@@ -65,9 +65,11 @@ async def test_a_baseline_waits_out_a_cached_reading_from_before_the_last_trade(
     last_done = NOW - timedelta(seconds=30)
     client = _client([{"state": "done", "finishedAt": last_done.isoformat()}],
                      [(1000, last_done - timedelta(seconds=5)),   # stale: before it finished
-                      (840, last_done + timedelta(seconds=20))])  # late enough
+                      (840, last_done + timedelta(seconds=20)),   # ended in time, began who knows
+                      (840, last_done + timedelta(seconds=81))])  # the next scan: began in time
 
-    assert (await vault_check.baseline(client)).tix == 840
+    reading = await vault_check.baseline(client)
+    assert reading.tix == 840 and reading.scan_from == last_done + timedelta(seconds=20)
 
 
 @pytest.mark.asyncio
@@ -372,9 +374,20 @@ async def test_a_reading_inside_the_window_counts(monkeypatch):
     finished = NOW
     client = _client([{"id": "next", "state": "running",
                        "startedAt": (finished + timedelta(minutes=5)).isoformat()}],
-                     [(900, finished + timedelta(seconds=20))])
+                     [(900, finished + timedelta(seconds=20)), (900, finished + timedelta(seconds=81))])
 
     assert (await vault_check.after(client, {"id": "ours", "finishedAt": finished.isoformat()}, BASE_AT)).tix == 900
+
+
+@pytest.mark.asyncio
+async def test_only_a_scan_that_began_inside_the_window_counts(monkeypatch):
+    """`at` is when a scan FINISHED. A slow scan stamped just after the trade settled can
+    still have counted the tix before it, so the first in-window reading is not used."""
+    monkeypatch.setattr(vault_check, "_WAIT_FOR_FRESH_S", 0)
+    finished = NOW
+    client = _client([], [(1000, finished + timedelta(seconds=20))])
+
+    assert await vault_check.after(client, {"id": "ours", "finishedAt": finished.isoformat()}, BASE_AT) is None
 
 
 @pytest.mark.asyncio
@@ -498,7 +511,8 @@ async def test_a_trade_that_began_while_waiting_for_the_reading_voids_it(monkeyp
     that wait -- before the reading was taken -- is inside the reading."""
     monkeypatch.setattr(vault_check.asyncio, "sleep", AsyncMock())
     finished = NOW
-    client = _client(None, [(1000, finished + timedelta(seconds=40))])
+    client = _client(None, [(1000, finished + timedelta(seconds=40)),
+                            (1000, finished + timedelta(seconds=101))])
     client.list_jobs = AsyncMock(side_effect=[
         [],
         [{"id": "next", "state": "running", "startedAt": (finished + timedelta(seconds=20)).isoformat()}],
@@ -511,10 +525,11 @@ async def test_a_trade_that_began_while_waiting_for_the_reading_voids_it(monkeyp
 async def test_a_trade_that_began_after_the_reading_leaves_it_standing(monkeypatch):
     monkeypatch.setattr(vault_check.asyncio, "sleep", AsyncMock())
     finished = NOW
-    client = _client(None, [(900, finished + timedelta(seconds=20))])
+    client = _client(None, [(900, finished + timedelta(seconds=20)),
+                            (900, finished + timedelta(seconds=81))])
     client.list_jobs = AsyncMock(side_effect=[
         [],
-        [{"id": "next", "state": "running", "startedAt": (finished + timedelta(seconds=30)).isoformat()}],
+        [{"id": "next", "state": "running", "startedAt": (finished + timedelta(seconds=90)).isoformat()}],
     ])
 
     assert (await vault_check.after(client, {"id": "ours", "finishedAt": finished.isoformat()}, BASE_AT)).tix == 900
@@ -523,7 +538,7 @@ async def test_a_trade_that_began_after_the_reading_leaves_it_standing(monkeypat
 @pytest.mark.asyncio
 async def test_a_running_job_with_no_start_time_voids_the_reading(monkeypatch):
     monkeypatch.setattr(vault_check.asyncio, "sleep", AsyncMock())
-    client = _client(None, [(900, NOW + timedelta(seconds=20))])
+    client = _client(None, [(900, NOW + timedelta(seconds=20)), (900, NOW + timedelta(seconds=81))])
     client.list_jobs = AsyncMock(side_effect=[[], [{"id": "next", "state": "running"}]])
 
     assert await vault_check.after(client, {"id": "ours", "finishedAt": NOW.isoformat()}, BASE_AT) is None
@@ -610,7 +625,7 @@ async def test_a_trade_that_ran_while_the_baseline_was_read_voids_it(monkeypatch
     """The job list is read before waiting out the cache; a trade that started during
     the wait would sit between the baseline and the trade it is for."""
     monkeypatch.setattr(vault_check.asyncio, "sleep", AsyncMock())
-    client = _client(None, [(1000, NOW)])
+    client = _client(None, [(1000, NOW), (1000, NOW + timedelta(seconds=61))])
     client.list_jobs = AsyncMock(side_effect=[
         [],
         [{"id": "x", "state": "running", "startedAt": (NOW - timedelta(seconds=10)).isoformat()}],
@@ -621,9 +636,10 @@ async def test_a_trade_that_ran_while_the_baseline_was_read_voids_it(monkeypatch
 @pytest.mark.asyncio
 async def test_a_trade_that_finished_too_close_to_the_baseline_voids_it(monkeypatch):
     monkeypatch.setattr(vault_check.asyncio, "sleep", AsyncMock())
-    client = _client(None, [(1000, NOW)])
+    client = _client(None, [(1000, NOW), (1000, NOW + timedelta(seconds=61))])
     client.list_jobs = AsyncMock(side_effect=[
         [],
+        # settled 12s after the counted scan can have begun: inside the settle lag
         [{"id": "x", "state": "done", "finishedAt": (NOW - timedelta(seconds=3)).isoformat()}],
     ])
     assert await vault_check.baseline(client) is None
@@ -633,7 +649,8 @@ async def test_a_trade_that_finished_too_close_to_the_baseline_voids_it(monkeypa
 async def test_a_baseline_with_nothing_trading_stands(monkeypatch):
     monkeypatch.setattr(vault_check.asyncio, "sleep", AsyncMock())
     client = _client([{"id": "x", "state": "done",
-                       "finishedAt": (NOW - timedelta(minutes=2)).isoformat()}], [(1000, NOW)])
+                       "finishedAt": (NOW - timedelta(minutes=2)).isoformat()}],
+                     [(1000, NOW), (1000, NOW + timedelta(seconds=61))])
     assert (await vault_check.baseline(client)).tix == 1000
 
 
@@ -660,7 +677,7 @@ async def test_a_trade_between_the_baseline_and_ours_voids_the_reading(monkeypat
 async def test_a_trade_over_before_the_baseline_does_not_void_the_reading(monkeypatch):
     monkeypatch.setattr(vault_check.asyncio, "sleep", AsyncMock())
     other = {"id": "x", "state": "done", "finishedAt": (BASE_AT - timedelta(minutes=1)).isoformat()}
-    client = _client([other], [(900, NOW + timedelta(seconds=20))])
+    client = _client([other], [(900, NOW + timedelta(seconds=20)), (900, NOW + timedelta(seconds=81))])
     assert (await vault_check.after(client, {"id": "ours", "finishedAt": NOW.isoformat()}, BASE_AT)).tix == 900
 
 

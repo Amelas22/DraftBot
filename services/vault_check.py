@@ -22,6 +22,12 @@ A reading only counts inside its WINDOW, proved by its own `at`:
   100-tix deposit net to zero, which would read as "nothing left" and refund.
 
 A reading that can't be had inside its window is no reading at all.
+
+And a reading's `at` is when its scan FINISHED (TradeService stamps it after the
+scan), so a slow scan stamped after the window opened can still have counted the
+tix before it. The serve scans one at a time, under a lock, and only once the
+last snapshot has expired -- so a scan that finished after an in-window reading
+was finished must also have STARTED after it. That later scan is the one used.
 """
 import asyncio
 from dataclasses import dataclass
@@ -35,7 +41,8 @@ from loguru import logger
 SETTLE_LAG = timedelta(seconds=15)
 # /vault caches a snapshot for this long; a newer one can't be had sooner.
 _CACHE_TTL = timedelta(seconds=60)
-_WAIT_FOR_FRESH_S = 90.0
+# Two scans after the window opens: one whose finish is in the window, then the next.
+_WAIT_FOR_FRESH_S = 180.0
 _MIN_POLL_S = 2.0
 
 Moved = Literal["moved", "none", "other"]
@@ -44,7 +51,11 @@ Moved = Literal["moved", "none", "other"]
 @dataclass(frozen=True)
 class VaultReading:
     tix: int
-    at: datetime        # when the serve read the collection, UTC
+    at: datetime        # when the serve's scan of the collection FINISHED, UTC
+    # The earliest the scan can have STARTED: the end of the scan before it (scans run one
+    # at a time). None when unknown -- a single reading, whose scan could have begun any
+    # time before ``at``.
+    scan_from: Optional[datetime] = None
 
 
 def parse_utc(raw: Any) -> Optional[datetime]:
@@ -69,18 +80,26 @@ async def _read(client: Any) -> Optional[VaultReading]:
 
 async def _read_within(client: Any, not_before: datetime,
                        not_after: Optional[datetime] = None) -> Optional[VaultReading]:
-    """A reading taken inside [not_before, not_after), waiting out the cache. None if
-    none comes in time, or the window has closed."""
+    """A reading whose whole scan ran inside [not_before, not_after), waiting out the
+    cache. None if none comes in time, or the window has closed.
+
+    The first reading stamped inside the window only proves its scan ENDED there; the
+    one returned is the next scan, which can only have begun after that end."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + _WAIT_FOR_FRESH_S
+    in_window_end: Optional[datetime] = None
     while True:
         reading = await _read(client)
         if reading and reading.at >= not_before:
-            if not_after is None or reading.at < not_after:
-                return reading
-            logger.warning("vault: the only fresh reading ({}) is after the next trade began ({})",
-                           reading.at.isoformat(), not_after.isoformat())
-            return None
+            if not_after is not None and reading.at >= not_after:
+                logger.warning("vault: the only fresh reading ({}) is after the next trade "
+                               "began ({})", reading.at.isoformat(), not_after.isoformat())
+                return None
+            if in_window_end is None:
+                in_window_end = reading.at          # its scan may have begun before the window
+            elif reading.at > in_window_end:
+                # Began after in_window_end, so wholly inside the window.
+                return VaultReading(reading.tix, reading.at, scan_from=in_window_end)
         if loop.time() >= deadline:
             logger.warning("vault: no reading taken after {} (last: {})",
                            not_before.isoformat(), reading and reading.at.isoformat())
@@ -126,22 +145,23 @@ async def baseline(client: Any) -> Optional[VaultReading]:
         return None
     # AGAIN, after the reading: waiting out the cache takes up to a minute, and a trade
     # that ran during it would sit between this baseline and the trade it is for.
-    if not await _quiet_through(client, reading.at):
+    if not await _quiet_through(client, reading):
         logger.warning("vault: another trade ran while the baseline was being read")
         return None
     return reading
 
 
-async def _quiet_through(client: Any, at: datetime) -> bool:
-    """Whether, as of the serve's job list NOW, nothing was trading at ``at`` or since
-    and every finished job had settled into the collection by then."""
+async def _quiet_through(client: Any, reading: VaultReading) -> bool:
+    """Whether, as of the serve's job list NOW, nothing is trading and every finished job
+    had settled into the collection before the reading's scan can have started."""
     jobs = await client.list_jobs()
     if jobs is None:
         return False
     if any(isinstance(j, dict) and str(j.get("state", "")).lower() in ("queued", "running") for j in jobs):
         return False
     finished = _finished_at_all(jobs)
-    return finished is not None and all(f + SETTLE_LAG <= at for f in finished)
+    began = reading.scan_from or reading.at
+    return finished is not None and all(f + SETTLE_LAG <= began for f in finished)
 
 
 async def after(client: Any, job: dict[str, Any], since: datetime) -> Optional[VaultReading]:
