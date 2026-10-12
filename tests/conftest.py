@@ -941,3 +941,15 @@ def custodian_up(monkeypatch):
         return state["up"]
     monkeypatch.setattr(lending, "lending_custodian_up", _up)
     return state
+
+
+@pytest.fixture(autouse=True)
+def library_locks(monkeypatch):
+    """Fresh reservation locks per test. An asyncio.Lock binds to the first
+    loop that waits on it, and each test runs on a loop of its own; the bot
+    runs one loop for its life, so only the tests need this."""
+    import asyncio
+
+    import services.library_reservation as resv
+    monkeypatch.setattr(resv, "_RESERVE_LOCK", asyncio.Lock())
+    monkeypatch.setattr(resv, "_LISTS_LOCK", asyncio.Lock())

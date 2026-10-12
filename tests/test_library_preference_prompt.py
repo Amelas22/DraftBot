@@ -173,6 +173,19 @@ async def test_nobody_else_can_agree_for_you(test_db, shelf):
     assert not (await _row()).library_agreed
 
 
+async def test_an_old_agree_button_after_switching_off_says_so(test_db, shelf):
+    await _lounge(stock={"Swamp": 4})
+    view = await _held_note()
+    await prefs.set_uses_library(MEMBER, GUILD, False)
+    agree = next(b for b in view.children if b.label == prompt.AGREE_LABEL)
+    interaction = _interaction(MEMBER)
+
+    await agree.callback(interaction)
+
+    said = interaction.response.edit_message.await_args.kwargs["content"]
+    assert "isn't holding a copy for you" in said, said
+
+
 async def test_agreeing_once_the_draft_fired_is_too_late(test_db, shelf):
     from datetime import datetime
     from models.draft_session import DraftSession
@@ -411,8 +424,9 @@ async def test_the_library_button_appears_only_on_those_boards(test_db):
 
     boards._BOARDS.clear()
     boards._BOARDS.add("lib-board")
-    assert "Library 🏛️" in labels("premade", "lib-board")
-    assert "Library 🏛️" not in labels("premade", "plain-board")
+    for kind in ("premade", "random", "swiss", "winston"):
+        assert "Library 🏛️" in labels(kind, "lib-board"), kind
+        assert "Library 🏛️" not in labels(kind, "plain-board"), kind
     assert "Library 🏛️" not in labels("staked", "lib-board"), \
         "a staked board has the row on Change Entry / Settings already"
 

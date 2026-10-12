@@ -157,6 +157,31 @@ async def test_once_it_fires_only_those_who_agreed_need_it(lounge):
     assert await resv.users_if_reserved(await _row("q1")) == {ANN}
 
 
+async def test_two_players_agreeing_at_once_both_count(lounge):
+    """Each reads the list, adds itself and writes it back; unserialised, the
+    second write would drop the first player's agreement."""
+    import asyncio
+    await _borrower(ANN, BEN)
+    await _queue("q1", [ANN, BEN])
+
+    await asyncio.gather(resv.agree_player("q1", ANN), resv.agree_player("q1", BEN))
+
+    assert sorted((await _row("q1")).library_agreed) == [ANN, BEN]
+
+
+async def test_agreeing_while_another_releases_keeps_both(lounge):
+    import asyncio
+    await _borrower(ANN, BEN, CAT)
+    await _queue("q1", [ANN, BEN, CAT])
+    await resv.reserve("q1")
+    await resv.release_player("q1", ANN)
+
+    await asyncio.gather(resv.agree_player("q1", ANN), resv.release_player("q1", BEN))
+
+    row = await _row("q1")
+    assert row.library_released == [BEN] and row.library_agreed == [ANN]
+
+
 async def test_agreeing_after_it_fired_is_too_late(lounge):
     await _borrower(ANN, BEN)
     await _queue("q1", [ANN, BEN])

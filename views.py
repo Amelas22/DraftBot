@@ -198,6 +198,10 @@ class PersistentView(discord.ui.View):
 
         if self.session_type == "staked":
             self.add_item(BetCapToggleButton(self.draft_session_id))
+        elif has_library_button(self.draft_session_id):
+            # In place of the Change Entry / Settings panel only a staked board
+            # has, where a rental library backs the server (services/library_boards).
+            self._add_button("Library 🏛️", "grey", "library_settings", self.library_settings_callback)
 
         if self.session_type != "test":
             self._add_button("Ready Check", "green", "ready_check", self.ready_check_callback)
@@ -231,10 +235,6 @@ class PersistentView(discord.ui.View):
         self._add_button(red.name, TEAM_A_STYLE.name, "Team_A", self.team_assignment_callback)
         self._add_button(blue.name, TEAM_B_STYLE.name, "Team_B", self.team_assignment_callback)
         self._add_button("Generate Seating Order", "grey", "generate_seating", self.randomize_teams_callback)
-        # In place of the Change Entry / Settings panel a premade board lacks,
-        # where a rental library backs the server (services/library_boards).
-        if has_library_button(self.draft_session_id):
-            self._add_button("Library 🏛️", "grey", "library_settings", self.library_settings_callback)
 
         # Add test button only if global test mode is enabled
         if is_test_mode():

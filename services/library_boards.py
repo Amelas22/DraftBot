@@ -1,9 +1,10 @@
 """Which sign-up boards carry a Library button.
 
-A premade board has no Change Entry / Settings panel, so where a rental library
-backs the server it gets a button of its own for the library row. Other
-servers' premade boards must not: a button that only ever says "no library
-here" is clutter on every league draft.
+Only a staked board has a Change Entry / Settings panel, so where a rental
+library backs the server every other board -- premade, random, swiss, winston
+-- gets a button of its own for the library row. Other servers' boards must
+not: a button that only ever says "no library here" is clutter on every league
+draft.
 
 A board is built synchronously and in many places -- when it is posted, every
 time it is redrawn, and when it is re-attached after a restart -- and none of

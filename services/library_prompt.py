@@ -18,7 +18,7 @@ draft's cube, that this player may borrow from. A communal library needs none
 of this -- it lends to everybody, as it always has.
 
 The preference changes from a row like the entry cap's: on the draft's Change
-Entry / Settings panel, or behind the Library button a premade board carries
+Entry / Settings panel, or behind the Library button other boards carry
 instead (services/library_boards).
 """
 from typing import Any, Optional
@@ -64,16 +64,16 @@ def prompt_text(library: Library, hold: int) -> str:
 def saved_text(uses_library: bool) -> str:
     if uses_library:
         return ("✅ Saved: when you sign up here, the library's copy of the cube "
-                "is reserved for your draft if one is free.")
+                "is held for your draft if one is free.")
     return ("👍 Saved: you'll bring your own cards. Change it any time from "
             f"{WHERE_TO_CHANGE}.")
 
 
 AGREE_LABEL = "I agree and wish to use the library"
 # Where the setting lives: Change Entry / Settings on a staked board, the
-# Library button on a premade one (services/library_boards).
+# Library button on every other (services/library_boards).
 WHERE_TO_CHANGE = ("the draft's **Change Entry / Settings** button "
-                   "(**Library 🏛️** on a premade draft)")
+                   "(**Library 🏛️** on other drafts)")
 TOO_LATE = ("⚠️ Too late to agree: this draft has already started, so it "
             "won't borrow from the library.")
 
@@ -135,7 +135,9 @@ async def _agree_and_say(player_id: str, session_id: str, cube: Any, hold: int
         return TOO_LATE, None
     text = reservation_text(answer, cube, hold)
     if text is None:
-        return "⚠️ Couldn't find that draft any more.", None
+        # Left the queue, or switched the library off since this note.
+        return ("The library isn't holding a copy for you in this draft. Sign "
+                f"up with borrowing on, from {WHERE_TO_CHANGE}, to ask again."), None
     view = (_release_view(player_id, session_id, cube, hold, owes=False)
             if answer.status in ("reserved", "held") else None)
     return text, view
@@ -396,7 +398,8 @@ def library_setting_buttons(player_id: str, guild_id: str,
 
 
 async def library_settings_panel(interaction: discord.Interaction, session_id: Any) -> None:
-    """The library row on its own, behind a premade board's Library button."""
+    """The library row on its own, behind the Library button of a board with no
+    Change Entry / Settings panel."""
     if interaction.user is None or interaction.guild_id is None:
         return
     player_id, guild_id = str(interaction.user.id), str(interaction.guild_id)

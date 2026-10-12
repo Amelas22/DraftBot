@@ -56,6 +56,10 @@ FINISHED_STAGES = ("completed", "abandoned")
 # Reserving is check-then-write: can the shelf cover this cube, then take it.
 # One process, so one lock is enough to stop two queues taking the last copy.
 _RESERVE_LOCK = asyncio.Lock()
+# Agreeing and releasing each read a draft's player lists, change them, and
+# write them back; two players pressing at once would otherwise each write over
+# the other. Never held while _RESERVE_LOCK is taken.
+_LISTS_LOCK = asyncio.Lock()
 
 
 @dataclass(frozen=True)
@@ -254,7 +258,7 @@ async def release_player(session_id: Any, player_id: Any) -> bool:
     False if there is no such draft. The reservation itself goes the next time
     it is read, if this was the last player who needed it.
     """
-    async with AsyncSessionLocal() as session:
+    async with _LISTS_LOCK, AsyncSessionLocal() as session:
         row = (await session.execute(select(DraftSession).where(
             DraftSession.session_id == str(session_id)))).scalar_one_or_none()
         if row is None:
@@ -278,7 +282,7 @@ async def agree_player(session_id: Any, player_id: Any) -> ReserveAnswer:
     already let the copy go. Agreeing undoes this player's own "don't need it",
     though not a reservation released for good.
     """
-    async with AsyncSessionLocal() as session:
+    async with _LISTS_LOCK, AsyncSessionLocal() as session:
         row = (await session.execute(select(DraftSession).where(
             DraftSession.session_id == str(session_id)))).scalar_one_or_none()
         if row is None:
