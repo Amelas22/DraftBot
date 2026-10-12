@@ -77,11 +77,6 @@ async def test_only_a_yes_counts_as_wanting_a_deck(test_db):
     assert await prefs.get_players_using_library(["1", "2", "3"], GUILD) == {"1"}
 
 
-async def test_the_switch_turns_an_unasked_player_on_then_off(test_db):
-    assert await prompt.toggle_uses_library(PLAYER, GUILD) is True
-    assert await prompt.toggle_uses_library(PLAYER, GUILD) is False
-
-
 # --- when it is asked -------------------------------------------------------
 
 @pytest.fixture
@@ -382,19 +377,72 @@ async def test_nobody_else_can_press_your_row(test_db, shelf):
     interaction.response.edit_message.assert_not_awaited()
 
 
+# --- the Library button on a premade board -----------------------------------
+
+async def test_a_premade_board_lists_only_servers_with_a_rental_library(test_db):
+    import services.library_boards as boards
+    await _lounge()
+    boards._BOARDS.clear()
+
+    await boards.note_board("lib-board", GUILD)
+    await boards.note_board("plain-board", "some-other-guild")
+
+    assert boards.has_library_button("lib-board")
+    assert not boards.has_library_button("plain-board")
+
+
+async def test_open_boards_are_loaded_before_they_are_re_attached(test_db):
+    import services.library_boards as boards
+    await _lounge()
+    await _queue([PLAYER], "open-q")
+    boards._BOARDS.clear()
+
+    assert await boards.load_boards() == 1
+    assert boards.has_library_button("open-q")
+
+
+async def test_the_library_button_appears_only_on_those_boards(test_db):
+    import services.library_boards as boards
+    from views import PersistentView
+
+    def labels(session_type, sid):
+        view = PersistentView(bot=None, draft_session_id=sid, session_type=session_type)
+        return [getattr(c, "label", None) for c in view.children]
+
+    boards._BOARDS.clear()
+    boards._BOARDS.add("lib-board")
+    assert "Library 🏛️" in labels("premade", "lib-board")
+    assert "Library 🏛️" not in labels("premade", "plain-board")
+    assert "Library 🏛️" not in labels("staked", "lib-board"), \
+        "a staked board has the row on Change Entry / Settings already"
+
+
+async def test_the_library_button_opens_the_row(test_db, shelf):
+    await _lounge(stock={"Swamp": 4})
+    await _drafted(PLAYER, 3)
+    await _queue([PLAYER])
+    interaction = _interaction(PLAYER)
+
+    await prompt.library_settings_panel(interaction, "q1")
+
+    sent = interaction.response.send_message.await_args
+    assert "remembered for drafts here" in sent.args[0], sent.args[0]
+    assert _labels(sent.kwargs["view"]) == [
+        "Library: not set", "Borrow from the library 🏛️", "Bring my own cards 🃏"]
+
+
+async def test_the_library_button_says_so_when_you_cannot_borrow(test_db, shelf):
+    await _lounge()
+    await _queue([PLAYER])
+    interaction = _interaction(PLAYER)
+
+    await prompt.library_settings_panel(interaction, "q1")
+
+    sent = interaction.response.send_message.await_args
+    assert "view" not in sent.kwargs and "nothing to set" in sent.args[0]
+
+
 # --- when something goes wrong ----------------------------------------------
-
-async def test_a_failed_read_does_not_flip_the_switch(test_db, monkeypatch):
-    """Reading the answer as "not asked" on an error would turn a tap meant to
-    switch it off into switching it on."""
-    await prefs.set_uses_library(PLAYER, GUILD, True)
-    monkeypatch.setattr(prompt, "get_uses_library",
-                        AsyncMock(side_effect=RuntimeError("db gone")))
-
-    assert await prompt.toggle_uses_library(PLAYER, GUILD) is None
-    monkeypatch.undo()
-    assert await prefs.get_uses_library(PLAYER, GUILD) is True
-
 
 async def test_a_failure_says_how_to_opt_in_and_never_reaches_the_sign_up(
         test_db, shelf, monkeypatch):

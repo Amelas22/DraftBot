@@ -58,8 +58,10 @@ from loguru import logger
 
 from services.state_manager import state_manager
 from services import stake_funding, wallet_service
+from services.library_boards import has_library_button
 from services.library_prompt import (library_after_sign_up, library_agree_button,
-                                     library_setting_buttons, library_to_ask_about)
+                                     library_setting_buttons, library_settings_panel,
+                                     library_to_ask_about)
 from services.library_reservation import owes_agreement
 from services.library_trust_service import hold_for
 from preference_service import get_uses_library
@@ -229,6 +231,10 @@ class PersistentView(discord.ui.View):
         self._add_button(red.name, TEAM_A_STYLE.name, "Team_A", self.team_assignment_callback)
         self._add_button(blue.name, TEAM_B_STYLE.name, "Team_B", self.team_assignment_callback)
         self._add_button("Generate Seating Order", "grey", "generate_seating", self.randomize_teams_callback)
+        # In place of the Change Entry / Settings panel a premade board lacks,
+        # where a rental library backs the server (services/library_boards).
+        if has_library_button(self.draft_session_id):
+            self._add_button("Library 🏛️", "grey", "library_settings", self.library_settings_callback)
 
         # Add test button only if global test mode is enabled
         if is_test_mode():
@@ -1063,6 +1069,9 @@ class PersistentView(discord.ui.View):
             return False
             
         return True
+
+    async def library_settings_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await library_settings_panel(interaction, self.draft_session_id)
 
     async def randomize_teams_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         bot = interaction.client

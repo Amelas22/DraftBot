@@ -17,9 +17,9 @@ Only where it can matter: a rental library behind this server, offering this
 draft's cube, that this player may borrow from. A communal library needs none
 of this -- it lends to everybody, as it always has.
 
-The preference changes from the draft's Change Entry / Settings panel, a row
-like the entry cap's. /toggle_library still flips it, for drafts without that
-panel, but nothing points players at it.
+The preference changes from a row like the entry cap's: on the draft's Change
+Entry / Settings panel, or behind the Library button a premade board carries
+instead (services/library_boards).
 """
 from typing import Any, Optional
 
@@ -33,7 +33,8 @@ from preference_service import get_uses_library, set_uses_library
 from services.library_access_service import may_borrow
 from models.draft_session import DraftSession
 from services.library_reservation import (ReserveAnswer, agree_player, agreed,
-                                          joinable_link, release_player, reserve)
+                                          joinable_link, owes_agreement,
+                                          release_player, reserve)
 from services.library_service import offers, rental_library_for
 from services.library_trust_service import hold_for
 
@@ -57,7 +58,7 @@ def prompt_text(library: Library, hold: int) -> str:
             f"When you draft here, the library can lend you the cards you "
             f"drafted, so you don't need your own. {held}\n"
             f"We'll remember your answer. Change it any time from "
-            f"**Change Entry / Settings** on the draft.")
+            f"{WHERE_TO_CHANGE}.")
 
 
 def saved_text(uses_library: bool) -> str:
@@ -65,10 +66,14 @@ def saved_text(uses_library: bool) -> str:
         return ("✅ Saved: when you sign up here, the library's copy of the cube "
                 "is reserved for your draft if one is free.")
     return ("👍 Saved: you'll bring your own cards. Change it any time from "
-            "**Change Entry / Settings** on the draft.")
+            f"{WHERE_TO_CHANGE}.")
 
 
 AGREE_LABEL = "I agree and wish to use the library"
+# Where the setting lives: Change Entry / Settings on a staked board, the
+# Library button on a premade one (services/library_boards).
+WHERE_TO_CHANGE = ("the draft's **Change Entry / Settings** button "
+                   "(**Library 🏛️** on a premade draft)")
 TOO_LATE = ("⚠️ Too late to agree: this draft has already started, so it "
             "won't borrow from the library.")
 
@@ -225,8 +230,7 @@ class _Answer(discord.ui.Button[Any]):
     async def callback(self, interaction: discord.Interaction) -> None:
         if not await set_uses_library(self.player_id, self.guild_id, self.uses_library):
             await interaction.response.send_message(
-                "⚠️ Couldn't save that just now. Try again from "
-                "**Change Entry / Settings** on the draft.",
+                f"⚠️ Couldn't save that just now. Try again from {WHERE_TO_CHANGE}.",
                 ephemeral=True)
             return
         text, view = saved_text(self.uses_library), None
@@ -263,8 +267,7 @@ class LibraryPreferenceView(discord.ui.View):
 
 
 UNANSWERED = ("Not saved. To borrow your deck from the library, use "
-              "**Change Entry / Settings** on the draft, or answer next time you "
-              "sign up.")
+              f"{WHERE_TO_CHANGE}, or answer next time you sign up.")
 
 
 async def library_after_sign_up(interaction: discord.Interaction, draft: Any) -> None:
@@ -309,30 +312,14 @@ async def library_after_sign_up(interaction: discord.Interaction, draft: Any) ->
         try:
             await interaction.followup.send(
                 "Couldn't check the library just now. To borrow your deck, use "
-                "**Change Entry / Settings** on the draft.", ephemeral=True)
+                f"{WHERE_TO_CHANGE}.", ephemeral=True)
         except Exception:
             logger.opt(exception=True).warning(
                 "library: could not tell {} it failed either",
                 getattr(interaction.user, "id", None))
 
 
-async def toggle_uses_library(player_id: Any, guild_id: Any) -> Optional[bool]:
-    """Flip the saved answer and return the new one, or None if it didn't save.
-
-    Unset flips to True: somebody reaching for the switch before being asked
-    is asking to borrow.
-    """
-    try:
-        new = not await get_uses_library(player_id, guild_id)
-    except Exception:
-        # Guessing here is how a tap meant to turn it off turns it on.
-        logger.exception("library switch: could not read {}'s preference", player_id)
-        return None
-    return new if await set_uses_library(str(player_id), str(guild_id), new) else None
-
-
 LIBRARY_ROW = 2   # below the stake select (row 0) and the entry cap (row 1)
-PANEL = "**Change Entry / Settings**"
 
 
 def _status_look(uses_library: Optional[bool]) -> "tuple[str, discord.ButtonStyle]":
@@ -378,7 +365,7 @@ class _SetLibrary(discord.ui.Button[Any]):
             return
         if not await set_uses_library(self.player_id, self.guild_id, self.uses_library):
             await interaction.response.send_message(
-                f"⚠️ Couldn't save that just now. Try again from {PANEL}.",
+                "⚠️ Couldn't save that just now. Try again.",
                 ephemeral=True)
             return
         self.status.label, self.status.style = _status_look(self.uses_library)
@@ -406,3 +393,33 @@ def library_setting_buttons(player_id: str, guild_id: str,
     return [status,
             _SetLibrary(player_id, guild_id, True, status, draft, library),
             _SetLibrary(player_id, guild_id, False, status, draft, library)]
+
+
+async def library_settings_panel(interaction: discord.Interaction, session_id: Any) -> None:
+    """The library row on its own, behind a premade board's Library button."""
+    if interaction.user is None or interaction.guild_id is None:
+        return
+    player_id, guild_id = str(interaction.user.id), str(interaction.guild_id)
+    draft = await DraftSession.get_by_session_id(str(session_id))
+    if draft is None:
+        await interaction.response.send_message("⚠️ Couldn't find that draft any more.",
+                                                ephemeral=True)
+        return
+    library = await library_to_ask_about(guild_id, draft.cube, player_id)
+    if library is None:
+        await interaction.response.send_message(
+            "The library doesn't lend this draft's cube to you, so there's "
+            "nothing to set here.", ephemeral=True)
+        return
+    view = discord.ui.View(timeout=600)
+    for item in library_setting_buttons(player_id, guild_id,
+                                        await get_uses_library(player_id, guild_id),
+                                        draft=draft, library=library):
+        view.add_item(item)
+    if player_id in {str(p) for p in (draft.sign_ups or {})} \
+            and await owes_agreement(draft, player_id):
+        view.add_item(library_agree_button(player_id, str(draft.session_id), draft.cube,
+                                           await hold_for(library, player_id) or 0))
+    await interaction.response.send_message(
+        f"🏛️ Borrowing from the **{library.name}** library. Your answer is "
+        f"remembered for drafts here.", view=view, ephemeral=True)
