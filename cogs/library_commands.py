@@ -50,7 +50,7 @@ from services.card_lending_service import (
     return_when_free,
     shortfall,
 )
-from services.library_access_service import may_borrow
+from services.library_access_service import may_borrow, why_not
 from services.library_service import (
     is_communal, library_for, library_id_for, offer_cube,
 )
@@ -91,7 +91,7 @@ _LOAN_MESSAGES = {
                    "Top up with `/wallet` and try again — nothing has been charged.",
     "short_cards": "📦 This library can no longer cover that offer. Run "
                    "`/library borrow` again to see what's available.",
-    "not_invited": "🔒 You're not on this library's borrowing list. Ask whoever runs it for an invite.",
+    "not_invited": "🔒 This library doesn't lend to you. Run `/library borrow` again to see why.",
     "wrong_server": "📍 Your deck is waiting in the server you drafted it in — run "
                     "`/library borrow` there. (`/library return` works from anywhere.)",
     # A callable, not a string: the limit is read from the environment when
@@ -504,10 +504,8 @@ class LibraryCommands(commands.Cog):
         if loan is not None:
             library_id = getattr(loan, "library_id", None) or library_id
         if not await may_borrow(library_id, ctx.author.id):
-            await ctx.followup.send(
-                "🔒 This card library is invite-only at the moment, and you're "
-                "not on the list. Ask whoever runs it if you'd like to be.",
-                ephemeral=True)
+            await ctx.followup.send(await why_not(library_id, ctx.author.id),
+                                    ephemeral=True)
             return
 
         # Can the library actually cover this deck? Asked before queueing, so a

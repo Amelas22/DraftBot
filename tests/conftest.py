@@ -804,15 +804,18 @@ def forget_the_custodian():
 
 async def a_library(library_id="lib", *, guild="g1", kind="communal",
                     collateral=0, collateral_untrusted=None, cubes=(),
-                    stock=None):
+                    stock=None, min_drafts=None):
     """Seed a library, bind a server to it, list its cubes, and stock its shelf.
 
     Almost every library test needs the same rows, and writing them out each
     time buries what the test is actually about. `guild=None` leaves the
     library unbound, which is how a server with no library is expressed.
 
-    `collateral_untrusted` is the figure asked of a borrower the library does
-    not know; None leaves the library untiered, charging everyone `collateral`.
+    `collateral_untrusted` is the figure asked of a borrower not on the member
+    list; None leaves the library untiered, charging everyone `collateral`.
+
+    `min_drafts` lets non-members with that many drafts borrow; None leaves the
+    member list alone in charge.
 
     `stock` is {card name: copies}, booked the way a settled deposit books
     them. A dispatch checks the shelf before it opens a trade, so a library
@@ -829,6 +832,7 @@ async def a_library(library_id="lib", *, guild="g1", kind="communal",
         s.add(Library(id=library_id, name=library_id, kind=kind,
                       collateral_tix=collateral,
                       collateral_tix_untrusted=collateral_untrusted,
+                      min_drafts_to_borrow=min_drafts,
                       created_by="test"))
         if guild is not None:
             s.add(LibraryServer(guild_id=str(guild), library_id=library_id,

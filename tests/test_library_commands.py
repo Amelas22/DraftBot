@@ -305,7 +305,7 @@ async def test_an_unconfigured_library_says_so_instead_of_queueing(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_an_uninvited_borrower_is_turned_away(monkeypatch):
+async def test_an_uninvited_borrower_is_turned_away(test_db, monkeypatch):
     """The pilot gate, pinned at the cog rather than at the service.
 
     Every other test here mocks the invite check to True so it can reach the

@@ -63,9 +63,8 @@ class Library(Base):
     collateral_tix = Column(Integer, nullable=False, default=0,
                             server_default=text('0'))
 
-    # The same, for a borrower this library does not yet know: somebody who has
-    # not drafted here enough to be a known quantity
-    # (services/library_trust_service).
+    # The same, for a borrower this library does not know: anybody not on its
+    # member list (services/library_trust_service).
     #
     # NULL means the library is not tiered and charges everyone the figure
     # above, which is every library until somebody sets this -- so the column
@@ -76,8 +75,16 @@ class Library(Base):
     # number per library" rule above: that rule is about there being no per-CUBE
     # price for anyone to argue over, and this is not a per-cube anything. What
     # it adds is an axis the rule never spoke to -- who is borrowing -- and a
-    # borrower cannot move themselves along it except by drafting here.
+    # borrower cannot move themselves along it.
     collateral_tix_untrusted = Column(Integer, nullable=True)
+
+    # Drafts in this library's servers that let somebody borrow without being
+    # on its member list (services/library_access_service).
+    #
+    # NULL means the member list alone decides, as it always has: nobody named
+    # lends to everyone, anybody named restricts it to the named. Set, the list
+    # stops being the gate and becomes who pays the lower hold.
+    min_drafts_to_borrow = Column(Integer, nullable=True)
 
     created_at = Column(DateTime, default=datetime.now)
     created_by = Column(String(64), nullable=True)

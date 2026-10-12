@@ -43,6 +43,7 @@ project-includes = [
     "models/library_server.py",
     "models/library_cube.py",
     "services/library_access_service.py",
+    "services/library_trust_service.py",
     "models/library_member.py",
     "models/card_loan.py",
     "models/mtgo_job.py",

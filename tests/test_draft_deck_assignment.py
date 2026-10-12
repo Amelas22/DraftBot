@@ -656,7 +656,7 @@ async def test_an_uninvited_drafter_gets_no_deck_and_no_promise(
     """
     told = _recording_dm(monkeypatch)
     await _seed()
-    with patch("services.draft_deck_assignment.members",
+    with patch("services.library_access_service.members",
                new=AsyncMock(return_value=["somebody-else"])):
         assigned = await svc.assign_drafted_decks(SESSION)
 
@@ -672,11 +672,39 @@ async def test_a_communal_library_lends_to_everyone_in_the_pod(
     told = _recording_dm(monkeypatch)
     await _seed()
 
-    with patch("services.draft_deck_assignment.members",
+    with patch("services.library_access_service.members",
                new=AsyncMock(return_value=[])):
         assigned = await svc.assign_drafted_decks(SESSION)
 
     assert assigned > 0 and len(told) == assigned
+
+
+async def _drafted(player, n):
+    from models.player import PlayerStats
+    async with AsyncSessionLocal() as s:
+        s.add(PlayerStats(player_id=player, guild_id=GUILD, display_name=player,
+                          drafts_participated=n))
+        await s.commit()
+
+
+async def test_a_draft_threshold_offers_decks_to_the_experienced(
+        test_db, monkeypatch):
+    """The same rule /library borrow applies: a member, or enough drafts here.
+    Deck assignment asking its own question was how an experienced player
+    would be told at /borrow they may borrow, with no deck ever offered."""
+    from conftest import a_library
+    from services import library_access_service as access
+
+    await a_library(LIBRARY, guild=GUILD, kind="rental", collateral=5,
+                    cubes=(CUBE,), min_drafts=3)
+    await access.invite(LIBRARY, "a-member", "test")
+    await _drafted(ALICE, 3)
+    await _drafted(BOB, 2)
+    _recording_dm(monkeypatch)
+    await _seed()
+
+    assert await svc.assign_drafted_decks(SESSION) == 1
+    assert set(await _loans()) == {ALICE}, "Bob has two drafts, one short"
 
 
 # --- who can still use a deck ------------------------------------------------
