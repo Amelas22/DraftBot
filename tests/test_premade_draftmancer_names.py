@@ -59,7 +59,7 @@ async def test_premade_join_stores_plain_name_not_emoji_decorated():
     with patch("views.get_draft_session", AsyncMock(return_value=session)), \
          patch("views.AsyncSessionLocal", _async_session_local_mock()), \
          patch("views.get_display_name", lambda member, guild=None: decorated), \
-         patch("views.library_after_sign_up", AsyncMock()):
+         patch("views.library_after_sign_up_soon", MagicMock()):
         await view.team_assignment_callback(interaction, button)
 
     assert session.sign_ups["1"] == "Alice"
