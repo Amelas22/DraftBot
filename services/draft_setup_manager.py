@@ -110,20 +110,31 @@ load_dotenv()
 # Global registry to track active manager instances
 ACTIVE_MANAGERS = {}
 
-# Draftmancer sessions the room has already been told the bot has given up on.
+# Two things the bot remembers for longer than a manager lives, both written at
+# the moment it gives up on a Draftmancer session somebody else now owns.
 #
-# Held at MODULE level, which is the whole point: _stand_down tells the room
-# once per manager INSTANCE, and a rebuilt manager's "once" is a first time. On
-# 2026-10-05 that put 68 identical embeds in The Divination's draft channel, one
-# every 71 seconds, as log_reconciler rebuilt a manager for an uncaptured draft.
+# They are module-level for the same reason: one manager instance knowing "I
+# have told the room" and "I have stopped trying" is no use to the NEXT instance
+# for the same session, and log_reconciler builds one every minute. That is how
+# 68 identical embeds reached The Divination's draft channel on 2026-10-05, one
+# every 71 seconds.
 #
-# Keyed per Draftmancer session, not per draft: regenerate_draft_session mints a
-# new one and announces it, so losing THAT one is a fact the room has not heard.
-# The session_id rides along so two drafts cannot collide on a missing draft_id.
-#
-# Process-local, so a restart may re-tell a room once, which is the right way
-# round to be wrong.
+# Both are process-local, so a restart may repeat each of them once -- which is
+# the right way round to be wrong for both.
+
+# Sessions the room has already been told about. Keyed per DRAFTMANCER session,
+# because regenerate_draft_session mints a new one and announces it, so losing
+# that one is a fact the room has not heard; the session_id rides along so two
+# drafts cannot collide on a missing draft_id.
 _TOLD_NOT_MANAGING: "set[tuple[str, str]]" = set()
+
+# Drafts the bot has stopped trying to manage at all.
+# spawn_for_existing_session declines to build a manager for one of these: a
+# refusal is not a transient failure worth retrying, because the log is
+# re-delivered only to a session the bot can join as owner. Nothing clears it
+# because nothing can -- standing down disconnects, and the only path that mints
+# a new Draftmancer session refuses to run once teams have formed.
+STOOD_DOWN: "set[str]" = set()
 
 
 def mpt_embed_field_value(direct_url):
@@ -1361,9 +1372,14 @@ class DraftSetupManager:
         happen. Tell them once, hand back the session URL, and disconnect.
 
         "Once" is enforced in _notify_bot_no_longer_managing, not here: standing
-        down is one of six ways the bot discovers it has lost a session.
+        down is one of six ways the bot discovers it has lost a session. Giving
+        up is recorded here, though, so the reconciler stops rebuilding this
+        manager every minute for the rest of its window -- see STOOD_DOWN.
         """
         self.logger.warning(f"Standing down: {reason}")
+        # Before the notice and the cleanup, so a failure in either still leaves
+        # the reconciler knowing not to come back.
+        STOOD_DOWN.add(str(self.session_id))
         await self._notify_bot_no_longer_managing(include_session_url=True)
         # Set before cleanup, as the mutiny path does: the connection loop's only
         # graceful exit is this flag, and without it the loop reconnects a draft
@@ -3336,6 +3352,16 @@ class DraftSetupManager:
     @classmethod
     async def spawn_for_existing_session(cls, session_id, bot):
         """Create a manager for an existing session and add the bot reference"""
+        # Nothing to build for a session the bot has been refused: it could only
+        # connect, be told "Unautorized", and stand down again. Answered here
+        # rather than in the caller because this classmethod already owns the
+        # question "can a manager be built for this session", and already says
+        # no by returning None -- which log_reconciler already skips on.
+        if session_id in STOOD_DOWN:
+            logger.debug(f"not rebuilding a manager for {session_id}: "
+                         f"the bot has stood down from it")
+            return None
+
         # Get the draft session
         draft_session = await DraftSession.get_by_session_id(session_id)
         if not draft_session:
