@@ -245,3 +245,36 @@ async def test_the_board_points_a_new_queue_at_the_one_holding_it(lounge):
     note = await library_signup_note(CUBE, GUILD)
 
     assert "in use" in note.lower() and "/chan/msg-q1" in note, note
+
+
+async def test_a_long_draft_keeps_the_whole_cube_until_its_decks_exist(lounge):
+    """No clock on it: teams to decks can run past an hour, and a reservation
+    that quietly stopped holding would let a second queue book the same copy."""
+    await _borrower(ANN)
+    await _queue("q1", [ANN])
+    await resv.reserve("q1")
+    await _set("q1", teams_start_time=datetime.now() - timedelta(hours=2))
+
+    assert await _available() == {}
+
+
+async def test_a_stale_release_does_not_undo_a_fresh_reservation(lounge):
+    """Released on what it read; a re-reserve in the meantime stands."""
+    await _borrower(ANN)
+    await _queue("q1", [ANN])
+    await resv.reserve("q1")
+    stale = await _row("q1")
+    stale.sign_ups = {}                    # what the stale read judged
+    await _set("q1", library_reserved_at=datetime.now() + timedelta(seconds=1))
+
+    assert await resv.still_reserved(stale) is False
+    assert (await _row("q1")).library_released_at is None, \
+        "the newer reservation was not the one judged"
+
+
+async def test_nobody_left_to_need_it_reserves_nothing(lounge):
+    await _borrower(ANN)
+    await _queue("q1", ["9999"])
+
+    assert (await resv.reserve("q1")).status == "not_applicable"
+    assert (await _row("q1")).library_reserved_at is None

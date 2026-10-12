@@ -146,7 +146,7 @@ async def library_available(
     since = await _reserved_since(exclude_loan_id)
     spoken_for = await _on_loan(library_id, exclude_loan_id=exclude_loan_id,
                                 yield_after=since)
-    for name, qty in (await _being_drafted(fetch or fetch_cube, library_id,
+    for name, qty in (await _being_drafted(read_once(fetch or fetch_cube), library_id,
                                            yield_after=since)).items():
         spoken_for[name] = spoken_for.get(name, 0) + qty
 
@@ -159,6 +159,25 @@ async def library_available(
         if left > 0:
             available[name] = left
     return available
+
+
+def read_once(fetch: "Callable[[str], Any]") -> "Callable[[str], Any]":
+    """`fetch`, but each cube is read at most once.
+
+    Scoped to one caller's question, so nothing is cached across requests and a
+    cube edited between them is seen. Several reservations of one cube used to
+    mean as many identical uncached CubeCobra reads, on paths with a one-second
+    budget.
+    """
+    seen: "dict[str, Any]" = {}
+
+    async def read(cube_id: str) -> Any:
+        key = str(cube_id)
+        if key not in seen:
+            seen[key] = await fetch(key)
+        return seen[key]
+
+    return read
 
 
 async def _teams_formed(session: Any, draft_ids: "list[str]") -> "dict[str, datetime]":
@@ -305,8 +324,10 @@ async def _being_drafted(fetch: "Callable[[str], Any]", library_id: Any, *,
         # queue filling to their decks existing (services/library_reservation).
         # A draft that fired without a reservation gets no decks, so it holds
         # nothing.
-        underway = [d for d in await reservations(library_id)
-                    if d.teams_start_time is None or d.teams_start_time >= cutoff]
+        # No clock: the reservation's own rules end it (decided, over, nobody
+        # needs it), and a draft can take well over an hour from teams forming
+        # to its decks existing.
+        underway = await reservations(library_id)
     else:
         async with AsyncSessionLocal() as session:
             guilds = [str(g) for g in (await session.scalars(

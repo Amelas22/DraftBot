@@ -32,7 +32,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from database.db_session import AsyncSessionLocal
 from helpers.stale_drafts import rooms_reaped
@@ -146,11 +146,18 @@ async def still_reserved(draft: Any, now: Optional[datetime] = None) -> bool:
     why = await _why_released(draft, when)
     if why is None:
         return True
+    # Only the reservation that was judged: a re-reserve, or a borrower joining
+    # while this was being worked out, must not be undone by a stale verdict.
     async with AsyncSessionLocal() as session:
-        row = await session.get(DraftSession, draft.id)
-        if row is not None and row.library_released_at is None:
-            row.library_released_at = when
-            await session.commit()
+        result = await session.execute(
+            update(DraftSession)
+            .where(DraftSession.id == draft.id,
+                   DraftSession.library_reserved_at == draft.library_reserved_at,
+                   DraftSession.library_released_at.is_(None))
+            .values(library_released_at=when))
+        await session.commit()
+    if not result.rowcount:
+        return False
     draft.library_released_at = when
     logger.info("library: draft {} released its reservation of {}: {}",
                 draft.session_id, draft.cube, why)
@@ -173,7 +180,8 @@ async def reservations(library_id: Any) -> "list[DraftSession]":
 async def reserve(session_id: Any) -> ReserveAnswer:
     """Reserve the library's copy of this queue's cube, if a copy is free."""
     from services.card_library_inventory import (
-        cube_as_the_library_sees_it, cube_support, library_available)
+        cube_as_the_library_sees_it, cube_support, fetch_cube, library_available,
+        read_once)
     from services.library_service import offers
 
     async with _RESERVE_LOCK:
@@ -189,10 +197,15 @@ async def reserve(session_id: Any) -> ReserveAnswer:
             return ReserveAnswer("held")
         if draft.teams_start_time is not None:
             return ReserveAnswer("fired")
+        if not await library_users(draft):
+            # Asked for by somebody who has since left, released it, or switched
+            # off: reserving would only be released at the next read.
+            return ReserveAnswer("not_applicable")
 
-        seen = await cube_as_the_library_sees_it(draft.cube)
+        read = read_once(fetch_cube)
+        seen = await cube_as_the_library_sees_it(draft.cube, fetch=read)
         if seen and seen.cards and cube_support(
-                seen.cards, await library_available(library.id)).ok:
+                seen.cards, await library_available(library.id, fetch=read)).ok:
             async with AsyncSessionLocal() as session:
                 row = await session.get(DraftSession, draft.id)
                 if row is not None:

@@ -371,11 +371,14 @@ async def library_signup_note(cube_id, guild_id) -> "Optional[str]":
         # Alongside the coverage reads rather than after them, so the two share
         # the budget instead of queueing for it.
         custodian = asyncio.create_task(lending_custodian_up())
-        seen = await cube_as_the_library_sees_it(cube_id)
+        # One read of each cube for the whole board line.
+        from services.card_library_inventory import fetch_cube, read_once
+        read = read_once(fetch_cube)
+        seen = await cube_as_the_library_sees_it(cube_id, fetch=read)
         if not (seen and seen.cards):
             return None
         cards = seen.cards
-        available = await library_available(library.id)
+        available = await library_available(library.id, fetch=read)
         covered = cube_support(cards, available).ok
         up = await custodian
     except Exception:
