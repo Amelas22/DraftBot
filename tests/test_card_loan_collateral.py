@@ -42,9 +42,9 @@ def rig(monkeypatch):
     # that does not has its own test.
     monkeypatch.setattr(svc, "is_money_server", lambda gid: True)
 
-    # Every deposit movement, as a target: ("set", borrower, amount). The real
+    # Every hold movement, as a target: ("set", borrower, amount). The real
     # figures are covered in test_collateral_target_hold.py; what matters here
-    # is WHEN the deposit is asked for relative to the cards moving.
+    # is WHEN the hold is asked for relative to the cards moving.
     moves = []
 
     async def set_it(guild_id, borrower_id, loan_id, amount, expect_job=None):
@@ -76,7 +76,7 @@ async def test_the_hold_is_taken_before_the_cards_leave(test_db, rig):
     status, _ = await svc.start_borrow(GUILD, BORROWER)
 
     assert status == "dispatched"
-    assert moves[0] == ("set", BORROWER, 5), "the deposit is taken before dispatching"
+    assert moves[0] == ("set", BORROWER, 5), "the hold is taken before dispatching"
     assert client.lent, "and the trade still goes out"
 
 
@@ -102,7 +102,7 @@ async def test_a_failed_handover_gives_the_collateral_back(test_db, rig):
 
     await svc.settle_in_flight()
 
-    assert ("set", BORROWER, 0) in moves, "the deposit goes back"
+    assert ("set", BORROWER, 0) in moves, "the hold goes back"
     assert (await _loan(loan_id)).state == "assigned"
 
 
@@ -125,7 +125,7 @@ async def test_returning_the_deck_releases_the_collateral(test_db, rig):
 
     await svc.settle_in_flight()
 
-    assert ("set", BORROWER, 0) in moves, "the deposit goes back"
+    assert ("set", BORROWER, 0) in moves, "the hold goes back"
     assert (await _loan(loan_id)).state == "returned"
 
 
@@ -154,15 +154,15 @@ async def test_a_library_that_charges_nothing_touches_no_wallet(test_db, rig, mo
     status, _ = await svc.start_borrow(GUILD, BORROWER)
 
     assert status == "dispatched"
-    assert moves == [], "no deposit, no wallet involvement at all"
+    assert moves == [], "no hold, no wallet involvement at all"
 
 
-async def test_a_returned_deposit_is_drawn_against_what_they_owe(test_db, rig, monkeypatch):
+async def test_a_returned_hold_is_drawn_against_what_they_owe(test_db, rig, monkeypatch):
     """Debts are not discretionary in this bot.
 
     on_inflow is documented as the thing every path putting tix into a wallet
     must call, and the tournament escrow refund does. Without it a borrower who
-    owes the league gets their deposit back as spendable tix, where every other
+    owes the league gets their hold back as spendable tix, where every other
     inflow would have settled it -- which makes the library a way to hold money
     out of reach of the debt system.
     """
@@ -179,5 +179,5 @@ async def test_a_returned_deposit_is_drawn_against_what_they_owe(test_db, rig, m
 
     await svc.settle_in_flight()
 
-    assert ("set", BORROWER, 0) in moves, "the deposit came back"
+    assert ("set", BORROWER, 0) in moves, "the hold came back"
     assert seen == [(GUILD, BORROWER)], "and the debt system was told about it"

@@ -8,8 +8,8 @@ losing a player's collateral, or applying one trade's outcome to another.
 The rule the fixes share: **do the irreversible half first, and make it
 idempotent, so the recoverable half can be retried.** Money moves before
 `job_id` is cleared, because clearing `job_id` is what hides the loan from the
-next scan -- and because the deposit is expressed as a TARGET holding rather
-than a hold (see test_collateral_target_hold.py), settling the same loan twice
+next scan -- and because the hold is expressed as a TARGET rather than a delta
+(see test_collateral_target_hold.py), settling the same loan twice
 converges instead of paying twice.
 """
 from unittest.mock import AsyncMock
