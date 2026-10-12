@@ -416,7 +416,7 @@ async def library_signup_note(cube_id, guild_id) -> "Optional[str]":
     if library.min_drafts_to_borrow is not None:
         who = f" Open to players with {library.min_drafts_to_borrow}+ drafts here."
     if library.kind == RENTAL:
-        who += " Signing up reserves it for this draft."
+        who += " Signing up holds it for this draft; agree before it fires to keep it."
 
     if most == 0:
         return ("🆓 **Library available, no cards needed** — borrow your deck from the library "

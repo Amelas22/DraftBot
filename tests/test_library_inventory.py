@@ -366,6 +366,7 @@ async def test_experienced_non_members_who_reserved_hold_the_cube(test_db):
         row = (await s.scalars(select(DraftSession).where(
             DraftSession.session_id == "s1"))).one()
         row.library_reserved_at = datetime.now()
+        row.library_agreed = [BOB]
         await s.commit()
 
     available = await inv.library_available(

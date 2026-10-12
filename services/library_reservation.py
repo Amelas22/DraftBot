@@ -11,6 +11,11 @@ Taken automatically: the moment an eligible player who borrows (their saved
 preference, services/library_prompt) signs up to a filling queue, the queue
 reserves the cube if the shelf can cover it.
 
+Held, then agreed to. Signing up holds the copy at once, so no other queue can
+take it, but each borrower confirms with "I agree" (`agree_player`) before the
+draft fires. From the moment teams form, only players who agreed count as
+needing it; a copy nobody agreed to goes back then, and its draft gets no decks.
+
 Kept until nobody in the draft needs it. A player's need ends when they leave
 the queue, say they don't need it (`release_player`), return their deck, have
 their offer expire, or play a match without having collected a deck. The
@@ -82,12 +87,17 @@ def queue_link(draft: Any) -> Optional[str]:
             f"{draft.draft_channel_id}/{draft.message_id}")
 
 
+def agreed(draft: Any) -> "set[str]":
+    """Players who agreed to borrow in this draft."""
+    return {str(p) for p in (draft.library_agreed or [])}
+
+
 async def library_users(draft: Any, library_id: Any = None) -> "set[str]":
     """Who in this draft still needs the library's copy of its cube.
 
     Signed up, allowed to borrow, saved as borrowing, and not finished with it:
     not released, no deck returned or offer lapsed, and not having played a
-    match without a collected deck.
+    match without a collected deck. Once teams have formed, also agreed.
     """
     from preference_service import get_players_using_library
     from services.library_access_service import may_borrow_many
@@ -99,6 +109,8 @@ async def library_users(draft: Any, library_id: Any = None) -> "set[str]":
         return set()
     seated = {str(p) for p in (draft.sign_ups or {})}
     seated -= {str(p) for p in (draft.library_released or [])}
+    if draft.teams_start_time is not None:
+        seated &= agreed(draft)
     if seated:
         seated &= await may_borrow_many(library_id, seated)
     if seated:
@@ -256,6 +268,40 @@ async def release_player(session_id: Any, player_id: Any) -> bool:
         draft = row
     await still_reserved(draft)
     return True
+
+
+async def agree_player(session_id: Any, player_id: Any) -> ReserveAnswer:
+    """Record that this player agrees to borrow in this draft, and reserve.
+
+    Only while the queue fills: agreeing is what keeps the copy past teams
+    forming, so agreeing afterwards would hand a deck to a draft that has
+    already let the copy go. Agreeing undoes this player's own "don't need it",
+    though not a reservation released for good.
+    """
+    async with AsyncSessionLocal() as session:
+        row = (await session.execute(select(DraftSession).where(
+            DraftSession.session_id == str(session_id)))).scalar_one_or_none()
+        if row is None:
+            return ReserveAnswer("not_applicable")
+        if row.teams_start_time is not None:
+            return ReserveAnswer("fired")
+        player = str(player_id)
+        # New lists, not in-place edits: a JSON column mutated in place is not
+        # seen as changed and would never be written.
+        row.library_agreed = sorted(agreed(row) | {player})
+        row.library_released = [p for p in (row.library_released or [])
+                                if str(p) != player]
+        await session.commit()
+    return await reserve(session_id)
+
+
+async def owes_agreement(draft: Any, player_id: Any) -> bool:
+    """Whether this player's draft holds the copy for them and is waiting on
+    their "I agree" before it fires."""
+    player = str(player_id)
+    if draft.teams_start_time is not None or player in agreed(draft):
+        return False
+    return await still_reserved(draft) and player in await library_users(draft)
 
 
 async def queue_holding(guild_id: Any, cube_id: Any) -> "Optional[DraftSession]":

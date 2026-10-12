@@ -2,7 +2,9 @@
 
 The first eligible borrower to sign up to a filling queue reserves the copy if
 the shelf can cover it. While that queue holds it, the copy is in use: a second
-queue of the same cube is told where it is. The reservation lasts until nobody
+queue of the same cube is told where it is. Each borrower agrees before the
+draft fires; once teams form, only those who agreed need it, so a copy nobody
+agreed to goes back then. The reservation lasts until nobody
 in the draft needs it -- they left, released it, returned their deck, or played
 a match without one -- or the draft is decided, over, or its queue went quiet.
 Released is for good.
@@ -123,6 +125,61 @@ async def test_a_draft_that_fired_without_it_cannot_reserve(lounge):
     assert (await resv.reserve("q1")).status == "fired"
 
 
+# --- agreeing -----------------------------------------------------------------
+
+async def test_agreeing_reserves_it_and_records_who_agreed(lounge):
+    await _borrower(ANN)
+    await _queue("q1", [ANN])
+
+    assert (await resv.agree_player("q1", ANN)).status == "reserved"
+    assert (await _row("q1")).library_agreed == [ANN]
+
+
+async def test_a_held_copy_nobody_agreed_to_goes_back_when_the_draft_fires(lounge):
+    await _borrower(ANN)
+    await _queue("q1", [ANN])
+    await resv.reserve("q1")
+    assert await resv.owes_agreement(await _row("q1"), ANN)
+
+    await _set("q1", teams_start_time=datetime.now())
+
+    assert not await resv.still_reserved(await _row("q1"))
+    assert await _available() == {"Swamp": 4}
+
+
+async def test_once_it_fires_only_those_who_agreed_need_it(lounge):
+    await _borrower(ANN, BEN)
+    await _queue("q1", [ANN, BEN])
+    await resv.reserve("q1")
+    await resv.agree_player("q1", ANN)
+    await _set("q1", teams_start_time=datetime.now())
+
+    assert await resv.users_if_reserved(await _row("q1")) == {ANN}
+
+
+async def test_agreeing_after_it_fired_is_too_late(lounge):
+    await _borrower(ANN, BEN)
+    await _queue("q1", [ANN, BEN])
+    await resv.agree_player("q1", ANN)
+    await _set("q1", teams_start_time=datetime.now())
+
+    assert (await resv.agree_player("q1", BEN)).status == "fired"
+    assert await resv.users_if_reserved(await _row("q1")) == {ANN}
+
+
+async def test_agreeing_takes_back_your_own_dont_need_it(lounge):
+    await _borrower(ANN, BEN)
+    await _queue("q1", [ANN, BEN])
+    await resv.reserve("q1")
+    await resv.release_player("q1", ANN)
+
+    await resv.agree_player("q1", ANN)
+
+    row = await _row("q1")
+    assert ANN in await resv.library_users(row) and not row.library_released
+    assert not await resv.owes_agreement(row, ANN)
+
+
 # --- giving it back -----------------------------------------------------------
 
 async def test_the_last_borrower_leaving_releases_it_for_good(lounge):
@@ -156,7 +213,7 @@ async def test_saying_you_dont_need_it_releases_it_when_you_were_the_last(lounge
 async def test_playing_a_match_without_a_deck_ends_that_players_need(lounge):
     await _borrower(ANN)
     await _queue("q1", [ANN])
-    await resv.reserve("q1")
+    await resv.agree_player("q1", ANN)
     await _set("q1", teams_start_time=datetime.now())
     async with AsyncSessionLocal() as s:
         s.add(MatchResult(session_id="q1", match_number=1, player1_id=ANN,
@@ -169,7 +226,7 @@ async def test_playing_a_match_without_a_deck_ends_that_players_need(lounge):
 async def test_a_borrower_who_collected_still_needs_it_after_playing(lounge):
     await _borrower(ANN)
     await _queue("q1", [ANN])
-    await resv.reserve("q1")
+    await resv.agree_player("q1", ANN)
     await _set("q1", teams_start_time=datetime.now())
     async with AsyncSessionLocal() as s:
         s.add(CardLoan(guild_id=GUILD, borrower_id=ANN, library_id=LIB,
@@ -217,7 +274,7 @@ async def test_once_decks_exist_only_the_decks_are_held(lounge):
     """Narrowed to what was actually drafted; the rest is free for another pod."""
     await _borrower(ANN)
     await _queue("q1", [ANN])
-    await resv.reserve("q1")
+    await resv.agree_player("q1", ANN)
     await _set("q1", teams_start_time=datetime.now())
     async with AsyncSessionLocal() as s:
         s.add(CardLoan(guild_id=GUILD, borrower_id=ANN, library_id=LIB,
@@ -252,7 +309,7 @@ async def test_a_long_draft_keeps_the_whole_cube_until_its_decks_exist(lounge):
     that quietly stopped holding would let a second queue book the same copy."""
     await _borrower(ANN)
     await _queue("q1", [ANN])
-    await resv.reserve("q1")
+    await resv.agree_player("q1", ANN)
     await _set("q1", teams_start_time=datetime.now() - timedelta(hours=2))
 
     assert await _available() == {}

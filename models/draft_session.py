@@ -78,6 +78,9 @@ class DraftSession(Base):
     library_released_at = Column(DateTime)
     # Players who said they don't need the library for THIS draft.
     library_released = Column(JSON)
+    # Players who agreed to borrow in THIS draft. Signing up holds the copy;
+    # from the moment teams form, only these players count as needing it.
+    library_agreed = Column(JSON)
     spaces_object_key = Column(String(256), nullable=True)  # DigitalOcean Spaces object path
     unlock_at = Column(DateTime)              # when the public embed may publish (logs_captured_at + PUBLISH_DELAY; manual release = now)
     drafttable_url = Column(String(512))   # published draft table page, once it exists

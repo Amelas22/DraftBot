@@ -4,7 +4,9 @@ The answer is a saved preference per player and server. It is asked right after
 sign-up, only while unset, and only where it can matter: a rental library behind
 the server, offering the draft's cube, that the player may borrow from. A
 borrower who has answered is told instead whether their draft holds the
-library's copy, or which queue does (services/library_reservation).
+library's copy, or which queue does (services/library_reservation). A held
+copy waits on their "I agree" before the draft fires; answering yes to the
+question itself, which quotes the hold, is agreeing.
 """
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -119,7 +121,17 @@ async def test_an_unasked_eligible_player_is_asked_with_their_own_hold(
     assert interaction.followup.send.await_args.kwargs["ephemeral"] is True
 
 
-async def test_a_borrower_is_not_asked_but_told_it_is_reserved(test_db, shelf):
+def _labels(view):
+    return [b.label for b in view.children]
+
+
+async def _row(sid="q1"):
+    from models.draft_session import DraftSession
+    return await DraftSession.get_by_session_id(sid)
+
+
+async def test_a_borrower_is_not_asked_but_told_it_is_held_until_they_agree(
+        test_db, shelf):
     await _lounge(stock={"Swamp": 4})
     await prefs.set_uses_library(MEMBER, GUILD, True)
     interaction = _interaction(MEMBER)
@@ -127,9 +139,63 @@ async def test_a_borrower_is_not_asked_but_told_it_is_reserved(test_db, shelf):
     await prompt.library_after_sign_up(interaction, await _queue([MEMBER]))
 
     text = interaction.followup.send.await_args.args[0]
-    assert "reserved for this draft" in text, text
-    assert "view" in interaction.followup.send.await_args.kwargs, \
-        "with the button to say they don't need it"
+    assert "held for this draft" in text and prompt.AGREE_LABEL in text, text
+    assert _labels(interaction.followup.send.await_args.kwargs["view"]) == [
+        prompt.AGREE_LABEL, "I don't need the library this draft"]
+
+
+async def _held_note(player=MEMBER, sid="q1"):
+    """A saved borrower signs up; returns the note's view."""
+    await prefs.set_uses_library(player, GUILD, True)
+    interaction = _interaction(player)
+    await prompt.library_after_sign_up(interaction, await _queue([player], sid))
+    return interaction.followup.send.await_args.kwargs["view"]
+
+
+async def test_agreeing_from_the_note_keeps_the_copy(test_db, shelf):
+    await _lounge(stock={"Swamp": 4})
+    view = await _held_note()
+    agree = next(b for b in view.children if b.label == prompt.AGREE_LABEL)
+    interaction = _interaction(MEMBER)
+
+    await agree.callback(interaction)
+
+    sent = interaction.response.edit_message.await_args.kwargs
+    assert "reserved for this draft" in sent["content"], sent["content"]
+    assert _labels(sent["view"]) == ["I don't need the library this draft"]
+    assert (await _row()).library_agreed == [MEMBER]
+
+
+async def test_nobody_else_can_agree_for_you(test_db, shelf):
+    await _lounge(stock={"Swamp": 4})
+    view = await _held_note()
+    agree = next(b for b in view.children if b.label == prompt.AGREE_LABEL)
+    interaction = _interaction(PLAYER)
+
+    await agree.callback(interaction)
+
+    interaction.response.edit_message.assert_not_awaited()
+    assert not (await _row()).library_agreed
+
+
+async def test_agreeing_once_the_draft_fired_is_too_late(test_db, shelf):
+    from datetime import datetime
+    from models.draft_session import DraftSession
+    from sqlalchemy import update
+
+    await _lounge(stock={"Swamp": 4})
+    view = await _held_note()
+    async with AsyncSessionLocal() as s:
+        await s.execute(update(DraftSession).where(DraftSession.session_id == "q1")
+                        .values(teams_start_time=datetime.now()))
+        await s.commit()
+    agree = next(b for b in view.children if b.label == prompt.AGREE_LABEL)
+    interaction = _interaction(MEMBER)
+
+    await agree.callback(interaction)
+
+    assert interaction.response.edit_message.await_args.kwargs["content"] == prompt.TOO_LATE
+    assert not (await _row()).library_agreed
 
 
 async def test_a_borrower_in_a_second_queue_is_pointed_at_the_first(test_db, shelf):
@@ -204,8 +270,11 @@ async def test_yes_saves_it_and_reserves_the_copy(test_db, shelf):
     await button.callback(interaction)
 
     assert await prefs.get_uses_library(PLAYER, GUILD) is True
-    text = interaction.response.edit_message.await_args.kwargs["content"]
-    assert "reserved for this draft" in text, text
+    sent = interaction.response.edit_message.await_args.kwargs
+    assert "reserved for this draft" in sent["content"], sent["content"]
+    assert (await _row()).library_agreed == [PLAYER], \
+        "the question quoted the hold, so yes is agreeing"
+    assert _labels(sent["view"]) == ["I don't need the library this draft"]
 
 
 async def test_no_saves_it_and_closes_the_prompt(test_db, shelf):

@@ -679,14 +679,18 @@ async def test_a_communal_library_lends_to_everyone_in_the_pod(
     assert assigned > 0 and len(told) == assigned
 
 
-async def _reserved(session_id=SESSION):
-    """The draft reserved the library's copy while it filled."""
+async def _reserved(session_id=SESSION, agreed=(ALICE, BOB)):
+    """The draft reserved the library's copy while it filled, and these
+    players agreed to borrow before it fired."""
     from datetime import datetime
     from sqlalchemy import select as _select
     async with AsyncSessionLocal() as s:
         row = (await s.execute(_select(DraftSession).where(
             DraftSession.session_id == session_id))).scalar_one()
         row.library_reserved_at = datetime.now()
+        row.library_agreed = list(agreed)
+        # Decks are offered once teams have formed, when agreeing is what counts.
+        row.teams_start_time = row.teams_start_time or datetime.now()
         await s.commit()
 
 
@@ -740,6 +744,24 @@ async def test_a_rental_library_offers_decks_only_to_those_who_asked(
     assert await svc.assign_drafted_decks(SESSION) == 1
     assert set(await _loans()) == {ALICE}, "Bob never said he wanted one"
     assert [who for who, _ in told] == [ALICE]
+
+
+async def test_a_borrower_who_never_agreed_gets_no_deck(test_db, monkeypatch):
+    """Saying yes once holds the copy; agreeing before the draft fired is
+    what gets a deck from it."""
+    from conftest import a_library
+    from preference_service import set_uses_library
+
+    await a_library(LIBRARY, guild=GUILD, kind="rental", collateral=5,
+                    cubes=(CUBE,))
+    await set_uses_library(ALICE, GUILD, True)
+    await set_uses_library(BOB, GUILD, True)
+    _recording_dm(monkeypatch)
+    await _seed()
+    await _reserved(agreed=(ALICE,))
+
+    assert await svc.assign_drafted_decks(SESSION) == 1
+    assert set(await _loans()) == {ALICE}, "Bob never agreed"
 
 
 async def test_a_rental_draft_that_never_reserved_gets_no_decks(

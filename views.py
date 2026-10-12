@@ -59,7 +59,9 @@ from loguru import logger
 from services.state_manager import state_manager
 from services import stake_funding, wallet_service
 from services.library_prompt import (LibraryToggleButton, library_after_sign_up,
-                                     library_to_ask_about)
+                                     library_agree_button, library_to_ask_about)
+from services.library_reservation import owes_agreement
+from services.library_trust_service import hold_for
 from preference_service import get_uses_library
 # Debounce/timeout constants live in ready_check.py so the ordering invariant
 # between them is asserted in one place; re-exported here for the cooldown logic.
@@ -3338,6 +3340,11 @@ class BetCapToggleButton(CallbackButton):
                         combined_view.add_item(LibraryToggleButton(
                             user_id, guild_id, await get_uses_library(user_id, guild_id),
                             draft=draft_session, library=library))
+                        # Waiting on this player's agreement before it fires.
+                        if await owes_agreement(draft_session, user_id):
+                            combined_view.add_item(library_agree_button(
+                                str(user_id), str(draft_session.session_id),
+                                draft_session.cube, await hold_for(library, user_id) or 0))
                 except Exception:
                     logger.exception("settings panel: library check failed for {} on {}",
                                      user_id, self.draft_session_id)

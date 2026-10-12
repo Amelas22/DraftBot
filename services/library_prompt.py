@@ -6,10 +6,12 @@ borrow. That answer is a saved preference per player and server, asked once,
 right after somebody signs up -- the stake confirmation, a non-staked sign-up,
 or joining a premade team -- and only while it is unset.
 
-A player who borrows is not asked again. Signing up reserves the copy for the
-queue when one is free, and they are told either that it is reserved, with a
-button to say they don't need it this time, or which queue is using it, so
-they can join that one to fire it.
+A player who borrows is not asked again. Signing up holds the copy for the
+queue when one is free, and they are told either that it is held, with buttons
+to agree to borrow or to say they don't need it this time, or which queue is
+using it, so they can join that one to fire it. A held copy nobody agreed to
+goes back when the draft fires. Answering "Borrow from the library" when first
+asked is agreeing, since that question already quotes the hold.
 
 Only where it can matter: a rental library behind this server, offering this
 draft's cube, that this player may borrow from. A communal library needs none
@@ -28,8 +30,9 @@ from loguru import logger
 from models.library import Library
 from preference_service import get_uses_library, set_uses_library
 from services.library_access_service import may_borrow
-from services.library_reservation import (ReserveAnswer, joinable_link,
-                                          release_player, reserve)
+from models.draft_session import DraftSession
+from services.library_reservation import (ReserveAnswer, agree_player, agreed,
+                                          joinable_link, release_player, reserve)
 from services.library_service import offers, rental_library_for
 from services.library_trust_service import hold_for
 
@@ -64,10 +67,20 @@ def saved_text(uses_library: bool) -> str:
             "`/toggle_library`.")
 
 
-def reservation_text(answer: ReserveAnswer, cube: Any, hold: int) -> Optional[str]:
+AGREE_LABEL = "I agree and wish to use the library"
+TOO_LATE = ("⚠️ Too late to agree: this draft has already started, so it "
+            "won't borrow from the library.")
+
+
+def reservation_text(answer: ReserveAnswer, cube: Any, hold: int,
+                     has_agreed: bool = True) -> Optional[str]:
     """What a borrower is told about this draft's reservation, or None."""
     if answer.status in ("reserved", "held"):
         held = f" The hold is **{hold} tix**, refunded on return." if hold else ""
+        if not has_agreed:
+            return (f"🏛️ The library's copy of **{cube}** is held for this draft. "
+                    f"Press **{AGREE_LABEL}** before it fires to keep it, or it "
+                    f"goes back.{held}")
         return (f"🏛️ The library's copy of **{cube}** is reserved for this draft. "
                 f"Collect your deck with `/library borrow` once it's drafted."
                 f"{held}")
@@ -109,18 +122,83 @@ class _Release(discord.ui.Button[Any]):
             self.view.stop()
 
 
-def _release_view(player_id: str, session_id: str) -> discord.ui.View:
+async def _agree_and_say(player_id: str, session_id: str, cube: Any, hold: int
+                         ) -> "tuple[str, Optional[discord.ui.View]]":
+    answer = await agree_player(session_id, player_id)
+    if answer.status == "fired":
+        return TOO_LATE, None
+    text = reservation_text(answer, cube, hold)
+    if text is None:
+        return "⚠️ Couldn't find that draft any more.", None
+    view = (_release_view(player_id, session_id, cube, hold, owes=False)
+            if answer.status in ("reserved", "held") else None)
+    return text, view
+
+
+class _Agree(discord.ui.Button[Any]):
+    """Agrees to borrow in this draft, which keeps the held copy past teams
+    forming. On the note it answers, it replaces the note; on the settings
+    panel (`in_place=False`) it replies separately, leaving the panel be."""
+
+    def __init__(self, player_id: str, session_id: str, cube: Any, hold: int,
+                 in_place: bool = True) -> None:
+        super().__init__(label=AGREE_LABEL, style=discord.ButtonStyle.success)
+        self.player_id = player_id
+        self.session_id = session_id
+        self.cube = cube
+        self.hold = hold
+        self.in_place = in_place
+
+    @override
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user is None or str(interaction.user.id) != self.player_id:
+            await interaction.response.send_message("This button is not for you.",
+                                                    ephemeral=True)
+            return
+        text, view = await _agree_and_say(self.player_id, self.session_id,
+                                          self.cube, self.hold)
+        if self.in_place:
+            await interaction.response.edit_message(content=text, view=view)
+            if self.view is not None:
+                self.view.stop()
+        elif view is None:
+            await interaction.response.send_message(text, ephemeral=True)
+        else:
+            await interaction.response.send_message(text, view=view, ephemeral=True)
+
+
+def library_agree_button(player_id: str, session_id: str, cube: Any,
+                       hold: int) -> discord.ui.Button[Any]:
+    """The agree button for the draft's Change Entry / Settings panel: the way
+    back to it once the note's own buttons are gone, as they are after a
+    restart."""
+    return _Agree(player_id, session_id, cube, hold, in_place=False)
+
+
+def _release_view(player_id: str, session_id: str, cube: Any, hold: int,
+                  owes: bool) -> discord.ui.View:
     view = discord.ui.View(timeout=None)
+    if owes:
+        view.add_item(_Agree(player_id, session_id, cube, hold))
     view.add_item(_Release(player_id, session_id))
     return view
 
 
-async def _reserve_and_say(player_id: str, draft: Any, library: Library
+async def _reserve_and_say(player_id: str, draft: Any, library: Library,
+                           agree: bool = False
                            ) -> "tuple[Optional[str], Optional[discord.ui.View]]":
-    answer = await reserve(draft.session_id)
     hold = await hold_for(library, player_id) or 0
-    text = reservation_text(answer, draft.cube, hold)
-    view = (_release_view(player_id, str(draft.session_id))
+    session_id = str(draft.session_id)
+    if agree:
+        answer = await agree_player(session_id, player_id)
+        has_agreed = True
+    else:
+        answer = await reserve(session_id)
+        # Read afresh: somebody re-joining a queue they already agreed in.
+        current = await DraftSession.get_by_session_id(session_id)
+        has_agreed = current is not None and str(player_id) in agreed(current)
+    text = reservation_text(answer, draft.cube, hold, has_agreed)
+    view = (_release_view(player_id, session_id, draft.cube, hold, owes=not has_agreed)
             if answer.status in ("reserved", "held") else None)
     return text, view
 
@@ -151,7 +229,9 @@ class _Answer(discord.ui.Button[Any]):
             return
         text, view = saved_text(self.uses_library), None
         if self.uses_library:
-            said, view = await _reserve_and_say(self.player_id, self.draft, self.library)
+            # The question quoted the hold, so answering yes is agreeing.
+            said, view = await _reserve_and_say(self.player_id, self.draft,
+                                                self.library, agree=True)
             if said:
                 text += "\n" + said
         await interaction.response.edit_message(content=text, view=view)
