@@ -300,6 +300,8 @@ async def test_a_gated_rental_library_says_who_may_borrow(test_db, monkeypatch):
 
     assert "**50–100 tix**" in note and "Members pay 50" in note, note
     assert "3+ drafts" in note and "Signing up holds it" in note, note
+    assert note.endswith("(https://magic-draft-logs.nyc3.digitaloceanspaces.com/library/index.html)"), \
+        "ends with the library page, which shows what the shelf holds"
 
 
 class _Health:

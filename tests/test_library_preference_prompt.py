@@ -115,6 +115,7 @@ async def test_an_unasked_eligible_player_is_asked_with_their_own_hold(
     interaction.followup.send.assert_awaited_once()
     text = interaction.followup.send.await_args.args[0]
     assert f"**{hold} tix**" in text, text
+    assert "library/index.html" in text, "with a link to what the library holds"
     assert interaction.followup.send.await_args.kwargs["ephemeral"] is True
 
 

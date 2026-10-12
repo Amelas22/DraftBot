@@ -44,6 +44,16 @@ async def library_for(guild_id: Any) -> "Optional[Library]":
         return library
 
 
+# The public page of what every library holds, what it lends for and what is
+# out on loan. Rebuilt every five minutes by the library-status timer on the
+# production host, from this same database.
+LIBRARY_PAGE_URL = "https://magic-draft-logs.nyc3.digitaloceanspaces.com/library/index.html"
+
+
+def library_page_link(text: str = "See the library") -> str:
+    return f"[{text}]({LIBRARY_PAGE_URL})"
+
+
 async def library_id_for(guild_id: Any) -> "Optional[str]":
     """Just the id, for the callers that only need something to scope by."""
     library = await library_for(guild_id)

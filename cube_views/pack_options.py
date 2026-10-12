@@ -327,6 +327,18 @@ LIBRARY_FIELD_NAME = "Cards:"
 async def library_signup_note(cube_id, guild_id) -> "Optional[str]":
     """One line for the signup board, or None if the library is not involved.
 
+    Whatever it says ends with a link to the library page, which shows what
+    the shelf holds and what is out -- the detail a board line has no room for.
+    """
+    from services.library_service import library_page_link
+
+    note = await _library_signup_line(cube_id, guild_id)
+    return f"{note} {library_page_link()}" if note else None
+
+
+async def _library_signup_line(cube_id, guild_id) -> "Optional[str]":
+    """The board's library line, without the link.
+
     Answers the question a player deciding whether to join actually has: can I
     play this without owning the cards? Every other library signal lives where
     the draft is CREATED, which only the organiser sees -- so somebody signing

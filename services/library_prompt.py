@@ -35,7 +35,7 @@ from models.draft_session import DraftSession
 from services.library_reservation import (ReserveAnswer, agree_player, agreed,
                                           joinable_link, owes_agreement,
                                           reclaim_player, release_player, reserve)
-from services.library_service import offers, rental_library_for
+from services.library_service import library_page_link, offers, rental_library_for
 from services.library_trust_service import hold_for
 
 
@@ -58,7 +58,7 @@ def prompt_text(library: Library, hold: int) -> str:
             f"When you draft here, the library can lend you the cards you "
             f"drafted, so you don't need your own. {held}\n"
             f"We'll remember your answer. Change it any time from "
-            f"{WHERE_TO_CHANGE}.")
+            f"{WHERE_TO_CHANGE}. {library_page_link('What the library holds')}")
 
 
 def saved_text(uses_library: bool) -> str:
