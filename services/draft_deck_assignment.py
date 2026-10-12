@@ -28,6 +28,7 @@ from sqlalchemy.orm import undefer
 
 from services.library_service import library_for, offers
 from services.library_access_service import members
+from services.library_reminders import draft_state, who_can_still_use
 from database.db_session import AsyncSessionLocal
 from helpers.mtgo_names import mtgo_name
 from helpers.mtgo_untradeable import split_untradeable
@@ -46,6 +47,17 @@ _SAID: "set[str]" = set()
 # also skips the WORK: the answer is derived from a captured log and a fixed
 # sign-up list, so it cannot come out differently on a later tick.
 _UNSEATABLE: "set[str]" = set()
+
+# Sessions whose draft is settled. Held for the same reason as _UNSEATABLE:
+# asking costs a scan of match_results, which carries no index on session_id,
+# and the check below guarantees its own recurrence -- it returns 0, so the
+# draft keeps its unserved candidates and is re-asked every tick until it ages
+# out of the reconciler's 72-hour window.
+#
+# Only settlement is cached. "Everyone still owed a deck has reported" looks
+# terminal and is not: regenerating a draft's pairings deletes its match rows
+# and recreates them unreported, which puts those players back in play.
+_OVER: "set[str]" = set()
 
 
 def _source(session_id: Any) -> str:
@@ -206,8 +218,9 @@ async def assign_drafted_decks(session_id: Any) -> int:
 
     The order of the checks is chosen so that the work grows with what is left
     to DO rather than with how many drafts exist: the guild's config, then who
-    already has their deck, then who cannot be given one -- and only if somebody
-    is still owed a deck does it read the draft log at all.
+    already has their deck, then whether the draft can still use one, then who
+    cannot be given one -- and only if somebody is still owed a deck does it
+    read the draft log at all.
     """
     meta = await _session_meta(session_id)
     if meta is None:
@@ -235,6 +248,35 @@ async def assign_drafted_decks(session_id: Any) -> int:
                      session_id, len(done))
         return 0
 
+    # Who still has a match this deck could change. Asked with the library's own
+    # rule, which is also what decides when a deck is asked for BACK, so the two
+    # cannot drift; and asked per drafter, because one player reporting says
+    # nothing about whether another still needs their cards.
+    if str(session_id) in _OVER:
+        return 0
+    if str(session_id) in _UNSEATABLE:
+        # Already decided, and the decision cannot change: the seating is read
+        # from this session's own sign-ups and log, neither of which moves once
+        # the draft is captured. Checked beside _OVER rather than after the
+        # eligibility read below, so a draft that can never seat does not pay
+        # an unindexed scan of match_results every tick to find that out.
+        return 0
+    state = await draft_state(session_id)
+    still_playing = who_can_still_use(state, candidates)
+    if not still_playing:
+        # Memoised only when the DRAFT is settled, which is terminal. "Everyone
+        # left has reported" is not: create_rooms_pairings deletes a session's
+        # match rows and regenerates them unreported (utils.py), so a re-run
+        # puts players back in play, and a cache keyed on that would skip them
+        # for the rest of the process's life.
+        if state.settled:
+            _OVER.add(str(session_id))
+        logger.debug("deck assignment: {} has nobody left with a match to play",
+                     session_id)
+        return 0
+    finished = [d for d in candidates if str(d) not in still_playing]
+    candidates = [d for d in candidates if str(d) in still_playing]
+
     # A borrower may hold exactly one unfinished loan -- the card_loans partial
     # unique index says so -- so someone who has not returned last week's deck
     # is passed over rather than the whole draft failing on their row.
@@ -251,20 +293,16 @@ async def assign_drafted_decks(session_id: Any) -> int:
                    if d not in busy and listed and str(d) not in listed]
     assignable = [d for d in candidates
                   if d not in busy and d not in set(not_invited)]
+    if finished:
+        logger.debug("deck assignment: {} drafter(s) on {} have no match left "
+                     "to play", len(finished), session_id)
     if not assignable:
         _say_once(f"busy:{session_id}",
                   "deck assignment: nobody on {} can be given a deck -- {} of {} "
-                  "drafters are still holding one. They are not queued: once this "
-                  "draft ages out of the reconciler's window their pools are gone.",
+                  "drafters are still holding one. They are not queued, and the "
+                  "horizon is the draft ending, not the reconciler's window: once "
+                  "it is over their pools are gone.",
                   session_id, len(busy), len(sign_ups))
-        return 0
-
-    if str(session_id) in _UNSEATABLE:
-        # Already decided, and the decision cannot change: the seating is read
-        # from this session's own sign-ups and log, neither of which moves once
-        # the draft is captured. Returning here rather than at the check below
-        # is what stops the reconciler re-reading the log, and re-emitting
-        # map_discord_to_draftmancer's own warning, once a minute for 72 hours.
         return 0
 
     draft_data = await _draft_log(session_id)

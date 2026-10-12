@@ -35,6 +35,17 @@ from loguru import logger
 REMIND_AFTER_FINISH = timedelta(hours=1)
 REPEAT_AFTER = timedelta(hours=1)
 
+# How long a deck offer stays good after the draft ends. The drafter's matches
+# start when the draft does, so an hour is room to collect and play; past it they
+# have shown they do not need the deck, and the offer is retracted -- for good,
+# because an expired loan counts as done and is never re-offered. Without a
+# limit an offer can be immortal: a draft that is partly reported and then
+# fizzles never settles, so the cards stay reserved and the borrower's one
+# active-loan slot stays occupied and they are passed over at every later draft.
+# Measured from the draft's END (DraftState.ended_at), never from team creation
+# or results: teams form before the Draftmancer draft even runs.
+OFFER_WINDOW = timedelta(hours=1)
+
 # The one state with anything to give back. An 'assigned' loan is an offer
 # nobody collected, which expire_stale_assignments retracts on its own, and the
 # in-flight states mean a trade is already moving.
@@ -313,10 +324,56 @@ async def _still_out(loan_id: Any) -> bool:
 
 
 class DraftState(NamedTuple):
-    """What the reminder pass needs to know about one draft, read once."""
+    """What the library needs to know about one draft, read once."""
     done_at: "dict[str, datetime]"      # finished players -> when they reported their last match
     settled: bool                       # see draft_state
     last_result: Optional[datetime]     # latest reported result; None if nothing was reported
+    # When the draft ended: logs_captured_at, else rooms_created_at. None when
+    # neither is known, which counts as not yet ended. See offer_window_closed.
+    ended_at: Optional[datetime] = None
+
+    def offer_window_closed(self, now: Optional[datetime] = None) -> bool:
+        """Has OFFER_WINDOW passed since this draft ended?
+
+        A draft that has not (visibly) ended has no window to close.
+        """
+        if self.ended_at is None:
+            return False
+        return (now or datetime.now()) - self.ended_at > OFFER_WINDOW
+
+
+def who_can_still_use(state: DraftState, player_ids: Any,
+                      now: Optional[datetime] = None) -> "set[str]":
+    """Which of these players still have a match that can change this draft.
+
+    The one rule shared by handing a deck out (assign_drafted_decks) and taking
+    an uncollected offer back (expire_stale_assignments), so both read the same
+    DraftState. Collected decks are never touched by it. Reminders for a
+    collected deck read done_at and settled directly, not this answer, and are
+    not subject to OFFER_WINDOW.
+
+    Asked per PLAYER, never per pod. One drafter reporting says nothing about
+    whether another still needs their cards, and refusing a whole pod on the
+    first result strands everyone who had not collected yet.
+
+    Empty when the draft is decided: a side clinching settles it with dead
+    rubbers still unreported, and cards should not go out for those. Empty too
+    once the offer window has closed -- see DraftState.offer_window_closed,
+    which is what stops a fizzled draft pinning a deck and a loan slot for good.
+
+    Note the per-player half is vacuous for a progressively-paired format, where
+    done_at cannot answer from the rows that exist yet: for those only
+    settlement and the offer window end it.
+    """
+    if state.settled or state.offer_window_closed(now):
+        return set()
+    return {str(p) for p in player_ids if str(p) not in state.done_at}
+
+
+async def who_can_still_use_a_deck(session_id: Any, player_ids: Any,
+                                   now: Optional[datetime] = None) -> "set[str]":
+    """who_can_still_use, reading the draft first."""
+    return who_can_still_use(await draft_state(session_id), player_ids, now)
 
 
 async def draft_state(session_id: Any) -> DraftState:
@@ -332,9 +389,8 @@ async def draft_state(session_id: Any) -> DraftState:
     this does not reuse it.
 
     settled -- is this draft decided? Named for what it means, not "over":
-    card_lending_service._drafts_that_are_over asks a different question in the
-    same subsystem (would anybody still collect an offer), and counts a first
-    result rather than a victory. Defers to helpers.stale_drafts.is_finished_draft,
+    who_can_still_use asks the narrower question the library acts on (can THIS
+    player still use a deck), and this is one of its halves. Defers to helpers.stale_drafts.is_finished_draft,
     which reads the victory message as well as the stage -- the stage alone is
     wrong for most finished drafts, which never advance past 'pairings'. So a
     draft counts as settled the moment a side clinches, with dead rubbers
@@ -345,6 +401,10 @@ async def draft_state(session_id: Any) -> DraftState:
     last_result -- for a settled draft, the moment it was decided, give or take
     a dead rubber reported after the clinch (which only ever makes the first ask
     later, never early).
+
+    ended_at -- when the draft ended: logs_captured_at (written when the draft
+    ends, before decks are assigned), else rooms_created_at, else None. What
+    DraftState.offer_window_closed measures from.
     """
     from sqlalchemy import select
 
@@ -366,8 +426,9 @@ async def draft_state(session_id: Any) -> DraftState:
 
     settled = row.session_stage in FINISHED_STAGES or is_finished_draft(row)
     last_result = max((t for _, _, t in results if t is not None), default=None)
+    ended_at = row.logs_captured_at or row.rooms_created_at
     if row.session_type not in FULLY_PAIRED_TYPES:
-        return DraftState({}, settled, last_result)
+        return DraftState({}, settled, last_result, ended_at)
 
     last_played: "dict[str, datetime]" = {}
     outstanding: "set[str]" = set()
@@ -381,4 +442,4 @@ async def draft_state(session_id: Any) -> DraftState:
             elif pid not in last_played or submitted_at > last_played[pid]:
                 last_played[pid] = submitted_at
     done_at = {pid: t for pid, t in last_played.items() if pid not in outstanding}
-    return DraftState(done_at, settled, last_result)
+    return DraftState(done_at, settled, last_result, ended_at)
