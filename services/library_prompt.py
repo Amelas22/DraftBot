@@ -17,8 +17,9 @@ Only where it can matter: a rental library behind this server, offering this
 draft's cube, that this player may borrow from. A communal library needs none
 of this -- it lends to everybody, as it always has.
 
-The preference changes from the draft's Change Entry / Settings panel or
-/toggle_library.
+The preference changes from the draft's Change Entry / Settings panel, a row
+like the entry cap's. /toggle_library still flips it, for drafts without that
+panel, but nothing points players at it.
 """
 from typing import Any, Optional
 
@@ -55,16 +56,16 @@ def prompt_text(library: Library, hold: int) -> str:
     return (f"🏛️ **Borrow your deck from the {library.name} library?**\n"
             f"When you draft here, the library can lend you the cards you "
             f"drafted, so you don't need your own. {held}\n"
-            f"We'll remember your answer. Change it any time with "
-            f"`/toggle_library` or **Change Entry / Settings**.")
+            f"We'll remember your answer. Change it any time from "
+            f"**Change Entry / Settings** on the draft.")
 
 
 def saved_text(uses_library: bool) -> str:
     if uses_library:
         return ("✅ Saved: when you sign up here, the library's copy of the cube "
                 "is reserved for your draft if one is free.")
-    return ("👍 Saved: you'll bring your own cards. Change it any time with "
-            "`/toggle_library`.")
+    return ("👍 Saved: you'll bring your own cards. Change it any time from "
+            "**Change Entry / Settings** on the draft.")
 
 
 AGREE_LABEL = "I agree and wish to use the library"
@@ -141,8 +142,8 @@ class _Agree(discord.ui.Button[Any]):
     panel (`in_place=False`) it replies separately, leaving the panel be."""
 
     def __init__(self, player_id: str, session_id: str, cube: Any, hold: int,
-                 in_place: bool = True) -> None:
-        super().__init__(label=AGREE_LABEL, style=discord.ButtonStyle.success)
+                 in_place: bool = True, row: Optional[int] = None) -> None:
+        super().__init__(label=AGREE_LABEL, style=discord.ButtonStyle.success, row=row)
         self.player_id = player_id
         self.session_id = session_id
         self.cube = cube
@@ -172,7 +173,7 @@ def library_agree_button(player_id: str, session_id: str, cube: Any,
     """The agree button for the draft's Change Entry / Settings panel: the way
     back to it once the note's own buttons are gone, as they are after a
     restart."""
-    return _Agree(player_id, session_id, cube, hold, in_place=False)
+    return _Agree(player_id, session_id, cube, hold, in_place=False, row=LIBRARY_ROW)
 
 
 def _release_view(player_id: str, session_id: str, cube: Any, hold: int,
@@ -224,7 +225,8 @@ class _Answer(discord.ui.Button[Any]):
     async def callback(self, interaction: discord.Interaction) -> None:
         if not await set_uses_library(self.player_id, self.guild_id, self.uses_library):
             await interaction.response.send_message(
-                "⚠️ Couldn't save that just now. Try `/toggle_library`.",
+                "⚠️ Couldn't save that just now. Try again from "
+                "**Change Entry / Settings** on the draft.",
                 ephemeral=True)
             return
         text, view = saved_text(self.uses_library), None
@@ -260,8 +262,9 @@ class LibraryPreferenceView(discord.ui.View):
             logger.opt(exception=True).debug("library prompt: could not close it")
 
 
-UNANSWERED = ("Not saved. Run `/toggle_library` to borrow your deck from the "
-              "library, or answer next time you sign up.")
+UNANSWERED = ("Not saved. To borrow your deck from the library, use "
+              "**Change Entry / Settings** on the draft, or answer next time you "
+              "sign up.")
 
 
 async def library_after_sign_up(interaction: discord.Interaction, draft: Any) -> None:
@@ -305,8 +308,8 @@ async def library_after_sign_up(interaction: discord.Interaction, draft: Any) ->
             return
         try:
             await interaction.followup.send(
-                "Couldn't check the library just now. Run `/toggle_library` "
-                "if you'd like to borrow your deck.", ephemeral=True)
+                "Couldn't check the library just now. To borrow your deck, use "
+                "**Change Entry / Settings** on the draft.", ephemeral=True)
         except Exception:
             logger.opt(exception=True).warning(
                 "library: could not tell {} it failed either",
@@ -328,22 +331,42 @@ async def toggle_uses_library(player_id: Any, guild_id: Any) -> Optional[bool]:
     return new if await set_uses_library(str(player_id), str(guild_id), new) else None
 
 
-class LibraryToggleButton(discord.ui.Button[Any]):
-    """The library switch on a draft's Change Entry / Settings panel. No
-    custom_id, for the panel's reason: it is ephemeral and per player.
+LIBRARY_ROW = 2   # below the stake select (row 0) and the entry cap (row 1)
+PANEL = "**Change Entry / Settings**"
 
-    Turned on from a draft still filling, it also reserves the copy for it.
+
+def _status_look(uses_library: Optional[bool]) -> "tuple[str, discord.ButtonStyle]":
+    if uses_library:
+        return "Library: ON 🏛️", discord.ButtonStyle.success
+    if uses_library is False:
+        return "Library: OFF 🃏", discord.ButtonStyle.danger
+    return "Library: not set", discord.ButtonStyle.secondary
+
+
+class _SetLibrary(discord.ui.Button[Any]):
+    """One side of the library row on a draft's Change Entry / Settings panel,
+    laid out like the entry cap beside it: a status, then one button per
+    answer. No custom_id, for the panel's reason: it is ephemeral and per
+    player.
+
+    Pressed, it relabels the status on the panel itself, then says what it
+    saved. Turned on from a draft still filling, it also holds the copy for
+    it, with the note asking the player to agree.
     """
 
-    def __init__(self, player_id: str, guild_id: str,
-                 uses_library: Optional[bool], draft: Any = None,
+    def __init__(self, player_id: str, guild_id: str, uses_library: bool,
+                 status: "discord.ui.Button[Any]", draft: Any = None,
                  library: "Optional[Library]" = None) -> None:
         super().__init__(
-            label="Library: ON 🏛️" if uses_library else "Library: OFF",
-            style=(discord.ButtonStyle.success if uses_library
-                   else discord.ButtonStyle.secondary))
+            label=("Borrow from the library 🏛️" if uses_library
+                   else "Bring my own cards 🃏"),
+            style=(discord.ButtonStyle.green if uses_library
+                   else discord.ButtonStyle.red),
+            row=LIBRARY_ROW)
         self.player_id = player_id
         self.guild_id = guild_id
+        self.uses_library = uses_library
+        self.status = status
         self.draft = draft
         self.library = library
 
@@ -353,18 +376,33 @@ class LibraryToggleButton(discord.ui.Button[Any]):
             await interaction.response.send_message("This button is not for you.",
                                                     ephemeral=True)
             return
-        new = await toggle_uses_library(self.player_id, self.guild_id)
-        if new is None:
+        if not await set_uses_library(self.player_id, self.guild_id, self.uses_library):
             await interaction.response.send_message(
-                "⚠️ Couldn't save that just now. Try `/toggle_library`.",
+                f"⚠️ Couldn't save that just now. Try again from {PANEL}.",
                 ephemeral=True)
             return
-        text, view = saved_text(new), None
-        if new and self.draft is not None and self.library is not None:
+        self.status.label, self.status.style = _status_look(self.uses_library)
+        await interaction.response.edit_message(view=self.view)
+
+        text, view = saved_text(self.uses_library), None
+        if self.uses_library and self.draft is not None and self.library is not None:
             said, view = await _reserve_and_say(self.player_id, self.draft, self.library)
             if said:
                 text += "\n" + said
         if view is None:
-            await interaction.response.send_message(text, ephemeral=True)
+            await interaction.followup.send(text, ephemeral=True)
         else:
-            await interaction.response.send_message(text, view=view, ephemeral=True)
+            await interaction.followup.send(text, view=view, ephemeral=True)
+
+
+def library_setting_buttons(player_id: str, guild_id: str,
+                            uses_library: Optional[bool], draft: Any = None,
+                            library: "Optional[Library]" = None
+                            ) -> "list[discord.ui.Button[Any]]":
+    """The library row for a draft's Change Entry / Settings panel."""
+    label, style = _status_look(uses_library)
+    status: "discord.ui.Button[Any]" = discord.ui.Button(
+        label=label, style=style, disabled=True, row=LIBRARY_ROW)
+    return [status,
+            _SetLibrary(player_id, guild_id, True, status, draft, library),
+            _SetLibrary(player_id, guild_id, False, status, draft, library)]

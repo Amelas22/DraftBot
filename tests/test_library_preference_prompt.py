@@ -306,7 +306,80 @@ async def test_an_unanswered_prompt_closes_itself(test_db, shelf):
     await view.on_timeout()
 
     kwargs = view.sent.edit.await_args.kwargs
-    assert kwargs["view"] is None and "/toggle_library" in kwargs["content"]
+    assert kwargs["view"] is None and "Change Entry / Settings" in kwargs["content"]
+
+
+# --- the row on Change Entry / Settings -------------------------------------
+
+def _panel_interaction(player=PLAYER):
+    interaction = _interaction(player)
+    interaction.followup = SimpleNamespace(send=AsyncMock())
+    return interaction
+
+
+async def _row_buttons(uses, player=PLAYER, sid="q1"):
+    from discord.ui import View
+    from services.library_service import library_for
+    draft = await _queue([player], sid)
+    status, borrow, own = prompt.library_setting_buttons(
+        player, GUILD, uses, draft=draft, library=await library_for(GUILD))
+    view = View()
+    for b in (status, borrow, own):
+        view.add_item(b)
+    return status, borrow, own
+
+
+async def test_the_row_shows_the_saved_answer_like_the_entry_cap(test_db, shelf):
+    await _lounge()
+    for uses, label in [(True, "Library: ON 🏛️"), (False, "Library: OFF 🃏"),
+                        (None, "Library: not set")]:
+        status, borrow, own = prompt.library_setting_buttons(PLAYER, GUILD, uses)
+        assert status.label == label and status.disabled
+        assert {b.row for b in (status, borrow, own)} == {prompt.LIBRARY_ROW}
+
+
+async def test_borrow_saves_it_relabels_the_panel_and_holds_the_copy(test_db, shelf):
+    await _lounge(stock={"Swamp": 4})
+    await _drafted(PLAYER, 3)
+    status, borrow, _ = await _row_buttons(False)
+    interaction = _panel_interaction()
+
+    await borrow.callback(interaction)
+
+    assert await prefs.get_uses_library(PLAYER, GUILD) is True
+    assert status.label == "Library: ON 🏛️", "relabelled where they pressed it"
+    interaction.response.edit_message.assert_awaited_once()
+    sent = interaction.followup.send.await_args
+    assert "held for this draft" in sent.args[0], sent.args[0]
+    assert prompt.AGREE_LABEL in _labels(sent.kwargs["view"])
+
+
+async def test_bring_my_own_saves_it_and_lets_the_copy_go(test_db, shelf):
+    await _lounge(stock={"Swamp": 4})
+    await _drafted(PLAYER, 3)
+    await prefs.set_uses_library(PLAYER, GUILD, True)
+    status, _, own = await _row_buttons(True)
+    from services.library_reservation import reserve, still_reserved
+    assert (await reserve("q1")).status == "reserved"
+    interaction = _panel_interaction()
+
+    await own.callback(interaction)
+
+    assert await prefs.get_uses_library(PLAYER, GUILD) is False
+    assert status.label == "Library: OFF 🃏"
+    assert "bring your own cards" in interaction.followup.send.await_args.args[0]
+    assert not await still_reserved(await _row())
+
+
+async def test_nobody_else_can_press_your_row(test_db, shelf):
+    await _lounge()
+    _, borrow, _ = await _row_buttons(None)
+    interaction = _panel_interaction(MEMBER)
+
+    await borrow.callback(interaction)
+
+    assert await prefs.get_uses_library(PLAYER, GUILD) is None
+    interaction.response.edit_message.assert_not_awaited()
 
 
 # --- when something goes wrong ----------------------------------------------
@@ -335,7 +408,7 @@ async def test_a_failure_says_how_to_opt_in_and_never_reaches_the_sign_up(
     await prompt.library_after_sign_up(interaction, await _queue([MEMBER]))
 
     said = interaction.followup.send.await_args.args[0]
-    assert "/toggle_library" in said, said
+    assert "Change Entry / Settings" in said, said
 
 
 async def test_a_server_with_no_library_is_not_told_anything(test_db):

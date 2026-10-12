@@ -58,8 +58,8 @@ from loguru import logger
 
 from services.state_manager import state_manager
 from services import stake_funding, wallet_service
-from services.library_prompt import (LibraryToggleButton, library_after_sign_up,
-                                     library_agree_button, library_to_ask_about)
+from services.library_prompt import (library_after_sign_up, library_agree_button,
+                                     library_setting_buttons, library_to_ask_about)
 from services.library_reservation import owes_agreement
 from services.library_trust_service import hold_for
 from preference_service import get_uses_library
@@ -3337,9 +3337,10 @@ class BetCapToggleButton(CallbackButton):
                 try:
                     library = await library_to_ask_about(guild_id, draft_session.cube, user_id)
                     if library is not None:
-                        combined_view.add_item(LibraryToggleButton(
-                            user_id, guild_id, await get_uses_library(user_id, guild_id),
-                            draft=draft_session, library=library))
+                        for item in library_setting_buttons(
+                                user_id, guild_id, await get_uses_library(user_id, guild_id),
+                                draft=draft_session, library=library):
+                            combined_view.add_item(item)
                         # Waiting on this player's agreement before it fires.
                         if await owes_agreement(draft_session, user_id):
                             combined_view.add_item(library_agree_button(
