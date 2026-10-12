@@ -487,7 +487,7 @@ async def test_a_server_with_no_library_is_not_told_anything(test_db):
 
 # --- asking again after "don't need it", and things going wrong --------------
 
-async def test_switching_back_on_after_dont_need_it_asks_to_agree_again(test_db, shelf):
+async def test_switching_back_on_after_dont_need_it_gets_the_copy_back(test_db, shelf):
     """Agreed, then "don't need it", then Borrow on the panel: the player must
     not be told "reserved, collect your deck" while still marked as released."""
     from services.library_reservation import library_users, release_player
@@ -560,3 +560,26 @@ async def test_a_board_rebuilt_after_startup_keeps_its_library_button(test_db):
         view = PersistentView(bot=None, draft_session_id="open-q",
                               session_type="premade", session_stage=stage)
         assert "Library 🏛️" in [getattr(c, "label", None) for c in view.children]
+
+
+async def test_changing_entry_or_team_keeps_a_dont_need_it(test_db, shelf):
+    """The sign-up path also runs on an entry change or a team switch; neither
+    is asking again, so a player who said "don't need it" stays released and is
+    not told the copy is theirs."""
+    from services.library_reservation import (agree_player, library_users,
+                                              release_player)
+    await _lounge(stock={"Swamp": 4})
+    await _drafted(PLAYER, 3)
+    for p in (MEMBER, PLAYER):
+        await prefs.set_uses_library(p, GUILD, True)
+    await _queue([MEMBER, PLAYER])
+    await agree_player("q1", MEMBER)
+    await agree_player("q1", PLAYER)
+    await release_player("q1", PLAYER)
+    interaction = _interaction(PLAYER)
+
+    await prompt.library_after_sign_up(interaction, SimpleNamespace(session_id="q1", cube=CUBE))
+
+    assert PLAYER not in await library_users(await _row())
+    said = interaction.followup.send.await_args.args[0]
+    assert "held for this draft" in said and prompt.AGREE_LABEL in said, said

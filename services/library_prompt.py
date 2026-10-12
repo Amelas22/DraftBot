@@ -58,7 +58,8 @@ def prompt_text(library: Library, hold: int) -> str:
             f"When you draft here, the library can lend you the cards you "
             f"drafted, so you don't need your own. {held}\n"
             f"We'll remember your answer. Change it any time from "
-            f"{WHERE_TO_CHANGE}. {library_page_link('What the library holds')}")
+            f"{WHERE_TO_CHANGE}. "
+            f"{library_page_link('What the library holds', preview=False)}")
 
 
 def saved_text(uses_library: bool) -> str:
@@ -221,21 +222,30 @@ def _release_view(player_id: str, session_id: str, cube: Any, hold: int,
 
 
 async def _reserve_and_say(player_id: str, draft: Any, library: Library,
-                           agree: bool = False
+                           agree: bool = False, reclaim: bool = False
                            ) -> "tuple[Optional[str], Optional[discord.ui.View]]":
+    """Reserve if a copy is free and say where things stand.
+
+    `reclaim` only for the player switching borrowing on: that is asking
+    again, and takes back their own "don't need it". A sign-up path reached by
+    changing entry or switching team is not, and leaves it alone.
+    """
     hold = await hold_for(library, player_id) or 0
     session_id = str(draft.session_id)
     if agree:
         answer = await agree_player(session_id, player_id)
         has_agreed = True
     else:
-        # Asking again takes back their own "don't need it" for this draft;
-        # left in place, it would quietly keep them from the deck.
-        await reclaim_player(session_id, player_id)
+        if reclaim:
+            await reclaim_player(session_id, player_id)
         answer = await reserve(session_id)
-        # Read afresh: somebody re-joining a queue they already agreed in.
+        # Read afresh: somebody re-joining a queue they already agreed in. One
+        # who said "don't need it" since is not agreed: they get the agree
+        # button, which is what takes that back.
         current = await DraftSession.get_by_session_id(session_id)
-        has_agreed = current is not None and str(player_id) in agreed(current)
+        player = str(player_id)
+        has_agreed = (current is not None and player in agreed(current)
+                      and player not in {str(p) for p in (current.library_released or [])})
         if (not has_agreed and current is not None
                 and current.teams_start_time is not None
                 and answer.status in ("reserved", "held")):
@@ -419,7 +429,8 @@ class _SetLibrary(discord.ui.Button[Any]):
         text, view = saved_text(self.uses_library), None
         if self.uses_library and self.draft is not None and self.library is not None:
             try:
-                said, view = await _reserve_and_say(self.player_id, self.draft, self.library)
+                said, view = await _reserve_and_say(self.player_id, self.draft,
+                                                    self.library, reclaim=True)
             except Exception:
                 logger.exception("library: saved {}'s yes but could not reserve in {}",
                                  self.player_id, self.draft.session_id)

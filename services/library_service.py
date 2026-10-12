@@ -50,8 +50,12 @@ async def library_for(guild_id: Any) -> "Optional[Library]":
 LIBRARY_PAGE_URL = "https://magic-draft-logs.nyc3.digitaloceanspaces.com/library/index.html"
 
 
-def library_page_link(text: str = "See the library") -> str:
-    return f"[{text}]({LIBRARY_PAGE_URL})"
+def library_page_link(text: str = "See the library", preview: bool = True) -> str:
+    """A masked link to the page. `preview=False` in a plain message, where
+    Discord would otherwise hang a preview card under it; an embed (the signup
+    board) never previews."""
+    url = LIBRARY_PAGE_URL if preview else f"<{LIBRARY_PAGE_URL}>"
+    return f"[{text}]({url})"
 
 
 async def library_id_for(guild_id: Any) -> "Optional[str]":
