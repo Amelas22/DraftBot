@@ -23,6 +23,7 @@ from typing import Any, Optional
 from loguru import logger
 
 from services.library_access_service import members
+from services.library_service import price_range_of
 
 
 async def is_trusted(library_id: Any, player_id: Any) -> bool:
@@ -46,15 +47,12 @@ async def hold_for(library: Any, player_id: Any) -> Optional[int]:
     Both numbers here are still the library's own policy, set from the same shell
     tool, and a borrower cannot move themselves between them.
     """
-    if library is None:
+    prices = price_range_of(library)
+    if prices is None:
         return None
-    trusted_price = int(library.collateral_tix or 0)
-    untrusted_price = getattr(library, "collateral_tix_untrusted", None)
-    if untrusted_price is None:
-        return trusted_price
-    if await is_trusted(library.id, player_id):
-        return trusted_price
+    least, most = prices
+    if least == most or await is_trusted(library.id, player_id):
+        return least
     logger.info("library {}: {} is not on its member list, so the "
-                "hold is {} rather than {}", library.id, player_id,
-                int(untrusted_price), trusted_price)
-    return int(untrusted_price)
+                "hold is {} rather than {}", library.id, player_id, most, least)
+    return most

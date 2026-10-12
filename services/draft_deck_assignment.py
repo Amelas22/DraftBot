@@ -298,13 +298,12 @@ async def assign_drafted_decks(session_id: Any) -> int:
     # out: an offer they never wanted would still take their one loan slot and
     # a deck's worth of the shelf until it expired. A communal library lends
     # to everyone in the pod, as it always has.
+    eligible = [d for d in candidates if d not in busy and str(d) in allowed]
     not_opted: "list[str]" = []
     if library.kind == RENTAL:
         wanting: "set[str]" = await get_players_using_library(candidates, guild_id)
-        not_opted = [d for d in candidates
-                     if d not in busy and str(d) in allowed and str(d) not in wanting]
-    refused = set(not_invited) | set(not_opted)
-    assignable = [d for d in candidates if d not in busy and d not in refused]
+        not_opted = [d for d in eligible if str(d) not in wanting]
+    assignable = [d for d in eligible if d not in set(not_opted)]
     if finished:
         logger.debug("deck assignment: {} drafter(s) on {} have no match left "
                      "to play", len(finished), session_id)

@@ -53,7 +53,7 @@ async def test_no_history_here_counts_as_none(test_db):
     """No PlayerStats row and a row saying zero must read the same."""
     await _gated()
 
-    assert await access.drafts_played(LIB, PLAYER) == 0
+    assert await access.drafts_played_many(LIB, [PLAYER]) == {PLAYER: 0}
     assert await access.may_borrow(LIB, PLAYER) is False
 
 
@@ -65,7 +65,7 @@ async def test_drafts_are_summed_across_the_librarys_servers(test_db):
     await _drafted(PLAYER, 2, guild=GUILD)
     await _drafted(PLAYER, 1, guild="g2")
 
-    assert await access.drafts_played(LIB, PLAYER) == 3
+    assert await access.drafts_played_many(LIB, [PLAYER]) == {PLAYER: 3}
     assert await access.may_borrow(LIB, PLAYER) is True
 
 

@@ -102,8 +102,10 @@ async def lending_custodian_up(timeout_s: float = 0.6) -> Optional[bool]:
         logger.warning("library: the custodian's /health took over {}s; its state "
                        "is unknown", timeout_s)
         return None
-    state, detail = classify(200 if health else None, health,
-                             None if health else "no answer")
+    if not health:
+        logger.warning("library: the custodian did not answer /health")
+        return False
+    state, detail = classify(200, health, None)
     if state != "ok":
         logger.warning("library: the custodian is {}: {}", state, detail)
     return state == "ok"

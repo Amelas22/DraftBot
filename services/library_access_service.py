@@ -84,11 +84,6 @@ async def drafts_played_many(library_id: Any,
     return counts
 
 
-async def drafts_played(library_id: Any, player_id: Any) -> int:
-    """drafts_played_many for one player."""
-    return (await drafts_played_many(library_id, [player_id]))[str(player_id)]
-
-
 async def is_invite_only(library_id: Any) -> bool:
     """Does this library lend only to named people?
 
@@ -137,7 +132,7 @@ async def why_not(library_id: Any, player_id: Any) -> str:
     if threshold is None:
         return ("🔒 This card library is invite-only at the moment, and you're "
                 "not on the list. Ask whoever runs it if you'd like to be.")
-    played = await drafts_played(library_id, player_id)
+    played = (await drafts_played_many(library_id, [player_id]))[str(player_id)]
     return (f"🔒 This card library lends to players with {threshold}+ drafts "
             f"here, and you have {played}.")
 

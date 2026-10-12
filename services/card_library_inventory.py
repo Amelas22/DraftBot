@@ -257,13 +257,13 @@ async def _could_collect(library_id: Any,
     """
     from models.library import RENTAL, Library
     from preference_service import get_players_using_library
-    from services.library_access_service import may_borrow_many, members, min_drafts
+    from services.library_access_service import may_borrow_many, members
 
     async with AsyncSessionLocal() as session:
         library = await session.get(Library, str(library_id))
     rental = library is not None and library.kind == RENTAL
-    if (not rental and not await members(library_id)
-            and await min_drafts(library_id) is None):
+    threshold = None if library is None else library.min_drafts_to_borrow
+    if not rental and threshold is None and not await members(library_id):
         return None
     seats = {str(d.session_id): {str(p) for p in (d.sign_ups or {})} for d in drafts}
     allowed = await may_borrow_many(library_id, set().union(*seats.values()))
