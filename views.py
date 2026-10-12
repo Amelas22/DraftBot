@@ -861,6 +861,7 @@ class PersistentView(discord.ui.View):
                 interaction.guild_id,
                 current_cube=draft_session.cube,
                 on_submit=apply_cube_update,
+                own_session_id=draft_session.session_id,
             )
             cube_selection.packs_per_player = draft_session.packs_per_player or DEFAULT_PACKS_PER_PLAYER
             cube_selection.cards_per_pack = draft_session.cards_per_pack or DEFAULT_CARDS_PER_PACK
@@ -870,6 +871,7 @@ class PersistentView(discord.ui.View):
                 view=cube_selection,
                 ephemeral=True
             )
+            cube_selection.mark_once_sent(interaction)
             
         except Exception as e:
             logger.exception(f"Error in update_cube_callback: {e}")

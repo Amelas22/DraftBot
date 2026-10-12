@@ -5,7 +5,7 @@ cog, the premade session hook, utils.py and views.py can all import it without
 an import cycle through cogs/. The message body itself is rendered by
 helpers/match_control.py, which stays free of Discord imports.
 """
-from typing import Any, Callable, Coroutine, cast
+from typing import TYPE_CHECKING, Any, Callable, Coroutine, cast
 
 import discord
 from loguru import logger
@@ -32,6 +32,9 @@ from models.tournament import (
     TournamentRound,
 )
 from services.tournament_formatter import round_name
+
+if TYPE_CHECKING:
+    from cube_views.pack_options import BaseCubeSelectionView
 
 
 async def match_facts(
@@ -157,7 +160,8 @@ def _picker_overrides(match_id: int, a_name: str, b_name: str) -> dict[str, Any]
     }
 
 
-def cube_picker_for_match(guild_id: int | None, match_id: int, a_name: str, b_name: str) -> discord.ui.View:
+def cube_picker_for_match(guild_id: int | None, match_id: int, a_name: str,
+                          b_name: str) -> "BaseCubeSelectionView":
     """The premade cube picker, pre-named from the pairing.
 
     Both team names present is what makes CubeDraftModal drop its name inputs
@@ -325,12 +329,14 @@ async def start_match_draft(interaction: discord.Interaction, match_id: int) -> 
     # hazard -- a stale one stays clickable for its 180s view timeout and would
     # create a SECOND draft linked to this same match. The lobby it produces is
     # still public, because that is posted by the picker's own submit interaction.
+    picker = cube_picker_for_match(interaction.guild_id, match_id, a_name, b_name)
     await interaction.response.send_message(
         content=(f"Pick a cube to start **{a_name}** vs **{b_name}** "
                  f"(the result records automatically when the draft finishes):"),
-        view=cube_picker_for_match(interaction.guild_id, match_id, a_name, b_name),
+        view=picker,
         ephemeral=True,
     )
+    picker.mark_once_sent(interaction)
 
 
 async def _refresh_pairing_message(

@@ -13,8 +13,9 @@ class CubeUpdateSelectionView(BaseCubeSelectionView):
 
     submit_label = "Update Cube"
 
-    def __init__(self, session_type: str, guild_id: int, current_cube=None, on_submit=None):
-        super().__init__(session_type, guild_id, current_cube)
+    def __init__(self, session_type: str, guild_id: int, current_cube=None, on_submit=None,
+                 own_session_id=None):
+        super().__init__(session_type, guild_id, current_cube, own_session_id=own_session_id)
         self.on_submit = on_submit
 
     async def submit_callback(self, interaction: discord.Interaction):
