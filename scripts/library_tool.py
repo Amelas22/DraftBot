@@ -46,6 +46,12 @@ import services.library_service as libs                          # noqa: E402
 
 async def _create(library_id, name, kind, hold, by, replace,
                   hold_unknown=None, min_drafts=None):
+    if hold_unknown is not None and hold_unknown < hold:
+        # The board names the range low-to-high and the cube dropdown quotes the
+        # higher figure; a second figure below the first would make both lie.
+        print(f"--hold-unknown {hold_unknown} is below --hold {hold}: the higher "
+              f"figure is the one asked of non-members. Nothing changed.")
+        return
     async with AsyncSessionLocal() as s:
         row = await s.get(Library, library_id)
         if row is not None and not replace:

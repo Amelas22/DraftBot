@@ -19,19 +19,6 @@ pytestmark = pytest.mark.asyncio
 LIB, GUILD, PLAYER = "lib", "g1", "u1"
 
 
-@pytest.fixture(autouse=True)
-def custodian_up(monkeypatch):
-    """The library's custodian answers, unless a test says otherwise. The board
-    asks it over the network, which no test here means to be about."""
-    import services.card_lending_service as lending
-
-    state = {"up": True}
-
-    async def _up(*_a, **_k):
-        return state["up"]
-    monkeypatch.setattr(lending, "lending_custodian_up", _up)
-    return state
-
 
 async def _drafted(n, player=PLAYER, guild=GUILD):
     """A player with `n` drafts behind them in this server."""

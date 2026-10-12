@@ -167,6 +167,10 @@ class DraftCommands(commands.Cog):
         from services.library_prompt import rental_library_for, saved_text, toggle_uses_library
 
         await ctx.response.defer(ephemeral=True)
+        if ctx.guild is None:
+            await ctx.followup.send("Run this in the server whose library you mean.",
+                                    ephemeral=True)
+            return
         if await rental_library_for(ctx.guild.id) is None:
             await ctx.followup.send(
                 "📭 This server doesn't have a card library to borrow from.",

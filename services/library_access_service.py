@@ -60,9 +60,10 @@ async def drafts_played_many(library_id: Any,
 
     PlayerStats is a maintained counter keyed (player_id, guild_id), so this is
     one indexed read rather than a scan of draft history -- which matters
-    because it is asked on the borrow path, while a player is waiting. It only
-    moves when a draft completes, so the draft somebody is in right now does not
-    count yet.
+    because it is asked on the borrow path, while a player is waiting. It moves
+    when a draft's rooms and pairings are made (update_player_stats_for_draft),
+    so at sign-up the draft being joined does not count yet, and by the time its
+    decks are offered it does.
 
     A player with no row has played nothing here and counts 0.
     """
@@ -138,7 +139,7 @@ async def why_not(library_id: Any, player_id: Any) -> str:
                 "not on the list. Ask whoever runs it if you'd like to be.")
     played = await drafts_played(library_id, player_id)
     return (f"🔒 This card library lends to players with {threshold}+ drafts "
-            f"here, and you have {played}. A draft counts once it's finished.")
+            f"here, and you have {played}.")
 
 
 async def invite(library_id: Any, player_id: Any, added_by: str) -> bool:

@@ -300,7 +300,7 @@ async def assign_drafted_decks(session_id: Any) -> int:
     # to everyone in the pod, as it always has.
     not_opted: "list[str]" = []
     if library.kind == RENTAL:
-        wanting: "set[str]" = await get_players_using_library(candidates, guild_id) or set()
+        wanting: "set[str]" = await get_players_using_library(candidates, guild_id)
         not_opted = [d for d in candidates
                      if d not in busy and str(d) in allowed and str(d) not in wanting]
     refused = set(not_invited) | set(not_opted)

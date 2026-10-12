@@ -923,3 +923,21 @@ async def session(match_control_db):
     about the bracket."""
     async with match_control_db() as open_session:
         yield open_session
+
+
+@pytest.fixture(autouse=True)
+def custodian_up(monkeypatch):
+    """The library's MTGO custodian answers, unless a test says otherwise.
+
+    The signup board asks it over the network, and no test means to. Set
+    `custodian_up["up"]` to False (down) or None (too slow to tell). The real
+    check is tested by binding it before this replaces the module attribute.
+    """
+    import services.card_lending_service as lending
+
+    state = {"up": True}
+
+    async def _up(*_a, **_k):
+        return state["up"]
+    monkeypatch.setattr(lending, "lending_custodian_up", _up)
+    return state

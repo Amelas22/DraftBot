@@ -92,12 +92,27 @@ class _Answer(discord.ui.Button[Any]):
 
 
 class LibraryPreferenceView(discord.ui.View):
-    """Two answers. A timeout saves nothing, so the player is asked next time."""
+    """Two answers. A timeout saves nothing, so the player is asked next time,
+    and says so rather than leaving buttons that no longer answer."""
 
     def __init__(self, player_id: str, guild_id: str) -> None:
         super().__init__(timeout=600)
+        self.sent: "Optional[discord.WebhookMessage]" = None
         self.add_item(_Answer(player_id, guild_id, True))
         self.add_item(_Answer(player_id, guild_id, False))
+
+    @override
+    async def on_timeout(self) -> None:
+        if self.sent is None:
+            return
+        try:
+            await self.sent.edit(content=UNANSWERED, view=None)
+        except Exception:
+            logger.opt(exception=True).debug("library prompt: could not close it")
+
+
+UNANSWERED = ("Not saved. Run `/toggle_library` to borrow your deck from the "
+              "library, or answer next time you sign up.")
 
 
 async def maybe_ask_library_preference(interaction: discord.Interaction,
@@ -108,22 +123,38 @@ async def maybe_ask_library_preference(interaction: discord.Interaction,
     read as a failed sign-up. It leaves the preference unset, so they are asked
     again at their next sign-up.
     """
+    library = None
     try:
         if interaction.user is None or interaction.guild_id is None:
             return
         player_id, guild_id = str(interaction.user.id), str(interaction.guild_id)
+        library = await rental_library_for(guild_id)
+        if library is None:
+            return
         if await get_uses_library(player_id, guild_id) is not None:
             return
         library = await library_to_ask_about(guild_id, cube_id, player_id)
         if library is None:
             return
         hold = await hold_for(library, player_id) or 0
-        await interaction.followup.send(
-            prompt_text(library, hold),
-            view=LibraryPreferenceView(player_id, guild_id), ephemeral=True)
+        view = LibraryPreferenceView(player_id, guild_id)
+        view.sent = await interaction.followup.send(
+            prompt_text(library, hold), view=view, ephemeral=True, wait=True)
     except Exception:
         logger.exception("library prompt: could not ask {} about the library",
                          getattr(interaction.user, "id", None))
+        if library is None:
+            return
+        # An unanswered player gets no deck at the end of the draft, so say how
+        # to get one rather than leave the board's "you'll be asked" untrue.
+        try:
+            await interaction.followup.send(
+                "Couldn't ask about the library just now. Run `/toggle_library` "
+                "if you'd like to borrow your deck.", ephemeral=True)
+        except Exception:
+            logger.opt(exception=True).warning(
+                "library prompt: could not tell {} it failed either",
+                getattr(interaction.user, "id", None))
 
 
 async def toggle_uses_library(player_id: Any, guild_id: Any) -> Optional[bool]:
@@ -132,7 +163,12 @@ async def toggle_uses_library(player_id: Any, guild_id: Any) -> Optional[bool]:
     Unset flips to True: somebody reaching for the switch before being asked
     is asking to borrow.
     """
-    new = not await get_uses_library(player_id, guild_id)
+    try:
+        new = not await get_uses_library(player_id, guild_id)
+    except Exception:
+        # Guessing here is how a tap meant to turn it off turns it on.
+        logger.exception("library switch: could not read {}'s preference", player_id)
+        return None
     return new if await set_uses_library(str(player_id), str(guild_id), new) else None
 
 

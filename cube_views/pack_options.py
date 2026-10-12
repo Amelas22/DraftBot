@@ -340,8 +340,10 @@ async def library_signup_note(cube_id, guild_id) -> "Optional[str]":
     Never claims coverage it has not checked. If the cube cannot be read, or
     the ledger cannot be reached, it says nothing rather than promising a deck
     that may not be there -- which is the exact failure it exists to prevent.
-    And a library whose custodian is unreachable or reconnecting is said to be
-    offline: the shelf may cover the cube, but nobody can borrow from it.
+    And a library whose custodian reports it cannot work is said to be offline:
+    the shelf may cover the cube, but nobody can borrow from it. A custodian
+    that did not answer in time is not called offline -- this line stands for
+    the whole draft, and one slow reply is not an outage.
     """
     from models.library import RENTAL
     from services.card_lending_service import lending_custodian_up
@@ -387,7 +389,7 @@ async def library_signup_note(cube_id, guild_id) -> "Optional[str]":
     if not covered:
         return ("⚠️ **Bring your own cards** — the library can't cover this "
                 "cube right now.")
-    if not up:
+    if up is False:
         return ("⚠️ **Bring your own cards** — the library is offline right "
                 "now.")
 

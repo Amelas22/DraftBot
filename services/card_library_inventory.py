@@ -31,7 +31,6 @@ from models.card_loan import ACTIVE_STATES, CardLoan
 from models.draft_session import DraftSession
 from models.library_server import LibraryServer
 from services import debt_service, wallet_service
-from services.library_access_service import members
 from services.library_reminders import session_of
 
 # Loan states whose cards are not on the shelf: every state a loan can be in
@@ -244,6 +243,41 @@ def _later(formed: Optional[datetime], than: Optional[datetime]) -> bool:
     return formed is not None and than is not None and formed > than
 
 
+async def _could_collect(library_id: Any,
+                         drafts: "list[Any]") -> "Optional[dict[str, set[str]]]":
+    """Per draft, who in it would be offered a deck: the same rule deck
+    assignment applies -- may borrow, and for a rental library has said they
+    want its decks. A draft nobody in could collect from holds nothing.
+
+    None for a library that restricts nobody -- communal, no members, no
+    threshold -- where every draft underway holds its cube, as it always has.
+
+    One access read for every drafter underway, and one preference read per
+    server, rather than a pair per draft.
+    """
+    from models.library import RENTAL, Library
+    from preference_service import get_players_using_library
+    from services.library_access_service import may_borrow_many, members, min_drafts
+
+    async with AsyncSessionLocal() as session:
+        library = await session.get(Library, str(library_id))
+    rental = library is not None and library.kind == RENTAL
+    if (not rental and not await members(library_id)
+            and await min_drafts(library_id) is None):
+        return None
+    seats = {str(d.session_id): {str(p) for p in (d.sign_ups or {})} for d in drafts}
+    allowed = await may_borrow_many(library_id, set().union(*seats.values()))
+    if not rental:
+        return {sid: who & allowed for sid, who in seats.items()}
+    wanting: "dict[str, set[str]]" = {}
+    for guild in {str(d.guild_id) for d in drafts}:
+        here = [p for d in drafts if str(d.guild_id) == guild
+                for p in seats[str(d.session_id)]]
+        wanting[guild] = await get_players_using_library(here, guild)
+    return {str(d.session_id): seats[str(d.session_id)] & allowed
+            & wanting[str(d.guild_id)] for d in drafts}
+
+
 async def _being_drafted(fetch: "Callable[[str], Any]", library_id: Any, *,
                          yield_after: Optional[datetime] = None
                          ) -> "dict[str, int]":
@@ -292,7 +326,7 @@ async def _being_drafted(fetch: "Callable[[str], Any]", library_id: Any, *,
                 ))).all()
         }
 
-    invited = set(await members(library_id))
+    collectors = await _could_collect(library_id, underway)
     committed: "dict[str, int]" = {}
     for draft in underway:
         if draft.session_stage in FINISHED_STAGES:
@@ -301,7 +335,7 @@ async def _being_drafted(fetch: "Callable[[str], Any]", library_id: Any, *,
             continue                      # its loans speak for it now
         if _later(draft.teams_start_time, yield_after):
             continue                      # reserved after the loan asking
-        if invited and not invited & set(draft.sign_ups or {}):
+        if collectors is not None and not collectors.get(str(draft.session_id)):
             continue                      # nobody here could collect a deck
         # Through the doorway, so what a draft is holding is named the way
         # custody is. Comparing a raw CubeCobra list to the ledger meant a

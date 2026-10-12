@@ -19,19 +19,6 @@ from cube_views.pack_options import library_signup_note
 from services.card_lending_service import lending_custodian_up as _real_custodian_up
 
 
-@pytest.fixture(autouse=True)
-def custodian_up(monkeypatch):
-    """The library's custodian answers, unless a test says otherwise. The board
-    asks it over the network, which no test here means to be about."""
-    import services.card_lending_service as lending
-
-    state = {"up": True}
-
-    async def _up(*_a, **_k):
-        return state["up"]
-    monkeypatch.setattr(lending, "lending_custodian_up", _up)
-    return state
-
 GUILD, CUBE = "g1", "mycube"
 
 
@@ -286,6 +273,18 @@ async def test_an_unreachable_custodian_says_the_library_is_offline(
 
 
 @pytest.mark.asyncio
+async def test_a_custodian_too_slow_to_tell_is_not_called_offline(
+        test_db, monkeypatch, custodian_up):
+    await _price(25)
+    _shelf(monkeypatch, {"Swamp": 4}, {"Swamp": 4}, CUBE_CARDS)
+    custodian_up["up"] = None
+
+    note = await library_signup_note(CUBE, GUILD)
+
+    assert "offline" not in note.lower() and "25 tix" in note, note
+
+
+@pytest.mark.asyncio
 async def test_a_gated_rental_library_says_who_may_borrow(test_db, monkeypatch):
     """Members and anybody with three drafts: the board names the line, and
     that a rental library asks at sign-up. Shown though members are listed,
@@ -322,7 +321,9 @@ class _Health:
     (_Health({"ok": True, "reconnecting": True}), False, "reconnecting"),
     (_Health({"ok": False}), False, "health says not ok"),
     (_Health(None), False, "no answer"),
-    (_Health({"ok": True}, delay=5), False, "too slow for the board's budget"),
+    (_Health({"ok": True, "stuck": True}), False, "stuck is not working"),
+    (_Health({"ok": True}, delay=5), None,
+     "too slow to tell: unknown, not offline -- the board stands all draft"),
     (_Health({"ok": True}, enabled=False), False, "no lending serve configured"),
 ])
 async def test_reachability_is_what_the_board_asks(monkeypatch, client, up, why):

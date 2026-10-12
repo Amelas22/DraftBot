@@ -164,3 +164,49 @@ async def test_ignoring_the_prompt_saves_nothing(test_db):
     await view.on_timeout()
 
     assert await prefs.get_uses_library(PLAYER, GUILD) is None
+
+
+# --- when something goes wrong ----------------------------------------------
+
+async def test_a_failed_read_does_not_flip_the_switch(test_db, monkeypatch):
+    """Reading the answer as "not asked" on an error would turn a tap meant to
+    switch it off into switching it on."""
+    await prefs.set_uses_library(PLAYER, GUILD, True)
+    monkeypatch.setattr(prompt, "get_uses_library",
+                        AsyncMock(side_effect=RuntimeError("db gone")))
+
+    assert await prompt.toggle_uses_library(PLAYER, GUILD) is None
+    monkeypatch.undo()
+    assert await prefs.get_uses_library(PLAYER, GUILD) is True
+
+
+async def test_a_prompt_that_fails_says_how_to_opt_in(test_db, monkeypatch):
+    """Unanswered means no deck at the end of the draft, so the player is told
+    the way round rather than left to find out then."""
+    await _lounge()
+    monkeypatch.setattr(prompt, "hold_for",
+                        AsyncMock(side_effect=RuntimeError("db gone")))
+    interaction = _interaction(MEMBER)
+
+    await prompt.maybe_ask_library_preference(interaction, CUBE)
+
+    said = interaction.followup.send.await_args.args[0]
+    assert "/toggle_library" in said, said
+
+
+async def test_a_server_with_no_library_is_not_told_anything(test_db, monkeypatch):
+    interaction = _interaction(MEMBER)
+
+    await prompt.maybe_ask_library_preference(interaction, CUBE)
+
+    interaction.followup.send.assert_not_awaited()
+
+
+async def test_an_unanswered_prompt_closes_itself(test_db):
+    view = prompt.LibraryPreferenceView(PLAYER, GUILD)
+    view.sent = SimpleNamespace(edit=AsyncMock())
+
+    await view.on_timeout()
+
+    kwargs = view.sent.edit.await_args.kwargs
+    assert kwargs["view"] is None and "/toggle_library" in kwargs["content"]

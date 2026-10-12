@@ -729,6 +729,25 @@ async def test_a_rental_library_offers_decks_only_to_those_who_asked(
     assert [who for who, _ in told] == [ALICE]
 
 
+async def test_a_preference_read_that_fails_is_not_read_as_nobody_asking(
+        test_db, monkeypatch):
+    """It raises, as the access read beside it does, and the reconciler tries
+    again next tick -- rather than assigning nobody and logging that the whole
+    pod declined."""
+    from conftest import a_library
+
+    await a_library(LIBRARY, guild=GUILD, kind="rental", collateral=5,
+                    cubes=(CUBE,))
+    monkeypatch.setattr(svc, "get_players_using_library",
+                        AsyncMock(side_effect=RuntimeError("db gone")))
+    _recording_dm(monkeypatch)
+    await _seed()
+
+    with pytest.raises(RuntimeError):
+        await svc.assign_drafted_decks(SESSION)
+    assert await _loans() == {}
+
+
 # --- who can still use a deck ------------------------------------------------
 #
 # A drafter may borrow from the moment their pool is assigned until they have no

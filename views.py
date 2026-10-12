@@ -661,6 +661,9 @@ class PersistentView(discord.ui.View):
             # If a ready check is active, add the new player to no_response and refresh the embed
             await ReadyCheckSession.sync_added_player(self.draft_session_id, user_id, draft_session_updated, interaction)
 
+            # Once per player: do they want the library's decks? (services/library_prompt)
+            await maybe_ask_library_preference(interaction, draft_session_updated.cube)
+
             if self.session_type == "winston":
                 if len(sign_ups) == 2:
                     sign_up_tags = ' '.join([f"<@{user_id}>" for user_id in draft_session_updated.sign_ups.keys()])
@@ -3328,10 +3331,15 @@ class BetCapToggleButton(CallbackButton):
 
                 # The library switch, where there is a rental library this
                 # player could borrow this cube from (services/library_prompt).
-                library = await library_to_ask_about(guild_id, draft_session.cube, user_id)
-                if library is not None:
-                    combined_view.add_item(LibraryToggleButton(
-                        user_id, guild_id, await get_uses_library(user_id, guild_id)))
+                # Guarded: a library hiccup must not take the stake panel with it.
+                try:
+                    library = await library_to_ask_about(guild_id, draft_session.cube, user_id)
+                    if library is not None:
+                        combined_view.add_item(LibraryToggleButton(
+                            user_id, guild_id, await get_uses_library(user_id, guild_id)))
+                except Exception:
+                    logger.exception("settings panel: library check failed for {} on {}",
+                                     user_id, self.draft_session_id)
                 
                 # Send the ephemeral message with the combined view
                 message_content = f"You are in for {current_stake} tix, with your entry cap **{status}**.\n"
