@@ -15,6 +15,9 @@ from database.db_session import AsyncSessionLocal
 from conftest import a_library
 import cube_views.pack_options as mod
 from cube_views.pack_options import library_signup_note
+# Bound before the autouse stub below replaces the module's attribute.
+from services.card_lending_service import lending_custodian_up as _real_custodian_up
+
 
 GUILD, CUBE = "g1", "mycube"
 
@@ -225,6 +228,19 @@ async def test_a_communal_library_still_warns_about_coverage(test_db, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_a_communal_library_keeps_its_line(test_db, monkeypatch):
+    """The Divination's board read "No cards needed" before rental libraries
+    opened up, and still does; only a rental library is called one."""
+    await a_library("lib", guild=GUILD, kind="communal", collateral=0, cubes=(CUBE,))
+    _shelf(monkeypatch, {"Swamp": 4}, {"Swamp": 4}, CUBE_CARDS)
+
+    note = await library_signup_note(CUBE, GUILD)
+
+    assert note.startswith("🆓 **No cards needed** — borrow your deck from the library free."), note
+    assert "Library available" not in note and "Signing up holds" not in note, note
+
+
+@pytest.mark.asyncio
 async def test_a_whitelisted_library_leaves_the_cube_dropdown_unmarked(
         test_db, monkeypatch):
     """The other shared surface: the cube list an organiser picks from is seen
@@ -252,3 +268,81 @@ async def test_a_communal_library_still_marks_the_cube_dropdown(test_db, monkeyp
     marked = await mark_library_cubes(options, GUILD)
 
     assert marked != options, "a communal library should still badge its cubes"
+
+
+# --- whether the library can lend right now ---------------------------------
+
+@pytest.mark.asyncio
+async def test_an_unreachable_custodian_says_the_library_is_offline(
+        test_db, monkeypatch, custodian_up):
+    """The shelf may cover the cube, but nobody can borrow from it."""
+    await _price(25)
+    _shelf(monkeypatch, {"Swamp": 4}, {"Swamp": 4}, CUBE_CARDS)
+    custodian_up["up"] = False
+
+    note = await library_signup_note(CUBE, GUILD)
+
+    assert "offline" in note.lower() and "bring your own" in note.lower(), note
+
+
+@pytest.mark.asyncio
+async def test_a_custodian_too_slow_to_tell_is_not_called_offline(
+        test_db, monkeypatch, custodian_up):
+    await _price(25)
+    _shelf(monkeypatch, {"Swamp": 4}, {"Swamp": 4}, CUBE_CARDS)
+    custodian_up["up"] = None
+
+    note = await library_signup_note(CUBE, GUILD)
+
+    assert "offline" not in note.lower() and "25 tix" in note, note
+
+
+@pytest.mark.asyncio
+async def test_a_gated_rental_library_says_who_may_borrow(test_db, monkeypatch):
+    """Members and anybody with three drafts: the board names the line, and
+    that a rental library asks at sign-up. Shown though members are listed,
+    because the threshold means the library is not invite-only."""
+    from services.library_access_service import invite
+
+    await a_library("lib", guild=GUILD, kind="rental", collateral=50,
+                    collateral_untrusted=100, cubes=(CUBE,), min_drafts=3)
+    await invite("lib", "p1", "test")
+    _shelf(monkeypatch, {"Swamp": 4}, {"Swamp": 4}, CUBE_CARDS)
+
+    note = await library_signup_note(CUBE, GUILD)
+
+    assert "**50–100 tix**" in note and "Members pay 50" in note, note
+    assert "3+ drafts" in note and "Signing up holds it" in note, note
+    assert note.endswith("(https://magic-draft-logs.nyc3.digitaloceanspaces.com/library/index.html)"), \
+        "ends with the library page, which shows what the shelf holds"
+
+
+class _Health:
+    """A lending client whose /health says `health`, after `delay` seconds."""
+
+    def __init__(self, health, delay=0.0, enabled=True):
+        self.health_body, self.delay, self.enabled = health, delay, enabled
+
+    async def health(self):
+        import asyncio
+        await asyncio.sleep(self.delay)
+        return self.health_body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("client,up,why", [
+    (_Health({"ok": True, "queued": 3}), True,
+     "busy with other trades is still up: the draft ends an hour from now"),
+    (_Health({"ok": True, "reconnecting": True}), False, "reconnecting"),
+    (_Health({"ok": False}), False, "health says not ok"),
+    (_Health(None), False, "no answer"),
+    (_Health({"ok": True, "stuck": True}), False, "stuck is not working"),
+    (_Health({"ok": True}, delay=5), None,
+     "too slow to tell: unknown, not offline -- the board stands all draft"),
+    (_Health({"ok": True}, enabled=False), False, "no lending serve configured"),
+])
+async def test_reachability_is_what_the_board_asks(monkeypatch, client, up, why):
+    import services.card_lending_service as lending
+    monkeypatch.setattr(lending, "get_lending_client", lambda: client)
+
+    assert await _real_custodian_up(timeout_s=0.2) is up, why

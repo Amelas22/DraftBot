@@ -31,7 +31,6 @@ from models.card_loan import ACTIVE_STATES, CardLoan
 from models.draft_session import DraftSession
 from models.library_server import LibraryServer
 from services import debt_service, wallet_service
-from services.library_access_service import members
 from services.library_reminders import session_of
 
 # Loan states whose cards are not on the shelf: every state a loan can be in
@@ -147,7 +146,7 @@ async def library_available(
     since = await _reserved_since(exclude_loan_id)
     spoken_for = await _on_loan(library_id, exclude_loan_id=exclude_loan_id,
                                 yield_after=since)
-    for name, qty in (await _being_drafted(fetch or fetch_cube, library_id,
+    for name, qty in (await _being_drafted(read_once(fetch or fetch_cube), library_id,
                                            yield_after=since)).items():
         spoken_for[name] = spoken_for.get(name, 0) + qty
 
@@ -160,6 +159,25 @@ async def library_available(
         if left > 0:
             available[name] = left
     return available
+
+
+def read_once(fetch: "Callable[[str], Any]") -> "Callable[[str], Any]":
+    """`fetch`, but each cube is read at most once.
+
+    Scoped to one caller's question, so nothing is cached across requests and a
+    cube edited between them is seen. Several reservations of one cube used to
+    mean as many identical uncached CubeCobra reads, on paths with a one-second
+    budget.
+    """
+    seen: "dict[str, Any]" = {}
+
+    async def read(cube_id: str) -> Any:
+        key = str(cube_id)
+        if key not in seen:
+            seen[key] = await fetch(key)
+        return seen[key]
+
+    return read
 
 
 async def _teams_formed(session: Any, draft_ids: "list[str]") -> "dict[str, datetime]":
@@ -244,6 +262,27 @@ def _later(formed: Optional[datetime], than: Optional[datetime]) -> bool:
     return formed is not None and than is not None and formed > than
 
 
+async def _could_collect(library_id: Any, library: Any,
+                         drafts: "list[Any]") -> "Optional[dict[str, set[str]]]":
+    """Per draft underway, who in it may borrow from this library -- the rule
+    deck assignment applies. A draft nobody in could collect from holds nothing.
+
+    For a library that is not rental; a rental library's drafts hold what they
+    reserved instead (services/library_reservation).
+
+    None for a library that restricts nobody -- no members, no threshold --
+    where every draft underway holds its cube, as it always has.
+    """
+    from services.library_access_service import may_borrow_many, members
+
+    threshold = None if library is None else library.min_drafts_to_borrow
+    if threshold is None and not await members(library_id):
+        return None
+    seats = {str(d.session_id): {str(p) for p in (d.sign_ups or {})} for d in drafts}
+    allowed = await may_borrow_many(library_id, set().union(*seats.values()))
+    return {sid: who & allowed for sid, who in seats.items()}
+
+
 async def _being_drafted(fetch: "Callable[[str], Any]", library_id: Any, *,
                          yield_after: Optional[datetime] = None
                          ) -> "dict[str, int]":
@@ -269,22 +308,43 @@ async def _being_drafted(fetch: "Callable[[str], Any]", library_id: Any, *,
     A draft whose teams formed after `yield_after` holds nothing: see
     library_available.
     """
+    from models.library import RENTAL, Library
+    from services.library_reservation import reservations
+
     cutoff = datetime.now() - DRAFTING_WINDOW
     async with AsyncSessionLocal() as session:
-        guilds = [str(g) for g in (await session.scalars(
-            select(LibraryServer.guild_id).where(
-                LibraryServer.library_id == str(library_id)))).all()]
-        if not guilds:
-            return {}
-        underway = list((await session.scalars(
-            select(DraftSession).where(
-                DraftSession.teams_start_time.isnot(None),
-                DraftSession.teams_start_time >= cutoff,
-                DraftSession.cube.isnot(None),
-                DraftSession.guild_id.in_(guilds),
-            ))).all())
+        library = await session.get(Library, str(library_id))
+    rental = library is not None and library.kind == RENTAL
+    collectors: "Optional[dict[str, set[str]]]" = None
+    if rental:
+        # A rental library's drafts hold exactly what they reserved, from the
+        # queue filling to their decks existing (services/library_reservation).
+        # A draft that fired without a reservation gets no decks, so it holds
+        # nothing.
+        # No clock: the reservation's own rules end it (decided, over, nobody
+        # needs it), and a draft can take well over an hour from teams forming
+        # to its decks existing.
+        underway = await reservations(library_id)
+    else:
+        async with AsyncSessionLocal() as session:
+            guilds = [str(g) for g in (await session.scalars(
+                select(LibraryServer.guild_id).where(
+                    LibraryServer.library_id == str(library_id)))).all()]
+            if not guilds:
+                return {}
+            underway = list((await session.scalars(
+                select(DraftSession).where(
+                    DraftSession.teams_start_time.isnot(None),
+                    DraftSession.teams_start_time >= cutoff,
+                    DraftSession.cube.isnot(None),
+                    DraftSession.guild_id.in_(guilds),
+                ))).all())
         if not underway:
             return {}
+        collectors = await _could_collect(library_id, library, underway)
+    if not underway:
+        return {}
+    async with AsyncSessionLocal() as session:
         assigned = {
             str(s) for s in (await session.scalars(
                 select(CardLoan.source).where(
@@ -292,7 +352,6 @@ async def _being_drafted(fetch: "Callable[[str], Any]", library_id: Any, *,
                 ))).all()
         }
 
-    invited = set(await members(library_id))
     committed: "dict[str, int]" = {}
     for draft in underway:
         if draft.session_stage in FINISHED_STAGES:
@@ -301,7 +360,7 @@ async def _being_drafted(fetch: "Callable[[str], Any]", library_id: Any, *,
             continue                      # its loans speak for it now
         if _later(draft.teams_start_time, yield_after):
             continue                      # reserved after the loan asking
-        if invited and not invited & set(draft.sign_ups or {}):
+        if collectors is not None and not collectors.get(str(draft.session_id)):
             continue                      # nobody here could collect a deck
         # Through the doorway, so what a draft is holding is named the way
         # custody is. Comparing a raw CubeCobra list to the ledger meant a

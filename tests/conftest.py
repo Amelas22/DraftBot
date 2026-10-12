@@ -803,12 +803,19 @@ def forget_the_custodian():
 
 
 async def a_library(library_id="lib", *, guild="g1", kind="communal",
-                    collateral=0, cubes=(), stock=None):
+                    collateral=0, collateral_untrusted=None, cubes=(),
+                    stock=None, min_drafts=None):
     """Seed a library, bind a server to it, list its cubes, and stock its shelf.
 
     Almost every library test needs the same rows, and writing them out each
     time buries what the test is actually about. `guild=None` leaves the
     library unbound, which is how a server with no library is expressed.
+
+    `collateral_untrusted` is the figure asked of a borrower not on the member
+    list; None leaves the library untiered, charging everyone `collateral`.
+
+    `min_drafts` lets non-members with that many drafts borrow; None leaves the
+    member list alone in charge.
 
     `stock` is {card name: copies}, booked the way a settled deposit books
     them. A dispatch checks the shelf before it opens a trade, so a library
@@ -823,7 +830,10 @@ async def a_library(library_id="lib", *, guild="g1", kind="communal",
 
     async with AsyncSessionLocal() as s:
         s.add(Library(id=library_id, name=library_id, kind=kind,
-                      collateral_tix=collateral, created_by="test"))
+                      collateral_tix=collateral,
+                      collateral_tix_untrusted=collateral_untrusted,
+                      min_drafts_to_borrow=min_drafts,
+                      created_by="test"))
         if guild is not None:
             s.add(LibraryServer(guild_id=str(guild), library_id=library_id,
                                 bound_by="test"))
@@ -913,3 +923,33 @@ async def session(match_control_db):
     about the bracket."""
     async with match_control_db() as open_session:
         yield open_session
+
+
+@pytest.fixture(autouse=True)
+def custodian_up(monkeypatch):
+    """The library's MTGO custodian answers, unless a test says otherwise.
+
+    The signup board asks it over the network, and no test means to. Set
+    `custodian_up["up"]` to False (down) or None (too slow to tell). The real
+    check is tested by binding it before this replaces the module attribute.
+    """
+    import services.card_lending_service as lending
+
+    state = {"up": True}
+
+    async def _up(*_a, **_k):
+        return state["up"]
+    monkeypatch.setattr(lending, "lending_custodian_up", _up)
+    return state
+
+
+@pytest.fixture(autouse=True)
+def library_locks(monkeypatch):
+    """Fresh reservation locks per test. An asyncio.Lock binds to the first
+    loop that waits on it, and each test runs on a loop of its own; the bot
+    runs one loop for its life, so only the tests need this."""
+    import asyncio
+
+    import services.library_reservation as resv
+    monkeypatch.setattr(resv, "_RESERVE_LOCK", asyncio.Lock())
+    monkeypatch.setattr(resv, "_LISTS_LOCK", asyncio.Lock())

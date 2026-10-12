@@ -24,7 +24,7 @@ from services.card_lending_service import assign_deck
 pytestmark = pytest.mark.asyncio
 
 GUILD, SESSION, LIBRARY = "g1", "sess-1", "lib"
-ALICE, BOB = "disc_a", "disc_b"
+ALICE, BOB = "1001", "1002"  # snowflake-shaped: a preference key cannot hold "_"
 
 
 def _log():
@@ -656,7 +656,7 @@ async def test_an_uninvited_drafter_gets_no_deck_and_no_promise(
     """
     told = _recording_dm(monkeypatch)
     await _seed()
-    with patch("services.draft_deck_assignment.members",
+    with patch("services.library_access_service.members",
                new=AsyncMock(return_value=["somebody-else"])):
         assigned = await svc.assign_drafted_decks(SESSION)
 
@@ -672,11 +672,134 @@ async def test_a_communal_library_lends_to_everyone_in_the_pod(
     told = _recording_dm(monkeypatch)
     await _seed()
 
-    with patch("services.draft_deck_assignment.members",
+    with patch("services.library_access_service.members",
                new=AsyncMock(return_value=[])):
         assigned = await svc.assign_drafted_decks(SESSION)
 
     assert assigned > 0 and len(told) == assigned
+
+
+async def _reserved(session_id=SESSION, agreed=(ALICE, BOB)):
+    """The draft reserved the library's copy while it filled, and these
+    players agreed to borrow before it fired."""
+    from datetime import datetime
+    from sqlalchemy import select as _select
+    async with AsyncSessionLocal() as s:
+        row = (await s.execute(_select(DraftSession).where(
+            DraftSession.session_id == session_id))).scalar_one()
+        row.library_reserved_at = datetime.now()
+        row.library_agreed = list(agreed)
+        # Decks are offered once teams have formed, when agreeing is what counts.
+        row.teams_start_time = row.teams_start_time or datetime.now()
+        await s.commit()
+
+
+async def _drafted(player, n):
+    from models.player import PlayerStats
+    async with AsyncSessionLocal() as s:
+        s.add(PlayerStats(player_id=player, guild_id=GUILD, display_name=player,
+                          drafts_participated=n))
+        await s.commit()
+
+
+async def test_a_draft_threshold_offers_decks_to_the_experienced(
+        test_db, monkeypatch):
+    """The same rule /library borrow applies: a member, or enough drafts here.
+    Deck assignment asking its own question was how an experienced player
+    would be told at /borrow they may borrow, with no deck ever offered."""
+    from conftest import a_library
+    from services import library_access_service as access
+
+    await a_library(LIBRARY, guild=GUILD, kind="rental", collateral=5,
+                    cubes=(CUBE,), min_drafts=3)
+    await access.invite(LIBRARY, "a-member", "test")
+    await _drafted(ALICE, 3)
+    await _drafted(BOB, 2)
+    _recording_dm(monkeypatch)
+    await _seed()
+
+    from preference_service import set_uses_library
+    await set_uses_library(ALICE, GUILD, True)
+    await set_uses_library(BOB, GUILD, True)
+    await _reserved()
+
+    assert await svc.assign_drafted_decks(SESSION) == 1
+    assert set(await _loans()) == {ALICE}, "Bob has two drafts, one short"
+
+
+async def test_a_rental_library_offers_decks_only_to_those_who_asked(
+        test_db, monkeypatch):
+    """An offer nobody wanted still takes their one loan slot and a deck's
+    worth of the shelf until it expires. Not asked counts as no."""
+    from conftest import a_library
+    from preference_service import set_uses_library
+
+    await a_library(LIBRARY, guild=GUILD, kind="rental", collateral=5,
+                    cubes=(CUBE,))
+    await set_uses_library(ALICE, GUILD, True)
+    told = _recording_dm(monkeypatch)
+    await _seed()
+    await _reserved()
+
+    assert await svc.assign_drafted_decks(SESSION) == 1
+    assert set(await _loans()) == {ALICE}, "Bob never said he wanted one"
+    assert [who for who, _ in told] == [ALICE]
+
+
+async def test_a_borrower_who_never_agreed_gets_no_deck(test_db, monkeypatch):
+    """Saying yes once holds the copy; agreeing before the draft fired is
+    what gets a deck from it."""
+    from conftest import a_library
+    from preference_service import set_uses_library
+
+    await a_library(LIBRARY, guild=GUILD, kind="rental", collateral=5,
+                    cubes=(CUBE,))
+    await set_uses_library(ALICE, GUILD, True)
+    await set_uses_library(BOB, GUILD, True)
+    _recording_dm(monkeypatch)
+    await _seed()
+    await _reserved(agreed=(ALICE,))
+
+    assert await svc.assign_drafted_decks(SESSION) == 1
+    assert set(await _loans()) == {ALICE}, "Bob never agreed"
+
+
+async def test_a_rental_draft_that_never_reserved_gets_no_decks(
+        test_db, monkeypatch):
+    """To use the library a draft must have reserved its copy while it filled;
+    one that fired without it gets nothing, however many asked."""
+    from conftest import a_library
+    from preference_service import set_uses_library
+
+    await a_library(LIBRARY, guild=GUILD, kind="rental", collateral=5,
+                    cubes=(CUBE,))
+    await set_uses_library(ALICE, GUILD, True)
+    _recording_dm(monkeypatch)
+    await _seed()
+
+    assert await svc.assign_drafted_decks(SESSION) == 0
+    assert await _loans() == {}
+
+
+async def test_a_preference_read_that_fails_is_not_read_as_nobody_asking(
+        test_db, monkeypatch):
+    """It raises, as the access read beside it does, and the reconciler tries
+    again next tick -- rather than assigning nobody and logging that the whole
+    pod declined."""
+    from conftest import a_library
+
+    await a_library(LIBRARY, guild=GUILD, kind="rental", collateral=5,
+                    cubes=(CUBE,))
+    import preference_service
+    monkeypatch.setattr(preference_service, "get_players_using_library",
+                        AsyncMock(side_effect=RuntimeError("db gone")))
+    _recording_dm(monkeypatch)
+    await _seed()
+    await _reserved()
+
+    with pytest.raises(RuntimeError):
+        await svc.assign_drafted_decks(SESSION)
+    assert await _loans() == {}
 
 
 # --- who can still use a deck ------------------------------------------------

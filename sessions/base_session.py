@@ -79,6 +79,13 @@ class BaseSession:
                         _SIGNUP_INTERACTION_BUDGET_S)
                     self.library_note = None
                 embed = self.create_embed()
+                from services.library_boards import note_board
+                try:
+                    await note_board(new_draft_session.session_id, new_draft_session.guild_id)
+                except Exception:
+                    # Without it the board just lacks its Library button.
+                    logger.exception("signup board: could not check the library for {}",
+                                     new_draft_session.session_id)
                 view = PersistentView(
                     bot=bot,
                     draft_session_id=new_draft_session.session_id,

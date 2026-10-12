@@ -21,7 +21,7 @@ from loguru import logger
 from sqlalchemy import select
 
 from database.db_session import AsyncSessionLocal
-from models.library import COMMUNAL, Library
+from models.library import COMMUNAL, RENTAL, Library
 from models.library_cube import LibraryCube
 from models.library_server import LibraryServer
 
@@ -44,10 +44,30 @@ async def library_for(guild_id: Any) -> "Optional[Library]":
         return library
 
 
+# The public page of what every library holds, what it lends for and what is
+# out on loan. Rebuilt every five minutes by the library-status timer on the
+# production host, from this same database.
+LIBRARY_PAGE_URL = "https://magic-draft-logs.nyc3.digitaloceanspaces.com/library/index.html"
+
+
+def library_page_link(text: str = "See the library", preview: bool = True) -> str:
+    """A masked link to the page. `preview=False` in a plain message, where
+    Discord would otherwise hang a preview card under it; an embed (the signup
+    board) never previews."""
+    url = LIBRARY_PAGE_URL if preview else f"<{LIBRARY_PAGE_URL}>"
+    return f"[{text}]({url})"
+
+
 async def library_id_for(guild_id: Any) -> "Optional[str]":
     """Just the id, for the callers that only need something to scope by."""
     library = await library_for(guild_id)
     return str(library.id) if library else None
+
+
+async def rental_library_for(guild_id: Any) -> "Optional[Library]":
+    """The rental library behind this server, or None if it has none."""
+    library = await library_for(guild_id)
+    return library if library is not None and library.kind == RENTAL else None
 
 
 def is_communal(library: "Optional[Library]") -> bool:
@@ -70,6 +90,26 @@ def price_of(library: "Optional[Library]") -> "Optional[int]":
     if library is None:
         return None
     return int(library.collateral_tix or 0)
+
+
+def price_range_of(library: "Optional[Library]") -> "Optional[tuple[int, int]]":
+    """(least, most) this library asks of a borrower, or None if there isn't one.
+
+    For the surfaces that cannot know who is reading them -- the signup board
+    and the cube dropdown are one message for a whole room, the same reason
+    neither can address only the people who may borrow. A tiered library asks
+    two different figures and such a surface has to name both or name the
+    larger; it must not name the smaller, which would read as a promise to
+    somebody about to be asked for twice that.
+
+    Equal when the library is not tiered, so a caller can render the pair
+    without first asking whether tiering is on.
+    """
+    trusted = price_of(library)
+    if trusted is None:
+        return None
+    untrusted = getattr(library, "collateral_tix_untrusted", None)
+    return (trusted, trusted if untrusted is None else int(untrusted))
 
 
 async def offers(library_id: Any, cube_id: Any) -> bool:
@@ -113,7 +153,11 @@ async def prices_for(cube_ids: "list[Any]",
     do not each have to know that.
     """
     library = await library_for(guild_id)
-    price = price_of(library)
+    # The MOST it might ask, because a dropdown is read by the whole room and
+    # cannot know which figure applies to the reader. Quoting the lower one
+    # would surprise exactly the borrowers who can least afford it.
+    prices = price_range_of(library)
+    price = None if prices is None else prices[1]
     if price is None or library is None:
         return {}
     offered = await offered_among(library.id, cube_ids)

@@ -118,6 +118,13 @@ async def main():
         # meant 959 messages at ~39 a minute -- and all of them failing on Manage
         # Messages in one channel. A Start Draft button on a live tournament match
         # spent that whole half hour dead behind it.
+        # Before any board is re-attached: which ones carry a Library button.
+        try:
+            from services.library_boards import load_boards
+            await load_boards()
+        except Exception:
+            # Every open library board loses its Library button on re-attach.
+            logger.exception("Error loading library boards")
         from debt_views.settle_views import PublicSettleDebtsView
         bot.add_view(PublicSettleDebtsView())
         from cogs.tournament_commands import re_register_tournament_views

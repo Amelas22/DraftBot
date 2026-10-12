@@ -58,6 +58,14 @@ from loguru import logger
 
 from services.state_manager import state_manager
 from services import stake_funding, wallet_service
+from services.library_boards import has_library_button
+from services.library_prompt import (library_after_sign_up_soon, library_agree_button,
+                                     library_setting_buttons, library_settings_panel,
+                                     library_to_ask_about)
+from services.library_reservation import cube_changed as library_cube_changed
+from services.library_reservation import owes_agreement
+from services.library_trust_service import hold_for
+from preference_service import get_uses_library
 # Debounce/timeout constants live in ready_check.py so the ordering invariant
 # between them is asserted in one place; re-exported here for the cooldown logic.
 from ready_check import READY_CHECK_DEBOUNCE_SECONDS
@@ -191,6 +199,10 @@ class PersistentView(discord.ui.View):
 
         if self.session_type == "staked":
             self.add_item(BetCapToggleButton(self.draft_session_id))
+        elif has_library_button(self.draft_session_id):
+            # In place of the Change Entry / Settings panel only a staked board
+            # has, where a rental library backs the server (services/library_boards).
+            self._add_button("Library 🏛️", "grey", "library_settings", self.library_settings_callback)
 
         if self.session_type != "test":
             self._add_button("Ready Check", "green", "ready_check", self.ready_check_callback)
@@ -632,6 +644,9 @@ class PersistentView(discord.ui.View):
             # Confirm signup (link provided after teams created)
             signup_confirmation_message = "You are now signed up! Your Draftmancer link will be provided once teams are created."
             await interaction.response.send_message(signup_confirmation_message, ephemeral=True)
+            # The library: ask once, or reserve its copy for this queue
+            # (services/library_prompt). Started now, so nothing below can skip it.
+            library_after_sign_up_soon(interaction, draft_session_updated)
 
             # Send ping if needed (6th player and haven't pinged yet)
             if should_ping:
@@ -805,6 +820,14 @@ class PersistentView(discord.ui.View):
                                 .values(**new_values)
                             )
                             await db_session.commit()
+
+                    if cube_changed:
+                        # What the queue held was the old cube's copy.
+                        try:
+                            await library_cube_changed(draft_session.session_id)
+                        except Exception:
+                            logger.exception("cube update: could not move the library "
+                                             "reservation for {}", draft_session.session_id)
 
                     await update_draft_message(select_interaction.client, draft_session.session_id)
 
@@ -1056,6 +1079,9 @@ class PersistentView(discord.ui.View):
             
         return True
 
+    async def library_settings_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await library_settings_panel(interaction, self.draft_session_id)
+
     async def randomize_teams_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         bot = interaction.client
         session_id = self.draft_session_id
@@ -1241,6 +1267,12 @@ class PersistentView(discord.ui.View):
             action_message += f" Your {fee} tix entry has been returned."
 
         await interaction.response.send_message(action_message, ephemeral=True)
+
+        # A premade draft has no stake step, so joining a team is where a player
+        # is asked about the library, or reserves its copy for this draft.
+        # Started now, so a failed redraw below cannot skip it.
+        if not leaving:
+            library_after_sign_up_soon(interaction, session)
 
         # Optionally update the message view to reflect the new team compositions
         await self.update_team_view(interaction)
@@ -2971,7 +3003,10 @@ class StakeOptionsSelect(discord.ui.Select):
 
         # Send confirmation message
         await interaction.response.send_message(signup_message, ephemeral=True)
-        
+        # The library: ask once, or reserve its copy for this queue
+        # (services/library_prompt). Started now, so nothing below can skip it.
+        library_after_sign_up_soon(interaction, draft_session_updated)
+
         # Update the draft message to reflect the new list of sign-ups
         await update_draft_message(interaction.client, self.draft_session_id)
 
@@ -3153,7 +3188,10 @@ class StakeModal(discord.ui.Modal):
 
             # Send the confirmation
             await interaction.response.send_message(signup_message, ephemeral=True)
-            
+            # The library: ask once, or reserve its copy for this queue
+            # (services/library_prompt). Started now, so nothing below can skip it.
+            library_after_sign_up_soon(interaction, draft_session)
+
             # Update the draft message to reflect the new list of sign-ups
             await update_draft_message(interaction.client, self.draft_session_id)
 
@@ -3311,11 +3349,36 @@ class BetCapToggleButton(CallbackButton):
                 
                 no_button.callback = no_callback
                 combined_view.add_item(no_button)
+
+                # The library switch, where there is a rental library this
+                # player could borrow this cube from (services/library_prompt).
+                # Guarded: a library hiccup must not take the stake panel with it.
+                # Built whole, then added: a row missing its agree button would
+                # leave a player who owes one no way to give it.
+                library_note = ""
+                try:
+                    library = await library_to_ask_about(guild_id, draft_session.cube, user_id)
+                    if library is not None:
+                        library_items = library_setting_buttons(
+                            user_id, guild_id, await get_uses_library(user_id, guild_id),
+                            draft=draft_session, library=library)
+                        # Waiting on this player's agreement before it fires.
+                        if await owes_agreement(draft_session, user_id):
+                            library_items.append(library_agree_button(
+                                str(user_id), str(draft_session.session_id),
+                                draft_session.cube, await hold_for(library, user_id) or 0))
+                        for item in library_items:
+                            combined_view.add_item(item)
+                except Exception:
+                    logger.exception("settings panel: library check failed for {} on {}",
+                                     user_id, self.draft_session_id)
+                    library_note = "\nLibrary settings are unavailable right now; try again in a minute."
                 
                 # Send the ephemeral message with the combined view
                 message_content = f"You are in for {current_stake} tix, with your entry cap **{status}**.\n"
                 message_content += f"Minimum entry is {min_stake} tix. Choose a new maximum, or change your cap.\n"
                 message_content += "Your cap setting is remembered for future drafts."
+                message_content += library_note
                 
                 await interaction.response.send_message(
                     content=message_content,

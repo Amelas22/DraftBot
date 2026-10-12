@@ -34,6 +34,7 @@ from models.library import Library
 from services.card_library_inventory import library_available
 from services.library_service import library_for, library_id_for
 from services.library_access_service import may_borrow
+from services.library_trust_service import hold_for
 from helpers.money_gate import linked_username, serve_busy_reason
 from services import wallet_service
 from models.mtgo_job import MtgoJob
@@ -72,6 +73,42 @@ QUEUE_TIMEOUT_S = 5 * 60
 async def library_busy_reason() -> Optional[str]:
     """Why the library cannot open a trade right now, or None if it is free."""
     return await serve_busy_reason(get_lending_client())
+
+
+async def lending_custodian_up(timeout_s: float = 0.6) -> Optional[bool]:
+    """Can the library's MTGO custodian lend right now? None if it can't be told.
+
+    Only whether it can work, not whether it is free: busy with somebody's trade
+    now says nothing about a draft that ends an hour from now, and that is the
+    question the signup board asks. Read with serve_health_monitor's classify,
+    so stuck, asking for a human, reconnecting and refusing our token all count
+    as down, the same as for the tix serve.
+
+    None for an answer that did not come in time. The board is written once, at
+    draft creation, so one slow reply read as "offline" would stand for the
+    whole draft; an unknown leaves the board saying what the shelf can cover.
+    Bounded on its own, short of the board's one-second budget.
+    """
+    from services.serve_health_monitor import classify
+
+    client = get_lending_client()
+    if not client.enabled:
+        logger.error("library: the lending serve is not configured (MTGO_LENDING_URL "
+                     "and MTGO_LENDING_TOKEN), so every library reads as offline")
+        return False
+    try:
+        health = await asyncio.wait_for(client.health(), timeout=timeout_s)
+    except asyncio.TimeoutError:
+        logger.warning("library: the custodian's /health took over {}s; its state "
+                       "is unknown", timeout_s)
+        return None
+    if not health:
+        logger.warning("library: the custodian did not answer /health")
+        return False
+    state, detail = classify(200, health, None)
+    if state != "ok":
+        logger.warning("library: the custodian is {}: {}", state, detail)
+    return state == "ok"
 
 
 async def _when_free(dispatch: "Callable[[], Awaitable[tuple[str, Any]]]",
@@ -351,19 +388,30 @@ async def library_behind(loan: Any, guild_id: Any) -> "Optional[Any]":
 
 
 async def collateral_for(loan: Any, guild_id: Any) -> Optional[int]:
-    """What this deck costs to borrow, or None if it cannot be borrowed.
+    """What this deck costs THIS borrower, or None if it cannot be borrowed.
 
     The price belongs to the LIBRARY the cards came from, not to the server. A
     server admin can rewrite `configs/<guild>.json` through the bot's own
     commands, so anything they can reach is a number they can lower -- and a
     library's terms are set by whoever runs it, from a shell tool.
 
+    Per borrower, because a tiered library asks less of somebody who has been
+    drafting there for years than of somebody it has never seen
+    (services/library_trust_service). The loan carries the borrower, so this
+    needed no new argument -- and THE ONE PLACE is the point: what a player is
+    told they need (hold_shortfall), what the dispatcher actually takes, and
+    what the return DM says is held all come through here. Two of those used to
+    read library.collateral_tix themselves, which agreed only because there was
+    one figure to read.
+
     None means there is no library here, which is not the same as free: zero is
     a price somebody chose, and reading "nobody configured this" as free is how
     an unbound server would start giving cards away.
     """
     library = await library_behind(loan, guild_id)
-    return None if library is None else int(library.collateral_tix or 0)
+    if library is None:
+        return None
+    return await hold_for(library, loan.borrower_id)
 
 
 async def shortfall(guild_id: Any, cards: "list[dict[str, Any]]",
@@ -703,7 +751,17 @@ async def _dispatch(guild_id: Any, borrower_id: Any, *, from_state: str, to_stat
         available = await lendable_now(library_id, exclude_loan_id=loan.id)
         if _cap(available, requested) != requested:
             return ("short_cards", loan)
-        collateral = int(library.collateral_tix or 0)
+        # Through hold_for, the figure collateral_for quotes, not off the row:
+        # a tiered library's figure depends on the borrower, and reading the
+        # column here would quote one number in /library deck and charge
+        # another at the trade. Off the library in hand, never a second
+        # lookup that could come back empty and read as free.
+        held = await hold_for(library, borrower_id)
+        if held is None:
+            logger.warning("library: refusing to lend in {} -- no hold for {} "
+                           "from {}", guild_id, borrower_id, library_id)
+            return ("unavailable", loan)
+        collateral = held
         if collateral and not is_money_server(guild_id):
             # A library that charges needs the wallet, and finding that out at
             # transfer time -- after the borrower has been promised a deck --

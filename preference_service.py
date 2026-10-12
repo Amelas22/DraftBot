@@ -15,6 +15,10 @@ class PlayerPreferences(Base):
     guild_id = Column(String(64), nullable=False)
     is_bet_capped = Column(Boolean, default=True, server_default=text('1'))
     dm_notifications = Column(Boolean, default=False, server_default=text('0'))
+    # Whether this player borrows their deck from the server's rental library.
+    # NULL means they have not been asked, which is what decides whether the
+    # sign-up flow asks them (services/library_prompt).
+    uses_library = Column(Boolean, nullable=True)
     last_updated = Column(TIMESTAMP, default=datetime.now, server_default=text('CURRENT_TIMESTAMP'))
 
     __table_args__ = (
@@ -278,3 +282,56 @@ async def get_players_dm_notification_preferences(player_ids, guild_id):
         return preferences
 
     return await execute_db_operation(_batch_query, default_value=default_preferences, error_message="Error getting DM notification preferences")
+
+async def get_uses_library(player_id, guild_id):
+    """Whether this player borrows from the library here: True, False, or None
+    if they have not been asked.
+
+    None is the point. Unlike the getters above there is no default to fall
+    back to, because "not asked" is what decides whether the sign-up flow asks
+    (services/library_prompt) -- a default would mean nobody is ever asked.
+
+    Raises on a database error rather than answering None, which would read as
+    "not asked" and flip a switch the wrong way.
+    """
+    async with AsyncSessionLocal() as session:
+        preference = await session.get(
+            PlayerPreferences, get_composite_preference_key(player_id, guild_id))
+    return None if preference is None else preference.uses_library
+
+
+async def set_uses_library(player_id, guild_id, uses_library):
+    """Save whether this player borrows from the library here. True on success."""
+    async def _update(session):
+        composite_id = get_composite_preference_key(player_id, guild_id)
+        preference = await session.get(PlayerPreferences, composite_id)
+        if preference is None:
+            session.add(PlayerPreferences(
+                id=composite_id, player_id=str(player_id), guild_id=str(guild_id),
+                uses_library=uses_library, last_updated=datetime.now()))
+        else:
+            preference.uses_library = uses_library
+            preference.last_updated = datetime.now()
+        logger.info(f"Library preference for player {player_id} in guild {guild_id}: {uses_library}")
+        return True
+
+    return await execute_db_operation(_update, default_value=False, commit=True,
+                                      error_message="Error updating library preference")
+
+
+async def get_players_using_library(player_ids, guild_id):
+    """The players among these who said they borrow from the library here.
+
+    Unset and False both leave a player out: a deck is offered only to somebody
+    who asked for one. Raises on a database error rather than answering "nobody",
+    which deck assignment would act on as a whole pod declining.
+    """
+    if not player_ids:
+        return set()
+    composite_ids = [get_composite_preference_key(p, guild_id) for p in player_ids]
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(
+            select(PlayerPreferences.player_id).where(
+                PlayerPreferences.id.in_(composite_ids),
+                PlayerPreferences.uses_library.is_(True)))).scalars().all()
+    return {str(p) for p in rows}

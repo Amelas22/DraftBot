@@ -15,6 +15,11 @@ they could repoint their server at.
     pipenv run python scripts/library_tool.py create lotuslounge "Lotus Lounge" \
         --kind rental --hold 100
 
+    # the same, open to anybody with 3+ drafts here as well as its members,
+    # asking 50 of a member and 100 of anybody else
+    pipenv run python scripts/library_tool.py create lotuslounge "Lotus Lounge" \
+        --kind rental --hold 50 --hold-unknown 100 --min-drafts 3 --replace
+
     pipenv run python scripts/library_tool.py list
     pipenv run python scripts/library_tool.py offer lotuslounge PowerLSV
     pipenv run python scripts/library_tool.py members lotuslounge
@@ -39,29 +44,65 @@ import services.library_access_service as access                 # noqa: E402
 import services.library_service as libs                          # noqa: E402
 
 
-async def _create(library_id, name, kind, hold, by, replace):
+async def _create(library_id, name, kind, hold, by, replace,
+                  hold_unknown=None, min_drafts=None):
+    if hold_unknown is not None and hold_unknown < hold:
+        # The board names the range low-to-high and the cube dropdown quotes the
+        # higher figure; a second figure below the first would make both lie.
+        print(f"--hold-unknown {hold_unknown} is below --hold {hold}: the higher "
+              f"figure is the one asked of non-members. Nothing changed.")
+        return
     async with AsyncSessionLocal() as s:
         row = await s.get(Library, library_id)
         if row is not None and not replace:
-            print(f"{library_id} already exists: {row.kind}, hold={row.collateral_tix} "
-                  )
+            print(f"{library_id} already exists: {row.kind}, "
+                  f"hold={_terms(row)}")
             print("   Pass --replace to change its terms. Everything already "
                   "deposited stays\n       where it is; only what borrowing costs moves.")
             return
         if row is None:
-            s.add(Library(id=library_id, name=name, kind=kind,
-                          collateral_tix=hold, created_by=by))
-            print(f"{library_id}: created — {kind}, hold={hold}")
+            row = Library(id=library_id, name=name, kind=kind,
+                          collateral_tix=hold,
+                          collateral_tix_untrusted=hold_unknown,
+                          min_drafts_to_borrow=min_drafts,
+                          created_by=by)
+            s.add(row)
+            print(f"{library_id}: created — {kind}, hold={_terms(row)}")
         else:
-            was = f"{row.kind}, hold={row.collateral_tix}"
+            was = f"{row.kind}, hold={_terms(row)}"
             row.kind, row.collateral_tix = kind, hold
+            # Only on --replace, which is the only way to get here, and
+            # deliberately settable back to nothing: passing no
+            # --hold-unknown un-tiers a library rather than leaving the old
+            # second figure in place where nobody can see it.
+            row.collateral_tix_untrusted = hold_unknown
+            # The same for the draft gate: no --min-drafts puts the member
+            # list back in sole charge.
+            row.min_drafts_to_borrow = min_drafts
             row.name = name
-            print(f"{library_id}: now {kind}, hold={hold} (was {was})")
+            print(f"{library_id}: now {kind}, hold={_terms(row)} (was {was})")
         await s.commit()
+    if hold_unknown is not None and hold_unknown != hold:
+        print(f"   Tiered: {hold} from a member, {hold_unknown} from anyone else.")
+    if min_drafts is not None:
+        print(f"   Lends to members and to anybody with {min_drafts}+ drafts in "
+              f"the servers it lends into.")
     if kind == "communal":
         print("   ⚠️  Communal means any member's deposit LISTS a cube here.")
         print("       Right where the cards are the members' own; wrong where "
               "they are a sponsor's.")
+
+
+def _terms(library) -> str:
+    """A library's price as one readable field, tiered or not.
+
+    Printed everywhere the tool shows terms, so a tiered library cannot look
+    like an untiered one in the listing that an operator checks it with.
+    """
+    unknown = library.collateral_tix_untrusted
+    if unknown is None or unknown == library.collateral_tix:
+        return str(library.collateral_tix)
+    return f"{library.collateral_tix} known / {unknown} unknown"
 
 
 async def _list():
@@ -76,11 +117,16 @@ async def _list():
         servers = [b.guild_id for b in bindings if b.library_id == lib.id]
         offered = sorted(c.cube_id for c in cubes if c.library_id == lib.id)
         members = await access.members(lib.id)
-        print(f"{lib.id}  ({lib.kind})  hold={lib.collateral_tix}")
+        print(f"{lib.id}  ({lib.kind})  hold={_terms(lib)}")
         print(f"   servers: {', '.join(servers) or 'NONE — nobody can borrow'}")
         print(f"   cubes  : {', '.join(offered) or 'none'}")
-        listed = (f"invite-only, {len(members)} member(s)" if members
-                  else "open to those servers")
+        if lib.min_drafts_to_borrow is not None:
+            listed = (f"{len(members)} member(s), and anybody with "
+                      f"{lib.min_drafts_to_borrow}+ drafts")
+        elif members:
+            listed = f"invite-only, {len(members)} member(s)"
+        else:
+            listed = "open to those servers"
         print(f"   access : {listed}")
 
 
@@ -131,7 +177,9 @@ async def _members(library_id):
     if not people:
         print(f"{library_id}: nobody listed — it lends to everyone in its servers.")
         return
-    print(f"{library_id}: invite-only, {len(people)} member(s):")
+    gate = ("invite-only" if await access.is_invite_only(library_id)
+            else "members, who pay the lower hold")
+    print(f"{library_id}: {gate}, {len(people)} member(s):")
     for player in sorted(people):
         print(f"   {player}")
 
@@ -181,6 +229,12 @@ def main():
     p.add_argument("name")
     p.add_argument("--kind", choices=list(KINDS), default="rental")
     p.add_argument("--hold", type=int, default=0, help="refundable, in tix")
+    p.add_argument("--hold-unknown", type=int, default=None, metavar="TIX",
+                   help="asked of a borrower not on the member list; "
+                        "omit to charge everyone --hold")
+    p.add_argument("--min-drafts", type=int, default=None, metavar="N",
+                   help="also lend to non-members with N+ drafts in this "
+                        "library's servers; omit for members only")
     p.add_argument("--replace", action="store_true", help="change existing terms")
     p.add_argument("--by", default=who)
 
@@ -218,7 +272,7 @@ def main():
     match a.cmd:
         case "create":
             asyncio.run(_create(a.library, a.name, a.kind, a.hold,
-                                a.by, a.replace))
+                                a.by, a.replace, a.hold_unknown, a.min_drafts))
         case "list":
             asyncio.run(_list())
         case "bind":

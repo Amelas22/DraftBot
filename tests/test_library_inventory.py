@@ -15,6 +15,7 @@ import pytest
 from datetime import datetime, timedelta
 
 from database.db_session import AsyncSessionLocal
+from sqlalchemy import select
 from models.card_loan import CardLoan
 from models.draft_session import DraftSession
 from models.library_server import LibraryServer
@@ -335,3 +336,56 @@ async def test_one_invited_drafter_is_enough_to_hold_the_cube(test_db):
         LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))
 
     assert available == {"Swamp": 1}
+
+
+async def _experienced(*players, drafts=5):
+    from models.player import PlayerStats
+    async with AsyncSessionLocal() as s:
+        for p in players:
+            s.add(PlayerStats(player_id=p, guild_id="g1", display_name=p,
+                              drafts_participated=drafts))
+        await s.commit()
+
+
+async def test_experienced_non_members_who_reserved_hold_the_cube(test_db):
+    """A gated rental library lends to its members and to anybody with enough
+    drafts, so a draft of experienced non-members that reserved the copy holds
+    it. Reading the member list alone, as this did while it was the gate, left
+    their cards lendable to another draft mid-pod."""
+    from conftest import a_library
+    from preference_service import set_uses_library
+    from services.library_access_service import invite
+
+    await a_library(LIB, guild="g1", kind="rental", min_drafts=3)
+    await invite(LIB, "u9", added_by="test")
+    await _deposit(ALICE, "Swamp", 4, "d1")
+    await _experienced(ALICE, BOB)
+    await set_uses_library(BOB, "g1", True)
+    await _draft(sign_ups={ALICE: "Alice", BOB: "Bob"})
+    async with AsyncSessionLocal() as s:
+        row = (await s.scalars(select(DraftSession).where(
+            DraftSession.session_id == "s1"))).one()
+        row.library_reserved_at = datetime.now()
+        row.library_agreed = [BOB]
+        await s.commit()
+
+    available = await inv.library_available(
+        LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))
+
+    assert available == {"Swamp": 1}
+
+
+async def test_a_rental_draft_that_never_reserved_holds_nothing(test_db):
+    """Its decks will be offered to nobody, so holding its cube only blocks the
+    drafts that reserved it."""
+    from conftest import a_library
+
+    await a_library(LIB, guild="g1", kind="rental", min_drafts=3)
+    await _deposit(ALICE, "Swamp", 4, "d1")
+    await _experienced(ALICE, BOB)
+    await _draft(sign_ups={ALICE: "Alice", BOB: "Bob"})
+
+    available = await inv.library_available(
+        LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 3}]}))
+
+    assert available == {"Swamp": 4}
