@@ -342,17 +342,18 @@ class MtgoTradeBotClient:
                 text = await resp.text()
                 if resp.status == 404 and mark_missing:
                     return {"_missing": True}
-                if mark_ambiguous and (resp.status >= 500 or 200 <= resp.status < 300):
+                if mark_ambiguous and not 400 <= resp.status < 500:
                     # For a POST that creates a job, only a REFUSAL (4xx) proves no job
-                    # exists. A 5xx can come after the job was queued, and a 2xx means it
-                    # WAS accepted -- so either without a job id to follow is ambiguous,
-                    # never a definite failure the caller would unwind (refund) on.
+                    # exists. A 5xx can come after the job was queued, a 2xx means it WAS
+                    # accepted, and a 3xx says nothing either way -- so any of them without
+                    # a job id to follow is ambiguous, never a definite failure the caller
+                    # would unwind (refund) on.
                     parsed = None
                     if 200 <= resp.status < 300 and text:
                         try:
                             parsed = await resp.json()
                         except Exception:
-                            parsed = None
+                            pass
                     if isinstance(parsed, dict) and parsed.get("id"):
                         return parsed
                     logger.error(f"TradeBot {method} {path} -> HTTP {resp.status} without a job id; "

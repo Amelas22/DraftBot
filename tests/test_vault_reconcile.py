@@ -485,9 +485,11 @@ def _post_reply(monkeypatch, client, code, text):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("code,text", [(500, "boom"), (202, ""), (202, "{}")])
+@pytest.mark.parametrize("code,text", [(500, "boom"), (202, ""), (202, "{}"),
+                                       (302, ""), (304, "")])
 async def test_a_reply_that_doesnt_name_a_job_is_ambiguous_not_a_refusal(monkeypatch, code, text):
-    """A 5xx can come after the job was queued; a 2xx means it WAS accepted."""
+    """A 5xx can come after the job was queued; a 2xx means it WAS accepted; a 3xx says
+    nothing either way."""
     from services.mtgo_tradebot_client import MtgoTradeBotClient
     client = MtgoTradeBotClient(url="http://serve", token="t")
     _post_reply(monkeypatch, client, code, text)

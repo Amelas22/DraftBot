@@ -267,11 +267,6 @@ def proves_closed(detail: Any) -> bool:
     return isinstance(detail, str) and detail.strip().startswith(_CLOSED_WITH_NOTHING_MOVED)
 
 
-# What the vault said about a finished trade.
-_UNREADABLE = "unreadable"   # no reading inside its window yet: try again later
-_NO_BASELINE = "legacy"      # a job recorded before the check existed: book as reported
-
-
 async def _vault_verdict(job_id: str, job: dict[str, Any], outcome: str,
                          expected_delta: int) -> str:
     """'moved' -- the vault changed by expected_delta, whatever the serve said;
@@ -479,9 +474,10 @@ async def _run_order(start: "Callable[..., Any]", finish: "Callable[..., Any]",
     size): a withdraw recorded as delivered, a deposit as not arrived, an admin told --
     so the caller must say so, not "moved" and not "failed, send again".
     ``moved`` counts only chunks that finished. ``pending`` says the run
-    stopped on a trade that is still OPEN rather than one that failed, which
-    the caller must keep apart: the watchdog will settle a pending trade, so
-    telling the player to send that part again would have them send it twice.
+    stopped on a trade that is still OPEN, or finished and ``confirming``, rather
+    than one that failed, which the caller must keep apart: the watchdog will
+    settle a pending trade, so telling the player to send that part again would
+    have them send it twice.
     """
     if trade_count(n) > MAX_TRADES_PER_ORDER:
         return {"moved": 0, "jobs": [],
@@ -605,8 +601,8 @@ async def start_deposit(guild_id: str, player_id: str, mtgo_user: str, n: int, *
 async def finish_deposit(job_id: str, guild_id: str, player_id: str, n: int, mtgo_user: str,
                          timeout_s: float = _DEFAULT_POLL_TIMEOUT_S) -> dict[str, Any]:
     """Poll the deposit job, then credit what the VAULT says arrived (idempotent by job_id):
-    credited if it rose by n, whatever the serve said; failed only if it didn't move and
-    the serve said failed; held for an admin otherwise."""
+    credited if it rose by n, whatever the serve said; failed if the trade is proven
+    closed with nothing moved; otherwise settled as not arrived, and an admin told."""
     outcome, job = await _poll_job(job_id, timeout_s)
     if outcome == "pending":
         return {"ok": False, "outcome": "pending"}
@@ -875,9 +871,9 @@ _polling_jobs: set[str] = set()  # job_ids with a live resumed poller — rescan
 
 async def resume_pending_jobs() -> int:
     """Spawn a poller for every 'pending' MtgoJob that doesn't already have one, booking
-    its ledger side when the job reaches a terminal state. Booking is idempotent
-    (job_id unique index), so racing a still-live command poller is safe. Returns the
-    number of jobs picked up."""
+    its ledger side when the job reaches a terminal state. Racing a still-live command
+    poller is safe: whichever claims the job first (``_settle``) books it, and the other
+    books nothing. Returns the number of jobs picked up."""
     await _finish_settlements()
     await recover_unsent_intents()
     async with db_session() as session:
