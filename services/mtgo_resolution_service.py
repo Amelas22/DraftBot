@@ -797,22 +797,49 @@ _NO_VAULT_MSG = ("The MTGO custodian's vault can't be read right now, so the tra
 # ---------------------------------------------------------------------------
 # admin alert for assumed settlements
 # ---------------------------------------------------------------------------
+# A settlement whose booking keeps failing is retried every pass; past this it is also
+# reported, rather than retried in silence for ever.
+_STUCK_SETTLEMENT = timedelta(hours=1)
+
+
+def _assumed_alert(row: MtgoJob) -> str:
+    booked = "booked as DELIVERED" if row.kind == "withdraw" else "NOT credited"
+    return (f"⚠️ Tix {row.kind} `{row.job_id}` — {row.amount} tix, MTGO `{row.mtgo_user}`, "
+            f"player <@{row.player_id}> — couldn't be confirmed and was {booked}.\n"
+            f"Why: {row.assumed}\n"
+            f"Check the vault; if that's wrong, repair it from the shell.")
+
+
+def _stuck_alert(row: MtgoJob) -> str:
+    return (f"⚠️ Tix {row.kind} `{row.job_id}` — {row.amount} tix, player <@{row.player_id}> — "
+            f"was decided ({row.status}) but its booking has kept failing since "
+            f"{row.resolved_at:%Y-%m-%d %H:%M}. The watchdog keeps retrying; the bot's log "
+            f"has the error.")
+
+
 async def alert_assumed() -> int:
     """DM the custodian's maintainer (SERVE_ALERT_DISCORD_ID, as the health monitor) about
-    every assumed settlement not yet reported. A row is marked alerted only once a DM
-    actually went out, so an alert that couldn't be sent is sent on a later pass instead
-    of being lost. Returns how many were reported."""
+    every assumed settlement, and every settlement whose booking has been failing for
+    over an hour, not yet reported. A row is marked alerted only once a DM actually went
+    out, so an alert that couldn't be sent is sent on a later pass instead of being
+    lost. Returns how many were reported."""
     import os
     to = os.getenv("SERVE_ALERT_DISCORD_ID", "").strip()
+    stuck_since = datetime.now() - _STUCK_SETTLEMENT
     async with db_session() as session:
-        rows = (await session.execute(select(MtgoJob).where(
+        assumed = (await session.execute(select(MtgoJob).where(
             MtgoJob.assumed.isnot(None), MtgoJob.alerted_at.is_(None),
             MtgoJob.status.in_(("done", "failed"))))).scalars().all()
+        stuck = (await session.execute(select(MtgoJob).where(
+            MtgoJob.status.like(f"{_SETTLING}%"), MtgoJob.alerted_at.is_(None),
+            MtgoJob.kind.in_(("deposit", "withdraw")),
+            MtgoJob.resolved_at < stuck_since))).scalars().all()
+    rows = [(r, _assumed_alert(r)) for r in assumed] + [(r, _stuck_alert(r)) for r in stuck]
     if not rows:
         return 0
     if not to:
-        logger.error(f"{len(rows)} assumed tix settlement(s) and SERVE_ALERT_DISCORD_ID is "
-                     f"not set -- nobody can be told")
+        logger.error(f"{len(rows)} tix settlement(s) need an admin and SERVE_ALERT_DISCORD_ID "
+                     f"is not set -- nobody can be told")
         return 0
     from bot_registry import get_bot
     from notification_service import send_dm
@@ -820,12 +847,7 @@ async def alert_assumed() -> int:
     if bot is None:
         return 0
     sent = 0
-    for row in rows:
-        booked = "booked as DELIVERED" if row.kind == "withdraw" else "NOT credited"
-        msg = (f"⚠️ Tix {row.kind} `{row.job_id}` — {row.amount} tix, MTGO `{row.mtgo_user}`, "
-               f"player <@{row.player_id}> — couldn't be confirmed and was {booked}.\n"
-               f"Why: {row.assumed}\n"
-               f"Check the vault; if that's wrong, repair it from the shell.")
+    for row, msg in rows:
         if await send_dm(bot, to, msg, label="custodian maintainer"):
             async def _mark(job_id: str = row.job_id):
                 async with db_session() as s2:

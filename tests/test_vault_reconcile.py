@@ -860,3 +860,29 @@ async def test_an_intent_still_inside_its_post_is_left_alone(test_db):  # noqa: 
 
     assert await resolution.recover_unsent_intents() == 0
     assert await _status(intent) == "sending"
+
+
+@pytest.mark.asyncio
+async def test_a_booking_that_keeps_failing_is_reported_once(test_db, monkeypatch):  # noqa: F811
+    """Retrying in silence for ever is how a stuck settlement went unnoticed."""
+    from sqlalchemy import update
+    monkeypatch.setenv("SERVE_ALERT_DISCORD_ID", "42")
+    sent = AsyncMock(return_value=True)
+    monkeypatch.setattr("notification_service.send_dm", sent)
+    monkeypatch.setattr("bot_registry.get_bot", lambda: object())
+    await _withdraw_out("s1")
+    await resolution._record_job("s2", "withdraw", GUILD, PLAYER, MTGO, 100, VaultReading(1000, NOW))
+    async with db_session() as s:
+        await s.execute(update(MtgoJob).where(MtgoJob.job_id == "s1").values(
+            status="settle-done", resolved_at=datetime.now() - timedelta(hours=2)))
+        await s.execute(update(MtgoJob).where(MtgoJob.job_id == "s2").values(
+            status="settle-done", resolved_at=datetime.now() - timedelta(minutes=10)))
+
+    assert await resolution.alert_assumed() == 1, "only the one stuck for over an hour"
+    assert "s1" in sent.await_args.args[2]
+    assert await resolution.alert_assumed() == 0
+
+
+def test_a_withdraw_the_vault_rose_for_is_not_a_delivery():
+    assert classify(1000, 1100, -100) == "other"
+    assert classify(1000, 900, +100) == "other", "nor a deposit the vault fell for"
