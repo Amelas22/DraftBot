@@ -412,7 +412,8 @@ async def test_two_settlers_reading_different_vaults_book_once(test_db):  # noqa
     decides; the second books nothing and reports the first's answer."""
     await _withdraw_out("w7")
     first = await _finish_withdraw("w7", "failed", 900)     # vault dropped: delivered
-    second = await _finish_withdraw("w7", "failed", 1000)   # a stale view: would refund
+    second = await _finish_withdraw("w7", "failed", 1000,   # a stale view: would refund
+                                    detail=CLOSED)
 
     assert first["outcome"] == "done" and second["outcome"] == "done"
     assert await _balances() == (0, 0), "debited once, never refunded"
@@ -807,6 +808,34 @@ async def test_a_refused_withdraw_closes_its_intent_and_refunds(test_db, monkeyp
     assert await _balances() == (100, 0)
 
 
+@pytest.mark.asyncio
+async def test_a_refused_withdraw_whose_refund_fails_is_refunded_by_the_watchdog(test_db, monkeypatch):  # noqa: F811
+    """Closed as failed before the refund landed, nothing would ever give the tix back."""
+    from sqlalchemy import update
+    await _fund(100)
+    monkeypatch.setattr(resolution.vault_check, "baseline",
+                        AsyncMock(return_value=VaultReading(1000, NOW)))
+    client = AsyncMock(enabled=True)
+    client.withdraw_tix = AsyncMock(return_value=None)
+    with patch("services.mtgo_resolution_service.get_client", return_value=client), \
+            patch.object(resolution, "_return_in_flight", AsyncMock(side_effect=RuntimeError)):
+        with pytest.raises(RuntimeError):
+            await resolution.start_withdraw(GUILD, PLAYER, MTGO, 100)
+
+    (row,) = (await _rows()).values()
+    assert row.status == "settle-failed"
+    assert await _balances() == (0, 100)
+    async with db_session() as s:
+        await s.execute(update(MtgoJob).where(MtgoJob.job_id == row.job_id).values(
+            resolved_at=datetime.now() - timedelta(hours=1)))
+
+    assert await resolution._finish_settlements() == 1
+    assert await _status(row.job_id) == "failed"
+    assert await _balances() == (100, 0)
+    assert await resolution._finish_settlements() == 0
+    assert await _balances() == (100, 0), "refunded once"
+
+
 async def _crashed_withdraw(committed):
     """A withdraw whose process died after recording it -- before or after its commit."""
     await _fund(100)
@@ -881,6 +910,25 @@ async def test_a_booking_that_keeps_failing_is_reported_once(test_db, monkeypatc
     assert await resolution.alert_assumed() == 1, "only the one stuck for over an hour"
     assert "s1" in sent.await_args.args[2]
     assert await resolution.alert_assumed() == 0
+
+
+@pytest.mark.asyncio
+async def test_a_stuck_assumed_settlement_still_says_it_was_assumed(test_db, monkeypatch):  # noqa: F811
+    """The stuck alert is the only one such a row gets: once sent, the assumed alert
+    skips it."""
+    from sqlalchemy import update
+    monkeypatch.setenv("SERVE_ALERT_DISCORD_ID", "42")
+    sent = AsyncMock(return_value=True)
+    monkeypatch.setattr("notification_service.send_dm", sent)
+    monkeypatch.setattr("bot_registry.get_bot", lambda: object())
+    await _withdraw_out("s3")
+    async with db_session() as s:
+        await s.execute(update(MtgoJob).where(MtgoJob.job_id == "s3").values(
+            status="settle-done", assumed="the serve forgot the job",
+            resolved_at=datetime.now() - timedelta(hours=2)))
+
+    assert await resolution.alert_assumed() == 1
+    assert "the serve forgot the job" in sent.await_args.args[2]
 
 
 def test_a_withdraw_the_vault_rose_for_is_not_a_delivery():

@@ -748,9 +748,12 @@ async def start_withdraw(guild_id: str, player_id: str, mtgo_user: str, n: int, 
                     f"({mtgo_user}, {n} tix committed, commit wd:{commit_key})")
             else:
                 # A DEFINITE refusal: the serve rejected it or was never reached, so no
-                # trade can exist -- its own proof. Give the tix back.
-                if await _unsent(commit_key):
-                    await _return_in_flight(guild_id, player_id, n, f"wd:{commit_key}")
+                # trade can exist -- its own proof. Give the tix back, claimed first like
+                # any settlement: a crash before the refund lands leaves settle-failed,
+                # which _finish_settlements completes under the same key.
+                if await _move_status(commit_key, _SENDING, f"{_SETTLING}failed"):
+                    await _return_in_flight(guild_id, player_id, n, commit_key)
+                    await _move_status(commit_key, f"{_SETTLING}failed", "failed")
                 return {"ok": False, "error": "serve did not accept the withdraw (unreachable or rejected)"}
         await _bind_intent(commit_key, resp["id"])
     return {"ok": True, "job_id": resp["id"]}
@@ -814,7 +817,10 @@ def _stuck_alert(row: MtgoJob) -> str:
     return (f"⚠️ Tix {row.kind} `{row.job_id}` — {row.amount} tix, player <@{row.player_id}> — "
             f"was decided ({row.status}) but its booking has kept failing since "
             f"{row.resolved_at:%Y-%m-%d %H:%M}. The watchdog keeps retrying; the bot's log "
-            f"has the error.")
+            f"has the error."
+            # This is the only alert the row gets, so an assumed outcome must say so here.
+            + (f"\nIts outcome was assumed, not confirmed: {row.assumed}\nCheck the vault."
+               if row.assumed else ""))
 
 
 async def alert_assumed() -> int:
