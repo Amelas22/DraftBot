@@ -14,7 +14,9 @@ class PlayerPreferences(Base):
     player_id = Column(String(64), nullable=False)
     guild_id = Column(String(64), nullable=False)
     is_bet_capped = Column(Boolean, default=True, server_default=text('1'))
-    dm_notifications = Column(Boolean, default=False, server_default=text('0'))
+    # NULL until the player toggles it: the row is shared with unrelated answers,
+    # and creating it for one of those must not decide DMs. Unset follows the guild default.
+    dm_notifications = Column(Boolean, nullable=True)
     # Whether this player borrows their deck from the server's rental library.
     # NULL means they have not been asked, which is what decides whether the
     # sign-up flow asks them (services/library_prompt).
@@ -174,7 +176,7 @@ async def get_players_bet_capping_preferences(player_ids, guild_id):
 async def get_player_dm_notification_preference(player_id, guild_id):
     """
     Get a player's DM notification preference.
-    Returns boolean: False for disabled (default), True for enabled.
+    Returns boolean: the player's own choice, else the guild default.
 
     Args:
         player_id (str): Discord user ID
@@ -183,21 +185,10 @@ async def get_player_dm_notification_preference(player_id, guild_id):
     Returns:
         bool: True if DM notifications are enabled, False otherwise
     """
-    async def _query(session):
-        composite_id = get_composite_preference_key(player_id, guild_id)
-        stmt = select(PlayerPreferences).where(PlayerPreferences.id == composite_id)
-        result = await session.execute(stmt)
-        preference = result.scalar_one_or_none()
-
-        if preference:
-            logger.debug(f"Found existing DM notification preference for player {player_id} in guild {guild_id}: {preference.dm_notifications}")
-            return preference.dm_notifications
-        else:
-            guild_default = get_dm_notifications_default(guild_id)
-            logger.debug(f"No DM notification preference found for player {player_id} in guild {guild_id}, using guild default: {guild_default}")
-            return guild_default
-
-    return await execute_db_operation(_query, default_value=False, error_message="Error getting DM notification preference")
+    # One rule for both readers: the batch read decides what an unset row means.
+    # Stored ids are strings, and the batch result keeps the caller's key type.
+    player_id = str(player_id)
+    return (await get_players_dm_notification_preferences([player_id], guild_id))[player_id]
 
 async def update_player_dm_notification_preference(player_id, guild_id, enabled):
     """
@@ -270,13 +261,14 @@ async def get_players_dm_notification_preferences(player_ids, guild_id):
 
         # Update the preferences dict with stored values
         preferences = default_preferences.copy()
-        for pref in stored_preferences:
-            preferences[pref.player_id] = pref.dm_notifications
+        chosen = {pref.player_id: pref.dm_notifications for pref in stored_preferences
+                  if pref.dm_notifications is not None}
+        preferences.update(chosen)
 
-        # Log which players don't have preferences set
-        players_without_prefs = set(player_ids) - set(p.player_id for p in stored_preferences)
+        # Log which players haven't chosen
+        players_without_prefs = set(player_ids) - chosen.keys()
         if players_without_prefs:
-            logger.debug(f"Players without stored preferences (defaulting to False): {players_without_prefs}")
+            logger.debug(f"Players without a DM preference (using guild default {guild_default}): {players_without_prefs}")
 
         logger.info(f"Retrieved DM preferences for {len(player_ids)} players: {sum(preferences.values())} enabled")
         return preferences
