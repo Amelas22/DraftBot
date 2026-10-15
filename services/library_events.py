@@ -15,7 +15,7 @@ In-process only: scripts/library_tool.py runs in its own process and cannot
 publish; its changes show at the next event or restart.
 """
 import asyncio
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable, Coroutine
 
 from loguru import logger
 
@@ -65,17 +65,22 @@ def publish_all() -> None:
         publish(lid)
 
 
-def publish_for_guild(guild_id: str) -> None:
-    """The library this server draws on, if it has one. Never blocks, never raises."""
+def _spawn(make: Callable[[], Coroutine[Any, Any, None]], what: str) -> None:
+    """Run a lookup in the background. The coroutine is made inside the try, so a
+    missing event loop is caught and logged. Never blocks, never raises."""
     if not _listeners:
         return
     try:
-        task = asyncio.get_running_loop().create_task(_publish_for_guild(str(guild_id)))
+        task = asyncio.get_running_loop().create_task(make())
         _resolving.add(task)
         task.add_done_callback(_resolving.discard)
     except Exception:
-        logger.opt(exception=True).error("library events: could not publish for guild {}",
-                                         guild_id)
+        logger.opt(exception=True).error("library events: could not publish for {}", what)
+
+
+def publish_for_guild(guild_id: str) -> None:
+    """The library this server draws on, if it has one. Never blocks, never raises."""
+    _spawn(lambda: _publish_for_guild(str(guild_id)), "guild {}".format(guild_id))
 
 
 async def _publish_for_guild(guild_id: str) -> None:
@@ -94,15 +99,7 @@ def publish_for_session(session_id: str) -> None:
     """The library of the server this draft is in, if it has one. For a write
     that names a draft but not its server -- a bulk sign-up update. Never
     blocks, never raises."""
-    if not _listeners:
-        return
-    try:
-        task = asyncio.get_running_loop().create_task(_publish_for_session(str(session_id)))
-        _resolving.add(task)
-        task.add_done_callback(_resolving.discard)
-    except Exception:
-        logger.opt(exception=True).error("library events: could not publish for draft {}",
-                                         session_id)
+    _spawn(lambda: _publish_for_session(str(session_id)), "draft {}".format(session_id))
 
 
 async def _publish_for_session(session_id: str) -> None:

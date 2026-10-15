@@ -79,8 +79,8 @@ async def fetch_cube(cube: str) -> "Optional[list[dict[str, Any]]]":
     try:
         got = await _get(key, None)
         cards = got[1] if got is not None and got[0] == "new" else None
-        if cards is not None:
-            _cache[key] = _Entry(cards, got[2] if got else None, time.monotonic())
+        if got is not None and cards is not None:
+            _cache[key] = _Entry(cards, got[2], time.monotonic())
         future.set_result(cards)
         return cards
     except BaseException:
@@ -142,11 +142,11 @@ async def _store(key: str, entry: Optional[_Entry],
         return False
     if cards is None:
         return False
-    changed = entry is None or _counts(cards) != _counts(entry.cards)
+    changed = entry is not None and _counts(cards) != _counts(entry.cards)
     _cache[key] = _Entry(cards, etag, now)
-    if changed and entry is not None:
+    if changed:
         await _publish_cube(key)
-    return changed and entry is not None
+    return changed
 
 
 def _counts(cards: "list[dict[str, Any]]") -> "dict[str, int]":
@@ -199,6 +199,7 @@ def clear_cache() -> None:
     _cache.clear()
     _first_reads.clear()
     _refreshing.clear()
+
 
 def parse_cube_list(text: str) -> "list[dict[str, Any]]":
     """The response body, as items the serve will take.
