@@ -317,32 +317,25 @@ async def test_a_gated_rental_library_says_who_may_borrow(test_db, monkeypatch):
         "ends with the library page, which shows what the shelf holds"
 
 
-class _Health:
-    """A lending client whose /health says `health`, after `delay` seconds."""
-
-    def __init__(self, health, delay=0.0, enabled=True):
-        self.health_body, self.delay, self.enabled = health, delay, enabled
-
-    async def health(self):
-        import asyncio
-        await asyncio.sleep(self.delay)
-        return self.health_body
+@pytest.mark.asyncio
+async def test_the_custodian_check_reads_the_monitors_last_state(monkeypatch):
+    import services.serve_health_monitor as m
+    from types import SimpleNamespace
+    import services.card_lending_service as lending
+    monkeypatch.setattr(lending, "get_lending_client",
+                        lambda: SimpleNamespace(enabled=True, url="http://lend"))
+    monkeypatch.setattr(m, "_last", {})
+    assert await _real_custodian_up() is None, "unknown before the first poll"
+    m._last["http://lend"] = "down"
+    assert await _real_custodian_up() is False
+    m._last["http://lend"] = "ok"
+    assert await _real_custodian_up() is True
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("client,up,why", [
-    (_Health({"ok": True, "queued": 3}), True,
-     "busy with other trades is still up: the draft ends an hour from now"),
-    (_Health({"ok": True, "reconnecting": True}), False, "reconnecting"),
-    (_Health({"ok": False}), False, "health says not ok"),
-    (_Health(None), False, "no answer"),
-    (_Health({"ok": True, "stuck": True}), False, "stuck is not working"),
-    (_Health({"ok": True}, delay=5), None,
-     "too slow to tell: unknown, not offline -- the board stands all draft"),
-    (_Health({"ok": True}, enabled=False), False, "no lending serve configured"),
-])
-async def test_reachability_is_what_the_board_asks(monkeypatch, client, up, why):
+async def test_an_unconfigured_lending_custodian_reads_as_offline(monkeypatch):
+    from types import SimpleNamespace
     import services.card_lending_service as lending
-    monkeypatch.setattr(lending, "get_lending_client", lambda: client)
-
-    assert await _real_custodian_up(timeout_s=0.2) is up, why
+    monkeypatch.setattr(lending, "get_lending_client",
+                        lambda: SimpleNamespace(enabled=False, url=""))
+    assert await _real_custodian_up() is False

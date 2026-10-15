@@ -156,6 +156,17 @@ async def main():
         # unconditional start would replace the live watcher's reference with a
         # finished no-op's.
         ensure_running(bot, "_serve_health_task", lambda: watch_serve_health(bot))
+        # The lending library's custodian, watched the same way. Its flips publish
+        # to every library -- they share the one lending account -- so a board's
+        # "library is offline" appears and clears on its own.
+        from services.card_lending_service import get_lending_client
+        from services.library_events import publish_all
+        lending = get_lending_client()
+        if lending.enabled:
+            ensure_running(bot, "_lending_health_task", lambda: watch_serve_health(
+                bot, name="lending custodian", url=lending.url, token=lending.token,
+                env_names=("MTGO_LENDING_URL", "MTGO_LENDING_TOKEN"),
+                on_change=lambda _up: publish_all()))
         # Same idea for the card library's trades, against the other serve: a
         # borrow whose command poller died would otherwise sit in 'out_pending'
         # forever, with the borrower holding cards the ledger says are still on

@@ -75,40 +75,23 @@ async def library_busy_reason() -> Optional[str]:
     return await serve_busy_reason(get_lending_client())
 
 
-async def lending_custodian_up(timeout_s: float = 0.6) -> Optional[bool]:
+async def lending_custodian_up() -> Optional[bool]:
     """Can the library's MTGO custodian lend right now? None if it can't be told.
 
-    Only whether it can work, not whether it is free: busy with somebody's trade
-    now says nothing about a draft that ends an hour from now, and that is the
-    question the signup board asks. Read with serve_health_monitor's classify,
-    so stuck, asking for a human, reconnecting and refusing our token all count
-    as down, the same as for the tix serve.
-
-    None for an answer that did not come in time. The board is written once, at
-    draft creation, so one slow reply read as "offline" would stand for the
-    whole draft; an unknown leaves the board saying what the shelf can cover.
-    Bounded on its own, short of the board's one-second budget.
+    Read from the health monitor's last poll of the lending custodian rather than
+    probed here, so the signup board and every recompute of it cost nothing. None
+    before the first poll -- an unknown leaves the board saying what the shelf can
+    cover, as a slow reply did when this probed.
     """
-    from services.serve_health_monitor import classify
+    from services.serve_health_monitor import last_state
 
     client = get_lending_client()
     if not client.enabled:
         logger.error("library: the lending serve is not configured (MTGO_LENDING_URL "
                      "and MTGO_LENDING_TOKEN), so every library reads as offline")
         return False
-    try:
-        health = await asyncio.wait_for(client.health(), timeout=timeout_s)
-    except asyncio.TimeoutError:
-        logger.warning("library: the custodian's /health took over {}s; its state "
-                       "is unknown", timeout_s)
-        return None
-    if not health:
-        logger.warning("library: the custodian did not answer /health")
-        return False
-    state, detail = classify(200, health, None)
-    if state != "ok":
-        logger.warning("library: the custodian is {}: {}", state, detail)
-    return state == "ok"
+    state = last_state(client.url)
+    return None if state is None else state == "ok"
 
 
 async def _when_free(dispatch: "Callable[[], Awaitable[tuple[str, Any]]]",

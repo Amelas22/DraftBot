@@ -13,6 +13,10 @@ Two things this has to get right, both learned from that outage:
   * One missed poll is not an outage. A single timeout happens; alerting on it
     trains the recipient to ignore the alert.
 """
+import asyncio
+
+import pytest
+
 from services.serve_health_monitor import Alerter, classify
 
 
@@ -153,3 +157,30 @@ def test_the_message_names_which_serve_and_what_is_wrong():
 
     assert "wallet custodian" in said
     assert "401" in said
+
+
+@pytest.mark.asyncio
+async def test_the_last_state_is_recorded_and_flips_are_reported(monkeypatch):
+    import services.serve_health_monitor as m
+    states = iter([("ok", ""), ("ok", ""), ("down", "x"), ("down", "x"), ("ok", "")])
+    flips = []
+
+    async def probe(_url, _token):
+        try:
+            return next(states)
+        except StopIteration:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(m, "probe", probe)
+    monkeypatch.setattr(m, "CHECK_INTERVAL_S", 0)   # never patch asyncio.sleep itself
+
+    async def send_dm(*_a, **_k):
+        return True
+
+    with pytest.raises(asyncio.CancelledError):
+        await m._poll_forever(None, "lending custodian", "http://lend", "t", "1", send_dm,
+                              on_change=flips.append)
+
+    assert flips == [True, False, True], "the first answer, then each flip; steady states say nothing"
+    assert m.last_state("http://lend") == "ok"
+    assert m.last_state("http://never-probed") is None
