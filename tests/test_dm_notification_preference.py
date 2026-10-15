@@ -59,3 +59,8 @@ async def test_a_row_without_a_choice_follows_a_server_that_defaults_off(test_db
     await prefs.set_uses_library(PLAYER, GUILD, True)
     with patch.object(prefs, "get_dm_notifications_default", return_value=False):
         assert await _both_reads() == (False, False)
+
+
+async def test_an_int_player_id_still_finds_the_stored_choice(test_db):
+    await prefs.update_player_dm_notification_preference(PLAYER, GUILD, False)
+    assert await prefs.get_player_dm_notification_preference(int(PLAYER), GUILD) is False

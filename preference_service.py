@@ -186,6 +186,8 @@ async def get_player_dm_notification_preference(player_id, guild_id):
         bool: True if DM notifications are enabled, False otherwise
     """
     # One rule for both readers: the batch read decides what an unset row means.
+    # Stored ids are strings, and the batch result keeps the caller's key type.
+    player_id = str(player_id)
     return (await get_players_dm_notification_preferences([player_id], guild_id))[player_id]
 
 async def update_player_dm_notification_preference(player_id, guild_id, enabled):
