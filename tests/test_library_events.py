@@ -124,3 +124,41 @@ async def test_publish_for_guild_resolves_the_library(monkeypatch):
     await bus.drain()
 
     assert heard == ["lib"]
+
+
+@pytest.mark.asyncio
+async def test_publish_for_session_resolves_the_drafts_library(test_db, monkeypatch):
+    from database.db_session import AsyncSessionLocal
+    from models.draft_session import DraftSession
+    async with AsyncSessionLocal() as s:
+        s.add(DraftSession(session_id="d1", guild_id="g1", sign_ups={}))
+        s.add(DraftSession(session_id="d2", guild_id="g2", sign_ups={}))
+        await s.commit()
+    heard = []
+
+    async def listener(lid):
+        heard.append(lid)
+
+    async def library_id_for(guild_id):
+        return "lib" if guild_id == "g1" else None
+
+    monkeypatch.setattr("services.library_service.library_id_for", library_id_for)
+    bus.subscribe("k", listener, "lib")
+    bus.publish_for_session("d1")
+    bus.publish_for_session("d2")
+    bus.publish_for_session("no-such-draft")
+    await bus.drain()
+
+    assert heard == ["lib"]
+
+
+def test_publish_for_session_without_listeners_schedules_nothing():
+    """No running loop here: it must return without scheduling or raising."""
+    bus.publish_for_session("d1")
+    assert not bus._resolving
+
+
+def test_publish_for_session_never_raises_without_a_loop():
+    bus.subscribe("k", lambda _lid: None, "lib")   # type: ignore[arg-type,return-value]
+    bus.publish_for_session("d1")                   # no running loop: logged, not raised
+    assert not bus._resolving

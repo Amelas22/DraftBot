@@ -90,6 +90,38 @@ async def _publish_for_guild(guild_id: str) -> None:
         publish(lid)
 
 
+def publish_for_session(session_id: str) -> None:
+    """The library of the server this draft is in, if it has one. For a write
+    that names a draft but not its server -- a bulk sign-up update. Never
+    blocks, never raises."""
+    if not _listeners:
+        return
+    try:
+        task = asyncio.get_running_loop().create_task(_publish_for_session(str(session_id)))
+        _resolving.add(task)
+        task.add_done_callback(_resolving.discard)
+    except Exception:
+        logger.opt(exception=True).error("library events: could not publish for draft {}",
+                                         session_id)
+
+
+async def _publish_for_session(session_id: str) -> None:
+    from sqlalchemy import select
+
+    from database.db_session import AsyncSessionLocal
+    from models.draft_session import DraftSession
+    try:
+        async with AsyncSessionLocal() as session:
+            guild = await session.scalar(select(DraftSession.guild_id).where(
+                DraftSession.session_id == session_id))
+    except Exception:
+        logger.opt(exception=True).warning("library events: no server resolved for draft {}",
+                                           session_id)
+        return
+    if guild is not None:
+        await _publish_for_guild(str(guild))
+
+
 async def _deliver(lid: str) -> None:
     try:
         while True:

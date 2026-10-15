@@ -18,9 +18,11 @@ from services import library_publish
 @pytest.fixture
 def heard(monkeypatch):
     """What would have been published, by call."""
-    got = {"libraries": [], "guilds": [], "all": 0}
+    got = {"libraries": [], "guilds": [], "sessions": [], "all": 0}
     monkeypatch.setattr(bus, "publish", lambda lid: got["libraries"].append(str(lid)))
     monkeypatch.setattr(bus, "publish_for_guild", lambda g: got["guilds"].append(str(g)))
+    monkeypatch.setattr(bus, "publish_for_session",
+                        lambda sid: got["sessions"].append(str(sid)))
     monkeypatch.setattr(bus, "publish_all",
                         lambda: got.__setitem__("all", got["all"] + 1))
     library_publish.install()
@@ -81,14 +83,88 @@ async def test_a_draft_publishes_only_when_a_tracked_column_changes(test_db, hea
 
 
 @pytest.mark.asyncio
-async def test_a_bulk_update_of_a_tracked_column_publishes_every_library(test_db, heard):
+async def test_a_bulk_update_of_one_draft_publishes_for_that_draft(test_db, heard):
+    """A sign-up click names its draft, so it is narrowed to the draft's library
+    rather than waking every library of every server."""
     async with AsyncSessionLocal() as s:
         s.add(DraftSession(session_id="d1", guild_id="g1", sign_ups={}))
         await s.commit()
         await s.execute(update(DraftSession).where(DraftSession.session_id == "d1")
                         .values(library_released_at=None, sign_ups={"p": "x"}))
         await s.commit()
-    assert heard["all"] == 1
+    assert heard["all"] == 0 and heard["sessions"] == ["d1"]
+
+
+@pytest.mark.asyncio
+async def test_a_draft_named_inside_an_and_is_still_narrowed(test_db, heard):
+    async with AsyncSessionLocal() as s:
+        s.add(DraftSession(session_id="d1", guild_id="g1", sign_ups={}))
+        await s.commit()
+        await s.execute(update(DraftSession).where(
+            DraftSession.session_id == "d1",
+            DraftSession.teams_start_time.is_(None)).values(sign_ups={"p": "x"}))
+        await s.commit()
+    assert heard["all"] == 0 and heard["sessions"] == ["d1"]
+
+
+@pytest.mark.asyncio
+async def test_a_bulk_update_that_names_no_one_draft_publishes_every_library(test_db, heard):
+    async with AsyncSessionLocal() as s:
+        s.add(DraftSession(session_id="d1", guild_id="g1", sign_ups={}))
+        s.add(DraftSession(session_id="d2", guild_id="g1", sign_ups={}))
+        await s.commit()
+        await s.execute(update(DraftSession).where(DraftSession.guild_id == "g1")
+                        .values(sign_ups={"p": "x"}))
+        await s.execute(update(DraftSession).where(
+            (DraftSession.session_id == "d1") | (DraftSession.session_id == "d2"))
+            .values(sign_ups={}))
+        await s.commit()
+    assert heard["all"] == 1 and heard["sessions"] == []
+
+
+async def _two_libraries():
+    """lib serves g1, lib2 serves g3; g2 has no library. A listener on each."""
+    from models.library import Library
+    from models.library_server import LibraryServer
+    async with AsyncSessionLocal() as s:
+        s.add(Library(id="lib", name="Lib"))
+        s.add(Library(id="lib2", name="Lib2"))
+        s.add(LibraryServer(library_id="lib", guild_id="g1"))
+        s.add(LibraryServer(library_id="lib2", guild_id="g3"))
+        s.add(DraftSession(session_id="in-lib", guild_id="g1", sign_ups={}))
+        s.add(DraftSession(session_id="no-lib", guild_id="g2", sign_ups={}))
+        await s.commit()
+    woken: "list[str]" = []
+
+    async def listener(lid):
+        woken.append(lid)
+    bus.subscribe("a", listener, "lib")
+    bus.subscribe("b", listener, "lib2")
+    return woken
+
+
+async def _sign_up(sid):
+    async with AsyncSessionLocal() as s:
+        await s.execute(update(DraftSession).where(DraftSession.session_id == sid)
+                        .values(sign_ups={"p": "x"}))
+        await s.commit()
+    await bus.drain()
+
+
+@pytest.mark.asyncio
+async def test_a_sign_up_in_a_server_without_a_library_publishes_nothing(test_db):
+    library_publish.install()
+    woken = await _two_libraries()
+    await _sign_up("no-lib")
+    assert woken == []
+
+
+@pytest.mark.asyncio
+async def test_a_sign_up_in_a_library_server_publishes_only_that_library(test_db):
+    library_publish.install()
+    woken = await _two_libraries()
+    await _sign_up("in-lib")
+    assert woken == ["lib"]
 
 
 @pytest.mark.asyncio

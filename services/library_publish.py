@@ -7,8 +7,11 @@ touch; do_orm_execute notes bulk update()/delete() statements, which flush never
 sees; after_commit publishes, so a listener only ever reads committed state; a
 rollback forgets.
 
-A bulk statement does not say which rows it touched, so it marks every library:
-there are a handful, and the bus merges.
+A bulk statement does not say which rows it touched. One that names a single
+draft -- WHERE session_id == X, alone or ANDed with more -- publishes for that
+draft's library, resolved after the commit; any other marks every library:
+there are a handful, and the bus merges. A bulk delete always marks every
+library, because after the commit its row is gone and names no server.
 
 What it cannot see is a write that bypasses the session -- raw SQL text or an
 engine connection. tests/test_library_publish.py fails the build on one. ORM bulk
@@ -42,7 +45,8 @@ _installed = False
 
 
 def _pending(session: Session) -> "dict[str, Any]":
-    return session.info.setdefault(_INFO, {"libraries": set(), "guilds": set(), "all": False})
+    return session.info.setdefault(
+        _INFO, {"libraries": set(), "guilds": set(), "sessions": set(), "all": False})
 
 
 def _changed(obj: Any, columns: "frozenset[str]") -> bool:
@@ -110,6 +114,35 @@ def _set_columns(statement: Any) -> "Optional[set[str]]":
     return {str(getattr(k, "key", None) or getattr(k, "name", None) or k) for k in values}
 
 
+def _one_draft(statement: Any) -> Optional[str]:
+    """The session id an update on draft_sessions is restricted to, when its
+    WHERE is ``session_id == <value>`` or an AND containing one; else None."""
+    from sqlalchemy.sql import operators
+    from sqlalchemy.sql.elements import BinaryExpression, BindParameter, BooleanClauseList
+
+    def find(clause: Any) -> Optional[str]:
+        if isinstance(clause, BooleanClauseList):
+            if clause.operator is not operators.and_:
+                return None
+            for c in clause.clauses:
+                found = find(c)
+                if found is not None:
+                    return found
+            return None
+        if isinstance(clause, BinaryExpression) and clause.operator is operators.eq:
+            for col, val in ((clause.left, clause.right), (clause.right, clause.left)):
+                table = getattr(col, "table", None)
+                if (getattr(col, "key", None) == "session_id"
+                        and getattr(table, "name", None) == "draft_sessions"
+                        and isinstance(val, BindParameter)):
+                    value = val.effective_value
+                    if value is not None:
+                        return str(value)
+        return None
+
+    return find(getattr(statement, "whereclause", None))
+
+
 def _do_orm_execute(state: Any) -> None:
     try:
         if not (state.is_update or state.is_delete):
@@ -121,7 +154,12 @@ def _do_orm_execute(state: Any) -> None:
         elif name in _FILTERED_TABLES:
             cols = None if state.is_delete else _set_columns(state.statement)
             if cols is None or cols & _FILTERED_TABLES[name]:
-                _pending(state.session)["all"] = True
+                sid = (_one_draft(state.statement)
+                       if state.is_update and name == "draft_sessions" else None)
+                if sid is not None:
+                    _pending(state.session)["sessions"].add(sid)
+                else:
+                    _pending(state.session)["all"] = True
     except Exception:
         logger.opt(exception=True).error("library publish: could not classify a statement")
 
@@ -140,6 +178,8 @@ def _after_commit(session: Session) -> None:
             bus.publish(lid)
         for guild in p["guilds"]:
             bus.publish_for_guild(guild)
+        for sid in p["sessions"]:
+            bus.publish_for_session(sid)
     except Exception:
         logger.opt(exception=True).error("library publish: could not publish a commit")
 
