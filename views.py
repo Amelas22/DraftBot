@@ -2462,7 +2462,23 @@ class CallbackButton(discord.ui.Button):
         await self.custom_callback(interaction, self)
 
 
+# One redraw of a board at a time. A click handler and the library listener
+# (services/library_boards) can redraw the same board at once; each reads the
+# draft, fetches the message and writes the whole embed back, so interleaved
+# they could put an older roster back on the board. The draft is read inside
+# the lock, so the last writer always draws the newest state. Nothing inside
+# the redraw calls update_draft_message again -- a redraw it triggers through
+# the library bus runs as its own task and waits its turn.
+_REDRAW_LOCKS: "dict[str, asyncio.Lock]" = {}
+
+
 async def update_draft_message(bot, session_id):
+    lock = _REDRAW_LOCKS.setdefault(str(session_id), asyncio.Lock())
+    async with lock:
+        await _update_draft_message(bot, session_id)
+
+
+async def _update_draft_message(bot, session_id):
     logger.info(f"Starting update for draft message with session ID: {session_id}")
 
     # Fetch draft session
