@@ -14,6 +14,7 @@ import cube_views.pack_options as po
 
 async def _board(sid="d1", guild="g1", **kw):
     async with AsyncSessionLocal() as s:
+        kw.setdefault("message_id", "m-" + sid)
         s.add(DraftSession(session_id=sid, guild_id=guild, cube="mycube", sign_ups={},
                            deletion_time=datetime.now() + timedelta(hours=3), **kw))
         await s.commit()
@@ -77,6 +78,7 @@ async def test_a_board_whose_teams_formed_stops_listening(test_db, world):
     world["line"] = "⏳ in use"
     bus.publish("lib")
     await bus.drain()
+    assert not bus._heard("lib")
     bus.publish("lib")
     await bus.drain()
     assert world["redraws"] == [] and boards.line_for("d1") == "🏛️ covered"
@@ -121,3 +123,45 @@ async def test_the_other_queues_board_switches_back_when_a_reservation_ends(test
         await s.commit()
     await bus.drain()
     assert world["redraws"] == ["d1"] and boards.line_for("d1") == "🏛️ covered"
+
+
+@pytest.mark.asyncio
+async def test_a_pending_board_whose_first_line_is_empty_is_redrawn(test_db, world):
+    """Loaded at startup with a stale field from before the restart: an empty
+    first line must still redraw, so the stale field comes off."""
+    await _board()
+    await boards.watch("d1", "g1", None)
+    boards._LINES.pop("d1")             # what load_boards leaves: watched, not computed
+    world["line"] = None
+    bus.publish("lib")
+    await bus.drain()
+    assert boards.line_for("d1") is None and world["redraws"] == ["d1"]
+
+
+@pytest.mark.asyncio
+async def test_a_second_load_keeps_a_line_already_known(test_db, world):
+    """on_ready runs again after a gateway reconnect; a line already true stays."""
+    from models.library import Library
+    from models.library_server import LibraryServer
+    async with AsyncSessionLocal() as s:
+        s.add(Library(id="lib", name="Lib"))
+        s.add(LibraryServer(library_id="lib", guild_id="g1"))
+        await s.commit()
+    await _board()
+    await boards.load_boards()
+    await bus.drain()
+    assert boards.line_for("d1") == "🏛️ covered" and world["redraws"] == ["d1"]
+    await boards.load_boards()
+    assert boards.line_for("d1") == "🏛️ covered"
+    await bus.drain()
+    assert world["redraws"] == ["d1"]
+
+
+@pytest.mark.asyncio
+async def test_a_board_not_yet_posted_stores_its_line_without_a_redraw(test_db, world):
+    await _board(message_id=None)
+    await boards.watch("d1", "g1", "🏛️ covered")
+    world["line"] = "⏳ in use"
+    bus.publish("lib")
+    await bus.drain()
+    assert boards.line_for("d1") == "⏳ in use" and world["redraws"] == []

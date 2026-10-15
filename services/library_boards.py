@@ -70,6 +70,8 @@ async def load_boards() -> int:
                 DraftSession.deletion_time > datetime.now()))).all()
     from services import library_events
     for sid, guild in rows:
+        if str(sid) in _LINES:
+            continue    # on_ready again after a reconnect: this line is already true
         await watch(sid, guild, None)
         _LINES.pop(str(sid), None)      # unknown until computed: the first redraw writes it
     for guild in {g for _, g in rows}:
@@ -121,9 +123,14 @@ async def _recompute(sid: str) -> None:
         line = await pack_options.library_signup_check(draft.cube, draft.guild_id)
     except pack_options.LibraryLineUnknown:
         return          # never claim what wasn't checked: keep the board as it is
-    if line == _LINES.get(sid):
+    # A watched board not in _LINES is pending (loaded at startup, never
+    # computed): even a None line is stored and redrawn, which removes a
+    # Cards field left over from before the restart.
+    if sid in _LINES and line == _LINES[sid]:
         return
     _LINES[sid] = line
+    if not draft.message_id:
+        return          # not posted yet: the board's first redraw writes the line
     from bot_registry import get_bot
     await _redraw(get_bot(), sid)
 

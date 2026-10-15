@@ -125,7 +125,8 @@ async def main():
             from services.library_boards import load_boards
             await load_boards()
         except Exception:
-            # Every open library board loses its Library button on re-attach.
+            # Boards not yet loaded lose their Library button on re-attach, and
+            # open boards' library lines won't update until the next restart.
             logger.exception("Error loading library boards")
         from debt_views.settle_views import PublicSettleDebtsView
         bot.add_view(PublicSettleDebtsView())

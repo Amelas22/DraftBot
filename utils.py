@@ -1929,7 +1929,11 @@ async def cleanup_sessions_task(bot):
                         print(f"{challenge.id} has been removed.")
 
             # A queue that went quiet is released by its deadline passing, which
-            # writes nothing the session hooks can see; this is the moment it ends.
+            # writes nothing the session hooks can see, so the boards it was holding
+            # a copy from are told here. This fires on every pass for each draft
+            # still in the 24h deletion window, not only the pass that ends it;
+            # that is harmless, since the bus merges events and an unchanged line
+            # makes no edit.
             from services.library_events import publish_for_guild
             for guild in reaped_guilds:
                 publish_for_guild(guild)
