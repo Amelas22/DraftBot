@@ -110,3 +110,47 @@ def _offering(table):
     async def offering(cube):
         return table.get(cube, [])
     return offering
+
+
+@pytest.mark.asyncio
+async def test_a_slow_background_refresh_does_not_undo_a_newer_refresh_now(monkeypatch):
+    """The background read started first and answers last, with the list from
+    before the admin's edit; the admin's re-read must stand."""
+    monkeypatch.setattr(cl, "_libraries_offering", _offering({}))
+    gate = asyncio.Event()
+    calls = []
+
+    async def get(cube, etag):
+        calls.append(etag)
+        if len(calls) == 1:
+            return ("new", cl.parse_cube_list("Bolt\n"), "e1")
+        if len(calls) == 2:                       # the background refresh
+            await gate.wait()
+            return ("new", cl.parse_cube_list("Bolt\nOld\n"), "e-old")
+        return ("new", cl.parse_cube_list("Bolt\nIsland\n"), "e2")
+    monkeypatch.setattr(cl, "_get", get)
+
+    await cl.fetch_cube("c")
+    monkeypatch.setattr(cl, "REFRESH_AFTER_S", -1)
+    await cl.fetch_cube("c")                      # starts the background refresh
+    await asyncio.sleep(0)
+    cards, changed = await cl.refresh_now("c")
+    assert changed
+    gate.set()
+    await cl.wait_for_refreshes()
+
+    monkeypatch.setattr(cl, "REFRESH_AFTER_S", 10**9)
+    assert {c["name"] for c in await cl.fetch_cube("c")} == {"Bolt", "Island"}
+
+
+@pytest.mark.asyncio
+async def test_refresh_now_reports_a_change_even_if_publishing_fails(cobra, monkeypatch):
+    """The cache is already updated by then; raising would tell the admin the
+    re-read failed when it did not."""
+    async def broken(_cube):
+        raise RuntimeError("database locked")
+    monkeypatch.setattr(cl, "_libraries_offering", broken)
+    cobra((200, "Bolt\n", "e1"), (200, "Bolt\nIsland\n", "e2"))
+    await cl.fetch_cube("c")
+    cards, changed = await cl.refresh_now("c")
+    assert changed and {c["name"] for c in cards} == {"Bolt", "Island"}

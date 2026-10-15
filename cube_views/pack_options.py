@@ -497,13 +497,15 @@ async def _library_signup_line(cube_id, guild_id,
     if not covered:
         # Where the copy is, when another queue reserved it: those players can
         # join that one and fire it (services/library_reservation).
+        # A failed lookup is not "bring your own cards": the copy may be in a
+        # queue they could join, so the line is unknown, not uncovered.
         try:
             from services.library_reservation import joinable_link, queue_holding
             link = joinable_link(await queue_holding(guild_id, cube_id, session_id))
         except Exception:
             logger.opt(exception=True).warning(
                 "signup board: could not see who holds {}", cube_id)
-            link = None
+            raise LibraryLineUnknown(str(cube_id)) from None
         if link:
             return (f"⏳ **Library in use** — its copy of this cube is reserved "
                     f"by [another queue]({link}). Join that one to fire it, or "

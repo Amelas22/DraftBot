@@ -60,6 +60,9 @@ async def fetch_cube(cube: str) -> "Optional[list[dict[str, Any]]]":
     Cached for the process: a cached list is returned at once whatever its age,
     and one past REFRESH_AFTER_S is re-checked in the background with its ETag.
     Only a cube never read before waits on the network.
+
+    The returned list, and every dict in it, is the cache's own copy, shared
+    with every other caller: read it, never mutate it. Copy it first to change it.
     """
     key = cube.strip()
     entry = _cache.get(key)
@@ -125,7 +128,13 @@ async def _refresh(key: str) -> None:
 
 async def _store(key: str, entry: Optional[_Entry],
                  got: "tuple[str, Optional[list[dict[str, Any]]], Optional[str]]") -> bool:
-    """Record a refresh's answer. True if the list changed (and was published)."""
+    """Record a refresh's answer. True if the list changed (and was published).
+
+    `entry` is what the refresh started from. If the cache holds something else
+    by now -- a refresh_now landed while this read was in flight -- this answer
+    is older than what is there and is dropped."""
+    if _cache.get(key) is not entry:
+        return False
     kind, cards, etag = got
     now = time.monotonic()
     if kind == "same" and entry is not None:
@@ -155,9 +164,15 @@ async def _libraries_offering(cube: str) -> "list[str]":
 
 
 async def _publish_cube(cube: str) -> None:
+    """Never raises: it runs after the cache is updated, and a failure to tell
+    the boards must not read as a failure to re-read the cube."""
     from services import library_events
-    for lid in await _libraries_offering(cube):
-        library_events.publish(lid)
+    try:
+        for lid in await _libraries_offering(cube):
+            library_events.publish(lid)
+    except Exception:
+        logger.opt(exception=True).error(
+            "cube list {}: changed, but the libraries offering it were not told", cube)
 
 
 async def refresh_now(cube: str) -> "tuple[Optional[list[dict[str, Any]]], bool]":

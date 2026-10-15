@@ -86,14 +86,6 @@ class BaseSession:
                     # Without it the board just lacks its Library button.
                     logger.exception("signup board: could not check the library for {}",
                                      new_draft_session.session_id)
-                from services.library_boards import watch
-                try:
-                    await watch(new_draft_session.session_id, new_draft_session.guild_id,
-                                self.library_note)
-                except Exception:
-                    # Without it the line stays as posted, as it did before.
-                    logger.exception("signup board: could not watch the library for {}",
-                                     new_draft_session.session_id)
                 view = PersistentView(
                     bot=bot,
                     draft_session_id=new_draft_session.session_id,
@@ -108,6 +100,17 @@ class BaseSession:
 
                 # Step 5: Update the draft session with message information
                 await self.update_message_info(new_draft_session, message)
+
+                # After the reply, so its database read is outside the
+                # interaction's three-second window.
+                from services.library_boards import watch
+                try:
+                    await watch(new_draft_session.session_id, new_draft_session.guild_id,
+                                self.library_note)
+                except Exception:
+                    # Without it the line stays as posted, as it did before.
+                    logger.exception("signup board: could not watch the library for {}",
+                                     new_draft_session.session_id)
 
                 # Step 6: Make the message sticky
                 await make_message_sticky(interaction.guild.id, message.channel.id, message, view, bot)

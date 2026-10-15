@@ -354,13 +354,23 @@ async def watch_serve_health(bot: Any, *, name: str = "MTGO custodian",
                              canary: bool = True,
                              env_names: "tuple[str, str]" = ("MTGO_TRADEBOT_URL",
                                                              "MTGO_TRADEBOT_TOKEN"),
-                             on_change: Optional[Callable[[bool], None]] = None) -> None:
+                             on_change: Optional[Callable[[bool], None]] = None,
+                             disabled_without: Optional[str] = None) -> None:
     """Poll one serve forever and DM the maintainer when it is not right.
 
     Configuration comes from the trade client by default, so the two cannot
     drift: a renamed env var or an added fallback fixes the trade path and
     would otherwise leave the watcher probing an address nobody uses.
+
+    `disabled_without` names what reads this watcher's state (through
+    `on_change` or last_state); when the watcher cannot start, that is logged
+    at ERROR as disabled, because nothing else will say so.
     """
+    def not_started() -> None:
+        if disabled_without:
+            logger.error("serve health: the {} is not watched, so {} is disabled",
+                         name, disabled_without)
+
     try:
         import os
         from notification_service import send_dm
@@ -381,6 +391,7 @@ async def watch_serve_health(bot: Any, *, name: str = "MTGO custodian",
             # missing rather than leaving the reader to guess among three.
             logger.warning("serve health: NOT WATCHING — {} not set. The {} has "
                            "no monitor.", ", ".join(missing), name)
+            not_started()
             return
         try:
             int(alert_to)
@@ -391,10 +402,14 @@ async def watch_serve_health(bot: Any, *, name: str = "MTGO custodian",
                          "user id (Developer Mode, right-click the user, Copy "
                          "User ID). The {} has no monitor.", ALERT_ENV, alert_to,
                          name)
+            not_started()
             return
         if not _claim(url):
+            # Also when two serves are configured with one URL: the other
+            # watcher holds it, and its state changes reach only its own caller.
             logger.warning("serve health: already watching {} — not starting a "
                            "second watcher for it", name)
+            not_started()
             return
     except Exception:
         # Setup lives inside the guard too. An import or a client construction
@@ -403,6 +418,7 @@ async def watch_serve_health(bot: Any, *, name: str = "MTGO custodian",
         logger.opt(exception=True).critical(
             "serve health: could not start the watcher for {} — it has no "
             "monitor", name)
+        not_started()
         return
 
     try:

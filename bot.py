@@ -169,7 +169,8 @@ async def main():
             ensure_running(bot, "_lending_health_task", lambda: watch_serve_health(
                 bot, name="lending custodian", url=lending.url, token=lending.token,
                 env_names=("MTGO_LENDING_URL", "MTGO_LENDING_TOKEN"),
-                on_change=lambda _up: publish_all()))
+                on_change=lambda _up: publish_all(),
+                disabled_without="sign-up boards' library-offline detection"))
         # Same idea for the card library's trades, against the other serve: a
         # borrow whose command poller died would otherwise sit in 'out_pending'
         # forever, with the borrower holding cards the ledger says are still on

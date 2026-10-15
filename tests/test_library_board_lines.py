@@ -31,7 +31,10 @@ def world(monkeypatch):
             raise state["line"]
         return state["line"]
 
+    state["lookups"] = []
+
     async def library_id_for(guild):
+        state["lookups"].append(guild)
         return state["library"] if guild == "g1" else None
 
     async def redraw(_bot, sid):
@@ -176,3 +179,20 @@ async def test_a_board_not_yet_posted_stores_its_line_without_a_redraw(test_db, 
     bus.publish("lib")
     await bus.drain()
     assert boards.line_for("d1") == "⏳ in use" and world["redraws"] == []
+
+
+@pytest.mark.asyncio
+async def test_loading_resolves_each_servers_library_once(test_db, world):
+    from models.library import Library
+    from models.library_server import LibraryServer
+    async with AsyncSessionLocal() as s:
+        s.add(Library(id="lib", name="Lib"))
+        s.add(LibraryServer(library_id="lib", guild_id="g1"))
+        await s.commit()
+    for sid in ("d1", "d2", "d3"):
+        await _board(sid)
+    world["lookups"].clear()
+    await boards.load_boards()
+    await bus.drain()
+    assert world["lookups"] == ["g1"]
+    assert sorted(world["redraws"]) == ["d1", "d2", "d3"]

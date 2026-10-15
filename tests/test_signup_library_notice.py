@@ -90,6 +90,25 @@ async def test_a_cube_the_library_cannot_cover_says_bring_your_own(
 
 
 @pytest.mark.asyncio
+async def test_not_knowing_who_holds_the_copy_is_not_bring_your_own(
+        test_db, monkeypatch):
+    """The copy may well be in use by a queue they could join; a failed lookup
+    must not tell them to go and find cards. The listener keeps its line; at
+    posting the board simply has none."""
+    import services.library_reservation as resv
+    await _price(0)
+    _shelf(monkeypatch, {"Swamp": 4}, {"Swamp": 1}, CUBE_CARDS)
+
+    async def broken(*_a, **_k):
+        raise RuntimeError("ledger unreachable")
+    monkeypatch.setattr(resv, "queue_holding", broken)
+
+    with pytest.raises(mod.LibraryLineUnknown):
+        await mod.library_signup_check(CUBE, GUILD, "d1")
+    assert await library_signup_note(CUBE, GUILD) is None
+
+
+@pytest.mark.asyncio
 async def test_a_cube_the_library_does_not_lend_for_says_nothing(
         test_db, monkeypatch):
     """Most drafts have nothing to do with the library. A field on every one of

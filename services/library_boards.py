@@ -68,14 +68,18 @@ async def load_boards() -> int:
                 DraftSession.guild_id.in_(any_library),
                 DraftSession.teams_start_time.is_(None),
                 DraftSession.deletion_time > datetime.now()))).all()
-    from services import library_events
+    from services import library_events, library_service
+    libraries: "dict[str, Optional[str]]" = {}     # one lookup per server, not per board
     for sid, guild in rows:
         if str(sid) in _LINES:
             continue    # on_ready again after a reconnect: this line is already true
-        await watch(sid, guild, None)
-        _LINES.pop(str(sid), None)      # unknown until computed: the first redraw writes it
-    for guild in {g for _, g in rows}:
-        library_events.publish_for_guild(guild)
+        if str(guild) not in libraries:
+            libraries[str(guild)] = await library_service.library_id_for(guild)
+        lid = libraries[str(guild)]
+        if lid is not None:
+            _subscribe(str(sid), lid)   # unknown until computed: the first redraw writes it
+    for lid in {lid for lid in libraries.values() if lid is not None}:
+        library_events.publish(lid)
     logger.info("library: {} open boards watch their library line", len(rows))
     return len(ids)
 
@@ -92,18 +96,23 @@ def line_for(session_id: Any) -> object:
 
 async def watch(session_id: Any, guild_id: Any, line: "Optional[str]") -> None:
     """Keep this board's line true from now on, starting from ``line``."""
-    from services import library_events, library_service
+    from services import library_service
 
     lid = await library_service.library_id_for(guild_id)
     if lid is None:
         return
     sid = str(session_id)
     _LINES[sid] = line
+    _subscribe(sid, lid)
+
+
+def _subscribe(sid: str, library_id: str) -> None:
+    from services import library_events
 
     async def on_change(_library_id: str) -> None:
         await _recompute(sid)
 
-    library_events.subscribe(sid, on_change, lid)
+    library_events.subscribe(sid, on_change, library_id)
 
 
 async def _recompute(sid: str) -> None:

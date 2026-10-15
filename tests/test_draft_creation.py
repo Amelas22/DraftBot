@@ -462,3 +462,37 @@ async def test_draft_deletion_time_set(test_db):
 
     # Allow 1 minute tolerance for test execution time
     assert abs(time_diff - expected_diff) < timedelta(minutes=1), "deletion_time should be ~5 hours after start"
+
+
+@pytest.mark.asyncio
+async def test_the_board_starts_watching_its_library_only_after_it_is_posted(test_db):
+    """watch() reads the database; inside Discord's three-second window it would
+    only delay the reply, so it runs once the board is sent and stored."""
+    interaction = create_mock_interaction()
+    session_details = create_session_details(interaction)
+    random_session = RandomSession(session_details, session_factory=test_db)
+    order = []
+
+    mock_draft_manager = MagicMock()
+    mock_draft_manager.keep_connection_alive = AsyncMock()
+    mock_draft_manager.socket_client = MagicMock()
+    mock_draft_manager.socket_client.connected = False
+    interaction.response.send_message = AsyncMock(
+        side_effect=lambda **_: order.append("sent"))
+
+    async def watch(*_args):
+        order.append("watch")
+
+    async def update_message_info(*_args):
+        order.append("stored")
+
+    with patch('sessions.base_session.DraftSetupManager', return_value=mock_draft_manager), \
+         patch('sessions.base_session.PersistentView'), \
+         patch('sessions.base_session.make_message_sticky', new_callable=AsyncMock), \
+         patch('sessions.base_session.get_session_deletion_hours', return_value=5), \
+         patch('sessions.base_session.get_cube_thumbnail_url', return_value='https://example.com/thumb.jpg'), \
+         patch('services.library_boards.watch', watch), \
+         patch.object(random_session, 'update_message_info', update_message_info):
+        await random_session.create_draft_session(interaction, interaction.client)
+
+    assert order == ["sent", "stored", "watch"], order
