@@ -11,7 +11,9 @@ A bulk statement does not say which rows it touched, so it marks every library:
 there are a handful, and the bus merges.
 
 What it cannot see is a write that bypasses the session -- raw SQL text or an
-engine connection. tests/test_library_publish.py fails the build on one.
+engine connection. tests/test_library_publish.py fails the build on one. ORM bulk
+insert(Model) statements, and commits from a thread with no running event loop,
+aren't published either.
 """
 from typing import Any, Optional
 
@@ -125,19 +127,26 @@ def _do_orm_execute(state: Any) -> None:
 
 
 def _after_commit(session: Session) -> None:
+    if session.in_nested_transaction():
+        return  # a savepoint release is not a commit; marks wait for the root
     p = session.info.pop(_INFO, None)
     if not p:
         return
-    if p["all"]:
-        bus.publish_all()
-        return
-    for lid in p["libraries"]:
-        bus.publish(lid)
-    for guild in p["guilds"]:
-        bus.publish_for_guild(guild)
+    try:
+        if p["all"]:
+            bus.publish_all()
+            return
+        for lid in p["libraries"]:
+            bus.publish(lid)
+        for guild in p["guilds"]:
+            bus.publish_for_guild(guild)
+    except Exception:
+        logger.opt(exception=True).error("library publish: could not publish a commit")
 
 
 def _after_rollback(session: Session) -> None:
+    if session.in_nested_transaction():
+        return  # a savepoint rollback keeps the outer transaction's marks
     session.info.pop(_INFO, None)
 
 

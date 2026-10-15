@@ -111,6 +111,32 @@ async def test_an_offer_publishes_its_library(test_db, heard):
     assert heard["libraries"] == ["lib"]
 
 
+@pytest.mark.asyncio
+async def test_a_savepoint_rollback_keeps_the_outer_marks(test_db, heard):
+    async with AsyncSessionLocal() as s:
+        s.add(CardLoan(guild_id="g1", library_id="lib", borrower_id="p1",
+                       cards=[], state="assigned"))
+        await s.flush()
+        nested = await s.begin_nested()
+        s.add(CardLoan(guild_id="g1", library_id="other", borrower_id="p2",
+                       cards=[], state="assigned"))
+        await s.flush()
+        await nested.rollback()
+        await s.commit()
+    assert "lib" in heard["libraries"]
+
+
+@pytest.mark.asyncio
+async def test_a_released_savepoint_publishes_only_at_the_outer_commit(test_db, heard):
+    async with AsyncSessionLocal() as s:
+        async with s.begin_nested():
+            s.add(CardLoan(guild_id="g1", library_id="lib", borrower_id="p1",
+                           cards=[], state="assigned"))
+        assert heard["libraries"] == []
+        await s.commit()
+    assert heard["libraries"] == ["lib"]
+
+
 _TRACKED = r"(card_loans|debt_ledger|draft_sessions|library|library_cube|library_server|library_member|player_preferences)"
 # Its writers run only from the alembic legacy-import migration.
 _EXEMPT = {"helpers/legacy_import.py"}
