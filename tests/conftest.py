@@ -962,3 +962,12 @@ def _fresh_library_bus():
     library_events.reset()
     yield
     library_events.reset()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_cube_cache():
+    """The cube cache is process-wide; no test may read another's cubes."""
+    from helpers import cube_list
+    cube_list.clear_cache()
+    yield
+    cube_list.clear_cache()
