@@ -1,4 +1,5 @@
-"""Which sign-up boards carry a Library button.
+"""Which sign-up boards carry a Library button, and what each board's library
+line says.
 
 Only a staked board has a Change Entry / Settings panel, so where a rental
 library backs the server every other board -- premade, random, swiss, winston
@@ -12,9 +13,16 @@ them knows its server. So the answer is kept here per draft, filled when a
 board is posted and, at startup, for every board still open, before any of
 them is re-attached. A server given a library by library_tool, which runs in
 its own process, shows the button on boards posted after the next restart.
+
+It also keeps each open board's library line (the Cards field) true. Every
+board in a server with a library -- rental or communal -- listens to that
+library (services/library_events); when it publishes, the line is recomputed
+and, only if it changed, the board is redrawn by update_draft_message, which
+writes the line kept here. A board listens until its teams form, then keeps its
+last line. A check that fails keeps the line it had.
 """
 from datetime import datetime
-from typing import Any
+from typing import Any, Optional
 
 from loguru import logger
 from sqlalchemy import select
@@ -52,4 +60,81 @@ async def load_boards() -> int:
                 DraftSession.deletion_time > datetime.now()))).all()
     _BOARDS.update(str(i) for i in ids)
     logger.info("library: {} open boards carry the Library button", len(ids))
+
+    async with AsyncSessionLocal() as session:
+        any_library = select(LibraryServer.guild_id)
+        rows = (await session.execute(
+            select(DraftSession.session_id, DraftSession.guild_id).where(
+                DraftSession.guild_id.in_(any_library),
+                DraftSession.teams_start_time.is_(None),
+                DraftSession.deletion_time > datetime.now()))).all()
+    from services import library_events
+    for sid, guild in rows:
+        await watch(sid, guild, None)
+        _LINES.pop(str(sid), None)      # unknown until computed: the first redraw writes it
+    for guild in {g for _, g in rows}:
+        library_events.publish_for_guild(guild)
+    logger.info("library: {} open boards watch their library line", len(rows))
     return len(ids)
+
+
+UNTRACKED = object()        # not a library board: leave its Cards field alone
+_LINES: "dict[str, Optional[str]]" = {}
+
+
+def line_for(session_id: Any) -> object:
+    """The board's current library line (a str, or None for "no line"), or
+    UNTRACKED for a board in a server without a library."""
+    return _LINES.get(str(session_id), UNTRACKED)
+
+
+async def watch(session_id: Any, guild_id: Any, line: "Optional[str]") -> None:
+    """Keep this board's line true from now on, starting from ``line``."""
+    from services import library_events, library_service
+
+    lid = await library_service.library_id_for(guild_id)
+    if lid is None:
+        return
+    sid = str(session_id)
+    _LINES[sid] = line
+
+    async def on_change(_library_id: str) -> None:
+        await _recompute(sid)
+
+    library_events.subscribe(sid, on_change, lid)
+
+
+async def _recompute(sid: str) -> None:
+    from cube_views import pack_options
+    from services import library_events
+
+    async with AsyncSessionLocal() as session:
+        draft = (await session.execute(
+            select(DraftSession).where(DraftSession.session_id == sid))).scalar_one_or_none()
+    if not _taking_signups(draft):
+        # The line answers "can I play without owning the cards?", which only
+        # matters while people can still join. The last line stays on the board.
+        library_events.unsubscribe(sid)
+        return
+    assert draft is not None
+    try:
+        line = await pack_options.library_signup_check(draft.cube, draft.guild_id)
+    except pack_options.LibraryLineUnknown:
+        return          # never claim what wasn't checked: keep the board as it is
+    if line == _LINES.get(sid):
+        return
+    _LINES[sid] = line
+    from bot_registry import get_bot
+    await _redraw(get_bot(), sid)
+
+
+async def _redraw(bot: Any, sid: str) -> None:
+    from views import update_draft_message
+    await update_draft_message(bot, sid)
+
+
+def _taking_signups(draft: Any) -> bool:
+    from services.library_reservation import FINISHED_STAGES
+    return (draft is not None and draft.teams_start_time is None
+            and draft.session_stage not in FINISHED_STAGES
+            and (draft.deletion_time is None or draft.deletion_time > datetime.now()))

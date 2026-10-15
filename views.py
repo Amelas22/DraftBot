@@ -2614,6 +2614,14 @@ async def update_draft_message(bot, session_id):
         elif pack_field_index is not None:
             embed.remove_field(pack_field_index)
 
+        # The library line, as the library last told this board (services/library_boards).
+        # UNTRACKED -- a board with no library, or one not computed yet -- is left alone.
+        from services.library_boards import UNTRACKED, line_for
+        from cube_views.pack_options import apply_library_field
+        library_line = line_for(session_id)
+        if library_line is not UNTRACKED:
+            apply_library_field(embed, library_line)
+
         # Get the thumbnail URL for the cube
         thumbnail_url = get_cube_thumbnail_url(draft_session.cube)
         embed.set_thumbnail(url=thumbnail_url)

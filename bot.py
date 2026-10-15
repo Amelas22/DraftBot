@@ -120,6 +120,8 @@ async def main():
         # spent that whole half hour dead behind it.
         # Before any board is re-attached: which ones carry a Library button.
         try:
+            from services.library_publish import install as install_library_publish
+            install_library_publish()
             from services.library_boards import load_boards
             await load_boards()
         except Exception:

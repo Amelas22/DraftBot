@@ -965,6 +965,15 @@ def _fresh_library_bus():
 
 
 @pytest.fixture(autouse=True)
+def _fresh_board_lines():
+    """Board library lines are process-wide; no test may read another's."""
+    from services import library_boards
+    library_boards._LINES.clear()
+    yield
+    library_boards._LINES.clear()
+
+
+@pytest.fixture(autouse=True)
 def _fresh_cube_cache():
     """The cube cache is process-wide; no test may read another's cubes."""
     from helpers import cube_list

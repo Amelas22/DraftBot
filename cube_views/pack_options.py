@@ -7,6 +7,7 @@ without the circular import that ``modals`` -> ``sessions`` -> ``views`` would
 otherwise create.
 """
 import asyncio
+from typing import Any, Optional
 
 import discord
 from loguru import logger
@@ -376,8 +377,13 @@ async def mark_library_cubes(options: list, guild_id, own_session_id=None) -> li
 LIBRARY_FIELD_NAME = "Cards:"
 
 
-async def library_signup_note(cube_id, guild_id) -> "Optional[str]":
-    """One line for the signup board, or None if the library is not involved.
+class LibraryLineUnknown(Exception):
+    """The library line could not be checked; keep whatever the board says."""
+
+
+async def library_signup_check(cube_id, guild_id) -> "Optional[str]":
+    """The board line with its link; None if the library isn't involved.
+    Raises LibraryLineUnknown when it can't be checked.
 
     Whatever it says ends with a link to the library page, which shows what
     the shelf holds and what is out -- the detail a board line has no room for.
@@ -386,6 +392,30 @@ async def library_signup_note(cube_id, guild_id) -> "Optional[str]":
 
     note = await _library_signup_line(cube_id, guild_id)
     return f"{note} {library_page_link()}" if note else None
+
+
+async def library_signup_note(cube_id, guild_id) -> "Optional[str]":
+    """One line for the signup board, or None if the library is not involved or
+    could not be checked -- at posting there is no earlier line to keep."""
+    try:
+        return await library_signup_check(cube_id, guild_id)
+    except LibraryLineUnknown:
+        return None
+
+
+def apply_library_field(embed: Any, line: "Optional[str]") -> None:
+    """Write the library line into a board embed: replaced if present, added just
+    after the Cube field if not, removed when there is none."""
+    index = next((i for i, f in enumerate(embed.fields) if f.name == LIBRARY_FIELD_NAME), None)
+    if line:
+        if index is not None:
+            embed.set_field_at(index, name=LIBRARY_FIELD_NAME, value=line, inline=False)
+            return
+        cube = next((i for i, f in enumerate(embed.fields) if f.name == "Cube:"), None)
+        at = cube + 1 if cube is not None else len(embed.fields)
+        embed.insert_field_at(at, name=LIBRARY_FIELD_NAME, value=line, inline=False)
+    elif index is not None:
+        embed.remove_field(index)
 
 
 async def _library_signup_line(cube_id, guild_id) -> "Optional[str]":
@@ -402,12 +432,13 @@ async def _library_signup_line(cube_id, guild_id) -> "Optional[str]":
     noise on the majority in order to inform a minority.
 
     Never claims coverage it has not checked. If the cube cannot be read, or
-    the ledger cannot be reached, it says nothing rather than promising a deck
-    that may not be there -- which is the exact failure it exists to prevent.
+    the ledger cannot be reached, it raises LibraryLineUnknown rather than
+    promising a deck that may not be there -- which is the exact failure it
+    exists to prevent; the caller keeps whatever line the board already has.
     And a library whose custodian reports it cannot work is said to be offline:
-    the shelf may cover the cube, but nobody can borrow from it. A custodian
-    that did not answer in time is not called offline -- this line stands for
-    the whole draft, and one slow reply is not an outage.
+    the shelf may cover the cube, but nobody can borrow from it. The custodian's
+    state is the health monitor's last poll; before the first poll it is
+    unknown, and an unknown custodian is not called offline.
     """
     from models.library import RENTAL
     from services.card_lending_service import lending_custodian_up
@@ -440,15 +471,17 @@ async def _library_signup_line(cube_id, guild_id) -> "Optional[str]":
         read = read_once(fetch_cube)
         seen = await cube_as_the_library_sees_it(cube_id, fetch=read)
         if not (seen and seen.cards):
-            return None
+            raise LibraryLineUnknown(str(cube_id))
         cards = seen.cards
         available = await library_available(library.id, fetch=read)
         covered = cube_support(cards, available).ok
         up = await custodian
+    except LibraryLineUnknown:
+        raise
     except Exception:
         logger.opt(exception=True).warning(
             "signup board: could not check the library for {}", cube_id)
-        return None
+        raise LibraryLineUnknown(str(cube_id)) from None
     finally:
         if custodian is not None and not custodian.done():
             custodian.cancel()

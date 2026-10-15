@@ -1806,6 +1806,7 @@ async def cleanup_sessions_task(bot):
             current_time = datetime.now()
             window_time = current_time - timedelta(hours=24)
             challenge_time = current_time - timedelta(hours=2)
+            reaped_guilds = set()
             async with AsyncSessionLocal() as db_session:  
                 async with db_session.begin():
                     # Fetch sessions that are past their deletion time and in the deletion window
@@ -1851,6 +1852,7 @@ async def cleanup_sessions_task(bot):
                                 f"{session.session_id}; keeping it for the next pass")
                             continue
                         cancelled_queues.append(session.session_id)
+                        reaped_guilds.add(str(session.guild_id))
                     
                         # Cancel the queue due to inactivity
                         if session.draft_channel_id and session.message_id:
@@ -1882,6 +1884,7 @@ async def cleanup_sessions_task(bot):
                                 f"match {session.tournament_match_id} unfinished; deletion_time extended"
                             )
                             continue
+                        reaped_guilds.add(str(session.guild_id))
                         # Check if channel_ids is not None and is iterable before attempting to iterate
                         if session.channel_ids:
                             for channel_id in session.channel_ids:
@@ -1924,6 +1927,12 @@ async def cleanup_sessions_task(bot):
                         # Commit deletion of challenge
 
                         print(f"{challenge.id} has been removed.")
+
+            # A queue that went quiet is released by its deadline passing, which
+            # writes nothing the session hooks can see; this is the moment it ends.
+            from services.library_events import publish_for_guild
+            for guild in reaped_guilds:
+                publish_for_guild(guild)
 
             # A cancelled queue's manager would otherwise hold its Draftmancer
             # socket until MANAGER_MAX_LIFETIME_MINUTES. Stopped after the commit,

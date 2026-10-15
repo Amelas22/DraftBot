@@ -117,7 +117,10 @@ async def drain() -> None:
 def reset() -> None:
     """Forget every listener and pending delivery. For tests."""
     for task in list(_running.values()) + list(_resolving):
-        task.cancel()
+        try:
+            task.cancel()
+        except RuntimeError:
+            pass        # its loop is already closed, so it can never run again
     _listeners.clear()
     _running.clear()
     _dirty.clear()

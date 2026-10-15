@@ -86,6 +86,14 @@ class BaseSession:
                     # Without it the board just lacks its Library button.
                     logger.exception("signup board: could not check the library for {}",
                                      new_draft_session.session_id)
+                from services.library_boards import watch
+                try:
+                    await watch(new_draft_session.session_id, new_draft_session.guild_id,
+                                self.library_note)
+                except Exception:
+                    # Without it the line stays as posted, as it did before.
+                    logger.exception("signup board: could not watch the library for {}",
+                                     new_draft_session.session_id)
                 view = PersistentView(
                     bot=bot,
                     draft_session_id=new_draft_session.session_id,
