@@ -46,6 +46,7 @@ project-includes = [
     "services/library_access_service.py",
     "services/library_trust_service.py",
     "services/library_events.py",
+    "services/library_publish.py",
     "services/library_boards.py",
     "services/library_prompt.py",
     "services/library_reservation.py",
