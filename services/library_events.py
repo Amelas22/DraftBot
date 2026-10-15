@@ -93,7 +93,6 @@ async def _publish_for_guild(guild_id: str) -> None:
 async def _deliver(lid: str) -> None:
     try:
         while True:
-            had_dirty = lid in _dirty
             _dirty.discard(lid)
             for key, (owner, listener) in list(_listeners.items()):
                 if owner != lid:
@@ -103,7 +102,7 @@ async def _deliver(lid: str) -> None:
                 except Exception:
                     logger.opt(exception=True).warning(
                         "library events: listener {} failed for library {}", key, lid)
-            if not had_dirty and lid not in _dirty:
+            if lid not in _dirty:
                 return
     finally:
         _running.pop(lid, None)

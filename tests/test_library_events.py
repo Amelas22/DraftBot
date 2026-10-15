@@ -13,12 +13,14 @@ async def test_a_burst_merges_into_at_most_two_deliveries():
 
     async def listener(lid):
         calls.append(lid)
-        await gate.wait()
+        if len(calls) == 1:
+            await gate.wait()
 
     bus.subscribe("b1", listener, "lib")
-    for _ in range(10):
-        bus.publish("lib")
+    bus.publish("lib")
     await asyncio.sleep(0)      # first delivery starts and blocks on the gate
+    for _ in range(9):
+        bus.publish("lib")
     gate.set()
     await bus.drain()
 
@@ -83,6 +85,26 @@ async def test_only_that_librarys_listeners_hear_it():
     await bus.drain()
 
     assert heard == [("a", "lib-a")]
+
+
+@pytest.mark.asyncio
+async def test_one_change_during_a_delivery_gets_exactly_one_more():
+    calls = []
+    gate = asyncio.Event()
+
+    async def listener(lid):
+        calls.append(lid)
+        if len(calls) == 1:
+            await gate.wait()
+
+    bus.subscribe("b1", listener, "lib")
+    bus.publish("lib")
+    await asyncio.sleep(0)      # first delivery starts and blocks on the gate
+    bus.publish("lib")          # one change during the first delivery
+    gate.set()
+    await bus.drain()
+
+    assert calls == ["lib", "lib"], "one delivery, plus one for the change during it"
 
 
 @pytest.mark.asyncio
