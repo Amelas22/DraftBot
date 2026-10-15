@@ -381,16 +381,21 @@ class LibraryLineUnknown(Exception):
     """The library line could not be checked; keep whatever the board says."""
 
 
-async def library_signup_check(cube_id, guild_id) -> "Optional[str]":
+async def library_signup_check(cube_id, guild_id,
+                               session_id: Any = None) -> "Optional[str]":
     """The board line with its link; None if the library isn't involved.
     Raises LibraryLineUnknown when it can't be checked.
+
+    `session_id` is the board's own draft, once it exists: whatever that draft
+    has reserved is its own copy, not one held by another queue. At posting
+    there is no draft yet, so nothing is excluded.
 
     Whatever it says ends with a link to the library page, which shows what
     the shelf holds and what is out -- the detail a board line has no room for.
     """
     from services.library_service import library_page_link
 
-    note = await _library_signup_line(cube_id, guild_id)
+    note = await _library_signup_line(cube_id, guild_id, session_id)
     return f"{note} {library_page_link()}" if note else None
 
 
@@ -418,7 +423,8 @@ def apply_library_field(embed: Any, line: "Optional[str]") -> None:
         embed.remove_field(index)
 
 
-async def _library_signup_line(cube_id, guild_id) -> "Optional[str]":
+async def _library_signup_line(cube_id, guild_id,
+                               session_id: Any = None) -> "Optional[str]":
     """The board's library line, without the link.
 
     Answers the question a player deciding whether to join actually has: can I
@@ -473,7 +479,9 @@ async def _library_signup_line(cube_id, guild_id) -> "Optional[str]":
         if not (seen and seen.cards):
             raise LibraryLineUnknown(str(cube_id))
         cards = seen.cards
-        available = await library_available(library.id, fetch=read)
+        available = await library_available(
+            library.id, fetch=read,
+            exclude_session_id=None if session_id is None else str(session_id))
         covered = cube_support(cards, available).ok
         up = await custodian
     except LibraryLineUnknown:
@@ -491,7 +499,7 @@ async def _library_signup_line(cube_id, guild_id) -> "Optional[str]":
         # join that one and fire it (services/library_reservation).
         try:
             from services.library_reservation import joinable_link, queue_holding
-            link = joinable_link(await queue_holding(guild_id, cube_id))
+            link = joinable_link(await queue_holding(guild_id, cube_id, session_id))
         except Exception:
             logger.opt(exception=True).warning(
                 "signup board: could not see who holds {}", cube_id)

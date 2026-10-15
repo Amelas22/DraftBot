@@ -122,6 +122,7 @@ async def library_available(
     library_id: Any,
     fetch: "Optional[Callable[[str], Any]]" = None,
     *, exclude_loan_id: Optional[int] = None,
+    exclude_session_id: Optional[str] = None,
 ) -> "dict[str, int]":
     """What THIS library could actually lend right now: {name: copies}.
 
@@ -139,6 +140,10 @@ async def library_available(
     drafts of the same cube, and the one that reserved second waits. Cards
     somebody has actually collected count whichever draft they came from.
 
+    `exclude_session_id` asks on behalf of that draft: whatever it is holding
+    while it fills is the copy it will use, not one taken from it, so its own
+    reservation is not subtracted.
+
     `fetch` reads a cube's list and defaults to CubeCobra; tests pass their own
     so nothing here reaches the network.
     """
@@ -147,7 +152,8 @@ async def library_available(
     spoken_for = await _on_loan(library_id, exclude_loan_id=exclude_loan_id,
                                 yield_after=since)
     for name, qty in (await _being_drafted(read_once(fetch or fetch_cube), library_id,
-                                           yield_after=since)).items():
+                                           yield_after=since,
+                                           exclude_session_id=exclude_session_id)).items():
         spoken_for[name] = spoken_for.get(name, 0) + qty
 
     available: "dict[str, int]" = {}
@@ -284,7 +290,8 @@ async def _could_collect(library_id: Any, library: Any,
 
 
 async def _being_drafted(fetch: "Callable[[str], Any]", library_id: Any, *,
-                         yield_after: Optional[datetime] = None
+                         yield_after: Optional[datetime] = None,
+                         exclude_session_id: Optional[str] = None,
                          ) -> "dict[str, int]":
     """The full card lists of THIS library's drafts that are underway but not
     yet assigned.
@@ -305,8 +312,8 @@ async def _being_drafted(fetch: "Callable[[str], Any]", library_id: Any, *,
     for them only blocks the people who can. One invited drafter is enough to
     hold all of it: which cards they will end up with is unknown until now.
 
-    A draft whose teams formed after `yield_after` holds nothing: see
-    library_available.
+    A draft whose teams formed after `yield_after`, or the draft named by
+    `exclude_session_id`, holds nothing: see library_available.
     """
     from models.library import RENTAL, Library
     from services.library_reservation import reservations
@@ -356,6 +363,8 @@ async def _being_drafted(fetch: "Callable[[str], Any]", library_id: Any, *,
     for draft in underway:
         if draft.session_stage in FINISHED_STAGES:
             continue
+        if exclude_session_id is not None and str(draft.session_id) == str(exclude_session_id):
+            continue                      # the draft asking: its hold is its own
         if f"draft:{draft.session_id}" in assigned:
             continue                      # its loans speak for it now
         if _later(draft.teams_start_time, yield_after):

@@ -23,9 +23,10 @@ async def _board(sid="d1", guild="g1", **kw):
 @pytest.fixture
 def world(monkeypatch):
     """The board's library answers, and every redraw, recorded."""
-    state = {"line": "🏛️ covered", "redraws": [], "library": "lib"}
+    state = {"line": "🏛️ covered", "redraws": [], "library": "lib", "asked_for": []}
 
-    async def check(_cube, _guild):
+    async def check(_cube, _guild, session_id=None):
+        state["asked_for"].append(session_id)
         if isinstance(state["line"], Exception):
             raise state["line"]
         return state["line"]
@@ -50,6 +51,16 @@ async def test_a_changed_line_is_stored_and_redrawn(test_db, world):
     bus.publish("lib")
     await bus.drain()
     assert boards.line_for("d1") == "⏳ in use" and world["redraws"] == ["d1"]
+
+
+@pytest.mark.asyncio
+async def test_a_board_asks_for_its_own_draft(test_db, world):
+    """So its own queue's reservation is never "another queue"."""
+    await _board()
+    await boards.watch("d1", "g1", "🏛️ covered")
+    bus.publish("lib")
+    await bus.drain()
+    assert world["asked_for"] == ["d1"]
 
 
 @pytest.mark.asyncio

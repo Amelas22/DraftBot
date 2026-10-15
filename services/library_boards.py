@@ -120,7 +120,7 @@ async def _recompute(sid: str) -> None:
         return
     assert draft is not None
     try:
-        line = await pack_options.library_signup_check(draft.cube, draft.guild_id)
+        line = await pack_options.library_signup_check(draft.cube, draft.guild_id, sid)
     except pack_options.LibraryLineUnknown:
         return          # never claim what wasn't checked: keep the board as it is
     # A watched board not in _LINES is pending (loaded at startup, never
