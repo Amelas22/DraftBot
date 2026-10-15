@@ -63,7 +63,8 @@ async def test_missing_entitlement_is_short_even_when_vault_has_it(shelves):
 
 async def test_collecting_own_reservation_and_hidden_vault_card(shelves):
     await donate("a")
-    shelves.stock = {}  # Only the physical listing is truncated.
+    shelves.stock = {}  # Only the physical listing is truncated...
+    shelves.inventory_route = False  # ...which is the /vault fallback.
     loan = await assigned()
     assert await lending.shortfall("ga", CARD, loan) == []
     assert await lending.trim_to_available("ga", loan) == CARD

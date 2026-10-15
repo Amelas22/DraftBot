@@ -92,7 +92,7 @@ async def _hold(cards):
 
 
 def _stocked(monkeypatch, cards):
-    async def _avail():
+    async def _avail(names=()):
         return {c["name"]: c["qty"] for c in cards}
     monkeypatch.setattr(svc, "available_now", _avail)
 

@@ -19,6 +19,7 @@ tell whether the cards ever moved.
 """
 import asyncio
 import time
+from collections.abc import Iterable
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Optional
 
@@ -39,7 +40,7 @@ from helpers.money_gate import linked_username, serve_busy_reason
 from services import wallet_service
 from models.mtgo_job import MtgoJob
 from services.mtgo_tradebot_client import (
-    DEFAULT_WAIT_MINUTES, get_lending_client, max_cards_per_trade,
+    DEFAULT_WAIT_MINUTES, card_key, get_lending_client, max_cards_per_trade,
     too_large,
 )
 
@@ -309,7 +310,7 @@ async def on_inflow(guild_id: Any, player_id: Any, *a: Any, **k: Any) -> Any:
 _PROMISED_STATES = ("out_pending", "dispatch_unknown")
 
 
-async def available_now() -> "dict[str, int]":
+async def available_now(names: "Iterable[str]" = ()) -> "dict[str, int]":
     """What the library can lend right now.
 
     The vault is what it physically holds, which already excludes anything a
@@ -321,19 +322,47 @@ async def available_now() -> "dict[str, int]":
     Promises count wherever they were made. One shelf serves every server, so
     counting only this server's offers would let two people in two servers each
     be offered a trade for the same stack.
+
+    Read from the serve's full inventory, so every name in `names` gets an
+    answer and an unlisted one is a card the shelf holds NONE of -- but only
+    when the serve calls its snapshot consistent. One taken before a trade that
+    is running or just finished may predate a return, and reading its zero as a
+    fact would refuse cards that are sitting right there; a serve too old to
+    have /inventory answers from the truncated /vault, which is never
+    consistent. Then an absent name means "not listed", and callers read it as
+    present -- see the `.get(name, want)` at each of them.
     """
-    client = get_lending_client()
-    vault = await client.vault()
-    stock = {i["name"]: i["qty"] for i in ((vault or {}).get("top") or [])}
+    inventory = await get_lending_client().inventory(fallback_to_vault=True)
+    if inventory is None:
+        return {}
+    # Everything on the shelf in the vault's spelling...
+    stock = inventory.by_name(key=str)
+    # ...and, from a reading that can be trusted, every asked name in the
+    # caller's spelling, zero when it is not there.
+    #
+    # One physical stack per card: when the caller asks under two spellings of
+    # one card (the ledger keeps each donor's), the first gets the stack and the
+    # rest get zero. Giving each the full count would let a caller summing them
+    # lend the same copies twice.
+    if inventory.consistent:
+        held = inventory.by_name()
+        for name in dict.fromkeys(names):
+            stock[name] = held.pop(card_key(name), 0)
     async with AsyncSessionLocal() as session:
         promised = (await session.scalars(
             select(CardLoan).where(
                 CardLoan.state.in_(_PROMISED_STATES)))).all()
+    # Matched by card_key, as the lookup above is: a promise spelled
+    # "lightning bolt" draws down the same stack as a request for "Lightning
+    # Bolt", and missing that offers one copy twice.
+    by_key: "dict[str, list[str]]" = {}
+    for name in stock:
+        by_key.setdefault(card_key(name), []).append(name)
     for loan in promised:
         # What was actually offered: a partial deck promises only its own cards.
         for item in loan.offered_cards:
-            if item["name"] in stock:
-                stock[item["name"]] -= item["qty"]
+            for name in by_key.get(card_key(item["name"]), ()):
+                stock[name] -= item["qty"]
     return {name: max(0, qty) for name, qty in stock.items()}
 
 
@@ -418,7 +447,8 @@ async def shortfall(guild_id: Any, cards: "list[dict[str, Any]]",
                     loan_id: Optional[int] = None) -> "list[dict[str, Any]]":
     """Which of these cards the library cannot fully cover, and by how much.
 
-    Ledger absence means zero entitlement; only the vault is truncated.
+    Ledger absence means zero entitlement. Physical absence is zero only on a
+    consistent /inventory reading; see available_now.
     A collecting loan may use its own reservation, but not another loan's.
     """
     if loan_id is not None:
@@ -475,8 +505,8 @@ async def lendable_now(library_id: Any, *, exclude_loan_id: Optional[int] = None
     """
     if not library_id:
         return {}
-    physical = await available_now()
     entitled = await library_available(library_id, exclude_loan_id=exclude_loan_id)
+    physical = await available_now(entitled)
     # The ledger is authoritative about ENTITLEMENT, so a card it has no rows
     # for is one this library holds none of -- it was deposited to somebody
     # else, or to nobody. Absent therefore means zero here, unlike the vault,

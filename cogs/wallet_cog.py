@@ -10,6 +10,7 @@ Player commands (all under /wallet):
 Admin commands live in their own group, as /debt-admin does:
 - /wallet-admin show @p   read another player's wallet; logged
 - /wallet-admin reconcile audit: physical vault tix == SUM of all wallets
+- /wallet-admin reconcile-cards  audit: library cards in the account == the library ledger
 
 Gating: enabled only on money servers with the TradeBot integration configured
 (MTGO_TRADEBOT_URL + _TOKEN). Deposits/withdraws require the caller to have linked their
@@ -27,6 +28,7 @@ from loguru import logger
 
 from models.mtgo_account import MtgoAccount
 from services import wallet_service
+from services import inventory_reconcile
 from services import mtgo_resolution_service as resolution
 from services import tournament_escrow_service as escrow
 from services.mtgo_tradebot_client import DEFAULT_MAX_CARDS_PER_TRADE, EVENT_TICKET
@@ -381,7 +383,7 @@ class WalletCommands(commands.Cog):
             f"Sent **{amount} tix** to <@{player.id}>. Your balance: **{payer_bal} tix**.",
             ephemeral=True)
 
-    # ----- /wallet reconcile (admin) -----
+    # ----- /wallet-admin reconcile, reconcile-cards (admin) -----
     @wallet_admin.command(
         name="reconcile", description="[Admin] Audit: vault tix vs. total of all wallets")
     @has_bot_manager_role()
@@ -390,20 +392,31 @@ class WalletCommands(commands.Cog):
         err = gate_serve(ctx)
         if err:
             return await ctx.followup.send(err, ephemeral=True)
+        audit = await inventory_reconcile.audit_tix()  # global: one vault across guilds
+        await ctx.followup.send(embed=_audit_embed(
+            "Wallet Reconciliation", audit.verdict, inventory_reconcile.describe_tix(audit)),
+            ephemeral=True)
 
-        res = await resolution.reconcile()  # global: one vault across guilds
-        if res.get("error"):
-            return await ctx.followup.send(f"Couldn't reconcile: {res['error']}", ephemeral=True)
+    @wallet_admin.command(
+        name="reconcile-cards",
+        description="[Admin] Audit: library cards in the MTGO account vs. the library ledger")
+    @has_bot_manager_role()
+    async def wallet_reconcile_cards(self, ctx: discord.ApplicationContext):
+        await ctx.defer(ephemeral=True)
+        # No gate_serve: that checks the tix custodian, and the library is its own
+        # account. An unconfigured library serve audits as UNREADABLE and says so.
+        audit = await inventory_reconcile.audit_library_cards()  # one shelf across guilds
+        await ctx.followup.send(embed=_audit_embed(
+            "Library Card Reconciliation", audit.verdict,
+            inventory_reconcile.describe_cards(audit)), ephemeral=True)
 
-        color = discord.Color.green() if res["ok"] else discord.Color.red()
-        embed = discord.Embed(title="Wallet Reconciliation", color=color)
-        embed.add_field(name="Vault tix (physical)", value=str(res["bot_tix"]), inline=True)
-        embed.add_field(name="Wallets total (claims)", value=str(res["wallet_total"]), inline=True)
-        embed.add_field(name="Difference", value=f"{res['diff']:+d}", inline=True)
-        embed.set_footer(text="✅ Balanced" if res["ok"]
-                         else "⚠️ MISMATCH — the vault and the ledger disagree.")
-        await ctx.followup.send(embed=embed, ephemeral=True)
 
+def _audit_embed(title: str, verdict: str, text: str) -> discord.Embed:
+    color = {inventory_reconcile.CLEAN: discord.Color.green(),
+             inventory_reconcile.MISMATCH: discord.Color.red()}.get(verdict, discord.Color.orange())
+    # An embed description holds 4096 characters; the audit text is capped well
+    # under that by describe_*, and this is the backstop.
+    return discord.Embed(title=title, description=text[:4000], color=color)
 
 def setup(bot):
     bot.add_cog(WalletCommands(bot))

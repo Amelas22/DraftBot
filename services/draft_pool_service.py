@@ -2,8 +2,8 @@
 
 Mirrors services/tournament_escrow_service.py deliberately. The pool is a
 synthetic wallet holder, so every movement is an ordinary transfer between two
-holders -- the system total never changes and wallet_service.reconcile keeps
-working untouched.
+holders -- the system total never changes and the tix audit
+(inventory_reconcile.audit_tix) keeps working untouched.
 
 Nothing here books a debt. That is the point: an entry that cannot be funded is
 refused, so playing can never leave a player owing.

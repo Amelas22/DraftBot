@@ -30,7 +30,7 @@ LIBRARY = "lib"
 @pytest.fixture
 def serve(monkeypatch):
     from conftest import FakeLendingServe
-    client = FakeLendingServe()
+    client = FakeLendingServe({"Swamp": 99})  # the shelf has the deck
     monkeypatch.setattr(svc, "get_lending_client", lambda: client)
 
     async def handle(_):

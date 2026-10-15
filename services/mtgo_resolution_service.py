@@ -1311,15 +1311,3 @@ async def auto_draw(guild_id: str, player_id: str) -> list[dict[str, Any]]:
     if settlements:
         logger.info(f"auto_draw: {player_id} settled {len(settlements)} debt(s) from wallet")
     return settlements
-
-
-# ---------------------------------------------------------------------------
-# reconciliation passthrough (physical vault tix == SUM settled wallets)
-# ---------------------------------------------------------------------------
-async def reconcile() -> dict[str, Any]:
-    """Pull the vault's live tix from the serve and compare to the wallet claim total."""
-    client = get_client()
-    bot_tix = await client.bot_tix()
-    if bot_tix is None:
-        return {"ok": False, "error": "could not read vault tix from serve"}
-    return await wallet_service.reconcile(bot_tix)

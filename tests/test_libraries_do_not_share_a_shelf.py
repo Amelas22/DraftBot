@@ -102,7 +102,7 @@ async def test_an_unbound_server_draws_on_nothing():
 
 
 def _stock(cards):
-    async def _now():
+    async def _now(names=()):
         return dict(cards)
     return _now
 

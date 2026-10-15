@@ -167,6 +167,10 @@ async def main():
         # every stranded loan and hold.
         from services.card_lending_service import lending_jobs_watchdog
         ensure_running(bot, "_lending_watchdog_task", lambda: lending_jobs_watchdog(bot))
+        # Every 30 min, both accounts' physical holdings against the ledgers;
+        # DMs the serve alert recipient when a mismatch persists. Read-only.
+        from services.inventory_reconcile import inventory_audit_watchdog
+        ensure_running(bot, "_inventory_audit_task", lambda: inventory_audit_watchdog(bot))
         logger.info("Re-registered team finder")
 
     @bot.event

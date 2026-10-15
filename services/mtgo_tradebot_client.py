@@ -17,8 +17,9 @@ import json as jsonlib
 import os
 import time
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import aiohttp
 from loguru import logger
@@ -167,6 +168,74 @@ def _order_body(user: str, cards, qty: int, commit: bool,
     else:
         body["cards"], body["qty"] = list(cards), qty
     return body
+
+
+def card_key(name: str) -> str:
+    """How card names are compared across the vault and the ledger: trimmed and
+    case-folded, the same normalisation debt_service groups card rows by."""
+    return name.strip().lower()
+
+
+@dataclass(frozen=True)
+class Inventory:
+    """One ``GET /inventory`` reply: what the account physically holds.
+
+    ``consistent`` is the serve saying nothing could have moved between its scan
+    and this reply -- no trade running, none completed since. A difference against
+    an inconsistent reading may be the trade in flight, so only a consistent one is
+    evidence of a discrepancy. ``cards`` are ``(cat_id, name, qty)`` per printing.
+    """
+    consistent: bool
+    tix: int
+    cards: "tuple[tuple[int, str, int], ...]"
+
+    @classmethod
+    def parse(cls, body: Any) -> "Optional[Inventory]":
+        """The reply as an Inventory, or None for anything that is not a usable one.
+
+        Strict on purpose: a reply missing its card list must not read as "the
+        account holds nothing", which is the most expensive wrong answer a
+        reconciler can be given.
+        """
+        if not isinstance(body, dict) or body.get("available") is not True:
+            return None
+        rows = body.get("cards")
+        if not isinstance(rows, list) or not isinstance(body.get("tix"), int):
+            return None
+        cards = []
+        for row in rows:
+            if not isinstance(row, dict):
+                return None
+            cat_id, name, qty = row.get("catId"), row.get("name"), row.get("qty")
+            if not (isinstance(cat_id, int) and isinstance(name, str) and isinstance(qty, int)):
+                return None
+            cards.append((cat_id, name, qty))
+        return cls(consistent=body.get("consistent") is True, tix=body["tix"],
+                   cards=tuple(cards))
+
+    @classmethod
+    def from_vault(cls, body: Any) -> "Optional[Inventory]":
+        """A ``GET /vault`` reply as an Inventory, for a serve that predates
+        /inventory. Never consistent: the vault lists only its largest holdings, so
+        a card it leaves out is unknown, not absent -- which is exactly what an
+        inconsistent reading already means to every caller.
+
+        Remove once every serve has /inventory.
+        """
+        if not isinstance(body, dict) or body.get("available") is not True:
+            return None
+        top = [(0, str(i["name"]), int(i["qty"])) for i in (body.get("top") or [])
+               if isinstance(i, dict) and "name" in i and "qty" in i]
+        return cls(consistent=False, tix=int(body.get("tix") or 0), cards=tuple(top))
+
+    def by_name(self, key: "Callable[[str], str]" = card_key) -> "dict[str, int]":
+        """Copies per card, every printing folded together. Keyed by card_key by
+        default; pass ``key=str`` to keep the vault's own spelling."""
+        out: "dict[str, int]" = {}
+        for _, name, qty in self.cards:
+            k = key(name)
+            out[k] = out.get(k, 0) + qty
+        return out
 
 
 class MtgoTradeBotClient:
@@ -393,6 +462,32 @@ class MtgoTradeBotClient:
         """{available, custodian, tix, distinct, top[]} — used to reconcile physical == Σ wallets."""
         return await self._call("GET", "/vault")
 
+    async def inventory(self, refresh: bool = False,
+                        fallback_to_vault: bool = False) -> "Optional[Inventory]":
+        """Everything the account holds, per printing (``GET /inventory``), or None
+        when it cannot be read: the serve is unreachable, predates the route (404),
+        has never completed a scan, or answered in a shape this does not recognise.
+
+        Unlike ``vault()`` the listing is complete, so -- when ``consistent`` -- a
+        card it does not list is a card the account holds none of.
+
+        ``refresh`` makes the serve scan afresh (a scan begun after this request).
+        Its cache only knows about trades the serve itself completed, so an audit
+        asks for it; it costs a full collection scan, which a stock check does not
+        need to pay for.
+
+        ``fallback_to_vault`` answers from ``/vault`` when ``/inventory`` cannot
+        be read, as an inconsistent Inventory (see Inventory.from_vault). Stock
+        checks want that; audits do not, since a partial listing can only ever be
+        UNSETTLED for them.
+        """
+        body = await self._call("GET", "/inventory",
+                                params={"refresh": "1"} if refresh else None)
+        inventory = Inventory.parse(body)
+        if inventory is None and fallback_to_vault:
+            inventory = Inventory.from_vault(await self.vault())
+        return inventory
+
     async def list_jobs(self) -> Optional[list]:
         """The serve's jobs, or None unless the reply really is a job listing -- a reply
         that isn't must never pass for "no jobs" to a caller deciding something on it."""
@@ -583,13 +678,6 @@ class MtgoTradeBotClient:
 
     async def withdraw_tix(self, user: str, n: int, commit: bool = True, wait_minutes: int = 0):
         return await self.give(user, EVENT_TICKET, n, commit=commit, wait_minutes=wait_minutes)
-
-    async def bot_tix(self) -> Optional[int]:
-        """Physical tix the bot currently holds (for the reconciliation audit). None if unavailable."""
-        v = await self.vault()
-        if not v or not v.get("available"):
-            return None
-        return v.get("tix")
 
 
 # Lazy module-level singleton (env is loaded by bot.py's load_dotenv() before cogs import).

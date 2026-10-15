@@ -167,7 +167,7 @@ async def test_a_charging_cube_refuses_before_any_cards_move(test_db, monkeypatc
     """
     from conftest import FakeLendingServe
 
-    client = FakeLendingServe()
+    client = FakeLendingServe({"Swamp": 4})  # the shelf has the deck
     monkeypatch.setattr(svc, "get_lending_client", lambda: client)
 
     async def handle(_):

@@ -27,7 +27,7 @@ holder (see SYSTEM_IN_FLIGHT). While the trade is open those tix belong to that 
 so they're unspendable by the player without any special-casing in the balance query.
 Success books the boundary debit against in-flight; failure transfers them back.
 
-Reconciliation: ``reconcile()`` asserts vault tix == SUM(all wallet rows).
+Reconciliation: services/inventory_reconcile.audit_tix checks vault tix == SUM(all wallet rows).
 """
 import asyncio
 import uuid
@@ -97,7 +97,6 @@ def library_scope(library_id) -> str:
     if library_id is None or not str(library_id).strip():
         raise ValueError("A card movement must name its library")
     return f"{LIBRARY_SCOPE}:{library_id}"
-
 
 
 def prize_wallet_id(tournament_id) -> str:
@@ -421,16 +420,3 @@ async def adjust(guild_id: str, player_id: str, amount: int, notes: str, created
 # ---------------------------------------------------------------------------
 # reconciliation audit: physical vault tix == SUM(all wallet rows)
 # ---------------------------------------------------------------------------
-async def reconcile(bot_tix: int) -> dict:
-    """Compare the physical vault tix (from the serve ``/vault``) to the claim total.
-
-    Both sides are global (one custodian, one claim ledger). In-flight withdraws are
-    included: those tix are still physically in the vault until the trade completes, and
-    the in-flight holder still owns the matching claim, so both sides move together.
-    Returns {ok, wallet_total, bot_tix, diff}; ok when they match exactly."""
-    wallet_total = await total_wallets()
-    diff = bot_tix - wallet_total
-    ok = diff == 0
-    if not ok:
-        logger.warning(f"RECONCILE MISMATCH: bot_tix={bot_tix} wallets={wallet_total} diff={diff:+d}")
-    return {"ok": ok, "wallet_total": wallet_total, "bot_tix": bot_tix, "diff": diff}

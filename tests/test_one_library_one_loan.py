@@ -14,6 +14,7 @@ import pytest
 from database.db_session import AsyncSessionLocal
 from models.card_loan import CardLoan
 import services.card_lending_service as svc
+from conftest import FakeLendingServe
 
 pytestmark = pytest.mark.asyncio
 
@@ -83,14 +84,7 @@ async def test_cards_promised_in_one_server_are_not_offered_in_another(test_db,
     accepted -- those cards are still physically on the shelf. Counting only
     this server's offers would let two people in different servers each be
     offered a trade for the same stack."""
-    class _Serve:
-        enabled = True
-
-        async def vault(self):
-            return {"available": True, "custodian": "Team01",
-                    "top": [{"name": "Swamp", "qty": 4}]}
-
-    monkeypatch.setattr(svc, "get_lending_client", lambda: _Serve())
+    monkeypatch.setattr(svc, "get_lending_client", lambda: FakeLendingServe({"Swamp": 4}))
     await _loan(AWAY, state="out_pending")
 
     assert (await svc.available_now())["Swamp"] == 0

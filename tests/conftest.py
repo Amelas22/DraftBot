@@ -58,6 +58,7 @@ from models.draft_session import DraftSession
 from models.match import MatchResult
 from models.stake import StakeInfo
 from models.tournament import TournamentMatch
+from services.mtgo_tradebot_client import Inventory
 from services.tournament_service import create_tournament, register_team, start_tournament
 
 
@@ -660,8 +661,11 @@ class FakeLendingServe:
     url = "http://fake-serve"
 
     def __init__(self, stock=None, jobs=None, job=None, job_id="job-1",
-                 response=_UNSET):
+                 response=_UNSET, inventory_route=True, consistent=True, tix=0):
         self.stock = dict(stock or {})
+        self.inventory_route = inventory_route
+        self.consistent = consistent
+        self.tix = tix
         self.jobs = dict(jobs or {})
         self.job = job
         self.job_id = job_id
@@ -679,6 +683,19 @@ class FakeLendingServe:
     async def vault(self):
         return {"available": True, "custodian": "Team01",
                 "top": [{"name": n, "qty": q} for n, q in self.stock.items()]}
+
+    async def inventory(self, refresh=False, fallback_to_vault=False):
+        """The full listing: a card not in `stock` is one the shelf holds none of.
+
+        With `inventory_route` off this is a serve that predates /inventory:
+        None, or -- when the caller asks -- the client's fallback to the
+        truncated vault."""
+        if not self.inventory_route:
+            return Inventory.from_vault(await self.vault()) if fallback_to_vault else None
+        return Inventory.parse({
+            "available": True, "consistent": self.consistent, "tix": self.tix,
+            "cards": [{"catId": i + 1, "name": n, "qty": q}
+                      for i, (n, q) in enumerate(self.stock.items())]})
 
     # -- trades ----------------------------------------------------------
     def _accept(self):
