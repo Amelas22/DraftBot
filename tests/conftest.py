@@ -953,3 +953,12 @@ def library_locks(monkeypatch):
     import services.library_reservation as resv
     monkeypatch.setattr(resv, "_RESERVE_LOCK", asyncio.Lock())
     monkeypatch.setattr(resv, "_LISTS_LOCK", asyncio.Lock())
+
+
+@pytest.fixture(autouse=True)
+def _fresh_library_bus():
+    """The library bus is process-wide; no test may hear another's listeners."""
+    from services import library_events
+    library_events.reset()
+    yield
+    library_events.reset()
