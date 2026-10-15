@@ -123,15 +123,25 @@ async def test_a_short_library_reports_how_short_per_card(test_db, monkeypatch):
 async def test_a_card_the_vault_never_lists_is_not_assumed_missing(test_db, monkeypatch):
     """The two absences read opposite ways round, and this is the vault one.
 
-    /vault truncates its listing, so a card missing from it is unknown rather
-    than gone -- refusing on unknown would block legitimate borrows, and the
-    trade itself will say so if we are wrong. A card missing from the LEDGER
-    is the other case entirely: nobody gave this library that card, and lending
-    it would be spending another library's stock. So this card is entitled in
-    the ledger (see the fixture) and simply not listed by the vault."""
-    monkeypatch.setattr(svc, "get_lending_client", lambda: FakeLendingServe({"Swamp": 24}))
+    On a serve without /inventory, /vault truncates its listing, so a card
+    missing from it is unknown rather than gone -- refusing on unknown would
+    block legitimate borrows, and the trade itself will say so if we are wrong.
+    A card missing from the LEDGER is the other case entirely: nobody gave this
+    library that card, and lending it would be spending another library's
+    stock. So this card is entitled in the ledger (see the fixture) and simply
+    not listed by the vault."""
+    monkeypatch.setattr(svc, "get_lending_client",
+                        lambda: FakeLendingServe({"Swamp": 24}, inventory_route=False))
     short = await svc.shortfall(GUILD, [{"name": "Some Hidden Card", "qty": 1}])
     assert short == []
+
+
+async def test_a_card_the_full_inventory_does_not_list_is_missing(test_db, monkeypatch):
+    """/inventory lists the whole account, so there an unlisted card is a card
+    the shelf holds none of -- entitled in the ledger or not."""
+    monkeypatch.setattr(svc, "get_lending_client", lambda: FakeLendingServe({"Swamp": 24}))
+    short = await svc.shortfall(GUILD, [{"name": "Some Hidden Card", "qty": 1}])
+    assert short == [{"name": "Some Hidden Card", "want": 1, "have": 0}]
 
 
 async def test_taking_what_there_is_returns_the_offer(test_db, monkeypatch):

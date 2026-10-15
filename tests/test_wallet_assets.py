@@ -158,11 +158,14 @@ async def test_boundary_rows_are_tix(test_db):  # noqa: F811
 
 
 @pytest.mark.asyncio
-async def test_reconcile_counts_tix_only(test_db):  # noqa: F811
+async def test_the_tix_audit_counts_tix_only(test_db):  # noqa: F811
+    from conftest import FakeLendingServe
+    from services import inventory_reconcile
+
     await wallet_service.credit_done(G, P, 12, job_id="j1")
     await wallet_service.adjust(G, P, 99, "n", "t", asset="other")
-    result = await wallet_service.reconcile(bot_tix=12)
-    assert result["ok"] and result["wallet_total"] == 12
+    audit = await inventory_reconcile.audit_tix(FakeLendingServe(tix=12))
+    assert audit.verdict == inventory_reconcile.CLEAN and audit.wallet_total == 12
 
 
 # ---------------------------------------------------------------------------

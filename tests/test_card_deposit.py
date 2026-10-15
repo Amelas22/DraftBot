@@ -45,7 +45,7 @@ def rig(monkeypatch):
 
 def _stock(stock):
     """available_now, stubbed: what the library can physically hand over."""
-    async def _avail():
+    async def _avail(names=()):
         return dict(stock)
     return _avail
 

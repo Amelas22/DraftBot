@@ -273,13 +273,14 @@ async def _start_withdrawal(guild_id: Any, owner_id: Any,
         return ("too_large", f"{total} cards, and MTGO moves "
                              f"{max_cards_per_trade()} in one trade")
 
-    stock = await available_now()
+    stock = await available_now(c["name"] for c in asked)
     entitled = await library_available(library_id)
-    # An unlisted card reads as PRESENT, not missing: /vault truncates its
-    # listing, so absence is not evidence of absence, and a deposit of any size
-    # runs off the end of it. Refusing on unknown would turn the normal case
-    # into "your cards are out on loan" when they are sitting right there. If
-    # we are wrong the trade says so, which is the same answer a minute later.
+    # Every asked name is in `stock` when the serve has /inventory, and a zero
+    # there is a real zero. Only the /vault fallback can leave one out, because
+    # it truncates its listing: then an unlisted card reads as PRESENT, not
+    # missing, since refusing on unknown would turn the normal case into "your
+    # cards are out on loan" when they are sitting right there. If we are wrong
+    # the trade says so, which is the same answer a minute later.
     out = []
     for card in asked:
         want = int(card["qty"])
