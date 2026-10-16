@@ -84,7 +84,8 @@ async def book_donation_debts(guild_id: str, session_id: str, winners: list[str]
                               losers: list[str], bot_id: str) -> list[str]:
     """Book each loser's share as a debt to DraftBot. Returns who THIS call booked.
 
-    Keyed per (draft, loser), so a replay books nothing twice. Shares come from
+    Books once per draft: any existing donation row for it means a replay or a
+    corrected result, and nothing more is booked. Shares come from
     team creation; a draft a crash left without them is levelled here from the
     declared entries rather than settling for nothing.
     """
@@ -96,15 +97,23 @@ async def book_donation_debts(guild_id: str, session_id: str, winners: list[str]
 
     booked: list[str] = []
     async with _DONATION_LOCK, db_session() as session:
-        keys = [donation_source_id(session_id, p) for p in losers]
-        existing = set((await session.execute(
-            select(DebtLedger.source_id).where(
+        already = (await session.execute(
+            select(DebtLedger.id).where(
+                DebtLedger.guild_id == guild_id,
                 DebtLedger.source_type == DONATION_SOURCE,
-                DebtLedger.source_id.in_(keys)))).scalars().all())
+                DebtLedger.source_id.like(f"{DONATION_SOURCE}:{session_id}:%"))
+            .limit(1))).first()
+        if already is not None:
+            # The first decision owns the money. Keys are per loser, so a
+            # correction that flips the result would otherwise book the other
+            # team too and collect from both sides.
+            logger.warning(f"donation draft {session_id}: already booked; a corrected "
+                           f"result does not move donation money")
+            return []
         for loser in losers:
             amount = shares.get(loser, 0)
             key = donation_source_id(session_id, loser)
-            if amount <= 0 or key in existing:
+            if amount <= 0:
                 continue
             note = f"Donation draft {session_id}: share owed to DraftBot"
             session.add(DebtLedger(guild_id=guild_id, player_id=loser,

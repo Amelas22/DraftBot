@@ -108,3 +108,25 @@ async def test_without_draftbots_id_nothing_is_booked_and_the_next_report_retrie
 
     await settle_decided_draft("d1")
     assert len(await _donation_rows()) == 4
+
+
+@pytest.mark.asyncio
+async def test_a_corrected_result_never_moves_donation_money(test_db):
+    """Decided for A, then corrected to B: only the first decision's losers owe."""
+    from sqlalchemy import update
+    from models.match import MatchResult
+
+    await _donation_draft(A_WINS)
+    await settle_decided_draft("d1")
+    before = sorted((r.player_id, r.source_id, r.amount) for r in await _donation_rows())
+
+    async with db_session() as s:
+        await s.execute(update(MatchResult).where(MatchResult.session_id == "d1")
+                        .values(winner_id="201"))
+    await settle_decided_draft("d1")
+
+    rows = await _donation_rows()
+    assert not [r for r in rows if r.player_id in ("101", "102")
+                or r.counterparty_id in ("101", "102")], "the new losers were booked"
+    assert sorted((r.player_id, r.source_id, r.amount) for r in rows) == before
+    assert await debt_service.get_balance_with("g", "101", BOT) == 0
