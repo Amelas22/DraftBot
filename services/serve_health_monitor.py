@@ -43,8 +43,9 @@ serve wedged, bot healthy. The gap that leaves is deliberate: a bot that is
 itself down alerts nobody here, but that case announces itself, because every
 command in every server stops answering at once.
 
-One serve per task. The lending library's custodian will want its own call;
-the guard is keyed by URL so a second one is admitted rather than dropped.
+One serve per task. The lending library's custodian has its own call (started
+in bot.py); the guard is keyed by URL so a second one is admitted rather than
+dropped.
 """
 import asyncio
 import time
@@ -97,6 +98,15 @@ ALERT_ENV = "SERVE_ALERT_DISCORD_ID"
 # reconnects, so a second watcher for the SAME serve must be refused -- but a
 # different serve has to be admitted, which a single flag could not express.
 _watching: "set[str]" = set()
+
+# Each watched serve's last probed state, by URL, for readers that need "is it up"
+# without probing it themselves (the library's board line).
+_last: "dict[str, str]" = {}
+
+
+def last_state(url: str) -> Optional[str]:
+    """The watched serve's last probed state, or None before its first poll."""
+    return _last.get(url)
 
 
 def _claim(url: str) -> bool:
@@ -341,13 +351,26 @@ async def watch_serve_health(bot: Any, *, name: str = "MTGO custodian",
                              url: Optional[str] = None,
                              token: Optional[str] = None,
                              alert_to: Optional[str] = None,
-                             canary: bool = True) -> None:
+                             canary: bool = True,
+                             env_names: "tuple[str, str]" = ("MTGO_TRADEBOT_URL",
+                                                             "MTGO_TRADEBOT_TOKEN"),
+                             on_change: Optional[Callable[[bool], None]] = None,
+                             disabled_without: Optional[str] = None) -> None:
     """Poll one serve forever and DM the maintainer when it is not right.
 
     Configuration comes from the trade client by default, so the two cannot
     drift: a renamed env var or an added fallback fixes the trade path and
     would otherwise leave the watcher probing an address nobody uses.
+
+    `disabled_without` names what reads this watcher's state (through
+    `on_change` or last_state); when the watcher cannot start, that is logged
+    at ERROR as disabled, because nothing else will say so.
     """
+    def not_started() -> None:
+        if disabled_without:
+            logger.error("serve health: the {} is not watched, so {} is disabled",
+                         name, disabled_without)
+
     try:
         import os
         from notification_service import send_dm
@@ -360,14 +383,15 @@ async def watch_serve_health(bot: Any, *, name: str = "MTGO custodian",
                     else os.getenv(ALERT_ENV, "").strip())
 
         missing = [n for n, v in ((ALERT_ENV, alert_to),
-                                  ("MTGO_TRADEBOT_URL", url),
-                                  ("MTGO_TRADEBOT_TOKEN", token)) if not v]
+                                  (env_names[0], url),
+                                  (env_names[1], token)) if not v]
         if missing:
             # WARNING, not INFO: "the thing that watches the money service is
             # not running" is not a routine fact, and it names which value is
             # missing rather than leaving the reader to guess among three.
             logger.warning("serve health: NOT WATCHING — {} not set. The {} has "
                            "no monitor.", ", ".join(missing), name)
+            not_started()
             return
         try:
             int(alert_to)
@@ -378,10 +402,14 @@ async def watch_serve_health(bot: Any, *, name: str = "MTGO custodian",
                          "user id (Developer Mode, right-click the user, Copy "
                          "User ID). The {} has no monitor.", ALERT_ENV, alert_to,
                          name)
+            not_started()
             return
         if not _claim(url):
+            # Also when two serves are configured with one URL: the other
+            # watcher holds it, and its state changes reach only its own caller.
             logger.warning("serve health: already watching {} — not starting a "
                            "second watcher for it", name)
+            not_started()
             return
     except Exception:
         # Setup lives inside the guard too. An import or a client construction
@@ -390,6 +418,7 @@ async def watch_serve_health(bot: Any, *, name: str = "MTGO custodian",
         logger.opt(exception=True).critical(
             "serve health: could not start the watcher for {} — it has no "
             "monitor", name)
+        not_started()
         return
 
     try:
@@ -414,7 +443,8 @@ async def watch_serve_health(bot: Any, *, name: str = "MTGO custodian",
                 logger.opt(exception=True).error(
                     "serve health: the startup check-in to {} failed; watching "
                     "anyway", alert_to)
-        await _poll_forever(bot, name, url, token, alert_to, send_dm)
+        await _poll_forever(bot, name, url, token, alert_to, send_dm,
+                            on_change=on_change)
     except asyncio.CancelledError:
         logger.warning("serve health: watcher for {} cancelled — it is no longer "
                        "being monitored", name)
@@ -431,13 +461,22 @@ async def watch_serve_health(bot: Any, *, name: str = "MTGO custodian",
 
 
 async def _poll_forever(bot: Any, name: str, url: str, token: str, alert_to: str,
-                        send_dm: Callable[..., Awaitable[bool]]) -> None:
+                        send_dm: Callable[..., Awaitable[bool]], *,
+                        on_change: Optional[Callable[[bool], None]] = None) -> None:
     alerter = Alerter(name=name)
     polls = 0
     while True:
         try:
             state, detail = await probe(url, token)
             polls += 1
+            before = _last.get(url)
+            _last[url] = state
+            if on_change is not None and (before is None or (before == "ok") != (state == "ok")):
+                # Its own try: a listener must never cost the monitor a poll.
+                try:
+                    on_change(state == "ok")
+                except Exception:
+                    logger.opt(exception=True).error("serve health: on_change failed")
             if state != "ok":
                 logger.warning("serve health: {} — {}", state, detail)
             if polls % HEARTBEAT_EVERY == 0:

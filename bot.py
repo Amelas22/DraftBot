@@ -120,10 +120,13 @@ async def main():
         # spent that whole half hour dead behind it.
         # Before any board is re-attached: which ones carry a Library button.
         try:
+            from services.library_publish import install as install_library_publish
+            install_library_publish()
             from services.library_boards import load_boards
             await load_boards()
         except Exception:
-            # Every open library board loses its Library button on re-attach.
+            # Boards not yet loaded lose their Library button on re-attach, and
+            # open boards' library lines won't update until the next restart.
             logger.exception("Error loading library boards")
         from debt_views.settle_views import PublicSettleDebtsView
         bot.add_view(PublicSettleDebtsView())
@@ -156,6 +159,18 @@ async def main():
         # unconditional start would replace the live watcher's reference with a
         # finished no-op's.
         ensure_running(bot, "_serve_health_task", lambda: watch_serve_health(bot))
+        # The lending library's custodian, watched the same way. Its flips publish
+        # to every library -- they share the one lending account -- so a board's
+        # "library is offline" appears and clears on its own.
+        from services.card_lending_service import get_lending_client
+        from services.library_events import publish_all
+        lending = get_lending_client()
+        if lending.enabled:
+            ensure_running(bot, "_lending_health_task", lambda: watch_serve_health(
+                bot, name="lending custodian", url=lending.url, token=lending.token,
+                env_names=("MTGO_LENDING_URL", "MTGO_LENDING_TOKEN"),
+                on_change=lambda _up: publish_all(),
+                disabled_without="sign-up boards' library-offline detection"))
         # Same idea for the card library's trades, against the other serve: a
         # borrow whose command poller died would otherwise sit in 'out_pending'
         # forever, with the borrower holding cards the ledger says are still on

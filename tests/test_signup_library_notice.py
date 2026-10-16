@@ -90,6 +90,25 @@ async def test_a_cube_the_library_cannot_cover_says_bring_your_own(
 
 
 @pytest.mark.asyncio
+async def test_not_knowing_who_holds_the_copy_is_not_bring_your_own(
+        test_db, monkeypatch):
+    """The copy may well be in use by a queue they could join; a failed lookup
+    must not tell them to go and find cards. The listener keeps its line; at
+    posting the board simply has none."""
+    import services.library_reservation as resv
+    await _price(0)
+    _shelf(monkeypatch, {"Swamp": 4}, {"Swamp": 1}, CUBE_CARDS)
+
+    async def broken(*_a, **_k):
+        raise RuntimeError("ledger unreachable")
+    monkeypatch.setattr(resv, "queue_holding", broken)
+
+    with pytest.raises(mod.LibraryLineUnknown):
+        await mod.library_signup_check(CUBE, GUILD, "d1")
+    assert await library_signup_note(CUBE, GUILD) is None
+
+
+@pytest.mark.asyncio
 async def test_a_cube_the_library_does_not_lend_for_says_nothing(
         test_db, monkeypatch):
     """Most drafts have nothing to do with the library. A field on every one of
@@ -317,32 +336,25 @@ async def test_a_gated_rental_library_says_who_may_borrow(test_db, monkeypatch):
         "ends with the library page, which shows what the shelf holds"
 
 
-class _Health:
-    """A lending client whose /health says `health`, after `delay` seconds."""
-
-    def __init__(self, health, delay=0.0, enabled=True):
-        self.health_body, self.delay, self.enabled = health, delay, enabled
-
-    async def health(self):
-        import asyncio
-        await asyncio.sleep(self.delay)
-        return self.health_body
+@pytest.mark.asyncio
+async def test_the_custodian_check_reads_the_monitors_last_state(monkeypatch):
+    import services.serve_health_monitor as m
+    from types import SimpleNamespace
+    import services.card_lending_service as lending
+    monkeypatch.setattr(lending, "get_lending_client",
+                        lambda: SimpleNamespace(enabled=True, url="http://lend"))
+    monkeypatch.setattr(m, "_last", {})
+    assert await _real_custodian_up() is None, "unknown before the first poll"
+    m._last["http://lend"] = "down"
+    assert await _real_custodian_up() is False
+    m._last["http://lend"] = "ok"
+    assert await _real_custodian_up() is True
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("client,up,why", [
-    (_Health({"ok": True, "queued": 3}), True,
-     "busy with other trades is still up: the draft ends an hour from now"),
-    (_Health({"ok": True, "reconnecting": True}), False, "reconnecting"),
-    (_Health({"ok": False}), False, "health says not ok"),
-    (_Health(None), False, "no answer"),
-    (_Health({"ok": True, "stuck": True}), False, "stuck is not working"),
-    (_Health({"ok": True}, delay=5), None,
-     "too slow to tell: unknown, not offline -- the board stands all draft"),
-    (_Health({"ok": True}, enabled=False), False, "no lending serve configured"),
-])
-async def test_reachability_is_what_the_board_asks(monkeypatch, client, up, why):
+async def test_an_unconfigured_lending_custodian_reads_as_offline(monkeypatch):
+    from types import SimpleNamespace
     import services.card_lending_service as lending
-    monkeypatch.setattr(lending, "get_lending_client", lambda: client)
-
-    assert await _real_custodian_up(timeout_s=0.2) is up, why
+    monkeypatch.setattr(lending, "get_lending_client",
+                        lambda: SimpleNamespace(enabled=False, url=""))
+    assert await _real_custodian_up() is False

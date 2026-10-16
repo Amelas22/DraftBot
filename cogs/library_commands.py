@@ -34,6 +34,7 @@ from helpers.money_gate import (
     mtgo_job_footer, mtgo_trade_prompt,
     spawn_followup,
 )
+from helpers.permissions import has_bot_manager_role
 from services.card_deposit_service import (
     chunk_cards, held_for, start_deposit, start_withdrawal,
     withdrawal_orders,
@@ -418,6 +419,34 @@ class LibraryCommands(commands.Cog):
 
     library = SlashCommandGroup(
         "library", "Borrow a deck from the card library, or lend it your cards")
+
+    # Admin actions get their own group, as /wallet-admin does: no command here
+    # sets default_member_permissions, so one left in /library would sit in every
+    # player's picker and only fail when used.
+    library_admin = SlashCommandGroup(
+        "library-admin", "Admin commands for the card library")
+
+    @library_admin.command(
+        name="refresh-cube",
+        description="[Admin] Re-read a cube from CubeCobra now, after editing it")
+    @has_bot_manager_role()
+    @discord.option("cube", str, description="The CubeCobra cube id, e.g. PowerLSV")
+    async def refresh_cube(self, ctx: discord.ApplicationContext, cube: str) -> None:
+        """Cube lists are cached for the process and re-checked every 12 hours; this
+        is for an admin who has just edited one and wants the library to see it."""
+        from helpers.cube_list import refresh_now
+
+        await ctx.defer(ephemeral=True)
+        cards, changed = await refresh_now(cube)
+        if cards is None:
+            said = (f"Couldn't read `{cube}` from CubeCobra. Nothing changed; "
+                    f"try again in a minute.")
+        else:
+            count = sum(int(c["qty"]) for c in cards)
+            said = (f"`{cube}`: {count} cards — "
+                    + ("the list changed, and library boards are being updated."
+                       if changed else "no change since the last read."))
+        await ctx.followup.send(said, ephemeral=True)
 
     def __init__(self, bot: Any) -> None:
         self.bot = bot

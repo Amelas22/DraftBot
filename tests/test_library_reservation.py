@@ -329,6 +329,25 @@ async def test_the_board_points_a_new_queue_at_the_one_holding_it(lounge):
     assert "in use" in note.lower() and "/chan/msg-q1" in note, note
 
 
+async def test_a_queue_holding_the_copy_still_reads_covered_on_its_own_board(lounge):
+    """Its own reservation is the copy it is about to use, not one taken from it:
+    the holder's board keeps the covered line, and another queue's board points
+    at the holder."""
+    from cube_views.pack_options import library_signup_check
+
+    await _borrower(ANN, BEN)
+    await _queue("q1", [ANN])
+    await _queue("q2", [BEN])
+    assert (await resv.reserve("q1")).status == "reserved"
+
+    own = await library_signup_check(CUBE, GUILD, session_id="q1")
+    other = await library_signup_check(CUBE, GUILD, session_id="q2")
+
+    assert own is not None and "library available" in own.lower(), own
+    assert "another queue" not in own, own
+    assert "in use" in other.lower() and "/chan/msg-q1" in other, other
+
+
 async def test_a_long_draft_keeps_the_whole_cube_until_its_decks_exist(lounge):
     """No clock on it: teams to decks can run past an hour, and a reservation
     that quietly stopped holding would let a second queue book the same copy."""

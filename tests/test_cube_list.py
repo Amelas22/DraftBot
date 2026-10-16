@@ -37,6 +37,7 @@ def test_the_order_cards_appear_in_is_kept():
 class _Resp:
     def __init__(self, status, text=""):
         self.status, self._text = status, text
+        self.headers: dict[str, str] = {}
 
     async def text(self):
         return self._text
@@ -52,7 +53,7 @@ class _Session:
     def __init__(self, resp):
         self._resp = resp
 
-    def get(self, url):
+    def get(self, url, **kw):
         if isinstance(self._resp, Exception):
             raise self._resp
         return self._resp

@@ -368,18 +368,23 @@ async def owes_agreement(draft: Any, player_id: Any) -> bool:
     return await still_reserved(draft) and player in await library_users(draft)
 
 
-async def queue_holding(guild_id: Any, cube_id: Any) -> "Optional[DraftSession]":
-    """The draft holding the library's copy of this cube here, if any.
+async def queue_holding(guild_id: Any, cube_id: Any,
+                        exclude_session_id: Any = None) -> "Optional[DraftSession]":
+    """The draft holding the library's copy of this cube here, if any, other
+    than `exclude_session_id` -- a board asking for itself, which is never
+    "another queue".
 
-    For the signup board, which is written when a queue opens and so can say
-    where the copy is rather than just that it is gone.
+    For the signup board, which can say where the copy is rather than just that
+    it is gone.
     """
     from services.library_service import library_id_for
 
     library_id = await library_id_for(guild_id)
     if library_id is None:
         return None
-    using = [d for d in await reservations(library_id) if d.cube == cube_id]
+    using = [d for d in await reservations(library_id) if d.cube == cube_id
+             and (exclude_session_id is None
+                  or str(d.session_id) != str(exclude_session_id))]
     return _first_reserved(using) if using else None
 
 

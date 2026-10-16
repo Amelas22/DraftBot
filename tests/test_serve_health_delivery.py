@@ -381,3 +381,59 @@ class _Stop(BaseException):
     touches can kill it, which is the property under test here -- an ordinary
     exception would be swallowed and the test would hang rather than fail.
     """
+
+
+# --- a watcher something else depends on says so when it cannot run --------
+
+def _errors():
+    from loguru import logger
+    seen: "list[str]" = []
+    handle = logger.add(lambda m: seen.append(m.record["message"]), level="ERROR")
+    return seen, handle
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("alert_to", ["", "not-an-id"])
+async def test_a_watcher_with_no_valid_recipient_says_what_it_disables(alert_to):
+    from loguru import logger
+    mon._watching.clear()
+    seen, handle = _errors()
+    try:
+        await mon.watch_serve_health(
+            MagicMock(), name="lending custodian", url="http://lend", token="t",
+            alert_to=alert_to, canary=False, disabled_without="the boards' offline check")
+    finally:
+        logger.remove(handle)
+    assert any("lending custodian" in m and "the boards' offline check is disabled" in m
+               for m in seen), seen
+
+
+@pytest.mark.asyncio
+async def test_a_watcher_refused_for_a_shared_url_says_what_it_disables():
+    """The lending custodian configured at the tix custodian's URL: the tix
+    watcher holds it, and the lending one's flips would reach nobody."""
+    from loguru import logger
+    mon._watching.clear()
+    mon._claim("http://same")
+    seen, handle = _errors()
+    try:
+        await mon.watch_serve_health(
+            MagicMock(), name="lending custodian", url="http://same", token="t",
+            alert_to="1", canary=False, disabled_without="the boards' offline check")
+    finally:
+        logger.remove(handle)
+        mon._watching.clear()
+    assert any("the boards' offline check is disabled" in m for m in seen), seen
+
+
+@pytest.mark.asyncio
+async def test_a_watcher_nothing_depends_on_logs_no_extra_error():
+    from loguru import logger
+    mon._watching.clear()
+    seen, handle = _errors()
+    try:
+        await mon.watch_serve_health(MagicMock(), url="http://x", token="t",
+                                     alert_to="", canary=False)
+    finally:
+        logger.remove(handle)
+    assert not any("disabled" in m for m in seen), seen
