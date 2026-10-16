@@ -249,6 +249,22 @@ async def set_entry(guild_id: str, session_id: str, player_id: str,
     return result
 
 
+async def _is_donation_in(session: AsyncSession, session_id: str) -> bool:
+    """Whether this draft was opened as a donation draft, read in the caller's transaction."""
+    from models.draft_session import DraftSession
+    from sqlalchemy import select
+
+    return bool((await session.execute(
+        select(DraftSession.donation)
+        .where(DraftSession.session_id == session_id))).scalar())
+
+
+async def is_donation_draft(session_id: str) -> bool:
+    """Whether this draft was opened as a donation draft."""
+    async with db_session() as session:
+        return await _is_donation_in(session, session_id)
+
+
 async def entry_in(session: AsyncSession, guild_id: str, session_id: str,
                    player_id: str, amount: int,
                    reason: str = "revised") -> EntryResult:
@@ -290,6 +306,11 @@ async def entry_in(session: AsyncSession, guild_id: str, session_id: str,
                     f"from {player_id} ({held} -> {amount}) -- the book has "
                     f"already closed")
         return {"ok": False, "deficit": 0}
+    if await _is_donation_in(session, session_id):
+        # A donation draft escrows nothing: its losers owe DraftBot afterwards
+        # (services/donation_service), so a player may enter without tix -- they
+        # may pay in cash. The sign-up row the caller writes is the whole entry.
+        return {"ok": True, "deficit": 0}
     if amount == held:
         return {"ok": True, "deficit": 0}
 
