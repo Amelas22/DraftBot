@@ -123,8 +123,8 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                                       list(session.team_a or []), list(session.team_b or []))
                 # Staked queues and premade drafts with a fixed entry fee: the
                 # two kinds of draft that hold a pool, and the same pair
-                # settlement pays out.
-                elif session.session_type == "staked" or session.entry_fee:
+                # settlement pays out. A donation draft holds none.
+                if not session.donation and (session.session_type == "staked" or session.entry_fee):
                     pool_sides = (str(session.guild_id), session.session_id,
                                   list(session.team_a or []), list(session.team_b or []))
 
