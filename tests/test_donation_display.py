@@ -1,5 +1,9 @@
 """What a donation draft's embeds say about its money."""
 import pytest
+from sqlalchemy import update
+
+from database.db_session import db_session
+from models.stake import StakeInfo
 
 from conftest import seed_session, seed_stakes
 from services.donation_service import level_donation
@@ -50,3 +54,25 @@ def test_donation_drafts_do_not_call_their_stakes_a_prize_pool():
     assert payouts_footer(False, 100) == "Winnings paid: 100 tix"
     assert "Nothing leaves your wallet" in SIGNUP_DONATION_NOTE
     assert "/donation_day paid_cash" in SIGNUP_DONATION_NOTE
+
+
+@pytest.mark.asyncio
+async def test_players_no_longer_on_a_team_are_not_listed_or_counted(test_db):
+    """Removed after teams formed: their recorded share stays, but is not shown."""
+    await seed_session("d1", guild="g", stage="teams", donation=True,
+                       sign_ups=dict(NAMES), teams=(["a1", "a2"], ["b1", "b2"]))
+    await seed_stakes("d1", {"a1": (50, False), "a2": (50, False),
+                             "b1": (50, False), "b2": (50, False),
+                             "gone": (50, False)})
+    await level_donation("d1", *TEAMS)
+    async with db_session() as s:  # the removed player's share, recorded earlier
+        await s.execute(update(StakeInfo).where(StakeInfo.player_id == "gone")
+                        .values(assigned_stake=50))
+
+    lines, total = await get_formatted_stake_pairs("d1", NAMES)
+    assert len(lines) == 4 and total == 200
+    assert not any("Unknown" in line for line in lines)
+
+    out, donated = await get_formatted_bet_outcomes("d1", NAMES, ["a1", "a2"])
+    assert len(out) == 4 and donated == 100
+    assert not any("Unknown" in line for line in out)

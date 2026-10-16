@@ -17,6 +17,7 @@ from sqlalchemy import func, select, update
 
 from database.db_session import db_session
 from models.debt_ledger import DebtLedger
+from models.draft_session import DraftSession
 from models.stake import StakeInfo
 from services import debt_service, wallet_service
 from services.debt_service import TIX_ONLY
@@ -174,10 +175,25 @@ def _by_share(item: tuple[str, int]) -> int:
     return item[1]
 
 
+async def current_team_shares(session_id: str) -> dict[str, int]:
+    """donation_shares, less anyone no longer on a team.
+
+    A player removed or subbed out after teams formed keeps their StakeInfo
+    row; embeds must neither list them nor count their share.
+    """
+    shares = await donation_shares(session_id)
+    async with db_session() as session:
+        teams = (await session.execute(
+            select(DraftSession.team_a, DraftSession.team_b)
+            .where(DraftSession.session_id == session_id))).first()
+    members = {str(p) for team in (teams or ()) for p in (team or [])}
+    return {p: n for p, n in shares.items() if p in members}
+
+
 async def format_donation_entries(session_id: str,
                                   sign_ups: dict[str, str]) -> tuple[list[str], int]:
     """Each player's share, for the teams embed: what they owe DraftBot if their side loses."""
-    shares = await donation_shares(session_id)
+    shares = await current_team_shares(session_id)
     ranked = sorted(shares.items(), key=_by_share, reverse=True)
     lines = [f"**{sign_ups.get(p, 'Unknown')}**: {n} tix" for p, n in ranked]
     return lines, sum(shares.values())
@@ -186,7 +202,7 @@ async def format_donation_entries(session_id: str,
 async def format_donation_outcomes(session_id: str, sign_ups: dict[str, str],
                                    winning_team: list[str]) -> tuple[list[str], int]:
     """What the result means, for the victory embed. The total is what goes to DraftBot."""
-    shares = await donation_shares(session_id)
+    shares = await current_team_shares(session_id)
     winners = set(winning_team)
     lines: list[str] = []
     donated = 0
