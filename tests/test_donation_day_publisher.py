@@ -46,3 +46,31 @@ async def test_a_failed_upload_reports_no_url():
     with patch.object(publisher, "build_payload", AsyncMock(return_value={"rows": []})), \
          patch.object(publisher, "DigitalOceanHelper", return_value=helper):
         assert await publisher.publish_event("1", EVENT, "999") is None
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_config_for_one_guild_does_not_stop_the_next():
+    bot = SimpleNamespace(user=SimpleNamespace(id=999),
+                          guilds=[SimpleNamespace(id=1), SimpleNamespace(id=2)])
+    publish = AsyncMock(return_value="https://x")
+    with patch.object(publisher, "get_event", side_effect=[KeyError("goal_usd"), EVENT]), \
+         patch.object(publisher, "publish_event", publish):
+        await publisher.publish_active(bot)
+
+    publish.assert_awaited_once_with("2", EVENT, "999")
+
+
+@pytest.mark.asyncio
+async def test_a_successful_upload_returns_the_public_url():
+    helper = MagicMock()
+    helper.upload_public_html = AsyncMock(
+        return_value=SimpleNamespace(success=True, object_path="donations/dd/index.html"))
+    helper.get_public_url.return_value = "https://cdn.example/donations/dd/index.html"
+    with patch.object(publisher, "build_payload", AsyncMock(return_value={"rows": []})), \
+         patch.object(publisher, "DigitalOceanHelper", return_value=helper):
+        url = await publisher.publish_event("1", EVENT, "999")
+
+    assert url == "https://cdn.example/donations/dd/index.html"
+    args = helper.upload_public_html.await_args.args
+    assert args[1:] == ("donations/dd", "index.html")
+    helper.get_public_url.assert_called_once_with("donations/dd/index.html")

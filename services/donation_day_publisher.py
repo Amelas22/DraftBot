@@ -39,10 +39,10 @@ async def publish_active(bot: Any) -> None:
     if user is None:
         return
     for guild in bot.guilds:
-        event = get_event(guild.id)
-        if not event or not event.get("active"):
-            continue
         try:
+            event = get_event(guild.id)
+            if not event or not event.get("active"):
+                continue
             await publish_event(str(guild.id), event, str(user.id))
         except Exception:
             logger.opt(exception=True).error(
