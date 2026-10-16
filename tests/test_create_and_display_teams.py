@@ -28,6 +28,7 @@ def _premade_session(sign_ups, team_a=None, team_b=None):
     # code reads has to be set here or the fake quietly disagrees with a real
     # row. entry_fee absent means a free draft.
     session.entry_fee = None
+    session.donation = False
     return session
 
 

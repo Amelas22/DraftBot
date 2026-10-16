@@ -22,6 +22,7 @@ from services.draft_pool_service import (format_entries, format_outcomes,
                                          pool_balance, release_draft_pool,
                                          settle_draw, settle_pool, PoolNotSettled)
 from services.draft_analysis import DraftAnalysis
+from services.donation_service import payouts_footer, payouts_title, stakes_field_name
 from cogs.leaderboard import create_leaderboard_embed, TimeframeView
 from draft_organization.tournament import Tournament
 from services.debt_service import (
@@ -586,8 +587,22 @@ async def settle_decided_draft(draft_session_id):
         return
 
     guild_id = str(draft_session.guild_id)
-    winners = (draft_session.team_a if team_a_wins > team_b_wins
-               else draft_session.team_b)
+    a_won = team_a_wins > team_b_wins
+    winners = draft_session.team_a if a_won else draft_session.team_b
+    losers = draft_session.team_b if a_won else draft_session.team_a
+
+    if draft_session.donation:
+        # Before the pool branches: a donation draft holds no pool. Its money
+        # moves as debts to DraftBot, auto-drawn from losers who hold tix.
+        from services.donation_service import settle_donation_draft
+        try:
+            await settle_donation_draft(guild_id, draft_session_id, outcome,
+                                        list(winners or []), list(losers or []))
+        except Exception:
+            logger.opt(exception=True).error(
+                f"donation draft {draft_session_id}: settlement failed; the next "
+                f"match report retries it")
+        return
 
     if await pool_balance(guild_id, draft_session_id) > 0:
         if outcome == "draw":
@@ -706,7 +721,7 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                     # Add the stakes field to the embed
                     if stake_lines:
                         embed.add_field(
-                            name=f"**Prize Pool: {total_stakes} tix**",
+                            name=stakes_field_name(draft_session.donation, total_stakes),
                             value="\n".join(stake_lines),
                             inline=False
                         )
@@ -737,14 +752,14 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                             bet_description = f"\n{separator}\n".join(outcome_lines)
 
                             bet_embed = discord.Embed(
-                                title="💰 Prize Pool Payouts",
+                                title=payouts_title(draft_session.donation),
                                 description=bet_description,
                                 color=discord_color  # Match main embed color
                             )
                             # The figure is the sum of the winners' PROFIT, which is what changed
                             # hands. The pool paid is twice it, because each winner put in
                             # c and took 2c -- so this cannot be called the pool.
-                            bet_embed.set_footer(text=f"Winnings paid: {outcome_total} tix")
+                            bet_embed.set_footer(text=payouts_footer(draft_session.donation, outcome_total))
                             # Where a loser first reads what this draft cost
                             # them, so it is where the wallet is explained.
                             add_wallet_howto(bet_embed, draft_session.guild_id)
@@ -3036,6 +3051,11 @@ async def get_formatted_stake_pairs(session_id, sign_ups):
     Returns:
         tuple: (formatted_stake_lines, total_stakes)
     """
+    from services.draft_pool_service import is_donation_draft
+    if await is_donation_draft(session_id):
+        from services.donation_service import format_donation_entries
+        return await format_donation_entries(session_id, sign_ups)
+
     if not await _has_stake_pairings(session_id):
         guild_id = await _guild_of(session_id)
         if guild_id is None:
@@ -3126,6 +3146,12 @@ async def get_formatted_bet_outcomes(session_id, sign_ups, winning_team_ids):
     Returns:
         tuple: (formatted_outcome_lines, total_stakes)
     """
+    from services.draft_pool_service import is_donation_draft
+    if await is_donation_draft(session_id):
+        from services.donation_service import format_donation_outcomes
+        return await format_donation_outcomes(session_id, sign_ups,
+                                              list(winning_team_ids or []))
+
     if not await _has_stake_pairings(session_id):
         guild_id = await _guild_of(session_id)
         if guild_id is None:

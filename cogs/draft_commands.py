@@ -1,4 +1,5 @@
 import discord
+from discord.commands import option
 from discord.ext import commands
 from loguru import logger
 from modals import CubeDraftSelectionView, StakedCubeDraftSelectionView
@@ -27,14 +28,28 @@ class DraftCommands(commands.Cog):
     #     logger.info(f"Received interaction: {interaction.data}")
 
     @discord.slash_command(name='draft', description='Start a cube draft with team settings based on server configuration', guild_ids=None)
-    async def draft(self, ctx):
+    @option("kind", str, description="Money servers: a staked draft, or a donation draft for DraftBot",
+            choices=["staked", "donation"], default="staked", required=False)
+    async def draft(self, ctx, kind: str = "staked"):
         logger.info(f"Received draft command from user {ctx.author.id} in guild {ctx.guild.id}")
-        
+
+        if kind == "donation":
+            if not is_money_server(ctx.guild.id):
+                await ctx.response.send_message(
+                    "Donation drafts only run on money servers.", ephemeral=True)
+                return
+            if not await is_bot_manager(ctx):
+                await ctx.response.send_message(
+                    "Only bot managers can open a donation draft.", ephemeral=True)
+                return
+
         # Check if this is a money server
         if is_money_server(ctx.guild.id):
-            logger.info(f"Using staked draft view for money server {ctx.guild.id}")
-            view = StakedCubeDraftSelectionView(guild_id=ctx.guild.id)
-            await ctx.response.send_message("Select a cube for the staked draft:", view=view, ephemeral=True)
+            logger.info(f"Using {kind} draft view for money server {ctx.guild.id}")
+            view = StakedCubeDraftSelectionView(guild_id=ctx.guild.id,
+                                                donation=kind == "donation")
+            await ctx.response.send_message(f"Select a cube for the {kind} draft:",
+                                            view=view, ephemeral=True)
         else:
             logger.info(f"Using standard draft view for free server {ctx.guild.id}")
             view = CubeDraftSelectionView(session_type="random", guild_id=ctx.guild.id)

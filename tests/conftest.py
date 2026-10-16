@@ -128,7 +128,7 @@ async def seed_session(session_id="s1", guild="g", stype="staked",
                        channel_ids=None, draft_id=None, rooms_created_at=None,
                        match_counter=1, friendly_id=None,
                        draft_data=None, spaces_object_key=None,
-                       deletion_time=None):
+                       deletion_time=None, donation=False):
     """Seed one DraftSession plus its MatchResults.
 
     teams: (team_a_list, team_b_list) or None (legacy-style, no team JSON).
@@ -141,6 +141,7 @@ async def seed_session(session_id="s1", guild="g", stype="staked",
     draft_data / spaces_object_key: the draft's Draftmancer log and its Spaces
     path. spaces_object_key is what makes a row quiz-eligible; draft_data is the
     fat JSON column the quiz paths must never load.
+    donation: opened as a donation draft (services/donation_service).
     """
     when = start or datetime(2026, 1, 1)
     async with AsyncSessionLocal() as s:
@@ -170,7 +171,7 @@ async def seed_session(session_id="s1", guild="g", stype="staked",
             # hand-patching the row afterwards with an UPDATE, which is what the
             # older pool tests still do.
             match_counter=match_counter, friendly_id=friendly_id,
-            deletion_time=deletion_time))
+            deletion_time=deletion_time, donation=donation))
         for i, (p1, p2, w, ts) in enumerate(matches):
             s.add(MatchResult(session_id=session_id, match_number=i + 1,
                               player1_id=p1, player2_id=p2, winner_id=w,

@@ -1,0 +1,190 @@
+"""Donation day in Discord: a receipt per donation, and a live leaderboard message.
+
+Both are driven by the publisher tick from the same ledger credits as the
+public page (services/donation_day), so every way money reaches DraftBot is
+announced -- auto-draw, /wallet pay, cash self-marks, direct gifts -- without
+a hook in any money path. Credits carry a stable key; the keys already
+announced are kept in the guild config so a restart never repeats a receipt.
+"""
+from datetime import datetime
+from typing import Any, TypedDict
+
+import discord
+
+from config import get_config, update_setting
+from helpers.utils import as_messageable
+from services.donation_day import Credit, Snapshot, display_name
+
+MAX_RECEIPTS_PER_TICK = 10
+LEADERBOARD_ROWS = 15
+CONFIG_KEY = "donation_day_discord"
+FIELD_LIMIT = 1024      # Discord's cap on an embed field value
+
+
+class DiscordState(TypedDict):
+    receipts_channel_id: str | None
+    leaderboard_channel_id: str | None
+    leaderboard_message_id: str | None
+    announced: list[str]
+
+
+def get_state(guild_id: str | int) -> DiscordState | None:
+    raw: Any = get_config(guild_id).get(CONFIG_KEY)
+    if not isinstance(raw, dict):
+        return None
+    return DiscordState(
+        receipts_channel_id=_opt_str(raw.get("receipts_channel_id")),
+        leaderboard_channel_id=_opt_str(raw.get("leaderboard_channel_id")),
+        leaderboard_message_id=_opt_str(raw.get("leaderboard_message_id")),
+        announced=[str(k) for k in raw.get("announced") or []])
+
+
+def save_state(guild_id: str | int, state: DiscordState) -> None:
+    update_setting(guild_id, CONFIG_KEY, dict(state))
+
+
+def _opt_str(value: Any) -> str | None:
+    return str(value) if value else None
+
+
+def _credit_time(credit: Credit) -> datetime:
+    return credit.at
+
+
+def _message_time(message: tuple[datetime, list[str], str]) -> datetime:
+    return message[0]
+
+
+def _session_of(key: str) -> str:
+    """The session id in a `won:<session>:<player>` key; drafts sharing a label stay apart."""
+    return key.split(":")[1] if key.count(":") >= 2 else key
+
+
+def _safe_name(player_id: str, names: dict[str, str], anonymous: set[str]) -> str:
+    return discord.utils.escape_markdown(display_name(player_id, names, anonymous))
+
+
+def _join_names(names: list[str]) -> str:
+    if len(names) <= 1:
+        return "".join(names)
+    return ", ".join(names[:-1]) + " & " + names[-1]
+
+
+def receipt_messages(credits: list[Credit], names: dict[str, str], anonymous: set[str],
+                     announced: set[str]) -> list[tuple[list[str], str]]:
+    """The receipts still to post, oldest first: (credit keys covered, text).
+
+    A draft's win credits share one receipt naming every winner not yet
+    announced; each payment or gift is its own receipt.
+    """
+    fresh = sorted((c for c in credits if c.key and c.key not in announced), key=_credit_time)
+    messages: list[tuple[datetime, list[str], str]] = []
+    wins: dict[str, list[Credit]] = {}
+    for credit in fresh:
+        if credit.kind == "won":
+            wins.setdefault(_session_of(credit.key), []).append(credit)
+            continue
+        who = _safe_name(credit.player_id, names, anonymous)
+        if credit.method == "gift":
+            text = f"💸 **{who}** donated {credit.amount} tix to DraftBot"
+        else:
+            label = " (cash)" if credit.method == "cash" else ""
+            text = f"💵 **{who}** paid {credit.amount} tix to DraftBot{label}"
+        messages.append((credit.at, [credit.key], text))
+    for group in wins.values():
+        winners = _join_names([_safe_name(c.player_id, names, anonymous) for c in group])
+        total = sum(c.amount for c in group)
+        messages.append((group[0].at, [c.key for c in group],
+                         f"🏆 **{winners}** won {total} tix for DraftBot (draft {group[0].draft})"))
+    messages.sort(key=_message_time)
+    return [(keys, text) for _, keys, text in messages]
+
+
+def leaderboard_embed(payload: dict[str, Any], page_url: str | None) -> discord.Embed:
+    """The leaderboard message: totals, then the top rows by total."""
+    description = (f"**${payload.get('raised', 0)}** raised of ${payload.get('goal', 0)} · "
+                   f"${payload.get('pledged', 0)} pledged")
+    if page_url:
+        description += f"\n{page_url}"
+    embed = discord.Embed(title=f"🏆 {payload.get('name', 'Donation Day')}",
+                          description=description, color=discord.Color.purple())
+    rows = list(payload.get("rows") or [])[:LEADERBOARD_ROWS]
+    lines = [f"**{i}. {discord.utils.escape_markdown(str(r['name']))}** — {r['total']} (won {r['won']} · paid {r['paid']})"
+             for i, r in enumerate(rows, start=1)]
+    value = "\n".join(lines) or "No donations yet."
+    embed.add_field(name="Leaderboard", value=value[:FIELD_LIMIT], inline=False)
+    embed.set_footer(text=f"1 tix = $1 · updated {str(payload.get('updated_at', '')).replace('T', ' ')}")
+    return embed
+
+
+def state_for_setup(previous: DiscordState | None, event_was_active: bool,
+                    receipts_channel_id: str | None,
+                    leaderboard_channel_id: str | None) -> DiscordState:
+    """The channel state `setup` saves.
+
+    A fresh event starts with no leaderboard message. Re-running setup on a running
+    event keeps what is already set: an omitted channel option keeps the existing
+    channel, and an unchanged channel keeps its receipts (announced) and its
+    leaderboard message. An unchanged receipts channel keeps `announced` even for a
+    new event, so nothing already posted there is posted again.
+    """
+    announced: list[str] = []
+    message_id: str | None = None
+    if previous is not None:
+        if event_was_active:
+            receipts_channel_id = receipts_channel_id or previous["receipts_channel_id"]
+            leaderboard_channel_id = leaderboard_channel_id or previous["leaderboard_channel_id"]
+        if previous["receipts_channel_id"] == receipts_channel_id:
+            announced = list(previous["announced"])
+        if event_was_active and previous["leaderboard_channel_id"] == leaderboard_channel_id:
+            message_id = previous["leaderboard_message_id"]
+    return DiscordState(receipts_channel_id=receipts_channel_id,
+                        leaderboard_channel_id=leaderboard_channel_id,
+                        leaderboard_message_id=message_id, announced=announced)
+
+
+async def post_receipts(bot: Any, guild_id: str, snapshot: Snapshot,
+                        state: DiscordState) -> DiscordState:
+    """Post the receipts not yet announced, at most MAX_RECEIPTS_PER_TICK; the rest wait a tick.
+
+    The announced keys are saved after EACH send: a failure part-way through
+    must not let the next tick repeat receipts already posted.
+    """
+    if not state["receipts_channel_id"]:
+        return state
+    announced = list(state["announced"])
+    pending = receipt_messages(snapshot.credits, snapshot.names, snapshot.anonymous,
+                               set(announced))[:MAX_RECEIPTS_PER_TICK]
+    if not pending:
+        return state
+    channel = as_messageable(bot.get_channel(int(state["receipts_channel_id"])))
+    for keys, text in pending:
+        await channel.send(text, allowed_mentions=discord.AllowedMentions.none())
+        announced += keys
+        state = {**state, "announced": announced}
+        save_state(guild_id, state)
+    return state
+
+
+async def update_leaderboard(bot: Any, guild_id: str, payload: dict[str, Any],
+                             page_url: str | None, state: DiscordState) -> DiscordState:
+    """Edit the leaderboard message in place, or post it if it doesn't exist yet."""
+    if not state["leaderboard_channel_id"]:
+        return state
+    channel = as_messageable(bot.get_channel(int(state["leaderboard_channel_id"])))
+    embed = leaderboard_embed(payload, page_url)
+    if state["leaderboard_message_id"]:
+        try:
+            message = await channel.fetch_message(int(state["leaderboard_message_id"]))
+            await message.edit(embed=embed)
+            return state
+        except discord.NotFound:
+            pass        # deleted by hand: post a fresh one below
+    message = await channel.send(embed=embed)
+    # Re-read before saving: a receipts step that failed part-way has saved newer
+    # `announced` keys than the state this tick holds, and writing the old list back
+    # would make the next tick repeat them. Only the message id is ours to change.
+    current = get_state(guild_id) or state
+    state = {**current, "leaderboard_message_id": str(message.id)}
+    save_state(guild_id, state)
+    return state

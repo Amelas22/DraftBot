@@ -10,8 +10,32 @@ class StakedSession(RandomSession):
         super().__init__(session_details, session_factory=session_factory)
         self.min_stake = session_details.min_stake  
         
+    def _create_donation_embed_content(self):
+        """The queue embed for a donation draft: same rules, the money goes to DraftBot."""
+        title = (f"Donation Draft — stakes go to DraftBot! Minimum entry: "
+                 f"{self.session_details.min_stake} tix")
+        description = (
+            f"Queue Opened <t:{self.session_details.draft_start_time}:R>\n\n"
+            "**Donation Draft Queue**\n"
+            "1. Sign up and set your maximum entry. Nothing leaves your wallet now.\n"
+            "2. Teams are drawn at random. Entries play **no** part in who ends "
+            "up on which team.\n"
+            "\n"
+            "**How it works:**\n"
+            "• Entries are capped and levelled exactly like a prize pool draft.\n"
+            "• The winners take nothing home: every matched tix on the losing side "
+            "goes to **DraftBot** as a donation, and the winners get the credit.\n"
+            "• If your side loses, you owe DraftBot your matched entry. Tix in your "
+            "wallet are drawn automatically. Paying in cash instead? Pay through "
+            "GitHub Sponsors, then run `/donation_day paid_cash`.\n"
+            f"{self.get_common_description()}"
+        )
+        return Embed(title=title, description=description, color=Color.purple())
+
     def _create_embed_content(self):
         """Create an embed message for a staked draft session."""
+        if getattr(self.session_details, "donation", False):
+            return self._create_donation_embed_content()
         # Remove the cube from the title since it's now in its own field
         title = (f"Prize Pool Draft! Minimum entry: "
                  f"{self.session_details.min_stake} tix")

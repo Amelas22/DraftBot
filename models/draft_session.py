@@ -105,6 +105,9 @@ class DraftSession(Base):
     # predates the option. Distinct from min_stake, which is a FLOOR players
     # bet above -- here there is nothing to choose.
     entry_fee = Column(Integer, nullable=True)
+    # A donation draft plays like a staked one, but nothing is escrowed: its
+    # losers owe their matched share to DraftBot (services/donation_service).
+    donation = Column(Boolean, nullable=False, default=False, server_default=text('0'))
     packs_per_player = Column(Integer, default=3, server_default=text('3'))
     cards_per_pack = Column(Integer, default=15, server_default=text('15'))
     logs_channel_id = Column(String(64))

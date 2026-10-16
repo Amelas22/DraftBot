@@ -45,9 +45,11 @@ PLACEHOLDER_JSON = '{"teams":[],"standings":[],"rounds":[]}'
 UNKNOWN_CAPTAIN = "Captain"
 
 
-async def _captain_names(session: Any, guild_id: str,
-                         user_ids: list[str]) -> dict[str, str]:
+async def resolve_display_names(session: Any, guild_id: str,
+                               user_ids: list[str]) -> dict[str, str]:
     """{user_id: display name} for the captains we can name.
+
+    Also names donors on the donation page (services/donation_day).
 
     Captains are the one roster slot with no name of their own:
     TournamentTeamMember deliberately excludes them (captain_user_id stays the
@@ -150,7 +152,7 @@ async def build_tournament_data(session: Any, tournament_id: int) -> dict[str, A
 
     standings, omw = await get_standings_with_omw(session, tournament_id)
     rosters = await get_rosters(session, tournament_id)
-    captains = await _captain_names(
+    captains = await resolve_display_names(
         session, tournament.guild_id, [p.captain_user_id for p in standings])
 
     return {

@@ -172,6 +172,14 @@ async def shortfall(guild_id: str, player_id: str, session_id: str,
     Charging the whole stake again would ask them to fund it twice out of a
     wallet the first payment had just emptied.
     """
+    from services.draft_pool_service import is_donation_draft
+
+    if await is_donation_draft(session_id):
+        # Nothing is charged at sign-up, and a loser may pay in cash, so no
+        # wallet has to cover a donation entry up front. The entry still counts
+        # as a liability against OTHER drafts (potential_losses), because
+        # losing it books a real debt.
+        return {"gap": 0, "balance": 0, "owed": 0, "at_risk": 0, "already_in": 0}
     owed, at_risk = await obligations(guild_id, player_id, exclude_session_id=session_id)
     already = await already_satisfied(guild_id, session_id, player_id)
     balance = await wallet_service.get_balance(guild_id, player_id)

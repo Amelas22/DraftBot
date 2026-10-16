@@ -31,6 +31,7 @@ from helpers.draft_outcome import decides_draft, standings_after, total_matches_
 from helpers.opponent_threads import spawn_opponent_threads
 from helpers.permissions import bot_manager_button
 from helpers.team_names import heads_field, labels_for
+from services.donation_service import SIGNUP_DONATION_NOTE
 from services.draft_pool_service import ENTRIES_STILL_HELD, PoolNotSettled, entry_in, release_draft_pool, set_entry
 from utils import (
     calculate_pairings,
@@ -2552,7 +2553,12 @@ async def _update_draft_message(bot, session_id):
             # capped to each other, so 200 against 100 would advertise 300 for
             # a draft that plays for 200.
             from services.draft_pool_service import contributions, max_pool
-            held = await contributions(str(draft_session.guild_id), session_id)
+            if draft_session.donation:
+                # Nothing is escrowed, so quote the pot from what was declared.
+                held = {p: int(s['amount'] or 0) for p, s in stake_info_by_player.items()
+                        if p in (draft_session.sign_ups or {})}
+            else:
+                held = await contributions(str(draft_session.guild_id), session_id)
             pool = max_pool(held.values())
             sign_ups_str = build_board(
                 draft_session.sign_ups,
@@ -3013,9 +3019,13 @@ class StakeOptionsSelect(discord.ui.Select):
                         ))
 
         # Confirm stake and provide draft link
-        signup_message = (f"Your maximum entry is {stake_amount} tix, and it has left "
-                          "your wallet for the prize pool. Anything the other side "
-                          "cannot cover comes back before the draft starts.")
+        if draft_session_updated.donation:
+            signup_message = (f"Your maximum entry is {stake_amount} tix. "
+                              + SIGNUP_DONATION_NOTE)
+        else:
+            signup_message = (f"Your maximum entry is {stake_amount} tix, and it has left "
+                              "your wallet for the prize pool. Anything the other side "
+                              "cannot cover comes back before the draft starts.")
         # Said here because the dropdown never asks: the cap is on by default and
         # only the over-100 modal offers the choice, so for most players this is
         # the one place they learn it applies to them.

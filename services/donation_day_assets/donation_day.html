@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Donation Day</title>
+<style>
+  :root { --bg:#fbfaf7; --fg:#1d1b18; --muted:#6b665e; --card:#fff; --line:#e7e2d9; --accent:#7c3aed; --track:#ede9fe; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#16151a; --fg:#ece9f3; --muted:#a19cad; --card:#1f1d25; --line:#2f2c38; --accent:#a78bfa; --track:#2e2640; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width:760px; margin:0 auto; padding:32px 16px 48px; }
+  h1 { font-size:1.9rem; margin:0 0 4px; }
+  .muted { color:var(--muted); font-size:.9rem; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:20px; margin-top:20px; }
+  .big { font-size:2.4rem; font-weight:700; font-variant-numeric:tabular-nums; }
+  .bar { height:14px; background:var(--track); border-radius:7px; overflow:hidden; margin:12px 0 6px; }
+  .bar > div { height:100%; background:var(--accent); width:0; transition:width .6s; }
+  table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; }
+  th, td { text-align:right; padding:8px 6px; border-bottom:1px solid var(--line); }
+  th:nth-child(-n+2), td:nth-child(-n+2) { text-align:left; }
+  th { color:var(--muted); font-weight:600; font-size:.85rem; }
+  ul { list-style:none; padding:0; margin:0; }
+  li { padding:6px 0; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; gap:12px; }
+  .empty { color:var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1 id="name">Donation Day</h1>
+  <div class="muted">1 tix = $1 · updated <span id="updated"></span></div>
+  <section class="card">
+    <div><span class="big" id="raised">0</span> <span class="muted">raised of $<span id="goal">0</span></span></div>
+    <div class="bar"><div id="fill"></div></div>
+    <div class="muted"><span id="pledged">0</span> pledged including what is still owed</div>
+  </section>
+  <section class="card">
+    <h2>Leaderboard</h2>
+    <table><thead><tr><th>#</th><th>Player</th><th>Won</th><th>Paid</th><th>Total</th></tr></thead>
+      <tbody id="rows"></tbody></table>
+  </section>
+  <section class="card">
+    <h2>Recent</h2>
+    <ul id="recent"></ul>
+  </section>
+</main>
+<script id="donation-data" type="application/json">{}</script>
+<script>
+  const d = JSON.parse(document.getElementById("donation-data").textContent || "{}");
+  const set = (id, v) => { document.getElementById(id).textContent = v; };
+  set("name", d.name || "Donation Day");
+  document.title = d.name || "Donation Day";
+  set("updated", d.updated_at || "");
+  set("raised", "$" + (d.raised || 0));
+  set("goal", d.goal || 0);
+  set("pledged", "$" + (d.pledged || 0));
+  document.getElementById("fill").style.width =
+    Math.min(100, d.goal ? 100 * (d.raised || 0) / d.goal : 0) + "%";
+  const rows = document.getElementById("rows");
+  (d.rows || []).forEach((r, i) => {
+    const tr = rows.insertRow();
+    [i + 1, r.name, r.won, r.paid, r.total].forEach(v => { tr.insertCell().textContent = v; });
+  });
+  if (!(d.rows || []).length) { const td = rows.insertRow().insertCell(); td.colSpan = 5; td.className = "empty"; td.textContent = "No donations yet."; }
+  const recent = document.getElementById("recent");
+  (d.recent || []).forEach(e => {
+    const li = document.createElement("li");
+    const who = document.createElement("span");
+    who.textContent = e.name + (e.kind === "won" ? " won " : " paid ") + e.amount + " tix";
+    const when = document.createElement("span");
+    when.className = "muted"; when.textContent = (e.at || "").replace("T", " ");
+    li.append(who, when); recent.append(li);
+  });
+  if (!(d.recent || []).length) { const li = document.createElement("li"); li.className = "empty"; li.textContent = "Nothing yet."; recent.append(li); }
+</script>
+</body>
+</html>
