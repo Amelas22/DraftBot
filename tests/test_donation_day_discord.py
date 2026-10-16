@@ -101,3 +101,22 @@ def test_a_long_leaderboard_stays_inside_the_field_limit():
     embed = leaderboard_embed(payload, None)
 
     assert all(len(f.value) <= 1024 for f in embed.fields)
+
+
+def test_two_drafts_sharing_a_label_are_separate_receipts():
+    credits = [_win("1", 100, session="s1"), _win("2", 50, session="s2")]
+
+    messages = receipt_messages(credits, NAMES, set(), set())
+
+    assert len(messages) == 2
+    assert all("lightning-bolt-7" in text for _, text in messages)
+
+
+def test_markdown_in_a_name_cannot_format_a_receipt_or_the_leaderboard():
+    names = {"1": "**evil**"}
+    [(_, text)] = receipt_messages([Credit("1", 5, T0, "paid", key="settle:1", method="wallet")],
+                                   names, set(), set())
+    embed = leaderboard_embed({"rows": [{"name": "**evil**", "total": 5, "won": 0, "paid": 5}]}, None)
+
+    assert "\\*\\*evil\\*\\*" in text
+    assert "\\*\\*evil\\*\\*" in embed.fields[0].value

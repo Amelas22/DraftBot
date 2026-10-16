@@ -162,6 +162,90 @@ def test_setup_on_a_running_event_resets_only_the_channel_that_changed():
 
 def test_setup_for_a_new_event_starts_clean():
     for previous, active in ((PREVIOUS, False), (None, True)):
-        state = dd_discord.state_for_setup(previous, active, "10", None)
-        assert state == {"receipts_channel_id": "10", "leaderboard_channel_id": None,
+        state = dd_discord.state_for_setup(previous, active, "10" if previous is None else "11", None)
+        assert state == {"receipts_channel_id": state["receipts_channel_id"], "leaderboard_channel_id": None,
                          "leaderboard_message_id": None, "announced": []}
+
+
+def test_a_new_event_in_a_different_receipts_channel_starts_clean():
+    state = dd_discord.state_for_setup(PREVIOUS, False, "11", None)
+
+    assert state["announced"] == [] and state["leaderboard_message_id"] is None
+
+
+def test_an_unchanged_receipts_channel_always_keeps_announced():
+    state = dd_discord.state_for_setup(PREVIOUS, False, "10", None)
+
+    assert state["announced"] == ["settle:1"]
+
+
+def test_rerunning_setup_without_channels_keeps_the_existing_ones():
+    state = dd_discord.state_for_setup(PREVIOUS, True, None, None)
+
+    assert state == PREVIOUS
+
+
+@pytest.mark.asyncio
+async def test_the_leaderboard_never_saves_a_stale_announced_list():
+    channel = _channel()
+    saved = []
+    newer = _state(announced=["settle:0"])
+    payload = {"name": "DD", "goal": 1, "raised": 0, "pledged": 0, "updated_at": "", "rows": []}
+    with patch.object(dd_discord, "get_state", return_value=newer), \
+         patch.object(dd_discord, "save_state", side_effect=lambda g, s: saved.append(dict(s))):
+        await dd_discord.update_leaderboard(_bot(channel), "g", payload, None, _state())
+
+    assert saved[-1]["announced"] == ["settle:0"] and saved[-1]["leaderboard_message_id"] == "555"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_publishes_for_a_guild_run_one_at_a_time():
+    import asyncio
+    import services.donation_day_publisher as publisher
+    helper = MagicMock()
+    helper.upload_public_html = AsyncMock(
+        return_value=SimpleNamespace(success=True, object_path="p/index.html"))
+    helper.get_public_url.return_value = "https://x"
+    event = {"name": "DD", "goal_usd": 100, "starts_at": "2026-10-16T12:00",
+             "page_key": "dd", "active": True}
+    running = 0
+    overlapped = []
+
+    async def slow_receipts(bot, guild_id, snapshot, state):
+        nonlocal running
+        running += 1
+        overlapped.append(running > 1)
+        await asyncio.sleep(0.02)
+        running -= 1
+        return state
+
+    with patch.object(publisher, "gather_snapshot", AsyncMock(return_value=_snapshot(1))), \
+         patch.object(publisher, "DigitalOceanHelper", return_value=helper), \
+         patch.object(publisher, "get_state", return_value=_state()), \
+         patch.object(publisher, "post_receipts", slow_receipts), \
+         patch.object(publisher, "update_leaderboard", AsyncMock()):
+        await asyncio.gather(*(publisher.publish_event("1", event, "9", bot=MagicMock())
+                               for _ in range(3)))
+
+    assert overlapped == [False, False, False]
+
+
+@pytest.mark.asyncio
+async def test_the_leaderboard_links_the_page_even_when_this_upload_failed():
+    import services.donation_day_publisher as publisher
+    helper = MagicMock()
+    helper.upload_public_html = AsyncMock(return_value=SimpleNamespace(success=False, object_path=None))
+    helper.get_public_url.return_value = "https://x/donations/dd/index.html"
+    event = {"name": "DD", "goal_usd": 100, "starts_at": "2026-10-16T12:00",
+             "page_key": "dd", "active": True}
+    board = AsyncMock()
+    with patch.object(publisher, "gather_snapshot", AsyncMock(return_value=_snapshot(0))), \
+         patch.object(publisher, "DigitalOceanHelper", return_value=helper), \
+         patch.object(publisher, "get_state", return_value=_state()), \
+         patch.object(publisher, "post_receipts", AsyncMock(side_effect=lambda b, g, s, st: st)), \
+         patch.object(publisher, "update_leaderboard", board):
+        url = await publisher.publish_event("1", event, "9", bot=MagicMock())
+
+    assert url is None
+    assert board.await_args.args[3] == "https://x/donations/dd/index.html"
+    helper.get_public_url.assert_called_with("donations/dd/index.html")

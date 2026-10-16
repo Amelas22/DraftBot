@@ -25,8 +25,23 @@ def render(payload: dict[str, Any]) -> str:
     return inject(TEMPLATE.read_text(encoding="utf-8"), payload, PLACEHOLDER_ID)
 
 
+_locks: dict[str, asyncio.Lock] = {}
+
+
+def _page_url(event: Event) -> str:
+    return DigitalOceanHelper().get_public_url(f"donations/{event['page_key']}/index.html")
+
+
 async def publish_event(guild_id: str, event: Event, bot_id: str,
                         bot: Any = None) -> str | None:
+    """One publish at a time per guild: setup/end handlers and the 3-minute loop all
+    come through here, and two overlapping runs would post the same receipts twice."""
+    async with _locks.setdefault(guild_id, asyncio.Lock()):
+        return await _publish_event(guild_id, event, bot_id, bot)
+
+
+async def _publish_event(guild_id: str, event: Event, bot_id: str,
+                         bot: Any = None) -> str | None:
     """Build one event's page and upload it; with `bot`, also post receipts and refresh
     the leaderboard. Each step is isolated -- Discord failing never costs the page, and
     the page failing never costs the channels. The public URL, or None if the upload failed."""
@@ -54,7 +69,7 @@ async def publish_event(guild_id: str, event: Event, bot_id: str,
                 logger.opt(exception=True).error(
                     f"donation day: receipts failed for guild {guild_id}; retrying next tick")
             try:
-                await update_leaderboard(bot, guild_id, payload, url, state)
+                await update_leaderboard(bot, guild_id, payload, url or _page_url(event), state)
             except Exception:
                 logger.opt(exception=True).error(
                     f"donation day: leaderboard failed for guild {guild_id}; retrying next tick")

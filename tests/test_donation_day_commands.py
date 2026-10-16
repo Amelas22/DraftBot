@@ -75,3 +75,22 @@ async def test_end_deactivates_only_after_a_successful_final_upload(url, stays_a
     assert save.called is (not stays_active)
     message = ctx.followup.send.await_args.args[0]
     assert ("run `/donation_day end` again" in message) is stays_active
+
+
+def test_an_overlong_event_name_is_refused():
+    with pytest.raises(ValueError):
+        new_event("x" * 101, 100, None, NOW)
+
+
+@pytest.mark.asyncio
+async def test_force_ends_the_event_even_when_the_final_upload_failed():
+    import cogs.donation_day_commands as cmds
+    cog = cmds.DonationDayCommands(MagicMock())
+    with patch.object(cmds, "get_event", return_value=new_event("DD", 100, None, NOW)), \
+         patch.object(cmds, "publish_event", AsyncMock(return_value=None)), \
+         patch.object(cmds, "save_event") as save:
+        ctx = _end_ctx()
+        await cmds.DonationDayCommands.end_event.callback(cog, ctx, force=True)
+
+    assert save.call_args.args[1]["active"] is False
+    assert "FAILED" in ctx.followup.send.await_args.args[0]

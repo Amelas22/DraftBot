@@ -23,6 +23,9 @@ from services.donation_day_publisher import publish_event
 from services.donation_service import mark_paid_cash
 
 
+MAX_NAME_LENGTH = 100
+
+
 def new_event(name: str, goal: int, starts: str | None, now: datetime,
               existing: Event | None = None) -> Event:
     """An active event. `starts` is 'YYYY-MM-DD HH:MM' in server time, or now.
@@ -30,6 +33,8 @@ def new_event(name: str, goal: int, starts: str | None, now: datetime,
     Re-running setup on a running event (`existing`) without `starts` keeps its start,
     so the totals window doesn't silently move.
     """
+    if len(name) > MAX_NAME_LENGTH:
+        raise ValueError(f"The name must be at most {MAX_NAME_LENGTH} characters.")
     if goal <= 0:
         raise ValueError("The goal must be a positive number of dollars.")
     if starts:
@@ -99,7 +104,9 @@ class DonationDayCommands(commands.Cog):
 
     @donation_day.command(name="end", description="Publish a final snapshot and end the donation day")
     @has_bot_manager_role()
-    async def end_event(self, ctx: discord.ApplicationContext) -> None:
+    @option("force", bool, description="End even if the final upload fails",
+            required=False, default=False)
+    async def end_event(self, ctx: discord.ApplicationContext, force: bool = False) -> None:
         await ctx.defer(ephemeral=True)
         guild_id = str(not_none(ctx.guild).id)
         event = get_event(guild_id)
@@ -107,16 +114,18 @@ class DonationDayCommands(commands.Cog):
             await ctx.followup.send("No donation day is running.", ephemeral=True)
             return
         url = await publish_event(guild_id, event, str(not_none(self.bot.user).id), bot=self.bot)
-        if url is None:
+        if url is None and not force:
             # Stay active: the 3-minute loop keeps retrying, and ending now would
             # freeze the last published page short of the final totals.
             await ctx.followup.send(
                 f"The final upload failed, so **{event['name']}** is still running and "
-                f"keeps retrying every 3 minutes. Once it recovers, run `/donation_day end` again.",
+                f"keeps retrying every 3 minutes. Once it recovers, run `/donation_day end` again, "
+                f"or run it with force:True to end anyway.",
                 ephemeral=True)
             return
         save_event(guild_id, {**event, "active": False})
-        await ctx.followup.send(f"**{event['name']}** has ended. Final page: {url}",
+        final = f"Final page: {url}" if url else "The final upload FAILED (ended by force); the last published page stays up."
+        await ctx.followup.send(f"**{event['name']}** has ended. {final}",
                                 ephemeral=True)
 
     @donation_day.command(name="status", description="Donation day totals and the page link")
