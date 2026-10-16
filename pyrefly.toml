@@ -19,6 +19,7 @@ project-includes = [
     "helpers/draft_rooms.py",
     "services/serve_health_monitor.py",
     "services/draft_pool_service.py",
+    "services/donation_service.py",
     "services/mtgo_resolution_service.py",
     "services/vault_check.py",
     "services/draft_reconstruct.py",

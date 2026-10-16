@@ -10,6 +10,7 @@ from loguru import logger
 from datetime import datetime, timedelta
 
 from services.draft_pool_service import match_pool, pool_balance
+from services.donation_service import level_donation
 import discord
 import random
 from sqlalchemy import update, select
@@ -112,14 +113,18 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                 # staked have just had them written by split_into_teams). The
                 # money itself moves AFTER this transaction commits; see below.
                 pool_sides = None
-                # STAKED only, matching utils.py's settlement gate exactly. Entries
-                # can only arrive through the staked signup UI, and settlement is
-                # inside a staked-only branch -- so matching any wider would level
-                # a pool that nothing would ever pay out, stranding it.
+                donation_sides = None
+                if session.donation:
+                    # A donation draft escrows nothing, so there is no pool to
+                    # match. Its shares are levelled from the declared entries
+                    # and recorded, after this transaction commits for the same
+                    # single-writer reason as the pool below.
+                    donation_sides = (session.session_id,
+                                      list(session.team_a or []), list(session.team_b or []))
                 # Staked queues and premade drafts with a fixed entry fee: the
                 # two kinds of draft that hold a pool, and the same pair
                 # settlement pays out.
-                if session.session_type == "staked" or session.entry_fee:
+                elif session.session_type == "staked" or session.entry_fee:
                     pool_sides = (str(session.guild_id), session.session_id,
                                   list(session.team_a or []), list(session.team_b or []))
 
@@ -204,6 +209,19 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
         # It times out, the retry loop exhausts, and the whole team-creation
         # transaction rolls back -- leaving teams written by split_into_teams
         # (its own transaction) beside a session_stage that never advanced.
+        if donation_sides is not None:
+            try:
+                await level_donation(*donation_sides)
+            except Exception:
+                logger.opt(exception=True).error(
+                    "could not record the donation shares on {}; unwinding the "
+                    "draft to sign-ups", session.session_id)
+                await unwind_team_creation(session.session_id, before)
+                await interaction.followup.send(
+                    "⚠️ The donation shares couldn't be recorded, so teams weren't "
+                    "created. Run a new **ready check**, then **Create Teams** to "
+                    "try again.")
+                return False
         if pool_sides is not None:
             # match_pool is all or nothing, so a failure here has moved no
             # money. The draft goes back to sign-ups as it was, and nothing has
