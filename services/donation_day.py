@@ -84,6 +84,30 @@ def save_event(guild_id: str | int, event: Event) -> None:
     update_setting(guild_id, "donation_day", dict(event))
 
 
+def resolve_draft_kind(requested: str | None, *, money_server: bool, event_active: bool,
+                       is_manager: bool) -> tuple[str | None, str | None]:
+    """Which kind of draft /draft opens: (kind, refusal message).
+
+    While a donation day runs, every draft on the server is a donation draft by
+    default, for anyone; only a bot manager may still ask for a staked one.
+    Outside an event the default stays staked and only managers open donation
+    drafts. A free server never opens either, so it gets (None, None) unless it
+    asked for a donation draft.
+    """
+    if not money_server:
+        if requested == "donation":
+            return None, "Donation drafts only run on money servers."
+        return None, None
+    if event_active:
+        if requested == "staked" and not is_manager:
+            return None, ("A donation day is running, so every draft here is a donation "
+                          "draft. Only bot managers can open a staked draft until it ends.")
+        return requested or "donation", None
+    if requested == "donation" and not is_manager:
+        return None, "Only bot managers can open a donation draft."
+    return requested or "staked", None
+
+
 def _row_key(row: dict[str, Any]) -> tuple[int, str]:
     return (-row["total"], row["name"])
 

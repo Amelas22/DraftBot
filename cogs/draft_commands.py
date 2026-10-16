@@ -8,6 +8,7 @@ from database.db_session import db_session
 from session import DraftSession, MatchResult
 from views import MatchResultSelect
 from config import is_money_server
+from services.donation_day import get_event, resolve_draft_kind
 from preference_service import get_player_dm_notification_preference, update_player_dm_notification_preference
 from helpers.display_names import get_display_name
 from helpers.permissions import is_bot_manager
@@ -28,23 +29,24 @@ class DraftCommands(commands.Cog):
     #     logger.info(f"Received interaction: {interaction.data}")
 
     @discord.slash_command(name='draft', description='Start a cube draft with team settings based on server configuration', guild_ids=None)
-    @option("kind", str, description="Money servers: a staked draft, or a donation draft for DraftBot",
-            choices=["staked", "donation"], default="staked", required=False)
-    async def draft(self, ctx, kind: str = "staked"):
+    @option("kind", str, description="Staked or donation (donation is the default during a donation day)",
+            choices=["staked", "donation"], default=None, required=False)
+    async def draft(self, ctx, kind: str | None = None):
         logger.info(f"Received draft command from user {ctx.author.id} in guild {ctx.guild.id}")
 
-        if kind == "donation":
-            if not is_money_server(ctx.guild.id):
-                await ctx.response.send_message(
-                    "Donation drafts only run on money servers.", ephemeral=True)
-                return
-            if not await is_bot_manager(ctx):
-                await ctx.response.send_message(
-                    "Only bot managers can open a donation draft.", ephemeral=True)
-                return
+        event = get_event(ctx.guild.id)
+        kind, refusal = resolve_draft_kind(
+            kind, money_server=is_money_server(ctx.guild.id),
+            event_active=bool(event and event.get("active")),
+            # Only asked when it can change the answer: an explicit choice that
+            # the role gates.
+            is_manager=await is_bot_manager(ctx) if kind else False)
+        if refusal:
+            await ctx.response.send_message(refusal, ephemeral=True)
+            return
 
         # Check if this is a money server
-        if is_money_server(ctx.guild.id):
+        if kind is not None:
             logger.info(f"Using {kind} draft view for money server {ctx.guild.id}")
             view = StakedCubeDraftSelectionView(guild_id=ctx.guild.id,
                                                 donation=kind == "donation")
