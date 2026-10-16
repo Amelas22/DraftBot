@@ -76,6 +76,8 @@ async def main():
         ensure_running(bot, "_inactive_players_task", lambda: check_inactive_players_task(bot))
         from services.log_reconciler import run_log_reconciler
         ensure_running(bot, "_log_reconciler_task", lambda: run_log_reconciler(bot))
+        from services.donation_day_publisher import run_donation_publisher
+        ensure_running(bot, "_donation_publisher_task", lambda: run_donation_publisher(bot))
         # Before reconnecting drafts in setup: a draft a crash left between
         # committing its teams and settling its pool goes back to sign-ups,
         # and is then one of them. Once per process, until it first succeeds.
