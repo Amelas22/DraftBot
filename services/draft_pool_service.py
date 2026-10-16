@@ -481,7 +481,7 @@ def level_side(held: dict[str, int], budget: int) -> dict[str, int]:
     return {p: n * _STAKE_STEP for p, n in alloc.items() if n}
 
 
-async def _declared_bets(session_id: str) -> tuple[dict[str, int], set[str]]:
+async def declared_bets(session_id: str) -> tuple[dict[str, int], set[str]]:
     """Each player's declared bet, and which of them asked to be capped.
 
     A NULL is_capped reads as UNCAPPED, which is how the queue renders it: the
@@ -606,6 +606,41 @@ class MatchResult(TypedDict):
     held: dict[str, int]            # what each player is left playing for, after both ceilings
 
 
+def plan_levelling(team_a: list[str], team_b: list[str], held: dict[str, int],
+                   bets: dict[str, int], wants_cap: set[str]) -> MatchResult:
+    """Both ceilings match_pool applies, as a plan that moves no money.
+
+    `held` is what each player has at stake going in: the pool's holdings for
+    a staked draft, the declared entries for a donation draft, which escrows
+    nothing. Sharing this one function is what keeps the two kinds of draft
+    levelling by the same rule.
+
+    Pure: works on a copy, so the caller's map is untouched. The `held` it
+    returns is that copy after both ceilings, every input key included.
+    """
+    held = dict(held)
+    sides = ([p for p in team_a if held.get(p)], [p for p in team_b if held.get(p)])
+
+    capped: dict[str, int] = {}
+    for side in sides:
+        capped |= _trim(held, side, cap_targets(side, bets, wants_cap, held))
+
+    # What each side can actually put up in whole tens. A stake is matched in
+    # units of ten, so an entry of 25 backs 20 of the other side and hands back
+    # the 5 -- and the figure the two sides meet at has to be one BOTH can
+    # reach that way, not merely the smaller total.
+    totals = [sum(snap_to_step(held[p]) for p in side) for side in sides]
+    matched = min(totals)
+
+    refunded: dict[str, int] = {}
+    for side in sides:
+        stays = level_side({p: held[p] for p in side}, matched)
+        refunded |= _trim(held, side, stays)
+
+    return {"matched": matched, "refunded": refunded, "capped": capped,
+            "held": held}
+
+
 async def match_pool(guild_id: str, session_id: str,
                      team_a: list[str], team_b: list[str]) -> MatchResult:
     """Cap both sides at the smaller side's total, returning the excess.
@@ -636,26 +671,9 @@ async def match_pool(guild_id: str, session_id: str,
     raises PoolNotSettled or the underlying error.
     """
     held = await contributions(guild_id, session_id)
-    sides = ([p for p in team_a if held.get(p)], [p for p in team_b if held.get(p)])
-    side_a, side_b = sides
-
-    bets, wants_cap = await _declared_bets(session_id)
-    capped: dict[str, int] = {}
-    for side in (side_a, side_b):
-        capped |= _trim(held, side, cap_targets(side, bets, wants_cap, held))
-
-    # What each side can actually put up in whole tens. A stake is matched in
-    # units of ten, so an entry of 25 backs 20 of the other side and hands back
-    # the 5 -- and the figure the two sides meet at has to be one BOTH can
-    # reach that way, not merely the smaller total.
-    totals = [sum(snap_to_step(held[p]) for p in side)
-              for side in sides]
-    matched = min(totals)
-
-    refunded: dict[str, int] = {}
-    for side in sides:
-        stays = level_side({p: held[p] for p in side}, matched)
-        refunded |= _trim(held, side, stays)
+    bets, wants_cap = await declared_bets(session_id)
+    plan = plan_levelling(team_a, team_b, held, bets, wants_cap)
+    matched, capped, refunded = plan["matched"], plan["capped"], plan["refunded"]
 
     await _apply_refunds(guild_id, session_id,
                          [(p, n, "capped") for p, n in capped.items()]
@@ -672,7 +690,7 @@ async def match_pool(guild_id: str, session_id: str,
     # place, so returning it saves that caller re-reading the ledger it was just
     # written from.
     return {"matched": matched, "refunded": refunded, "capped": capped,
-            "held": dict(held)}
+            "held": plan["held"]}
 
 
 def _payout_source(session_id: str, player_id: str) -> str:
