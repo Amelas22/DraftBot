@@ -68,3 +68,13 @@ async def test_two_marks_at_once_settle_the_debt_once(test_db):
 
     assert sorted(settled) == [0, 50]
     assert await debt_service.get_balance_with("g", "b2", BOT) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_credit_that_is_not_a_settlement_still_pays_down_the_donation(test_db):
+    await _owes_donation("b2", 50)
+    await debt_service.create_ledger_entries("g", "b2", BOT, 30, "admin", "x")
+    await debt_service.create_ledger_entries("g", BOT, "b2", 50, "admin", "credit")
+
+    assert await mark_paid_cash("g", "b2", BOT) == 0
+    assert await debt_service.get_balance_with("g", "b2", BOT) == -30

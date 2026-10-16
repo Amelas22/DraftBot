@@ -194,10 +194,11 @@ async def format_donation_outcomes(session_id: str, sign_ups: dict[str, str],
 async def _donation_outstanding(guild_id: str, player_id: str, bot_id: str) -> int:
     """What this player still owes DraftBot from donation drafts.
 
-    Every donation debt they were booked, less everything they have settled
-    with DraftBot. Settlements are not tagged by source, so all of them count
-    against donations first -- which can only UNDER-state the figure, so a cash
-    mark can never reach a debt that is not a donation.
+    Every donation debt they were booked, less every credit they hold against
+    DraftBot -- settlements, transfers, admin credits, whatever the source. Credits
+    are not tagged with the debt they pay, so all of them count against donations
+    first -- which can only UNDER-state the figure, so a cash mark can never reach
+    a debt that is not a donation.
     """
     async with db_session() as session:
         pledged = (await session.execute(
@@ -209,8 +210,7 @@ async def _donation_outstanding(guild_id: str, player_id: str, bot_id: str) -> i
             select(func.coalesce(func.sum(DebtLedger.amount), 0)).where(
                 DebtLedger.guild_id == guild_id, DebtLedger.player_id == player_id,
                 DebtLedger.counterparty_id == bot_id,
-                DebtLedger.source_type == "settlement", DebtLedger.amount > 0,
-                TIX_ONLY))).scalar()
+                DebtLedger.amount > 0, TIX_ONLY))).scalar()
     return max(int(pledged or 0) - int(settled or 0), 0)
 
 
