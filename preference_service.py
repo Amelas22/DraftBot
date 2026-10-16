@@ -21,6 +21,9 @@ class PlayerPreferences(Base):
     # NULL means they have not been asked, which is what decides whether the
     # sign-up flow asks them (services/library_prompt).
     uses_library = Column(Boolean, nullable=True)
+    # Whether this player's donation-day credit shows as "Anonymous". NULL is
+    # "named", the default; nullable with no default because the row is shared.
+    donation_anonymous = Column(Boolean, nullable=True)
     last_updated = Column(TIMESTAMP, default=datetime.now, server_default=text('CURRENT_TIMESTAMP'))
 
     __table_args__ = (
@@ -326,4 +329,40 @@ async def get_players_using_library(player_ids, guild_id):
             select(PlayerPreferences.player_id).where(
                 PlayerPreferences.id.in_(composite_ids),
                 PlayerPreferences.uses_library.is_(True)))).scalars().all()
+    return {str(p) for p in rows}
+
+
+async def set_donation_anonymous(player_id, guild_id, anonymous):
+    """Save whether this player shows as Anonymous on the donation page. True on success."""
+    async def _update(session):
+        composite_id = get_composite_preference_key(player_id, guild_id)
+        preference = await session.get(PlayerPreferences, composite_id)
+        if preference is None:
+            session.add(PlayerPreferences(
+                id=composite_id, player_id=str(player_id), guild_id=str(guild_id),
+                donation_anonymous=anonymous, last_updated=datetime.now()))
+        else:
+            preference.donation_anonymous = anonymous
+            preference.last_updated = datetime.now()
+        logger.info(f"Donation anonymity for player {player_id} in guild {guild_id}: {anonymous}")
+        return True
+
+    return await execute_db_operation(_update, default_value=False, commit=True,
+                                      error_message="Error updating donation anonymity")
+
+
+async def get_anonymous_donors(player_ids, guild_id):
+    """The players among these who asked to show as Anonymous on the donation page.
+
+    Raises on a database error rather than answering "nobody", which would
+    publish names people asked to hide.
+    """
+    if not player_ids:
+        return set()
+    composite_ids = [get_composite_preference_key(p, guild_id) for p in player_ids]
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(
+            select(PlayerPreferences.player_id).where(
+                PlayerPreferences.id.in_(composite_ids),
+                PlayerPreferences.donation_anonymous.is_(True)))).scalars().all()
     return {str(p) for p in rows}
