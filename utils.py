@@ -3050,6 +3050,11 @@ async def get_formatted_stake_pairs(session_id, sign_ups):
     Returns:
         tuple: (formatted_stake_lines, total_stakes)
     """
+    from services.draft_pool_service import is_donation_draft
+    if await is_donation_draft(session_id):
+        from services.donation_service import format_donation_entries
+        return await format_donation_entries(session_id, sign_ups)
+
     if not await _has_stake_pairings(session_id):
         guild_id = await _guild_of(session_id)
         if guild_id is None:
@@ -3140,6 +3145,12 @@ async def get_formatted_bet_outcomes(session_id, sign_ups, winning_team_ids):
     Returns:
         tuple: (formatted_outcome_lines, total_stakes)
     """
+    from services.draft_pool_service import is_donation_draft
+    if await is_donation_draft(session_id):
+        from services.donation_service import format_donation_outcomes
+        return await format_donation_outcomes(session_id, sign_ups,
+                                              list(winning_team_ids or []))
+
     if not await _has_stake_pairings(session_id):
         guild_id = await _guild_of(session_id)
         if guild_id is None:

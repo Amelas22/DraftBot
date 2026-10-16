@@ -2552,7 +2552,12 @@ async def _update_draft_message(bot, session_id):
             # capped to each other, so 200 against 100 would advertise 300 for
             # a draft that plays for 200.
             from services.draft_pool_service import contributions, max_pool
-            held = await contributions(str(draft_session.guild_id), session_id)
+            if draft_session.donation:
+                # Nothing is escrowed, so quote the pot from what was declared.
+                held = {p: int(s['amount'] or 0) for p, s in stake_info_by_player.items()
+                        if p in (draft_session.sign_ups or {})}
+            else:
+                held = await contributions(str(draft_session.guild_id), session_id)
             pool = max_pool(held.values())
             sign_ups_str = build_board(
                 draft_session.sign_ups,

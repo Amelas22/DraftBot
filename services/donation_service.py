@@ -158,3 +158,33 @@ async def settle_donation_draft(guild_id: str, session_id: str, outcome: str,
     from services.mtgo_resolution_service import settle_new_debts
     await settle_new_debts(guild_id, await donation_debtors(guild_id, session_id))
     return booked
+
+
+def _by_share(item: tuple[str, int]) -> int:
+    return item[1]
+
+
+async def format_donation_entries(session_id: str,
+                                  sign_ups: dict[str, str]) -> tuple[list[str], int]:
+    """Each player's share, for the teams embed: what they owe DraftBot if their side loses."""
+    shares = await donation_shares(session_id)
+    ranked = sorted(shares.items(), key=_by_share, reverse=True)
+    lines = [f"**{sign_ups.get(p, 'Unknown')}**: {n} tix" for p, n in ranked]
+    return lines, sum(shares.values())
+
+
+async def format_donation_outcomes(session_id: str, sign_ups: dict[str, str],
+                                   winning_team: list[str]) -> tuple[list[str], int]:
+    """What the result means, for the victory embed. The total is what goes to DraftBot."""
+    shares = await donation_shares(session_id)
+    winners = set(winning_team)
+    lines: list[str] = []
+    donated = 0
+    for player_id, share in sorted(shares.items(), key=_by_share, reverse=True):
+        name = sign_ups.get(player_id, "Unknown")
+        if player_id in winners:
+            lines.append(f"**{name}** won {share} tix for DraftBot")
+        else:
+            lines.append(f"**{name}** donates {share} tix to DraftBot")
+            donated += share
+    return lines, donated
