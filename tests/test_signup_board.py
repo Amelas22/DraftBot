@@ -148,7 +148,7 @@ async def _render(embed, sign_ups, guild=None):
     session = SimpleNamespace(
         session_id="123456789012345678-1753500000",
         friendly_id="lightning-bolt-7", cube="LSVCube", guild_id="999",
-        draft_channel_id="111", message_id="222", session_type="staked",
+        draft_channel_id="111", message_id="222", session_type="staked", donation=False,
         sign_ups=sign_ups, packs_per_player=3, cards_per_pack=15,
     )
     message = MagicMock()

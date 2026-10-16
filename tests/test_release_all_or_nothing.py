@@ -220,7 +220,7 @@ async def test_a_draw_whose_pool_cannot_release_still_posts():
     left the draw unposted and every later report failing the same way."""
     import utils
 
-    draft = MagicMock(session_type="staked", entry_fee=None, guild_id="g",
+    draft = MagicMock(session_type="staked", donation=False, entry_fee=None, guild_id="g",
                       team_a=["p1"], team_b=["p2"], match_counter=2, friendly_id="f")
     with patch.object(utils, "get_draft_session", AsyncMock(return_value=draft)), \
          patch.object(utils, "calculate_team_wins", AsyncMock(return_value=(1, 1))), \
