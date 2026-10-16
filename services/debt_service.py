@@ -428,7 +428,8 @@ async def create_settlement(
     payee_id: str,
     amount: int,
     settled_by: str,
-    settlement_id: str = None
+    settlement_id: str = None,
+    settlement_method: str = 'external'
 ) -> tuple[DebtLedger, DebtLedger]:
     """
     Create settlement entries to record a payment between two players.
@@ -447,6 +448,8 @@ async def create_settlement(
         amount: The amount paid (positive integer)
         settled_by: Who initiated the settlement (for audit)
         settlement_id: Optional deterministic ID for idempotency
+        settlement_method: 'external' for tix moved outside the bot; 'cash' for a
+            donation debt the debtor marked paid in cash
 
     Returns:
         Tuple of (payer_entry, payee_entry)
@@ -531,7 +534,7 @@ async def create_settlement(
                     source_id=settlement_id,
                     notes=notes,
                     created_by=settled_by,
-                    settlement_method='external'
+                    settlement_method=settlement_method
                 )
 
                 # Entry from payee's perspective (they received, so negative - reduces credit)
@@ -544,7 +547,7 @@ async def create_settlement(
                     source_id=settlement_id,
                     notes=notes,
                     created_by=settled_by,
-                    settlement_method='external'
+                    settlement_method=settlement_method
                 )
 
                 session.add(payer_entry)

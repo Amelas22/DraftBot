@@ -56,6 +56,7 @@ project-includes = [
     "models/mtgo_job.py",
     "services/card_lending_service.py",
     "cogs/library_commands.py",
+    "cogs/donation_day_commands.py",
     "services/card_library_inventory.py",
     "helpers/cube_list.py",
     "services/card_deposit_service.py",

@@ -13,11 +13,12 @@ donations it holds.
 import asyncio
 
 from loguru import logger
-from sqlalchemy import update, select
+from sqlalchemy import func, select, update
 
 from database.db_session import db_session
 from models.debt_ledger import DebtLedger
 from models.stake import StakeInfo
+from services import debt_service, wallet_service
 from services.debt_service import TIX_ONLY
 from services.draft_pool_service import MatchResult, declared_bets, plan_levelling
 
@@ -188,3 +189,46 @@ async def format_donation_outcomes(session_id: str, sign_ups: dict[str, str],
             lines.append(f"**{name}** donates {share} tix to DraftBot")
             donated += share
     return lines, donated
+
+
+async def _donation_outstanding(guild_id: str, player_id: str, bot_id: str) -> int:
+    """What this player still owes DraftBot from donation drafts.
+
+    Every donation debt they were booked, less everything they have settled
+    with DraftBot. Settlements are not tagged by source, so all of them count
+    against donations first -- which can only UNDER-state the figure, so a cash
+    mark can never reach a debt that is not a donation.
+    """
+    async with db_session() as session:
+        pledged = (await session.execute(
+            select(func.coalesce(func.sum(-DebtLedger.amount), 0)).where(
+                DebtLedger.guild_id == guild_id, DebtLedger.player_id == player_id,
+                DebtLedger.counterparty_id == bot_id,
+                DebtLedger.source_type == DONATION_SOURCE, TIX_ONLY))).scalar()
+        settled = (await session.execute(
+            select(func.coalesce(func.sum(DebtLedger.amount), 0)).where(
+                DebtLedger.guild_id == guild_id, DebtLedger.player_id == player_id,
+                DebtLedger.counterparty_id == bot_id,
+                DebtLedger.source_type == "settlement", DebtLedger.amount > 0,
+                TIX_ONLY))).scalar()
+    return max(int(pledged or 0) - int(settled or 0), 0)
+
+
+async def mark_paid_cash(guild_id: str, player_id: str, bot_id: str) -> int:
+    """Settle the caller's own donation debt to DraftBot as paid in cash, on trust.
+
+    Never another player's debt, and never a debt that is not a donation. A
+    repeat finds nothing outstanding and settles nothing. Held under MONEY_LOCK
+    so it cannot interleave with an auto-draw or a second click: both re-read
+    what is owed, and the second finds it already settled.
+    """
+    async with wallet_service.MONEY_LOCK:
+        owed = -await debt_service.get_balance_with(guild_id, player_id, bot_id)
+        amount = min(owed, await _donation_outstanding(guild_id, player_id, bot_id))
+        if amount <= 0:
+            return 0
+        await debt_service.create_settlement(
+            guild_id, player_id, bot_id, amount, settled_by=player_id,
+            settlement_method="cash")
+    logger.info(f"donation: {player_id} marked {amount} tix paid to DraftBot in cash")
+    return amount
