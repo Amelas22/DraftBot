@@ -76,3 +76,30 @@ async def test_players_no_longer_on_a_team_are_not_listed_or_counted(test_db):
     out, donated = await get_formatted_bet_outcomes("d1", NAMES, ["a1", "a2"])
     assert len(out) == 4 and donated == 100
     assert not any("Unknown" in line for line in out)
+
+
+@pytest.mark.asyncio
+async def test_a_corrected_result_does_not_change_what_was_booked(test_db):
+    """The ledger keeps the first decision; the victory embed must say the same."""
+    from unittest.mock import AsyncMock, patch
+
+    import services.donation_service as donation
+    from utils import settle_decided_draft
+
+    teams = (["101", "102"], ["201", "202"])
+    names = {"101": "Ann", "102": "Ben", "201": "Cat", "202": "Dan"}
+    await seed_session("d1", guild="g", stage="pairings", donation=True, sign_ups=names,
+                       teams=teams, matches=[("101", "201", "101", None)], match_counter=2)
+    await seed_stakes("d1", {"101": (100, False), "102": (50, False),
+                             "201": (50, False), "202": (50, False)})
+    await level_donation("d1", *teams)
+    with patch.object(donation, "draftbot_id", return_value="999"), \
+         patch("notification_service.notify_wallet", AsyncMock()):
+        await settle_decided_draft("d1")
+
+    lines, total = await get_formatted_bet_outcomes("d1", names, teams[1])
+
+    assert "**Ann** won 50 tix for DraftBot" in lines
+    assert "**Cat** donates 50 tix to DraftBot" in lines
+    assert not any("**Ann** donates" in line or "**Cat** won" in line for line in lines)
+    assert total == 100

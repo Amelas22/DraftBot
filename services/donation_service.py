@@ -201,9 +201,23 @@ async def format_donation_entries(session_id: str,
 
 async def format_donation_outcomes(session_id: str, sign_ups: dict[str, str],
                                    winning_team: list[str]) -> tuple[list[str], int]:
-    """What the result means, for the victory embed. The total is what goes to DraftBot."""
+    """What the result means, for the victory embed. The total is what goes to DraftBot.
+
+    Once the draft's debts are booked the ledger is the truth (the first decision
+    stands, even if the result is later corrected), so the booked debtors are the
+    losers and everyone else on a team won. `winning_team` is only used before
+    anything is booked.
+    """
     shares = await current_team_shares(session_id)
     winners = set(winning_team)
+    async with db_session() as session:
+        guild_id = (await session.execute(
+            select(DraftSession.guild_id)
+            .where(DraftSession.session_id == session_id))).scalars().first()
+    if guild_id is not None:
+        debtors = set(await donation_debtors(str(guild_id), session_id))
+        if debtors:
+            winners = set(shares) - debtors
     lines: list[str] = []
     donated = 0
     for player_id, share in sorted(shares.items(), key=_by_share, reverse=True):
