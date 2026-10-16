@@ -586,8 +586,22 @@ async def settle_decided_draft(draft_session_id):
         return
 
     guild_id = str(draft_session.guild_id)
-    winners = (draft_session.team_a if team_a_wins > team_b_wins
-               else draft_session.team_b)
+    a_won = team_a_wins > team_b_wins
+    winners = draft_session.team_a if a_won else draft_session.team_b
+    losers = draft_session.team_b if a_won else draft_session.team_a
+
+    if draft_session.donation:
+        # Before the pool branches: a donation draft holds no pool. Its money
+        # moves as debts to DraftBot, auto-drawn from losers who hold tix.
+        from services.donation_service import settle_donation_draft
+        try:
+            await settle_donation_draft(guild_id, draft_session_id, outcome,
+                                        list(winners or []), list(losers or []))
+        except Exception:
+            logger.opt(exception=True).error(
+                f"donation draft {draft_session_id}: settlement failed; the next "
+                f"match report retries it")
+        return
 
     if await pool_balance(guild_id, draft_session_id) > 0:
         if outcome == "draw":

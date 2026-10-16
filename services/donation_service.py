@@ -10,11 +10,15 @@ DraftBot is only ever the CREDITOR here. Its id is all digits, so wallet code
 treats it as a person, and a debt booked against it would auto-draw from the
 donations it holds.
 """
+import asyncio
+
 from loguru import logger
 from sqlalchemy import update, select
 
 from database.db_session import db_session
+from models.debt_ledger import DebtLedger
 from models.stake import StakeInfo
+from services.debt_service import TIX_ONLY
 from services.draft_pool_service import MatchResult, declared_bets, plan_levelling
 
 
@@ -51,3 +55,106 @@ async def donation_shares(session_id: str) -> dict[str, int]:
             select(StakeInfo.player_id, StakeInfo.assigned_stake)
             .where(StakeInfo.session_id == session_id))).all()
     return {player_id: int(share) for player_id, share in rows if share}
+
+
+DONATION_SOURCE = "donation"
+
+# Serializes the check-then-insert in book_donation_debts, for the reason
+# debt_service._STAKE_DEBT_LOCK gives: settlement runs inside every match
+# report, so two can overlap, and the bot is the database's only writer.
+_DONATION_LOCK = asyncio.Lock()
+
+
+def donation_source_id(session_id: str, player_id: str) -> str:
+    """The idempotency key of one loser's donation debt."""
+    return f"{DONATION_SOURCE}:{session_id}:{player_id}"
+
+
+def draftbot_id() -> str | None:
+    """DraftBot's own user id, read from the running bot -- never hard-coded,
+    so a dev bot collects in dev. None until the bot has logged in."""
+    from bot_registry import get_bot
+
+    user = getattr(get_bot(), "user", None)
+    return str(user.id) if user is not None else None
+
+
+async def book_donation_debts(guild_id: str, session_id: str, winners: list[str],
+                              losers: list[str], bot_id: str) -> list[str]:
+    """Book each loser's share as a debt to DraftBot. Returns who THIS call booked.
+
+    Keyed per (draft, loser), so a replay books nothing twice. Shares come from
+    team creation; a draft a crash left without them is levelled here from the
+    declared entries rather than settling for nothing.
+    """
+    shares = await donation_shares(session_id)
+    if not shares:
+        logger.warning(f"donation draft {session_id}: no shares recorded; "
+                       f"levelling from the declared entries now")
+        shares = (await level_donation(session_id, winners, losers))["held"]
+
+    booked: list[str] = []
+    async with _DONATION_LOCK, db_session() as session:
+        keys = [donation_source_id(session_id, p) for p in losers]
+        existing = set((await session.execute(
+            select(DebtLedger.source_id).where(
+                DebtLedger.source_type == DONATION_SOURCE,
+                DebtLedger.source_id.in_(keys)))).scalars().all())
+        for loser in losers:
+            amount = shares.get(loser, 0)
+            key = donation_source_id(session_id, loser)
+            if amount <= 0 or key in existing:
+                continue
+            note = f"Donation draft {session_id}: share owed to DraftBot"
+            session.add(DebtLedger(guild_id=guild_id, player_id=loser,
+                                   counterparty_id=bot_id, amount=-amount,
+                                   source_type=DONATION_SOURCE, source_id=key, notes=note))
+            session.add(DebtLedger(guild_id=guild_id, player_id=bot_id,
+                                   counterparty_id=loser, amount=amount,
+                                   source_type=DONATION_SOURCE, source_id=key, notes=note))
+            booked.append(loser)
+    if booked:
+        logger.info(f"donation draft {session_id}: {booked} owe DraftBot their shares")
+    return booked
+
+
+async def donation_debtors(guild_id: str, session_id: str) -> list[str]:
+    """Everyone this draft made a debtor of DraftBot, settled or not.
+
+    Read back from the ledger, not from what booking returned, so every later
+    match report is a free retry of a settlement that failed once -- the same
+    reason debt_service.get_draft_debtors exists.
+    """
+    async with db_session() as session:
+        rows = await session.execute(
+            select(DebtLedger.player_id).where(
+                DebtLedger.guild_id == guild_id,
+                DebtLedger.source_type == DONATION_SOURCE,
+                DebtLedger.source_id.like(f"{DONATION_SOURCE}:{session_id}:%"),
+                DebtLedger.amount < 0,
+                TIX_ONLY,
+            ).distinct())
+        return list(rows.scalars().all())
+
+
+async def settle_donation_draft(guild_id: str, session_id: str, outcome: str,
+                                winners: list[str], losers: list[str]) -> list[str]:
+    """Move a decided donation draft's money: losers owe DraftBot, funded ones pay now.
+
+    A draw books nothing. The draw from a loser's wallet is the ordinary
+    settle_new_debts pass, so it notifies exactly as any debt does.
+    """
+    if outcome == "draw":
+        return []
+    bot_id = draftbot_id()
+    if bot_id is None:
+        # Booking against anyone else would be wrong and permanent; the next
+        # match report runs this again.
+        logger.error(f"donation draft {session_id}: DraftBot's id is not known "
+                     f"yet; nothing booked")
+        return []
+    booked = await book_donation_debts(guild_id, session_id, winners, losers, bot_id)
+
+    from services.mtgo_resolution_service import settle_new_debts
+    await settle_new_debts(guild_id, await donation_debtors(guild_id, session_id))
+    return booked
