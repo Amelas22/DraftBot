@@ -18,17 +18,27 @@ from helpers.permissions import has_bot_manager_role
 from helpers.utils import not_none
 from preference_service import set_donation_anonymous
 from services.donation_day import Event, build_payload, get_event, save_event, slugify
+from services.donation_day_discord import get_state, save_state, state_for_setup
 from services.donation_day_publisher import publish_event
 from services.donation_service import mark_paid_cash
 
 
-def new_event(name: str, goal: int, starts: str | None, now: datetime) -> Event:
-    """A fresh, active event. `starts` is 'YYYY-MM-DD HH:MM' in server time, or now."""
+def new_event(name: str, goal: int, starts: str | None, now: datetime,
+              existing: Event | None = None) -> Event:
+    """An active event. `starts` is 'YYYY-MM-DD HH:MM' in server time, or now.
+
+    Re-running setup on a running event (`existing`) without `starts` keeps its start,
+    so the totals window doesn't silently move.
+    """
     if goal <= 0:
         raise ValueError("The goal must be a positive number of dollars.")
-    start = datetime.strptime(starts, "%Y-%m-%d %H:%M") if starts else now
-    return {"name": name, "goal_usd": goal,
-            "starts_at": start.isoformat(timespec="minutes"),
+    if starts:
+        start_at = datetime.strptime(starts, "%Y-%m-%d %H:%M").isoformat(timespec="minutes")
+    elif existing is not None and existing.get("active"):
+        start_at = existing["starts_at"]
+    else:
+        start_at = now.isoformat(timespec="minutes")
+    return {"name": name, "goal_usd": goal, "starts_at": start_at,
             "page_key": slugify(name), "active": True}
 
 
@@ -58,20 +68,34 @@ class DonationDayCommands(commands.Cog):
     @option("goal", int, description="Goal in dollars (1 tix = $1)")
     @option("starts", str, description="Start as YYYY-MM-DD HH:MM (server time); default now",
             required=False, default=None)
+    @option("receipts_channel", discord.TextChannel,
+            description="Where each donation is announced", required=False, default=None)
+    @option("leaderboard_channel", discord.TextChannel,
+            description="Where the live leaderboard is kept", required=False, default=None)
     async def setup_event(self, ctx: discord.ApplicationContext, name: str, goal: int,
-                          starts: str | None = None) -> None:
+                          starts: str | None = None,
+                          receipts_channel: discord.TextChannel | None = None,
+                          leaderboard_channel: discord.TextChannel | None = None) -> None:
         await ctx.defer(ephemeral=True)
+        guild_id = str(not_none(ctx.guild).id)
+        previous = get_event(guild_id)
         try:
-            event = new_event(name, goal, starts, datetime.now())
+            event = new_event(name, goal, starts, datetime.now(), existing=previous)
         except ValueError as e:
             await ctx.followup.send(f"Couldn't set that up: {e}", ephemeral=True)
             return
-        guild_id = str(not_none(ctx.guild).id)
         save_event(guild_id, event)
-        url = await publish_event(guild_id, event, str(not_none(self.bot.user).id))
-        await ctx.followup.send(
-            f"**{name}** is live. Page: {url or 'upload failed; it retries every 3 minutes'}",
-            ephemeral=True)
+        save_state(guild_id, state_for_setup(
+            get_state(guild_id), bool(previous and previous.get("active")),
+            str(receipts_channel.id) if receipts_channel else None,
+            str(leaderboard_channel.id) if leaderboard_channel else None))
+        url = await publish_event(guild_id, event, str(not_none(self.bot.user).id), bot=self.bot)
+        lines = [f"**{name}** is live. Page: {url or 'upload failed; it retries every 3 minutes'}"]
+        if receipts_channel:
+            lines.append(f"Receipts: {receipts_channel.mention}")
+        if leaderboard_channel:
+            lines.append(f"Leaderboard: {leaderboard_channel.mention}")
+        await ctx.followup.send("\n".join(lines), ephemeral=True)
 
     @donation_day.command(name="end", description="Publish a final snapshot and end the donation day")
     @has_bot_manager_role()
@@ -82,10 +106,17 @@ class DonationDayCommands(commands.Cog):
         if not event or not event.get("active"):
             await ctx.followup.send("No donation day is running.", ephemeral=True)
             return
-        url = await publish_event(guild_id, event, str(not_none(self.bot.user).id))
+        url = await publish_event(guild_id, event, str(not_none(self.bot.user).id), bot=self.bot)
+        if url is None:
+            # Stay active: the 3-minute loop keeps retrying, and ending now would
+            # freeze the last published page short of the final totals.
+            await ctx.followup.send(
+                f"The final upload failed, so **{event['name']}** is still running and "
+                f"keeps retrying every 3 minutes. Once it recovers, run `/donation_day end` again.",
+                ephemeral=True)
+            return
         save_event(guild_id, {**event, "active": False})
-        await ctx.followup.send(f"**{event['name']}** has ended. Final page: "
-                                f"{url or 'the final upload failed; the last published page stays up'}",
+        await ctx.followup.send(f"**{event['name']}** has ended. Final page: {url}",
                                 ephemeral=True)
 
     @donation_day.command(name="status", description="Donation day totals and the page link")
