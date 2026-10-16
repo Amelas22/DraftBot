@@ -180,8 +180,9 @@ async def handle_draft_session(interaction: discord.Interaction, session_type: s
 
 
 class StakedCubeDraftSelectionView(BaseCubeSelectionView):
-    def __init__(self, guild_id: int):
+    def __init__(self, guild_id: int, donation: bool = False):
         super().__init__("default", guild_id)
+        self.donation = donation
 
     async def submit_callback(self, interaction: discord.Interaction):
         if not self.cube_choice:
@@ -191,13 +192,15 @@ class StakedCubeDraftSelectionView(BaseCubeSelectionView):
             return
 
         if modal := StakedCubeDraftModal.create_if_needed(
-            self.cube_choice, self.packs_per_player, self.cards_per_pack
+            self.cube_choice, self.packs_per_player, self.cards_per_pack,
+            donation=self.donation
         ):
             await interaction.response.send_modal(modal)
         else:
             session_details = SessionDetails(interaction)
             session_details.cube_choice = self.cube_choice
             session_details.min_stake = 20  # Set fixed min stake to 20
+            session_details.donation = self.donation
             session_details.packs_per_player = self.packs_per_player
             session_details.cards_per_pack = self.cards_per_pack
             await handle_staked_draft_session(interaction, session_details)
@@ -207,15 +210,20 @@ class StakedCubeDraftModal(discord.ui.Modal):
     @classmethod
     def create_if_needed(cls, cube_choice: str,
                          packs_per_player: int = DEFAULT_PACKS_PER_PLAYER,
-                         cards_per_pack: int = DEFAULT_CARDS_PER_PACK) -> Optional['StakedCubeDraftModal']:
+                         cards_per_pack: int = DEFAULT_CARDS_PER_PACK,
+                         donation: bool = False) -> Optional['StakedCubeDraftModal']:
         """Create a modal only if it would have input fields."""
-        modal = cls(cube_choice, packs_per_player, cards_per_pack)
+        modal = cls(cube_choice, packs_per_player, cards_per_pack, donation=donation)
         return modal if modal.children else None
 
     def __init__(self, cube_choice: str,
                  packs_per_player: int = DEFAULT_PACKS_PER_PLAYER,
-                 cards_per_pack: int = DEFAULT_CARDS_PER_PACK, *args, **kwargs) -> None:
-        super().__init__(title="Staked Draft Setup", *args, **kwargs)
+                 cards_per_pack: int = DEFAULT_CARDS_PER_PACK,
+                 donation: bool = False, *args, **kwargs) -> None:
+        super().__init__(
+            title="Donation Draft Setup" if donation else "Staked Draft Setup",
+            *args, **kwargs)
+        self.donation = donation
         self.cube_choice = cube_choice
         self.packs_per_player = packs_per_player
         self.cards_per_pack = cards_per_pack
@@ -243,6 +251,7 @@ class StakedCubeDraftModal(discord.ui.Modal):
 
         # Set fixed min stake to 20
         session_details.min_stake = 20
+        session_details.donation = self.donation
         session_details.packs_per_player = self.packs_per_player
         session_details.cards_per_pack = self.cards_per_pack
 

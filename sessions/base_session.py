@@ -149,6 +149,7 @@ class BaseSession:
             cube=self.session_details.cube_choice,
             min_stake=getattr(self.session_details, 'min_stake', 10),
             entry_fee=getattr(self.session_details, 'entry_fee', None),
+            donation=getattr(self.session_details, 'donation', False),
             packs_per_player=self.session_details.packs_per_player,
             cards_per_pack=self.session_details.cards_per_pack
         )
