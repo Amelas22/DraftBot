@@ -8,6 +8,7 @@ from helpers.display_names import get_display_name, get_display_name_by_id
 from helpers.draft_footer import apply_draft_footer_from_session
 from helpers.team_names import labels_for
 from loguru import logger
+from services.donation_service import stakes_field_name
 
 async def manage_live_drafts_channel(bot, guild):
     """Create or get the live-drafts channel and ensure it exists"""
@@ -173,7 +174,7 @@ async def generate_live_draft_embed(bot, draft_session):
         # whole pool -- unlike the summary embed, which re-renders after payout.
         if stake_lines:
             embed.add_field(
-                name=f"**Prize Pool: {total_stakes} tix**",
+                name=stakes_field_name(draft_session.donation, total_stakes),
                 value="\n".join(stake_lines),
                 inline=False
             )

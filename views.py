@@ -31,6 +31,7 @@ from helpers.draft_outcome import decides_draft, standings_after, total_matches_
 from helpers.opponent_threads import spawn_opponent_threads
 from helpers.permissions import bot_manager_button
 from helpers.team_names import heads_field, labels_for
+from services.donation_service import SIGNUP_DONATION_NOTE
 from services.draft_pool_service import ENTRIES_STILL_HELD, PoolNotSettled, entry_in, release_draft_pool, set_entry
 from utils import (
     calculate_pairings,
@@ -3018,9 +3019,13 @@ class StakeOptionsSelect(discord.ui.Select):
                         ))
 
         # Confirm stake and provide draft link
-        signup_message = (f"Your maximum entry is {stake_amount} tix, and it has left "
-                          "your wallet for the prize pool. Anything the other side "
-                          "cannot cover comes back before the draft starts.")
+        if draft_session_updated.donation:
+            signup_message = (f"Your maximum entry is {stake_amount} tix. "
+                              + SIGNUP_DONATION_NOTE)
+        else:
+            signup_message = (f"Your maximum entry is {stake_amount} tix, and it has left "
+                              "your wallet for the prize pool. Anything the other side "
+                              "cannot cover comes back before the draft starts.")
         # Said here because the dropdown never asks: the cap is on by default and
         # only the over-100 modal offers the choice, so for most players this is
         # the one place they learn it applies to them.

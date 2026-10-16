@@ -29,7 +29,8 @@ from services import team_creator
 
 
 def _session():
-    return SimpleNamespace(session_id="s1", sign_ups={"1": "Alice", "2": "Bob"})
+    return SimpleNamespace(session_id="s1", sign_ups={"1": "Alice", "2": "Bob"},
+                           donation=False)
 
 
 def _field(embed):

@@ -36,3 +36,17 @@ async def test_the_victory_embed_says_who_raised_and_who_donates(test_db):
     assert total == 100
     assert "**Ann** won 50 tix for DraftBot" in lines
     assert "**Cat** donates 50 tix to DraftBot" in lines
+
+
+def test_donation_drafts_do_not_call_their_stakes_a_prize_pool():
+    from services.donation_service import (SIGNUP_DONATION_NOTE, payouts_footer,
+                                           payouts_title, stakes_field_name)
+
+    assert stakes_field_name(True, 200) == "**Donation stakes: 200 tix**"
+    assert stakes_field_name(False, 200) == "**Prize Pool: 200 tix**"
+    assert payouts_title(True) == "💜 Donations to DraftBot"
+    assert payouts_title(False) == "💰 Prize Pool Payouts"
+    assert payouts_footer(True, 100) == "Donated to DraftBot: 100 tix"
+    assert payouts_footer(False, 100) == "Winnings paid: 100 tix"
+    assert "Nothing leaves your wallet" in SIGNUP_DONATION_NOTE
+    assert "/donation_day paid_cash" in SIGNUP_DONATION_NOTE

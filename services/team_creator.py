@@ -10,7 +10,7 @@ from loguru import logger
 from datetime import datetime, timedelta
 
 from services.draft_pool_service import match_pool, pool_balance
-from services.donation_service import level_donation
+from services.donation_service import level_donation, stakes_field_name
 import discord
 import random
 from sqlalchemy import update, select
@@ -433,7 +433,7 @@ async def _add_stake_info_to_embed(embed, session):
     # Spelled as utils.py and livedrafts.py already spell it; this is the same
     # field on a third surface, not a new one.
     add_links_to_embed_safely(embed, stake_lines,
-                              f"**Prize Pool: {total_stakes} tix**")
+                              stakes_field_name(session.donation, total_stakes))
 
 
 async def _create_teams_embed(session, team_a_names, team_b_names, seating_order, session_type):

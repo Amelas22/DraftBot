@@ -22,6 +22,7 @@ from services.draft_pool_service import (format_entries, format_outcomes,
                                          pool_balance, release_draft_pool,
                                          settle_draw, settle_pool, PoolNotSettled)
 from services.draft_analysis import DraftAnalysis
+from services.donation_service import payouts_footer, payouts_title, stakes_field_name
 from cogs.leaderboard import create_leaderboard_embed, TimeframeView
 from draft_organization.tournament import Tournament
 from services.debt_service import (
@@ -720,7 +721,7 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                     # Add the stakes field to the embed
                     if stake_lines:
                         embed.add_field(
-                            name=f"**Prize Pool: {total_stakes} tix**",
+                            name=stakes_field_name(draft_session.donation, total_stakes),
                             value="\n".join(stake_lines),
                             inline=False
                         )
@@ -751,14 +752,14 @@ async def generate_draft_summary_embed(bot, draft_session_id):
                             bet_description = f"\n{separator}\n".join(outcome_lines)
 
                             bet_embed = discord.Embed(
-                                title="💰 Prize Pool Payouts",
+                                title=payouts_title(draft_session.donation),
                                 description=bet_description,
                                 color=discord_color  # Match main embed color
                             )
                             # The figure is the sum of the winners' PROFIT, which is what changed
                             # hands. The pool paid is twice it, because each winner put in
                             # c and took 2c -- so this cannot be called the pool.
-                            bet_embed.set_footer(text=f"Winnings paid: {outcome_total} tix")
+                            bet_embed.set_footer(text=payouts_footer(draft_session.donation, outcome_total))
                             # Where a loser first reads what this draft cost
                             # them, so it is where the wallet is explained.
                             add_wallet_howto(bet_embed, draft_session.guild_id)

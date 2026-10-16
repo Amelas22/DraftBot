@@ -241,3 +241,23 @@ async def mark_paid_cash(guild_id: str, player_id: str, bot_id: str) -> int:
             settlement_method="cash")
     logger.info(f"donation: {player_id} marked {amount} tix paid to DraftBot in cash")
     return amount
+
+
+def stakes_field_name(donation: bool, total: int) -> str:
+    """The teams/victory/live embeds' stakes field label: a donation draft has no pool."""
+    return f"**{'Donation stakes' if donation else 'Prize Pool'}: {total} tix**"
+
+
+def payouts_title(donation: bool) -> str:
+    return "💜 Donations to DraftBot" if donation else "💰 Prize Pool Payouts"
+
+
+def payouts_footer(donation: bool, total: int) -> str:
+    return (f"Donated to DraftBot: {total} tix" if donation
+            else f"Winnings paid: {total} tix")
+
+
+SIGNUP_DONATION_NOTE = (
+    "Nothing leaves your wallet now. If your side loses, you owe DraftBot your "
+    "matched entry: it is drawn from your wallet automatically, or pay cash and "
+    "run `/donation_day paid_cash`.")
