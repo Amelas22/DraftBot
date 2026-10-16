@@ -4,7 +4,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import services.donation_day_publisher as publisher
+from services.donation_day import Snapshot
 
+SNAPSHOT = Snapshot(credits=[], outstanding=0, names={}, anonymous=set())
 EVENT = {"name": "DD", "goal_usd": 100, "starts_at": "2026-10-16T12:00",
          "page_key": "dd", "active": True}
 
@@ -43,7 +45,7 @@ async def test_inactive_events_are_not_published():
 async def test_a_failed_upload_reports_no_url():
     helper = MagicMock()
     helper.upload_public_html = AsyncMock(return_value=SimpleNamespace(success=False, object_path=None))
-    with patch.object(publisher, "build_payload", AsyncMock(return_value={"rows": []})), \
+    with patch.object(publisher, "gather_snapshot", AsyncMock(return_value=SNAPSHOT)), \
          patch.object(publisher, "DigitalOceanHelper", return_value=helper):
         assert await publisher.publish_event("1", EVENT, "999") is None
 
@@ -57,7 +59,7 @@ async def test_a_malformed_config_for_one_guild_does_not_stop_the_next():
          patch.object(publisher, "publish_event", publish):
         await publisher.publish_active(bot)
 
-    publish.assert_awaited_once_with("2", EVENT, "999")
+    publish.assert_awaited_once_with("2", EVENT, "999", bot=bot)
 
 
 @pytest.mark.asyncio
@@ -66,7 +68,7 @@ async def test_a_successful_upload_returns_the_public_url():
     helper.upload_public_html = AsyncMock(
         return_value=SimpleNamespace(success=True, object_path="donations/dd/index.html"))
     helper.get_public_url.return_value = "https://cdn.example/donations/dd/index.html"
-    with patch.object(publisher, "build_payload", AsyncMock(return_value={"rows": []})), \
+    with patch.object(publisher, "gather_snapshot", AsyncMock(return_value=SNAPSHOT)), \
          patch.object(publisher, "DigitalOceanHelper", return_value=helper):
         url = await publisher.publish_event("1", EVENT, "999")
 

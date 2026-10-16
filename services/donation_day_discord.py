@@ -12,7 +12,8 @@ from typing import Any, TypedDict
 import discord
 
 from config import get_config, update_setting
-from services.donation_day import Credit, display_name
+from helpers.utils import as_messageable
+from services.donation_day import Credit, Snapshot, display_name
 
 MAX_RECEIPTS_PER_TICK = 10
 LEADERBOARD_ROWS = 15
@@ -105,3 +106,68 @@ def leaderboard_embed(payload: dict[str, Any], page_url: str | None) -> discord.
     embed.add_field(name="Leaderboard", value=value[:FIELD_LIMIT], inline=False)
     embed.set_footer(text=f"1 tix = $1 · updated {str(payload.get('updated_at', '')).replace('T', ' ')}")
     return embed
+
+
+def state_for_setup(previous: DiscordState | None, event_was_active: bool,
+                    receipts_channel_id: str | None,
+                    leaderboard_channel_id: str | None) -> DiscordState:
+    """The channel state `setup` saves.
+
+    A fresh event starts with nothing announced and no leaderboard message. Re-running
+    setup on a running event keeps what is already posted, per channel: receipts stay
+    announced while the receipts channel is unchanged, and the leaderboard message is
+    reused while the leaderboard channel is unchanged.
+    """
+    announced: list[str] = []
+    message_id: str | None = None
+    if previous is not None and event_was_active:
+        if previous["receipts_channel_id"] == receipts_channel_id:
+            announced = list(previous["announced"])
+        if previous["leaderboard_channel_id"] == leaderboard_channel_id:
+            message_id = previous["leaderboard_message_id"]
+    return DiscordState(receipts_channel_id=receipts_channel_id,
+                        leaderboard_channel_id=leaderboard_channel_id,
+                        leaderboard_message_id=message_id, announced=announced)
+
+
+async def post_receipts(bot: Any, guild_id: str, snapshot: Snapshot,
+                        state: DiscordState) -> DiscordState:
+    """Post the receipts not yet announced, at most MAX_RECEIPTS_PER_TICK; the rest wait a tick.
+
+    The announced keys are saved after EACH send: a failure part-way through
+    must not let the next tick repeat receipts already posted.
+    """
+    if not state["receipts_channel_id"]:
+        return state
+    announced = list(state["announced"])
+    pending = receipt_messages(snapshot.credits, snapshot.names, snapshot.anonymous,
+                               set(announced))[:MAX_RECEIPTS_PER_TICK]
+    if not pending:
+        return state
+    channel = as_messageable(bot.get_channel(int(state["receipts_channel_id"])))
+    for keys, text in pending:
+        await channel.send(text, allowed_mentions=discord.AllowedMentions.none())
+        announced += keys
+        state = {**state, "announced": announced}
+        save_state(guild_id, state)
+    return state
+
+
+async def update_leaderboard(bot: Any, guild_id: str, payload: dict[str, Any],
+                             page_url: str | None, state: DiscordState) -> DiscordState:
+    """Edit the leaderboard message in place, or post it if it doesn't exist yet."""
+    if not state["leaderboard_channel_id"]:
+        return state
+    channel = as_messageable(bot.get_channel(int(state["leaderboard_channel_id"])))
+    embed = leaderboard_embed(payload, page_url)
+    if state["leaderboard_message_id"]:
+        try:
+            message = await channel.fetch_message(int(state["leaderboard_message_id"]))
+            await message.edit(embed=embed)
+            return state
+        except discord.NotFound:
+            pass        # deleted by hand: post a fresh one below
+    message = await channel.send(embed=embed)
+    state = {**state, "leaderboard_message_id": str(message.id)}
+    save_state(guild_id, state)
+    return state

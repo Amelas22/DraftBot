@@ -2,15 +2,18 @@
 
 Never touches money: it reads the ledgers and uploads a page. A failure is
 logged and the next tick tries again; one guild failing never stops another.
+The same tick also drives the two Discord channels (receipts and the leaderboard).
 """
 import asyncio
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
 
 from helpers.digital_ocean_helper import DigitalOceanHelper
-from services.donation_day import Event, build_payload, get_event
+from services.donation_day import Event, gather_snapshot, get_event, tally
+from services.donation_day_discord import get_state, post_receipts, update_leaderboard
 from services.league_site_data import inject
 
 PLACEHOLDER_ID = "donation-data"
@@ -22,15 +25,40 @@ def render(payload: dict[str, Any]) -> str:
     return inject(TEMPLATE.read_text(encoding="utf-8"), payload, PLACEHOLDER_ID)
 
 
-async def publish_event(guild_id: str, event: Event, bot_id: str) -> str | None:
-    """Build and upload one event's page. The public URL, or None if the upload failed."""
-    html = render(await build_payload(guild_id, event, bot_id))
-    helper = DigitalOceanHelper()
-    result = await helper.upload_public_html(html, f"donations/{event['page_key']}", "index.html")
-    if not result.success or result.object_path is None:
-        logger.warning(f"donation day: upload failed for guild {guild_id}")
-        return None
-    return helper.get_public_url(result.object_path)
+async def publish_event(guild_id: str, event: Event, bot_id: str,
+                        bot: Any = None) -> str | None:
+    """Build one event's page and upload it; with `bot`, also post receipts and refresh
+    the leaderboard. Each step is isolated -- Discord failing never costs the page, and
+    the page failing never costs the channels. The public URL, or None if the upload failed."""
+    snapshot = await gather_snapshot(guild_id, event, bot_id)
+    payload = tally(snapshot.credits, snapshot.outstanding, snapshot.names,
+                    snapshot.anonymous, event, datetime.now())
+    url: str | None = None
+    try:
+        helper = DigitalOceanHelper()
+        result = await helper.upload_public_html(render(payload),
+                                                 f"donations/{event['page_key']}", "index.html")
+        if result.success and result.object_path is not None:
+            url = helper.get_public_url(result.object_path)
+        else:
+            logger.warning(f"donation day: upload failed for guild {guild_id} "
+                           f"(page {event['page_key']})")
+    except Exception:
+        logger.opt(exception=True).error(f"donation day: page upload raised for guild {guild_id}")
+    if bot is not None:
+        state = get_state(guild_id)
+        if state is not None:
+            try:
+                state = await post_receipts(bot, guild_id, snapshot, state)
+            except Exception:
+                logger.opt(exception=True).error(
+                    f"donation day: receipts failed for guild {guild_id}; retrying next tick")
+            try:
+                await update_leaderboard(bot, guild_id, payload, url, state)
+            except Exception:
+                logger.opt(exception=True).error(
+                    f"donation day: leaderboard failed for guild {guild_id}; retrying next tick")
+    return url
 
 
 async def publish_active(bot: Any) -> None:
@@ -43,7 +71,7 @@ async def publish_active(bot: Any) -> None:
             event = get_event(guild.id)
             if not event or not event.get("active"):
                 continue
-            await publish_event(str(guild.id), event, str(user.id))
+            await publish_event(str(guild.id), event, str(user.id), bot=bot)
         except Exception:
             logger.opt(exception=True).error(
                 f"donation day: could not publish guild {guild.id}; retrying next tick")
