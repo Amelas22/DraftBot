@@ -117,4 +117,24 @@ async def test_the_winners_of_a_settled_donation_draft_are_credited_their_shares
 
     assert sorted((c.player_id, c.amount, c.kind) for c in credits) == \
         [("a1", 50, "won"), ("a2", 50, "won")]
+    assert sorted((c.key, c.draft) for c in credits) == \
+        [("won:d1:a1", "d1"), ("won:d1:a2", "d1")]
     assert outstanding == 100
+
+
+@pytest.mark.asyncio
+async def test_credits_carry_a_stable_key_and_how_they_were_paid(test_db):
+    await debt_service.create_ledger_entries("g", LOSER, BOT, 40, DONATION_SOURCE,
+                                             f"donation:d1:{LOSER}")
+    await mark_paid_cash("g", LOSER, BOT)
+    await wallet_service.adjust("g", GIVER, 25, "seed", "t")
+    await wallet_service.pay("g", GIVER, BOT, 25)
+
+    async with db_session() as s:
+        credits, _ = await gather_credits(s, "g", BOT, datetime.now() - timedelta(minutes=5))
+
+    settled = next(c for c in credits if c.player_id == LOSER)
+    gift = next(c for c in credits if c.player_id == GIVER)
+    assert settled.method == "cash" and settled.key.startswith("settle:")
+    assert gift.method == "gift" and gift.key.startswith("gift:")
+    assert settled.key != gift.key

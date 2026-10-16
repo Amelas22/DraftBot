@@ -47,6 +47,22 @@ class Credit:
     amount: int
     at: datetime
     kind: str               # "won" | "paid"
+    key: str = ""           # stable identity, so a credit is announced once
+    method: str = ""        # paid credits: "wallet" | "cash" | "external" | "gift"
+    draft: str = ""         # win credits: the draft's friendly_id, else its session_id
+
+
+@dataclass(frozen=True)
+class Snapshot:
+    credits: list[Credit]
+    outstanding: int
+    names: dict[str, str]
+    anonymous: set[str]
+
+
+def display_name(player_id: str, names: dict[str, str], anonymous: set[str]) -> str:
+    """A player's public name: never an id, and Anonymous if they asked."""
+    return ANONYMOUS if player_id in anonymous else names.get(player_id, UNNAMED)
 
 
 def slugify(name: str) -> str:
@@ -86,7 +102,7 @@ def tally(credits: list[Credit], outstanding: int, names: dict[str, str],
         bucket[credit.player_id] = bucket.get(credit.player_id, 0) + credit.amount
 
     def name(player_id: str) -> str:
-        return ANONYMOUS if player_id in anonymous else names.get(player_id, UNNAMED)
+        return display_name(player_id, names, anonymous)
 
     rows = [{"name": name(p), "won": won.get(p, 0), "paid": paid.get(p, 0),
              "total": won.get(p, 0) + paid.get(p, 0)}
@@ -118,8 +134,9 @@ async def gather_credits(session: AsyncSession, guild_id: str, bot_id: str,
                    TIX_ONLY))).all():
         booked.setdefault(str(source_id).split(":")[1], (loser, at))
     for session_id, (loser, at) in booked.items():
-        draft = (await session.execute(select(DraftSession.team_a, DraftSession.team_b)
-                                       .where(DraftSession.session_id == session_id))).first()
+        draft = (await session.execute(
+            select(DraftSession.team_a, DraftSession.team_b, DraftSession.friendly_id)
+            .where(DraftSession.session_id == session_id))).first()
         if draft is None:
             continue
         team_a, team_b = list(draft.team_a or []), list(draft.team_b or [])
@@ -128,27 +145,32 @@ async def gather_credits(session: AsyncSession, guild_id: str, bot_id: str,
             str(player): int(share or 0) for player, share in (await session.execute(
                 select(StakeInfo.player_id, StakeInfo.assigned_stake)
                 .where(StakeInfo.session_id == session_id))).all()}
-        credits += [Credit(w, int(shares[w]), at, "won") for w in winners if shares.get(w)]
+        label = str(draft.friendly_id or session_id)
+        credits += [Credit(w, int(shares[w]), at, "won", key=f"won:{session_id}:{w}", draft=label)
+                    for w in winners if shares.get(w)]
 
     # PAID: settlements of debts to DraftBot -- auto-drawn, paid by /wallet pay,
     # or self-marked cash.
-    for player_id, amount, at in (await session.execute(
-            select(DebtLedger.player_id, DebtLedger.amount, DebtLedger.created_at)
+    for row_id, player_id, amount, at, settlement_method in (await session.execute(
+            select(DebtLedger.id, DebtLedger.player_id, DebtLedger.amount,
+                   DebtLedger.created_at, DebtLedger.settlement_method)
             .where(DebtLedger.guild_id == guild_id, DebtLedger.counterparty_id == bot_id,
                    DebtLedger.source_type == "settlement", DebtLedger.amount > 0,
                    DebtLedger.created_at >= since, TIX_ONLY))).all():
-        credits.append(Credit(player_id, int(amount), at, "paid"))
+        credits.append(Credit(player_id, int(amount), at, "paid", key=f"settle:{row_id}",
+                              method=str(settlement_method or "external")))
 
     # PAID: direct gifts. A debt:<id> transfer is the wallet half of a settlement
     # already counted above, so it is skipped rather than counted twice.
-    for payer, amount, at, source in (await session.execute(
-            select(WalletTx.counterparty_id, WalletTx.amount, WalletTx.created_at,
+    for tx_id, payer, amount, at, source in (await session.execute(
+            select(WalletTx.id, WalletTx.counterparty_id, WalletTx.amount, WalletTx.created_at,
                    WalletTx.source)
             .where(WalletTx.guild_id == guild_id, WalletTx.player_id == bot_id,
                    WalletTx.kind == "receive", WalletTx.created_at >= since))).all():
         if (source or "").startswith("debt:") or not payer or is_system_account(payer):
             continue
-        credits.append(Credit(payer, int(amount), at, "paid"))
+        credits.append(Credit(payer, int(amount), at, "paid", key=f"gift:{tx_id}",
+                              method="gift"))
 
     balances = (await session.execute(
         select(func.sum(DebtLedger.amount))
@@ -159,13 +181,19 @@ async def gather_credits(session: AsyncSession, guild_id: str, bot_id: str,
     return credits, outstanding
 
 
-async def build_payload(guild_id: str, event: Event, bot_id: str,
-                        now: datetime | None = None) -> dict[str, Any]:
-    """The whole page payload for one guild's event."""
+async def gather_snapshot(guild_id: str, event: Event, bot_id: str) -> Snapshot:
+    """Everything the page and the Discord posts are built from, read once."""
     since = datetime.fromisoformat(event["starts_at"])
     async with db_session() as session:
         credits, outstanding = await gather_credits(session, guild_id, bot_id, since)
         ids = sorted({c.player_id for c in credits})
         names = await resolve_display_names(session, guild_id, ids)
     anonymous = await get_anonymous_donors(ids, guild_id)
-    return tally(credits, outstanding, names, anonymous, event, now or datetime.now())
+    return Snapshot(credits, outstanding, names, anonymous)
+
+
+async def build_payload(guild_id: str, event: Event, bot_id: str,
+                        now: datetime | None = None) -> dict[str, Any]:
+    """The whole page payload for one guild's event."""
+    s = await gather_snapshot(guild_id, event, bot_id)
+    return tally(s.credits, s.outstanding, s.names, s.anonymous, event, now or datetime.now())

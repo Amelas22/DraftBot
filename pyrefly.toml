@@ -22,6 +22,7 @@ project-includes = [
     "services/donation_service.py",
     "services/donation_day.py",
     "services/donation_day_publisher.py",
+    "services/donation_day_discord.py",
     "services/mtgo_resolution_service.py",
     "services/vault_check.py",
     "services/draft_reconstruct.py",
