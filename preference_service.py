@@ -24,6 +24,9 @@ class PlayerPreferences(Base):
     # Whether this player's donation-day credit shows as "Anonymous". NULL is
     # "named", the default; nullable with no default because the row is shared.
     donation_anonymous = Column(Boolean, nullable=True)
+    # Whether this player is left off the Skill Rating Ladder. NULL is listed;
+    # nullable with no default because the row is shared.
+    hide_from_sr_ladder = Column(Boolean, nullable=True)
     last_updated = Column(TIMESTAMP, default=datetime.now, server_default=text('CURRENT_TIMESTAMP'))
 
     __table_args__ = (
@@ -366,3 +369,34 @@ async def get_anonymous_donors(player_ids, guild_id):
                 PlayerPreferences.id.in_(composite_ids),
                 PlayerPreferences.donation_anonymous.is_(True)))).scalars().all()
     return {str(p) for p in rows}
+
+
+async def get_hide_from_sr_ladder(player_id, guild_id):
+    """Whether this player asked to be left off the Skill Rating Ladder here.
+
+    True only when stored True; unset and False both read as listed. Raises on a
+    database error rather than answering False, which would list a hidden player.
+    """
+    async with AsyncSessionLocal() as session:
+        preference = await session.get(
+            PlayerPreferences, get_composite_preference_key(player_id, guild_id))
+    return bool(preference and preference.hide_from_sr_ladder)
+
+
+async def set_hide_from_sr_ladder(player_id, guild_id, hide):
+    """Save whether this player is left off the Skill Rating Ladder. True on success."""
+    async def _update(session):
+        composite_id = get_composite_preference_key(player_id, guild_id)
+        preference = await session.get(PlayerPreferences, composite_id)
+        if preference is None:
+            session.add(PlayerPreferences(
+                id=composite_id, player_id=str(player_id), guild_id=str(guild_id),
+                hide_from_sr_ladder=hide, last_updated=datetime.now()))
+        else:
+            preference.hide_from_sr_ladder = hide
+            preference.last_updated = datetime.now()
+        logger.info(f"Hide from SR ladder for player {player_id} in guild {guild_id}: {hide}")
+        return True
+
+    return await execute_db_operation(_update, default_value=False, commit=True,
+                                      error_message="Error updating SR ladder visibility")

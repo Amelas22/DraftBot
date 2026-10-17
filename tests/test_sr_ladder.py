@@ -28,6 +28,7 @@ from leaderboard_config import (
 )
 from models.leaderboard_message import LeaderboardMessage
 from models.player import PlayerStats
+from preference_service import PlayerPreferences, get_composite_preference_key
 import services.leaderboard_service as leaderboard_service
 from services.leaderboard_formatter import create_leaderboard_embed
 from helpers.skill import (
@@ -101,6 +102,16 @@ def player(player_id, name, rating, games=30, drafted_days_ago=1, guild=GUILD):
         true_skill_mu=mu_for_rating(rating, games),
         true_skill_sigma=PRIOR_SIGMA,
         last_draft_timestamp=datetime.now() - timedelta(days=drafted_days_ago),
+    )
+
+
+def hidden(player_id, value=True, guild=GUILD):
+    """A PlayerPreferences row holding this player's hide-from-ladder answer."""
+    return PlayerPreferences(
+        id=get_composite_preference_key(player_id, guild),
+        player_id=player_id,
+        guild_id=guild,
+        hide_from_sr_ladder=value,
     )
 
 
@@ -460,3 +471,35 @@ async def test_get_leaderboard_data_dispatches_to_the_sr_ladder_query(test_db, m
 
         assert [p["player_id"] for p in data] == ["111"]
         assert data[0]["rating"] == 1800
+
+
+# ============================================================================
+# HIDDEN PLAYERS
+# ============================================================================
+
+@pytest.mark.asyncio
+async def test_a_hidden_player_is_left_off_and_the_rest_close_up(test_db):
+    data = await _fetch(test_db, player("111", "A", 1800), player("222", "B", 1700),
+                        player("333", "C", 1660), hidden("222"))
+    assert [p["player_id"] for p in data] == ["111", "333"]
+
+
+@pytest.mark.asyncio
+async def test_hiding_happens_before_the_limit(test_db):
+    rows = [player(str(i), f"P{i}", 1700 + i) for i in range(SR_LADDER_LIMIT + 1)]
+    top = str(SR_LADDER_LIMIT)  # the highest rated
+    data = await _fetch(test_db, *rows, hidden(top))
+    assert len(data) == SR_LADDER_LIMIT and top not in {p["player_id"] for p in data}
+
+
+@pytest.mark.asyncio
+async def test_a_null_or_false_answer_is_listed(test_db):
+    data = await _fetch(test_db, player("111", "A", 1800), hidden("111", None),
+                        player("222", "B", 1700), hidden("222", False))
+    assert [p["player_id"] for p in data] == ["111", "222"]
+
+
+@pytest.mark.asyncio
+async def test_hiding_in_another_guild_does_not_hide_here(test_db):
+    data = await _fetch(test_db, player("111", "A", 1800), hidden("111", guild="other"))
+    assert [p["player_id"] for p in data] == ["111"]
