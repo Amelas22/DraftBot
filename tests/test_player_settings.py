@@ -6,6 +6,7 @@ Ladder board, and only that board.
 """
 import asyncio
 import dataclasses
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock
 
@@ -17,9 +18,15 @@ import player_settings_view
 from cogs.settings_commands import SettingsCommands
 from database.db_session import AsyncSessionLocal
 from models.leaderboard_message import LeaderboardMessage
-from player_settings import Setting, Settings, flip, load_settings
+from models.draft_session import DraftSession
+from models.stake import StakeInfo
+from player_settings import (LiveResult, Setting, Settings, apply_cap_to_live_drafts, flip,
+                             live_drafts, live_result_text, load_settings)
 from player_settings_view import SettingsView, settings_embed
-from preference_service import get_anonymous_donors, get_player_dm_notification_preference
+from preference_service import (get_anonymous_donors, get_player_bet_capping_preference,
+                                get_player_dm_notification_preference)
+from sqlalchemy import select
+import views
 import utils
 from utils import redraw_leaderboard
 
@@ -165,3 +172,159 @@ async def test_redraw_edits_only_that_category(test_db, monkeypatch):
 
     assert fetched_ids == [11]
     message.edit.assert_awaited_once_with(embed="E", view=None)  # pinned board: no selector
+
+
+# --- the stake cap, and the live sign-ups it carries into --------------------
+
+BOT = MagicMock()
+
+
+@pytest.fixture
+def redraw(monkeypatch):
+    mock = AsyncMock()
+    monkeypatch.setattr(views, "update_draft_message", mock)
+    return mock
+
+
+@pytest.fixture
+def money(monkeypatch):
+    monkeypatch.setattr(player_settings, "is_money_server", lambda _g: True)
+
+
+@pytest.fixture
+def not_money(monkeypatch):
+    monkeypatch.setattr(player_settings, "is_money_server", lambda _g: False)
+
+
+async def draft(sid, players, guild="g", **fields):
+    row = dict(session_id=sid, guild_id=guild, sign_ups={p: p for p in players},
+               deletion_time=datetime.now() + timedelta(hours=3),
+               draft_channel_id="chan", message_id=f"msg-{sid}")
+    row.update(fields)
+    async with AsyncSessionLocal() as s:
+        s.add(DraftSession(**row))
+        await s.commit()
+
+
+async def stake(sid, player, capped):
+    async with AsyncSessionLocal() as s:
+        s.add(StakeInfo(session_id=sid, player_id=player, max_stake=50, is_capped=capped))
+        await s.commit()
+
+
+async def stake_row(sid, player):
+    async with AsyncSessionLocal() as s:
+        return (await s.execute(select(StakeInfo).where(
+            StakeInfo.session_id == sid, StakeInfo.player_id == player))).scalars().first()
+
+
+async def test_live_drafts_are_only_those_still_taking_sign_ups(test_db):
+    await draft("open", ["p1"])
+    await draft("teams", ["p1"], session_stage="teams", teams_start_time=datetime.now())
+    await draft("started", ["p1"], teams_start_time=datetime.now())
+    await draft("matched", ["p1"], pool_matched_at=datetime.now())
+    await draft("finished", ["p1"], session_stage="completed")
+    await draft("abandoned", ["p1"], session_stage="abandoned")
+    await draft("expired", ["p1"], deletion_time=datetime.now() - timedelta(minutes=1))
+    await draft("elsewhere", ["p1"], guild="other")
+    await draft("not_in", ["p2"])
+    assert [d.session_id for d in await live_drafts("p1", "g")] == ["open"]
+
+
+async def test_flipping_the_cap_changes_the_live_entry_and_redraws(test_db, redraw):
+    await draft("open", ["p1"]); await stake("open", "p1", capped=True)
+    result = await apply_cap_to_live_drafts(BOT, "p1", "g", False)
+    assert [d.session_id for d in result.changed] == ["open"]
+    assert (await stake_row("open", "p1")).is_capped is False
+    redraw.assert_awaited_once_with(BOT, "open")
+
+
+async def test_a_live_draft_without_a_stake_is_skipped(test_db, redraw):
+    await draft("open", ["p1"])
+    result = await apply_cap_to_live_drafts(BOT, "p1", "g", False)
+    assert result == LiveResult(changed=[], failed=[])
+    redraw.assert_not_awaited()
+    assert live_result_text(result) == ""
+
+
+async def test_one_failing_draft_does_not_stop_the_others(test_db, redraw):
+    for sid in ("a", "b"):
+        await draft(sid, ["p1"]); await stake(sid, "p1", capped=True)
+    redraw.side_effect = [RuntimeError("discord"), None]
+    result = await apply_cap_to_live_drafts(BOT, "p1", "g", False)
+    assert len(result.changed) == 1 and len(result.failed) == 1
+    text = live_result_text(result)
+    assert "couldn't" in text.lower()
+    assert "https://discord.com/channels/g/chan/msg-a" in text
+    assert "https://discord.com/channels/g/chan/msg-b" in text
+
+
+async def test_the_cap_button_saves_the_preference_and_reports_the_draft(test_db, redraw, money):
+    await draft("open", ["p1"]); await stake("open", "p1", capped=True)
+    v = SettingsView("p1", "g", "Lounge", await load_settings("p1", "g"))
+    assert v.cap_button in v.children and v.cap_button.row == 0
+    i = _interaction("p1")
+    await v.cap_button.callback(i)
+    assert await get_player_bet_capping_preference("p1", "g") is False
+    assert (await stake_row("open", "p1")).is_capped is False
+    sent = i.followup.send.await_args
+    assert "discord.com/channels/g/chan/msg-open" in sent.args[0]
+    assert sent.kwargs["ephemeral"] is True
+    assert v.cap_button.style is discord.ButtonStyle.secondary
+    i.edit_original_response.assert_awaited_once()
+
+
+async def test_the_cap_button_with_no_live_draft_sends_no_followup(test_db, redraw, money):
+    v = SettingsView("p1", "g", "Lounge", await load_settings("p1", "g"))
+    i = _interaction("p1")
+    await v.cap_button.callback(i)
+    assert await get_player_bet_capping_preference("p1", "g") is False
+    i.followup.send.assert_not_awaited()
+
+
+async def test_the_cap_shows_on_a_money_server(test_db, money):
+    s = await load_settings("p1", "g")
+    assert s.stake_cap is True
+    e = settings_embed("Lounge", s)
+    assert e.fields[0].name == "Drafting"
+    assert "● On  Cap my stake to the other side" in e.fields[0].value
+    assert SettingsView("p1", "g", "Lounge", s).cap_button.label == "Stake cap"
+
+
+async def test_no_cap_row_off_a_money_server(test_db, not_money):
+    s = await load_settings("p1", "g")
+    assert s.stake_cap is None
+    v = SettingsView("p1", "g", "Lounge", s)
+    assert v.cap_button not in v.children
+    assert "Drafting" not in [f.name for f in settings_embed("Lounge", s).fields]
+
+
+async def test_the_panel_still_changes_the_entry(test_db, redraw):
+    await draft("open", ["p1"]); await stake("open", "p1", capped=True)
+    i = SimpleNamespace(client=BOT, response=SimpleNamespace(send_message=AsyncMock()))
+    await views.BetCapToggleButton("open").update_cap_status(i, "p1", "g", is_capped=False)
+    assert (await stake_row("open", "p1")).is_capped is False
+    assert await get_player_bet_capping_preference("p1", "g") is False
+    redraw.assert_awaited_once_with(BOT, "open")
+    assert "Your entry cap is now OFF" in i.response.send_message.await_args.args[0]
+
+
+async def test_the_panel_without_an_entry_says_so(test_db, redraw):
+    await draft("open", ["p1"])
+    i = SimpleNamespace(client=BOT, response=SimpleNamespace(send_message=AsyncMock()))
+    await views.BetCapToggleButton("open").update_cap_status(i, "p1", "g", is_capped=False)
+    assert i.response.send_message.await_args.args[0] == "Error: your entry could not be found."
+    assert await get_player_bet_capping_preference("p1", "g") is True
+    redraw.assert_not_awaited()
+
+
+async def test_a_failed_message_edit_still_redraws_the_ladder(test_db, monkeypatch):
+    redraw = AsyncMock()
+    monkeypatch.setattr(player_settings_view, "redraw_leaderboard", redraw)
+    view = SettingsView("p1", "g", "Lounge", await load_settings("p1", "g"))
+    i = _interaction("p1")
+    i.edit_original_response.side_effect = RuntimeError("discord")
+    with pytest.raises(RuntimeError):
+        await view.hide_button.callback(i)
+    await asyncio.sleep(0)
+    redraw.assert_awaited_once_with(ANY, "g", "sr_ladder")

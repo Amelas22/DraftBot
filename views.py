@@ -67,6 +67,7 @@ from services.library_reservation import cube_changed as library_cube_changed
 from services.library_reservation import owes_agreement
 from services.library_trust_service import hold_for
 from preference_service import get_uses_library
+from player_settings import apply_cap_to_entry
 # Debounce/timeout constants live in ready_check.py so the ordering invariant
 # between them is asserted in one place; re-exported here for the cooldown logic.
 from ready_check import READY_CHECK_DEBOUNCE_SECONDS
@@ -3424,32 +3425,14 @@ class BetCapToggleButton(CallbackButton):
     
     async def update_cap_status(self, interaction, user_id, guild_id, is_capped):
         """Helper method to update cap status"""
-        async with AsyncSessionLocal() as inner_session:
-            async with inner_session.begin():
-                # Get the stake info
-                inner_stake_stmt = select(StakeInfo).where(and_(
-                    StakeInfo.session_id == self.draft_session_id,
-                    StakeInfo.player_id == user_id
-                ))
-                inner_stake_result = await inner_session.execute(inner_stake_stmt)
-                inner_stake_info = inner_stake_result.scalars().first()
-                
-                if not inner_stake_info:
-                    await interaction.response.send_message("Error: your entry could not be found.", ephemeral=True)
-                    return
-                
-                # Set is_capped status
-                inner_stake_info.is_capped = is_capped
-                inner_session.add(inner_stake_info)
-                await inner_session.commit()
-        
+        if not await apply_cap_to_entry(interaction.client, self.draft_session_id, user_id, is_capped):
+            await interaction.response.send_message("Error: your entry could not be found.", ephemeral=True)
+            return
+
         # Update the player's preference for future drafts
         from preference_service import update_player_bet_capping_preference
         await update_player_bet_capping_preference(user_id, guild_id, is_capped)
-        
-        # Update the draft message
-        await update_draft_message(interaction.client, self.draft_session_id)
-        
+
         # Inform the user
         status_text = "ON 🧢" if is_capped else "OFF 🏎️"
         description_text = entry_cap_phrase(is_capped)

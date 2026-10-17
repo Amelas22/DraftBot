@@ -1,7 +1,8 @@
 """The /settings message: an embed of a player's settings and a button for each.
 
 Each click flips the stored value (player_settings.flip), reloads, and redraws
-this same message. Row 0 is left for the Drafting buttons.
+this same message. Row 0 holds the Drafting buttons; the stake cap is offered
+only on a money server, and a new cap is carried into the player's live sign-ups.
 """
 import asyncio
 from typing import Any
@@ -10,9 +11,11 @@ import discord
 from typing_extensions import override
 
 from helpers.utils import not_none, ui_button
-from player_settings import Setting, Settings, flip, load_settings
+from player_settings import (Setting, Settings, apply_cap_to_live_drafts, flip,
+                             live_result_text, load_settings)
 from utils import redraw_leaderboard
 
+CAP_LABEL = "Cap my stake to the other side"
 DMS_LABEL = "DM me when a ready check starts"
 HIDE_LABEL = "Hide me from the Skill Rating Ladder"
 ANONYMOUS_LABEL = "Show me as Anonymous on donation pages"
@@ -33,6 +36,8 @@ def _line(on: bool, label: str) -> str:
 def _groups(settings: Settings) -> list[tuple[str, list[str]]]:
     """Each embed field: its group name and its lines. Empty groups are left out."""
     drafting: list[str] = []
+    if settings.stake_cap is not None:
+        drafting.append(_line(settings.stake_cap, CAP_LABEL))
     return [
         (name, lines) for name, lines in (
             ("Drafting", drafting),
@@ -67,9 +72,12 @@ class SettingsView(discord.ui.View):
         # The interaction that opened this message, set by the command, so a
         # timeout can edit the ephemeral message it sent.
         self.opener: discord.Interaction | None = None
+        if settings.stake_cap is None:
+            self.remove_item(self.cap_button)
         self._restyle()
 
     def _restyle(self) -> None:
+        self.cap_button.style = _style(bool(self.settings.stake_cap))
         self.dms_button.style = _style(self.settings.dms)
         self.hide_button.style = _style(self.settings.hide_from_ladder)
         self.anonymous_button.style = _style(self.settings.anonymous)
@@ -79,18 +87,31 @@ class SettingsView(discord.ui.View):
             await interaction.response.send_message(NOT_YOURS, ephemeral=True)
             return
         await interaction.response.defer()
-        if await flip(self.player_id, self.guild_id, setting) is None:
+        new = await flip(self.player_id, self.guild_id, setting)
+        if new is None:
             await interaction.followup.send(SAVE_FAILED, ephemeral=True)
             return
-        self.settings = await load_settings(self.player_id, self.guild_id)
-        self._restyle()
-        await interaction.edit_original_response(
-            embed=settings_embed(self.guild_name, self.settings), view=self)
+        # Side effects first, so a failed edit of this message can't skip them.
         if setting is Setting.HIDE_FROM_LADDER:
             task = asyncio.create_task(
                 redraw_leaderboard(interaction.client, self.guild_id, "sr_ladder"))
             _background.add(task)
             task.add_done_callback(_background.discard)
+        live = ""
+        if setting is Setting.STAKE_CAP:
+            live = live_result_text(await apply_cap_to_live_drafts(
+                interaction.client, self.player_id, self.guild_id, new))
+        self.settings = await load_settings(self.player_id, self.guild_id)
+        self._restyle()
+        await interaction.edit_original_response(
+            embed=settings_embed(self.guild_name, self.settings), view=self)
+        if live:
+            await interaction.followup.send(live, ephemeral=True)
+
+    @ui_button(label="Stake cap", row=0)
+    async def cap_button(self, _button: discord.ui.Button[Any],
+                         interaction: discord.Interaction) -> None:
+        await self._toggle(interaction, Setting.STAKE_CAP)
 
     @ui_button(label="Ready-check DMs", row=1)
     async def dms_button(self, _button: discord.ui.Button[Any],
