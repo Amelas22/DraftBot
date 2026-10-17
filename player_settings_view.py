@@ -7,6 +7,7 @@ may borrow. A new cap, or the library switched on, is carried into the
 player's live sign-ups.
 """
 import asyncio
+import weakref
 from typing import Any
 
 import discord
@@ -19,7 +20,7 @@ from player_settings import (Setting, Settings, apply_cap_to_live_drafts,
                              load_settings)
 from utils import redraw_leaderboard
 
-CAP_LABEL = "Cap my stake to the other side"
+CAP_LABEL = "Cap my entry to my share of my team"
 LIBRARY_LABEL = "Offer me a library deck"
 LIBRARY_NOT_SET = "○ Not set (you'll be asked at sign-up)"
 DMS_LABEL = "DM me when a ready check starts"
@@ -29,12 +30,27 @@ ANONYMOUS_LABEL = "Show me as Anonymous on donation pages"
 NOT_YOURS = "These buttons are not for you."
 SAVE_FAILED = "⚠️ Couldn't save that just now. Try again."
 EXPIRED = "These buttons have expired. Run `/settings` again."
+NOTHING_AFFECTED = "No draft you're signed up for right now was affected."
 LIVE_FAILED = ("⚠️ Saved, but I couldn't update the drafts you're signed up for. "
                "Use each draft's **Change Entry / Settings** button.")
 
 # asyncio keeps only a weak reference to a task; hold the ladder redraws here
 # until they finish so one is not collected mid-flight.
 _background: "set[asyncio.Task[None]]" = set()
+
+# One lock per (player, server): two quick clicks run one after the other, so
+# a flip and its live-draft writes can't interleave with the next click's and
+# leave the saved preference disagreeing with a live entry. Weak values: a
+# lock goes once no click holds or waits on it.
+_locks: "weakref.WeakValueDictionary[tuple[str, str], asyncio.Lock]" = (
+    weakref.WeakValueDictionary())
+
+
+def _lock_for(player_id: str, guild_id: str) -> asyncio.Lock:
+    lock = _locks.get((player_id, guild_id))
+    if lock is None:
+        lock = _locks[(player_id, guild_id)] = asyncio.Lock()
+    return lock
 
 
 def _line(on: bool, label: str) -> str:
@@ -80,8 +96,9 @@ class SettingsView(discord.ui.View):
         self.guild_id = guild_id
         self.guild_name = guild_name
         self.settings = settings
-        # The interaction that opened this message, set by the command, so a
-        # timeout can edit the ephemeral message it sent.
+        # The latest interaction on this message, so a timeout can edit it:
+        # set by the command, then replaced by each click, because every
+        # click restarts the timeout and outlives the opener's 15-minute token.
         self.opener: discord.Interaction | None = None
         if settings.stake_cap is None:
             self.remove_item(self.cap_button)
@@ -101,33 +118,13 @@ class SettingsView(discord.ui.View):
             await interaction.response.send_message(NOT_YOURS, ephemeral=True)
             return
         await interaction.response.defer()
-        new = await flip(self.player_id, self.guild_id, setting)
-        if new is None:
-            await interaction.followup.send(SAVE_FAILED, ephemeral=True)
-            return
-        # Side effects first, so a failed edit of this message can't skip them.
-        if setting is Setting.HIDE_FROM_LADDER:
-            task = asyncio.create_task(
-                redraw_leaderboard(interaction.client, self.guild_id, "sr_ladder"))
-            _background.add(task)
-            task.add_done_callback(_background.discard)
-        # Each follow-up: its text and the view to send with it, if any. The
-        # preference is saved by now, so a failure here must not escape.
-        live: list[tuple[str, discord.ui.View | None]] = []
-        try:
-            if setting is Setting.STAKE_CAP:
-                text = live_result_text(await apply_cap_to_live_drafts(
-                    interaction.client, self.player_id, self.guild_id, new))
-                if text:
-                    live.append((text, None))
-            elif setting is Setting.LIBRARY and new:
-                live.extend((text, view) for _draft, text, view
-                            in await apply_library_to_live_drafts(self.player_id, self.guild_id)
-                            if text is not None)
-        except Exception:
-            logger.exception("settings: saved {} for {} but couldn't update their live drafts",
-                             setting.value, self.player_id)
-            live = [(LIVE_FAILED, None)]
+        self.opener = interaction
+        async with _lock_for(self.player_id, self.guild_id):
+            new = await flip(self.player_id, self.guild_id, setting)
+            if new is None:
+                await interaction.followup.send(SAVE_FAILED, ephemeral=True)
+                return
+            live = await self._carry_into_live_drafts(interaction, setting, new)
         self.settings = await load_settings(self.player_id, self.guild_id)
         self._restyle()
         await interaction.edit_original_response(
@@ -138,7 +135,36 @@ class SettingsView(discord.ui.View):
             else:
                 await interaction.followup.send(text, view=view, ephemeral=True)
 
-    @ui_button(label="Stake cap", row=0)
+    async def _carry_into_live_drafts(self, interaction: discord.Interaction,
+                                      setting: Setting, new: bool
+                                      ) -> list[tuple[str, discord.ui.View | None]]:
+        """The side effects of a saved flip, and the follow-ups to send."""
+        # Side effects first, so a failed edit of this message can't skip them.
+        if setting is Setting.HIDE_FROM_LADDER:
+            task = asyncio.create_task(
+                redraw_leaderboard(interaction.client, self.guild_id, "sr_ladder"))
+            _background.add(task)
+            task.add_done_callback(_background.discard)
+        # Each follow-up: its text and the view to send with it, if any. The
+        # preference is saved by now, so a failure here must not escape.
+        try:
+            if setting is Setting.STAKE_CAP:
+                text = live_result_text(await apply_cap_to_live_drafts(
+                    interaction.client, self.player_id, self.guild_id, new))
+                return [(text or NOTHING_AFFECTED, None)]
+            if setting is Setting.LIBRARY and new:
+                live: list[tuple[str, discord.ui.View | None]] = [
+                    (text, view) for _draft, text, view
+                    in await apply_library_to_live_drafts(self.player_id, self.guild_id)
+                    if text is not None]
+                return live or [(NOTHING_AFFECTED, None)]
+        except Exception:
+            logger.exception("settings: saved {} for {} but couldn't update their live drafts",
+                             setting.value, self.player_id)
+            return [(LIVE_FAILED, None)]
+        return []
+
+    @ui_button(label="Entry cap", row=0)
     async def cap_button(self, _button: discord.ui.Button[Any],
                          interaction: discord.Interaction) -> None:
         await self._toggle(interaction, Setting.STAKE_CAP)

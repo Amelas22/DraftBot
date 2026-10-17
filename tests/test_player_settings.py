@@ -22,7 +22,8 @@ from models.draft_session import DraftSession
 from models.stake import StakeInfo
 from player_settings import (LiveResult, Setting, Settings, apply_cap_to_live_drafts, flip,
                              live_drafts, live_result_text, load_settings)
-from player_settings_view import LIVE_FAILED, SettingsView, settings_embed
+from player_settings_view import (EXPIRED, LIVE_FAILED, NOTHING_AFFECTED, SettingsView,
+                                  settings_embed)
 from preference_service import (get_anonymous_donors, get_player_bet_capping_preference,
                                 get_player_dm_notification_preference, get_uses_library,
                                 set_uses_library)
@@ -279,12 +280,45 @@ async def test_the_cap_button_saves_the_preference_and_reports_the_draft(test_db
     i.edit_original_response.assert_awaited_once()
 
 
-async def test_the_cap_button_with_no_live_draft_sends_no_followup(test_db, redraw, money):
+async def test_the_cap_button_with_no_live_draft_says_none_were_affected(test_db, redraw, money):
     v = SettingsView("p1", "g", "Lounge", await load_settings("p1", "g"))
     i = _interaction("p1")
     await v.cap_button.callback(i)
     assert await get_player_bet_capping_preference("p1", "g") is False
-    i.followup.send.assert_not_awaited()
+    sent = i.followup.send.await_args
+    assert sent.args[0] == NOTHING_AFFECTED and sent.kwargs["ephemeral"] is True
+    i.followup.send.assert_awaited_once()
+
+
+async def test_a_click_keeps_a_fresh_token_for_the_timeout(test_db):
+    v = SettingsView("p1", "g", "Lounge", await load_settings("p1", "g"))
+    v.opener = _interaction("p1")
+    click = _interaction("p1")
+    await v.dms_button.callback(click)
+    assert v.opener is click
+    await v.on_timeout()
+    click.edit_original_response.assert_awaited_with(content=EXPIRED, view=v)
+
+
+async def test_two_quick_cap_clicks_leave_the_preference_and_the_entry_agreeing(
+        test_db, redraw, money, monkeypatch):
+    await draft("open", ["p1"]); await stake("open", "p1", capped=True)
+    real = player_settings_view.apply_cap_to_live_drafts
+    calls = 0
+
+    async def slow_first(bot, player_id, guild_id, is_capped):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await asyncio.sleep(0.05)   # the first click's live write lands last
+        return await real(bot, player_id, guild_id, is_capped)
+    monkeypatch.setattr(player_settings_view, "apply_cap_to_live_drafts", slow_first)
+    v = SettingsView("p1", "g", "Lounge", await load_settings("p1", "g"))
+    await asyncio.gather(v.cap_button.callback(_interaction("p1")),
+                         v.cap_button.callback(_interaction("p1")))
+    preference = await get_player_bet_capping_preference("p1", "g")
+    assert preference is True                      # flipped twice
+    assert (await stake_row("open", "p1")).is_capped is preference
 
 
 async def test_the_cap_shows_on_a_money_server(test_db, money):
@@ -292,8 +326,8 @@ async def test_the_cap_shows_on_a_money_server(test_db, money):
     assert s.stake_cap is True
     e = settings_embed("Lounge", s)
     assert e.fields[0].name == "Drafting"
-    assert "● On  Cap my stake to the other side" in e.fields[0].value
-    assert SettingsView("p1", "g", "Lounge", s).cap_button.label == "Stake cap"
+    assert "● On  Cap my entry to my share of my team" in e.fields[0].value
+    assert SettingsView("p1", "g", "Lounge", s).cap_button.label == "Entry cap"
 
 
 async def test_no_cap_row_off_a_money_server(test_db, not_money):
@@ -407,6 +441,26 @@ async def test_switching_on_holds_the_copy_in_the_live_draft(test_db, shelf):
     await v.library_button.callback(i)
     sent = i.followup.send.await_args
     assert "held for this draft" in sent.args[0] and AGREE_LABEL in _labels(sent.kwargs["view"])
+    assert sent.args[0].startswith(f"https://discord.com/channels/{GUILD}/chan/msg-q1\n")
+
+
+async def test_switching_on_with_no_live_draft_says_none_were_affected(test_db, shelf):
+    await _lounge(stock={"Swamp": 4}); await _drafted(PLAYER, 3)
+    v = SettingsView(PLAYER, GUILD, "L", await load_settings(PLAYER, GUILD)); i = _interaction(PLAYER)
+    await v.library_button.callback(i)
+    assert await get_uses_library(PLAYER, GUILD) is True
+    i.followup.send.assert_awaited_once_with(NOTHING_AFFECTED, ephemeral=True)
+
+
+async def test_a_library_note_without_board_ids_has_no_link(test_db, shelf):
+    await _lounge(stock={"Swamp": 4}); await _drafted(PLAYER, 3); await _queue([PLAYER])
+    async with AsyncSessionLocal() as s:
+        row = (await s.execute(select(DraftSession))).scalars().one()
+        row.message_id = None
+        await s.commit()
+    await set_uses_library(PLAYER, GUILD, True)
+    [(_d, text, _v)] = await player_settings.apply_library_to_live_drafts(PLAYER, GUILD)
+    assert text.startswith("🏛️")
 
 
 async def test_switching_off_lets_the_live_copy_go(test_db, shelf):
@@ -431,8 +485,10 @@ async def test_a_draft_that_cannot_be_checked_says_so_and_the_rest_go_on(test_db
     monkeypatch.setattr(player_settings, "reserve_and_say", flaky)
     await set_uses_library(PLAYER, GUILD, True)
     results = await player_settings.apply_library_to_live_drafts(PLAYER, GUILD)
-    assert [(d.session_id, text, view) for d, text, view in results][0] == ("q1", COULD_NOT_CHECK, None)
-    assert results[1][0].session_id == "q2" and results[1][1]
+    assert [(d.session_id, text, view) for d, text, view in results][0] == (
+        "q1", f"https://discord.com/channels/{GUILD}/chan/msg-q1\n{COULD_NOT_CHECK}", None)
+    assert results[1][0].session_id == "q2"
+    assert results[1][1].startswith(f"https://discord.com/channels/{GUILD}/chan/msg-q2\n")
 
 
 async def test_a_draft_of_a_cube_the_library_does_not_lend_is_left_out(test_db, shelf):

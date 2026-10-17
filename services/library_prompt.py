@@ -78,9 +78,12 @@ WHERE_TO_CHANGE = ("`/settings`, or the draft's **Change Entry / Settings** butt
                    "(**Library 🏛️** on other drafts)")
 TOO_LATE = ("⚠️ Too late to agree: this draft has already started, so it "
             "won't borrow from the library.")
+# Only the draft's own panel: it has the **Borrow from the library** button,
+# where /settings has a toggle that would switch an On library off.
+DRAFT_PANEL = ("the draft's **Change Entry / Settings** button "
+               "(**Library 🏛️** on other drafts)")
 COULD_NOT_CHECK = ("⚠️ Couldn't check the library just now. Try again in a minute "
-                   "from the draft's **Change Entry / Settings** button "
-                   "(**Library 🏛️** on other drafts).")
+                   f"from {DRAFT_PANEL}.")
 
 
 def reservation_text(answer: ReserveAnswer, cube: Any, hold: int,
@@ -108,7 +111,7 @@ def reservation_text(answer: ReserveAnswer, cube: Any, hold: int,
                 f"your own cards for this draft.")
     if answer.status == "unknown":
         return (f"⚠️ Couldn't check the library's shelf for **{cube}** just now. "
-                f"To try again, use {WHERE_TO_CHANGE} and press **Borrow from the library**.")
+                f"To try again, use {DRAFT_PANEL} and press **Borrow from the library**.")
     return None
 
 

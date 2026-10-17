@@ -2,7 +2,8 @@
 
 No Discord UI here (player_settings_view draws them). Every value is read and
 written through its existing preference_service getter and setter, so /settings
-and the older single-purpose commands agree on what is stored.
+and the other places that change a setting (a draft's sign-up panel, the
+library prompt) agree on what is stored.
 """
 import enum
 from dataclasses import dataclass, field
@@ -179,10 +180,20 @@ async def apply_cap_to_live_drafts(bot: Any, player_id: str, guild_id: str,
     return result
 
 
+def _link(d: DraftSession) -> str:
+    return f"https://discord.com/channels/{d.guild_id}/{d.draft_channel_id}/{d.message_id}"
+
+
 def _links(drafts: list[DraftSession]) -> str:
-    return ", ".join(
-        f"https://discord.com/channels/{d.guild_id}/{d.draft_channel_id}/{d.message_id}"
-        for d in drafts)
+    return ", ".join(_link(d) for d in drafts)
+
+
+def _naming(draft: DraftSession, text: str) -> str:
+    """The text, under a link to the draft's board so it says which draft;
+    as it is when the board's ids are missing."""
+    if not (draft.guild_id and draft.draft_channel_id and draft.message_id):
+        return text
+    return f"{_link(draft)}\n{text}"
 
 
 def live_result_text(result: LiveResult) -> str:
@@ -206,7 +217,8 @@ async def apply_library_to_live_drafts(player_id: str, guild_id: str
 
     Switching off needs nothing here: a held copy goes once its player no
     longer uses the library. One draft failing does not stop the rest; it is
-    reported with COULD_NOT_CHECK.
+    reported with COULD_NOT_CHECK. Each text starts with a link to that
+    draft's board.
     """
     results: list[tuple[DraftSession, str | None, discord.ui.View | None]] = []
     for draft in await live_drafts(player_id, guild_id):
@@ -219,5 +231,5 @@ async def apply_library_to_live_drafts(player_id: str, guild_id: str
             logger.exception("settings: couldn't hold a library copy for {} in draft {}",
                              player_id, draft.session_id)
             text, view = COULD_NOT_CHECK, None
-        results.append((draft, text, view))
+        results.append((draft, None if text is None else _naming(draft, text), view))
     return results
