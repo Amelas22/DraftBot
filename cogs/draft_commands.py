@@ -1,5 +1,5 @@
 import discord
-from discord.commands import option
+from datetime import datetime
 from discord.ext import commands
 from loguru import logger
 from modals import CubeDraftSelectionView, StakedCubeDraftSelectionView
@@ -8,7 +8,7 @@ from database.db_session import db_session
 from session import DraftSession, MatchResult
 from views import MatchResultSelect
 from config import is_money_server
-from services.donation_day import get_event, resolve_draft_kind
+from services.donation_day import donation_day_running, draft_kind, get_event
 from helpers.display_names import get_display_name
 from helpers.permissions import is_bot_manager
 from helpers.substitutes import is_sub_target_channel, resolve_sub_grant
@@ -28,21 +28,12 @@ class DraftCommands(commands.Cog):
     #     logger.info(f"Received interaction: {interaction.data}")
 
     @discord.slash_command(name='draft', description='Start a cube draft with team settings based on server configuration', guild_ids=None)
-    @option("kind", str, description="Staked or donation (donation is the default during a donation day)",
-            choices=["staked", "donation"], default=None, required=False)
-    async def draft(self, ctx, kind: str | None = None):
+    async def draft(self, ctx):
         logger.info(f"Received draft command from user {ctx.author.id} in guild {ctx.guild.id}")
 
         event = get_event(ctx.guild.id)
-        kind, refusal = resolve_draft_kind(
-            kind, money_server=is_money_server(ctx.guild.id),
-            event_active=bool(event and event.get("active")),
-            # Only asked when it can change the answer: an explicit choice that
-            # the role gates.
-            is_manager=await is_bot_manager(ctx) if kind else False)
-        if refusal:
-            await ctx.response.send_message(refusal, ephemeral=True)
-            return
+        kind = draft_kind(money_server=is_money_server(ctx.guild.id),
+                          event_active=donation_day_running(event, datetime.now()))
 
         # Check if this is a money server
         if kind is not None:

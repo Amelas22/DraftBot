@@ -15,7 +15,8 @@ from discord.ext import commands
 from helpers.digital_ocean_helper import DigitalOceanHelper
 from helpers.permissions import has_bot_manager_role
 from helpers.utils import not_none
-from services.donation_day import Event, build_payload, get_event, save_event, slugify
+from services.donation_day import (Event, build_payload, donation_day_running, get_event,
+                                   save_event, slugify)
 from services.donation_day_discord import get_state, save_state, state_for_setup
 from services.donation_day_publisher import publish_event
 from services.donation_service import mark_paid_cash
@@ -93,7 +94,9 @@ class DonationDayCommands(commands.Cog):
             str(receipts_channel.id) if receipts_channel else None,
             str(leaderboard_channel.id) if leaderboard_channel else None))
         url = await publish_event(guild_id, event, str(not_none(self.bot.user).id), bot=self.bot)
-        lines = [f"**{name}** is live. Page: {url or 'upload failed; it retries every 3 minutes'}"]
+        when = ("is live" if donation_day_running(event, datetime.now())
+                else f"is scheduled for {event['starts_at'].replace('T', ' ')}")
+        lines = [f"**{name}** {when}. Page: {url or 'upload failed; it retries every 3 minutes'}"]
         if receipts_channel:
             lines.append(f"Receipts: {receipts_channel.mention}")
         if leaderboard_channel:
@@ -136,7 +139,9 @@ class DonationDayCommands(commands.Cog):
             return
         payload = await build_payload(guild_id, event, str(not_none(self.bot.user).id))
         url = DigitalOceanHelper().get_public_url(f"donations/{event['page_key']}/index.html")
-        state = "running" if event.get("active") else "ended"
+        state = ("running" if donation_day_running(event, datetime.now())
+                 else f"scheduled for {event['starts_at'].replace('T', ' ')}" if event.get("active")
+                 else "ended")
         await ctx.followup.send(
             f"**{event['name']}** ({state}): ${payload['raised']} raised of "
             f"${event['goal_usd']}, ${payload['pledged']} pledged.\n{url}", ephemeral=True)
