@@ -3425,13 +3425,17 @@ class BetCapToggleButton(CallbackButton):
     
     async def update_cap_status(self, interaction, user_id, guild_id, is_capped):
         """Helper method to update cap status"""
-        if not await apply_cap_to_entry(interaction.client, self.draft_session_id, user_id, is_capped):
+        if not await apply_cap_to_entry(interaction.client, self.draft_session_id, user_id, is_capped,
+                                        redraw=False):
             await interaction.response.send_message("Error: your entry could not be found.", ephemeral=True)
             return
 
         # Update the player's preference for future drafts
         from preference_service import update_player_bet_capping_preference
         await update_player_bet_capping_preference(user_id, guild_id, is_capped)
+
+        # Update the draft message
+        await update_draft_message(interaction.client, self.draft_session_id)
 
         # Inform the user
         status_text = "ON 🧢" if is_capped else "OFF 🏎️"

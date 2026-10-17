@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Any
 
 from loguru import logger
-from sqlalchemy import or_, select
+from sqlalchemy import select
 
 from config import is_money_server
 from database.db_session import AsyncSessionLocal
@@ -26,7 +26,6 @@ from preference_service import (
     update_player_bet_capping_preference,
     update_player_dm_notification_preference,
 )
-from services.library_reservation import FINISHED_STAGES
 
 
 class Setting(enum.Enum):
@@ -92,7 +91,7 @@ async def flip(player_id: str, guild_id: str, setting: Setting) -> bool | None:
 
 async def live_drafts(player_id: str, guild_id: str) -> list[DraftSession]:
     """The drafts in this server the player is signed up for whose entries can
-    still change: not finished, teams not made, pool not matched, not expired."""
+    still change: no stage yet, teams not made, pool not matched, not expired."""
     async with AsyncSessionLocal() as session:
         rows = (await session.execute(
             select(DraftSession).where(
@@ -100,17 +99,21 @@ async def live_drafts(player_id: str, guild_id: str) -> list[DraftSession]:
                 DraftSession.teams_start_time.is_(None),
                 DraftSession.pool_matched_at.is_(None),
                 DraftSession.deletion_time > datetime.now(),
-                or_(DraftSession.session_stage.is_(None),
-                    DraftSession.session_stage.notin_(FINISHED_STAGES)),
+                # Change Entry / Settings stops at 'teams'; a draft at any
+                # stage is past the point where an entry can change.
+                DraftSession.session_stage.is_(None),
             ).order_by(DraftSession.id))).scalars().all()
     # sign_ups is a JSON column, so membership is checked here, not in SQL.
     return [d for d in rows if str(player_id) in {str(k) for k in (d.sign_ups or {})}]
 
 
-async def apply_cap_to_entry(bot: Any, session_id: str, player_id: str, is_capped: bool) -> bool:
+async def apply_cap_to_entry(bot: Any, session_id: str, player_id: str, is_capped: bool,
+                             redraw: bool = True) -> bool:
     """Set the cap on the player's entry in one draft and redraw its board.
 
-    False when the player has no entry (StakeInfo) in that draft.
+    False when the player has no entry (StakeInfo) in that draft. With
+    redraw=False the caller redraws the board itself, once it has done what
+    must not depend on that redraw succeeding.
     """
     async with AsyncSessionLocal() as session:
         async with session.begin():
@@ -121,8 +124,9 @@ async def apply_cap_to_entry(bot: Any, session_id: str, player_id: str, is_cappe
             if stake is None:
                 return False
             stake.is_capped = is_capped
-    from views import update_draft_message
-    await update_draft_message(bot, session_id)
+    if redraw:
+        from views import update_draft_message
+        await update_draft_message(bot, session_id)
     return True
 
 

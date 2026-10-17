@@ -220,7 +220,7 @@ async def stake_row(sid, player):
 
 async def test_live_drafts_are_only_those_still_taking_sign_ups(test_db):
     await draft("open", ["p1"])
-    await draft("teams", ["p1"], session_stage="teams", teams_start_time=datetime.now())
+    await draft("teams", ["p1"], session_stage="teams")
     await draft("started", ["p1"], teams_start_time=datetime.now())
     await draft("matched", ["p1"], pool_matched_at=datetime.now())
     await draft("finished", ["p1"], session_stage="completed")
@@ -328,3 +328,13 @@ async def test_a_failed_message_edit_still_redraws_the_ladder(test_db, monkeypat
         await view.hide_button.callback(i)
     await asyncio.sleep(0)
     redraw.assert_awaited_once_with(ANY, "g", "sr_ladder")
+
+
+async def test_a_failed_panel_redraw_keeps_the_entry_and_the_preference(test_db, redraw):
+    await draft("open", ["p1"]); await stake("open", "p1", capped=True)
+    redraw.side_effect = RuntimeError("discord")
+    i = SimpleNamespace(client=BOT, response=SimpleNamespace(send_message=AsyncMock()))
+    with pytest.raises(RuntimeError):
+        await views.BetCapToggleButton("open").update_cap_status(i, "p1", "g", is_capped=False)
+    assert (await stake_row("open", "p1")).is_capped is False
+    assert await get_player_bet_capping_preference("p1", "g") is False
