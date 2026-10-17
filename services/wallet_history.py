@@ -25,7 +25,7 @@ from sqlalchemy.sql.elements import ColumnElement
 from database.db_session import db_session
 from models.draft_session import DraftSession
 from models.tournament import Tournament
-from models.wallet_tx import WalletTx
+from models.wallet_tx import TIX, WalletTx
 from services.wallet_service import is_system_account
 
 DRAFT = "draft"
@@ -385,7 +385,7 @@ async def get_history_page(guild_id: str, player_id: str, *,
     """
     size = max(1, size)   # a page of nothing is a division by zero, not a page
     where = (WalletTx.guild_id == guild_id, WalletTx.player_id == player_id,
-             *category_conditions(category))
+             WalletTx.asset == TIX, *category_conditions(category))
     async with db_session() as session:
         total = int((await session.execute(
             select(func.count()).select_from(WalletTx).where(*where))).scalar() or 0)

@@ -32,7 +32,7 @@ from sqlalchemy import select, func, update
 from database.db_session import db_session
 from database.retry import with_db_retry
 from models.mtgo_job import MtgoJob
-from models.wallet_tx import WalletTx
+from models.wallet_tx import TIX, WalletTx
 from models.debt_ledger import DebtLedger
 from helpers.money_gate import serve_busy_reason, spawn_followup
 from services.mtgo_tradebot_client import ORDER_TIMEOUT_S, get_client, max_cards_per_trade
@@ -1073,7 +1073,8 @@ async def settle_debt_from_wallet(guild_id: str, payer_id: str, creditor_id: str
         async with db_session() as session:
             # idempotency: this settlement already applied?
             seen = await session.execute(
-                select(WalletTx.id).where(WalletTx.source == wallet_source).limit(1))
+                select(WalletTx.id).where(WalletTx.asset == TIX,
+                                          WalletTx.source == wallet_source).limit(1))
             if seen.scalar():
                 return {"ok": True, "amount": amount, "id": link_id, "idempotent": True}
 

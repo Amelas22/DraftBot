@@ -163,3 +163,65 @@ async def test_reconcile_counts_tix_only(test_db):  # noqa: F811
     await wallet_service.adjust(G, P, 99, "n", "t", asset="other")
     result = await wallet_service.reconcile(bot_tix=12)
     assert result["ok"] and result["wallet_total"] == 12
+
+
+# ---------------------------------------------------------------------------
+# direct ledger readers: history, donation day, escrow probes, debt settlement
+# ---------------------------------------------------------------------------
+from datetime import datetime, timedelta  # noqa: E402
+
+
+async def _add(*rows):
+    async with db_session() as session:
+        session.add_all(rows)
+        await session.commit()
+
+
+def _tx(player, kind, amount, source, asset, **kw):
+    return WalletTx(guild_id=G, player_id=player, kind=kind, amount=amount,
+                    source=source, asset=asset, **kw)
+
+
+@pytest.mark.asyncio
+async def test_donation_gather_ignores_other_assets(test_db):  # noqa: F811
+    from services import donation_day
+    since = datetime.utcnow() - timedelta(days=1)
+    await _add(_tx("bot", "receive", 5, "gift-tix", "tix", counterparty_id="300"),
+               _tx("bot", "receive", 7, "gift-other", "other", counterparty_id="300"))
+    async with db_session() as session:
+        credits, _ = await donation_day.gather_credits(session, G, "bot", since)
+    assert [c.amount for c in credits] == [5]
+
+
+@pytest.mark.asyncio
+async def test_wallet_history_page_ignores_other_assets(test_db):  # noqa: F811
+    from services import wallet_history
+    await _add(_tx("p1", "receive", 1, "a", "tix"), _tx("p1", "receive", 2, "b", "tix"),
+               _tx("p1", "receive", 3, "c", "other"))
+    page = await wallet_history.get_history_page(G, "p1")
+    assert page.total == 2
+    assert {r.asset for r in page.rows} == {"tix"}
+
+
+@pytest.mark.asyncio
+async def test_escrow_and_payout_probes_ignore_other_assets(test_db):  # noqa: F811
+    from services import tournament_escrow_service as escrow
+    base = escrow.entry_source(9, 4)
+    await _add(_tx("p1", "receive", 1, base, "other"),
+               _tx("p1", "receive", 1, "payout:9:1", "other"))
+    async with db_session() as session:
+        assert await escrow._entry_sources(session, 9, 4) == []
+        assert not await escrow._already_paid(session, 9)
+    await _add(_tx("p1", "receive", 1, base, "tix"),
+               _tx("p1", "receive", 1, "payout:9:1", "tix"))
+    async with db_session() as session:
+        assert await escrow._entry_sources(session, 9, 4) == [base]
+        assert await escrow._already_paid(session, 9)
+
+
+@pytest.mark.asyncio
+async def test_debt_wallet_source_probe_ignores_other_assets(test_db):  # noqa: F811
+    from services import mtgo_resolution_service as resolution
+    await _add(_tx("p1", "pay", -1, "debt:L1", "other"))
+    res = await resolution.settle_debt_from_wallet(G, "p1", "p2", 1, link_id="L1")
+    assert not res.get("idempotent")
