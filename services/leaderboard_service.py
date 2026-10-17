@@ -10,6 +10,7 @@ from models.win_streak_history import WinStreakHistory
 from models.perfect_streak_history import PerfectStreakHistory
 from models.draft_streak_history import DraftStreakHistory
 from models.player import PlayerStats
+from preference_service import PlayerPreferences
 from models import QuizStats, QuizSubmission, QuizSession
 from models.trophy_quiz_submission import TrophyQuizSubmission
 from models.trophy_quiz_session import TrophyQuizSession
@@ -958,7 +959,8 @@ async def get_sr_ladder_leaderboard_data(guild_id, timeframe, limit, session):
     """Highest-rated players who have drafted recently.
 
     Reads player_stats directly: the rating lives in the stored TrueSkill
-    mu/sigma, so this never needs the match-result ledger fold.
+    mu/sigma, so this never needs the match-result ledger fold. Players who
+    asked to be hidden are excluded in the query, before the limit.
     """
     # This board's window is the crown cycle by definition, so it is resolved
     # here as well as at get_leaderboard_data -- calling this query directly
@@ -973,6 +975,12 @@ async def get_sr_ladder_leaderboard_data(guild_id, timeframe, limit, session):
         PlayerStats.true_skill_mu.isnot(None),
         PlayerStats.true_skill_sigma.isnot(None),
         PlayerStats.last_draft_timestamp >= cutoff,
+        PlayerStats.player_id.notin_(
+            select(PlayerPreferences.player_id).where(
+                PlayerPreferences.guild_id == str(guild_id),
+                PlayerPreferences.hide_from_sr_ladder.is_(True),
+            )
+        ),
     )
     rows = (await session.execute(stmt)).scalars().all()
 

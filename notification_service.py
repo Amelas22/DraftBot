@@ -427,7 +427,7 @@ async def send_ready_check_dms(bot_or_client, draft_session, guild_id, channel_i
             f"A ready check has been started for the draft you signed up for in **{guild_name}**.\n\n"
             f"Click here to jump to the channel: [#{channel_name}]({channel_link})\n\n"
             f"Please respond by clicking the Ready button!\n\n"
-            f"_To disable these notifications, use `/toggle_dm_notifications` in {guild_name}_"
+            f"_To turn these off, use `/settings` in {guild_name}_"
         )
 
     return await _send_notification_dms(
@@ -460,7 +460,7 @@ async def send_teams_created_dms(bot_or_client, draft_session, guild_id, channel
             f"Teams have been created for the draft in **{guild_name}**.\n\n"
             f"**Your Link:** [Draftmancer Link]({draft_link})\n\n"
             f"Click here to jump to the channel: [#{channel_name}]({channel_link})\n\n"
-            f"_To disable these notifications, use `/toggle_dm_notifications` in {guild_name}_"
+            f"_To turn these off, use `/settings` in {guild_name}_"
         )
 
     return await _send_notification_dms(

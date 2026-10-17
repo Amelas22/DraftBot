@@ -1348,6 +1348,89 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                     fire_debt_summary_refresh(bot, draft_session.guild_id, "StakeDebts")
 
 
+async def _edit_board(bot, channel, guild_id: str, leaderboard_message, category: str,
+                      timeframe: str, cache=None) -> None:
+    """Redraw one category's leaderboard message in place. Logs, never raises."""
+    try:
+        # Create the embed with the saved timeframe
+        embed = await create_leaderboard_embed(
+            guild_id, category, timeframe=timeframe, cache=cache)
+
+        # Get the message ID field name
+        msg_id_field = f"{category}_view_message_id" if category != "hot_streak" else "message_id"
+
+        message_id = getattr(leaderboard_message, msg_id_field, None)
+        if not message_id:
+            return
+        try:
+            message = await channel.fetch_message(int(message_id))
+
+            # A board that fixes its own window gets no selector;
+            # passing view=None is also what strips one already there.
+            view = None
+            if not pinned_timeframe(category, guild_id):
+                view = TimeframeView(bot, guild_id, category, current_timeframe=timeframe)
+            await message.edit(embed=embed, view=view)
+
+            logger.info(f"Updated {category} leaderboard for guild {guild_id}")
+        except discord.NotFound:
+            logger.warning(f"Leaderboard message for {category} not found in guild {guild_id}")
+        except Exception as e:
+            logger.error(f"Error updating {category} leaderboard: {e}")
+    except Exception as e:
+        logger.error(f"Error creating {category} leaderboard embed: {e}")
+
+
+def _leaderboard_channel(bot, guild_id: str, leaderboard_message):
+    """The guild's leaderboard channel, if the bot can edit boards in it.
+
+    None, with a warning, when the guild or channel is gone or the bot lacks
+    send / embed / read-history permission there.
+    """
+    guild = bot.get_guild(int(guild_id))
+    if not guild:
+        logger.warning(f"Guild {guild_id} not found for leaderboard update")
+        return None
+
+    channel = guild.get_channel(int(leaderboard_message.channel_id))
+    if not channel:
+        logger.warning(f"Leaderboard channel {leaderboard_message.channel_id} not found")
+        return None
+
+    # Check permissions in the channel
+    bot_member = guild.get_member(bot.user.id)
+    permissions = channel.permissions_for(bot_member)
+    if not (permissions.send_messages and permissions.embed_links and permissions.read_message_history):
+        logger.warning(f"Missing permissions in leaderboard channel {channel.name}")
+        return None
+    return channel
+
+
+async def redraw_leaderboard(bot, guild_id: str, category: str) -> None:
+    """Redraw just this category's board in the guild, e.g. after a player hides.
+
+    Unlike update_leaderboards_for_guild it touches no other board, and leaves
+    crowns and the ring bearer alone. Returns quietly when the guild has no
+    leaderboard or message for it, and with a warning when its channel is gone
+    or the bot can't edit there; logs any other error.
+    """
+    try:
+        async with AsyncSessionLocal() as session:
+            leaderboard_message = (await session.execute(
+                select(LeaderboardMessage).where(LeaderboardMessage.guild_id == guild_id)
+            )).scalar_one_or_none()
+        if not leaderboard_message:
+            return
+        channel = _leaderboard_channel(bot, guild_id, leaderboard_message)
+        if not channel:
+            return
+        stored = getattr(leaderboard_message, f"{category}_timeframe", None)
+        await _edit_board(bot, channel, guild_id, leaderboard_message, category,
+                          effective_timeframe(category, guild_id, stored))
+    except Exception as e:
+        logger.error(f"Error redrawing {category} leaderboard for guild {guild_id}: {e}")
+
+
 async def update_leaderboards_for_guild(bot, guild_id: str, session_id=None, streak_extensions=None):
     """
     Update all leaderboard messages for a guild.
@@ -1372,21 +1455,8 @@ async def update_leaderboards_for_guild(bot, guild_id: str, session_id=None, str
 
             logger.info(f"Updating leaderboard for guild {guild_id}")
 
-            guild = bot.get_guild(int(guild_id))
-            if not guild:
-                logger.warning(f"Guild {guild_id} not found for leaderboard update")
-                return
-
-            channel = guild.get_channel(int(leaderboard_message.channel_id))
+            channel = _leaderboard_channel(bot, guild_id, leaderboard_message)
             if not channel:
-                logger.warning(f"Leaderboard channel {leaderboard_message.channel_id} not found")
-                return
-
-            # Check permissions in the channel
-            bot_member = guild.get_member(bot.user.id)
-            permissions = channel.permissions_for(bot_member)
-            if not (permissions.send_messages and permissions.embed_links and permissions.read_message_history):
-                logger.warning(f"Missing permissions in leaderboard channel {channel.name}")
                 return
 
             # All categories to display (imported from central config).
@@ -1413,35 +1483,8 @@ async def update_leaderboards_for_guild(bot, guild_id: str, session_id=None, str
 
             # Process each category
             for category in categories:
-                try:
-                    # Create the embed with the saved timeframe
-                    embed = await create_leaderboard_embed(
-                        guild_id, category, timeframe=timeframes[category],
-                        cache=players_cache)
-
-                    # Get the message ID field name
-                    msg_id_field = f"{category}_view_message_id" if category != "hot_streak" else "message_id"
-
-                    # Check if we have a message ID for this category
-                    if hasattr(leaderboard_message, msg_id_field) and getattr(leaderboard_message, msg_id_field):
-                        try:
-                            message_id = getattr(leaderboard_message, msg_id_field)
-                            message = await channel.fetch_message(int(message_id))
-
-                            # A board that fixes its own window gets no selector;
-                            # passing view=None is also what strips one already there.
-                            view = None
-                            if not pinned_timeframe(category, guild_id):
-                                view = TimeframeView(bot, guild_id, category, current_timeframe=timeframes[category])
-                            await message.edit(embed=embed, view=view)
-
-                            logger.info(f"Updated {category} leaderboard for guild {guild_id}")
-                        except discord.NotFound:
-                            logger.warning(f"Leaderboard message for {category} not found in guild {guild_id}")
-                        except Exception as e:
-                            logger.error(f"Error updating {category} leaderboard: {e}")
-                except Exception as e:
-                    logger.error(f"Error creating {category} leaderboard embed: {e}")
+                await _edit_board(bot, channel, guild_id, leaderboard_message,
+                                  category, timeframes[category], cache=players_cache)
 
             # Update last_updated timestamp
             leaderboard_message.last_updated = datetime.now()

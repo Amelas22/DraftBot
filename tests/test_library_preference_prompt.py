@@ -13,17 +13,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from conftest import a_library
+from conftest import CUBE, GUILD, MEMBER, PLAYER, _drafted, _labels, _lounge, _queue, _row
 from database.db_session import AsyncSessionLocal
-from models.player import PlayerStats
 import preference_service as prefs
-import services.library_access_service as access
 import services.library_prompt as prompt
 
 pytestmark = pytest.mark.asyncio
-
-LIB, GUILD, CUBE = "lounge", "g1", "mycube"
-MEMBER, PLAYER = "1001", "1002"
 
 
 def _interaction(player=PLAYER, guild=GUILD):
@@ -33,21 +28,6 @@ def _interaction(player=PLAYER, guild=GUILD):
         edit_original_response=AsyncMock(),
         response=SimpleNamespace(edit_message=AsyncMock(), send_message=AsyncMock(),
                                  defer=AsyncMock()))
-
-
-async def _lounge(kind="rental", stock=None):
-    """Fifty from a member, a hundred from anybody with three drafts."""
-    await a_library(LIB, guild=GUILD, kind=kind, collateral=50,
-                    collateral_untrusted=100, cubes=(CUBE,), min_drafts=3,
-                    stock=stock)
-    await access.invite(LIB, MEMBER, "test")
-
-
-async def _drafted(player, n):
-    async with AsyncSessionLocal() as session:
-        session.add(PlayerStats(player_id=player, guild_id=GUILD,
-                                display_name=player, drafts_participated=n))
-        await session.commit()
 
 
 # --- the saved answer -------------------------------------------------------
@@ -81,28 +61,6 @@ async def test_only_a_yes_counts_as_wanting_a_deck(test_db):
 
 # --- when it is asked -------------------------------------------------------
 
-@pytest.fixture
-def shelf(monkeypatch):
-    """One copy of the cube, so a reserve attempt can be answered offline."""
-    import services.card_library_inventory as inv
-
-    async def fetch(cube_id):
-        return [{"name": "Swamp", "qty": 4}] if cube_id == CUBE else None
-    monkeypatch.setattr(inv, "fetch_cube", fetch)
-
-
-async def _queue(players, sid="q1", cube=CUBE):
-    from datetime import datetime, timedelta
-    from models.draft_session import DraftSession
-    async with AsyncSessionLocal() as s:
-        s.add(DraftSession(session_id=sid, guild_id=GUILD, cube=cube,
-                           sign_ups={p: p for p in players},
-                           deletion_time=datetime.now() + timedelta(hours=3),
-                           draft_channel_id="chan", message_id=f"msg-{sid}"))
-        await s.commit()
-    return SimpleNamespace(session_id=sid, cube=cube)
-
-
 @pytest.mark.parametrize("player,hold", [(MEMBER, 50), (PLAYER, 100)])
 async def test_an_unasked_eligible_player_is_asked_with_their_own_hold(
         test_db, shelf, player, hold):
@@ -117,15 +75,6 @@ async def test_an_unasked_eligible_player_is_asked_with_their_own_hold(
     assert f"**{hold} tix**" in text, text
     assert "library/index.html" in text, "with a link to what the library holds"
     assert interaction.followup.send.await_args.kwargs["ephemeral"] is True
-
-
-def _labels(view):
-    return [b.label for b in view.children]
-
-
-async def _row(sid="q1"):
-    from models.draft_session import DraftSession
-    return await DraftSession.get_by_session_id(sid)
 
 
 async def test_a_borrower_is_not_asked_but_told_it_is_held_until_they_agree(

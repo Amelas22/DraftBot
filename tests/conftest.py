@@ -917,6 +917,59 @@ def stub_library(monkeypatch, module, *, collateral=0, library_id="lib",
     return library
 
 
+# --- the Lounge: one rental library lending one cube, and a draft of it -----
+# Shared by the library sign-up prompt tests and the /settings tests.
+
+LIB, GUILD, CUBE = "lounge", "g1", "mycube"
+MEMBER, PLAYER = "1001", "1002"
+
+
+async def _lounge(kind="rental", stock=None):
+    """Fifty from a member, a hundred from anybody with three drafts."""
+    import services.library_access_service as access
+    await a_library(LIB, guild=GUILD, kind=kind, collateral=50,
+                    collateral_untrusted=100, cubes=(CUBE,), min_drafts=3,
+                    stock=stock)
+    await access.invite(LIB, MEMBER, "test")
+
+
+async def _drafted(player, n):
+    from models.player import PlayerStats
+    async with AsyncSessionLocal() as session:
+        session.add(PlayerStats(player_id=player, guild_id=GUILD,
+                                display_name=player, drafts_participated=n))
+        await session.commit()
+
+
+@pytest.fixture
+def shelf(monkeypatch):
+    """One copy of the cube, so a reserve attempt can be answered offline."""
+    import services.card_library_inventory as inv
+
+    async def fetch(cube_id):
+        return [{"name": "Swamp", "qty": 4}] if cube_id == CUBE else None
+    monkeypatch.setattr(inv, "fetch_cube", fetch)
+
+
+async def _queue(players, sid="q1", cube=CUBE):
+    from datetime import timedelta
+    async with AsyncSessionLocal() as s:
+        s.add(DraftSession(session_id=sid, guild_id=GUILD, cube=cube,
+                           sign_ups={p: p for p in players},
+                           deletion_time=datetime.now() + timedelta(hours=3),
+                           draft_channel_id="chan", message_id=f"msg-{sid}"))
+        await s.commit()
+    return SimpleNamespace(session_id=sid, cube=cube)
+
+
+def _labels(view):
+    return [b.label for b in view.children]
+
+
+async def _row(sid="q1"):
+    return await DraftSession.get_by_session_id(sid)
+
+
 @pytest_asyncio.fixture
 async def session(match_control_db):
     """One open session per test -- every test below wants a session, not a
