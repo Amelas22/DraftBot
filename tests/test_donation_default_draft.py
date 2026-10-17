@@ -5,7 +5,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from cogs.draft_commands import DraftCommands
-from services.donation_day import draft_kind
+from datetime import datetime
+
+from services.donation_day import donation_day_running, draft_kind
 
 
 def test_a_running_donation_day_opens_a_donation_draft():
@@ -35,10 +37,11 @@ def test_draft_registers_no_options():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("money_server,event,expect", [
-    (True, {"active": True}, ("staked view", True)),
-    (True, {"active": False}, ("staked view", False)),
+    (True, {"active": True, "starts_at": "2000-01-01T00:00"}, ("staked view", True)),
+    (True, {"active": True, "starts_at": "2999-01-01T00:00"}, ("staked view", False)),
+    (True, {"active": False, "starts_at": "2000-01-01T00:00"}, ("staked view", False)),
     (True, None, ("staked view", False)),
-    (False, {"active": True}, ("free view", None)),
+    (False, {"active": True, "starts_at": "2000-01-01T00:00"}, ("free view", None)),
 ])
 async def test_draft_opens_the_view_its_server_config_calls_for(monkeypatch, money_server, event, expect):
     import cogs.draft_commands as dc
@@ -56,3 +59,21 @@ async def test_draft_opens_the_view_its_server_config_calls_for(monkeypatch, mon
     await DraftCommands.draft.callback(DraftCommands(MagicMock()), ctx)
 
     assert opened == [expect]
+
+
+NOW = datetime(2026, 10, 20, 12, 0)
+
+
+def test_a_donation_day_runs_once_it_has_started():
+    event = {"active": True, "starts_at": "2026-10-20T11:00"}
+    assert donation_day_running(event, NOW)
+
+
+def test_a_donation_day_set_up_ahead_waits_for_its_start():
+    event = {"active": True, "starts_at": "2026-10-20T18:00"}
+    assert not donation_day_running(event, NOW)
+
+
+def test_an_ended_or_absent_donation_day_is_not_running():
+    assert not donation_day_running({"active": False, "starts_at": "2026-10-20T11:00"}, NOW)
+    assert not donation_day_running(None, NOW)

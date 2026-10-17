@@ -11,7 +11,7 @@ Never emits a Discord id: a player is a resolved display name, or "Anonymous".
 import re
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, TypedDict
+from typing import Any, Mapping, TypedDict
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -82,6 +82,15 @@ def get_event(guild_id: str | int) -> Event | None:
 
 def save_event(guild_id: str | int, event: Event) -> None:
     update_setting(guild_id, "donation_day", dict(event))
+
+
+def donation_day_running(event: "Event | Mapping[str, Any] | None", now: datetime) -> bool:
+    """Whether the server's donation day is on right now: set up, not ended, and past
+    its start. A day set up ahead of time waits for its start (server time, as
+    /donation_day setup takes it)."""
+    if not event or not event.get("active"):
+        return False
+    return datetime.fromisoformat(str(event["starts_at"])) <= now
 
 
 def draft_kind(*, money_server: bool, event_active: bool) -> str | None:
