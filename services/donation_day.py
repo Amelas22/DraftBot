@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Mapping, TypedDict
 
+from loguru import logger
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -90,7 +91,14 @@ def donation_day_running(event: "Event | Mapping[str, Any] | None", now: datetim
     /donation_day setup takes it)."""
     if not event or not event.get("active"):
         return False
-    return datetime.fromisoformat(str(event["starts_at"])) <= now
+    try:
+        return datetime.fromisoformat(str(event["starts_at"])) <= now
+    except (KeyError, TypeError, ValueError):
+        # Only a hand-edited config can get here. A staked draft is the safe answer:
+        # a donation draft opened on bad config would send the losers' stakes to DraftBot.
+        logger.error(f"donation day: unreadable start {event.get('starts_at')!r}; "
+                     f"treating the day as not running")
+        return False
 
 
 def draft_kind(*, money_server: bool, event_active: bool) -> str | None:

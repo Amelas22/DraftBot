@@ -77,3 +77,14 @@ def test_a_donation_day_set_up_ahead_waits_for_its_start():
 def test_an_ended_or_absent_donation_day_is_not_running():
     assert not donation_day_running({"active": False, "starts_at": "2026-10-20T11:00"}, NOW)
     assert not donation_day_running(None, NOW)
+
+
+def test_a_donation_day_starting_this_minute_is_running():
+    """/donation_day setup with no start stores this minute, and must open at once."""
+    assert donation_day_running({"active": True, "starts_at": "2026-10-20T12:00"}, NOW)
+
+
+def test_an_unreadable_start_reads_as_not_running():
+    """Only a hand-edited config gets here; a staked draft is the safe answer."""
+    for bad in ("not a date", "2026-10-20T11:00+00:00"):
+        assert not donation_day_running({"active": True, "starts_at": bad}, NOW)
