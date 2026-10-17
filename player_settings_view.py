@@ -1,0 +1,120 @@
+"""The /settings message: an embed of a player's settings and a button for each.
+
+Each click flips the stored value (player_settings.flip), reloads, and redraws
+this same message. Row 0 is left for the Drafting buttons.
+"""
+import asyncio
+from typing import Any
+
+import discord
+from typing_extensions import override
+
+from helpers.utils import not_none, ui_button
+from player_settings import Setting, Settings, flip, load_settings
+from utils import redraw_leaderboard
+
+DMS_LABEL = "DM me when a ready check starts"
+HIDE_LABEL = "Hide me from the Skill Rating Ladder"
+ANONYMOUS_LABEL = "Show me as Anonymous on donation pages"
+
+NOT_YOURS = "These buttons are not for you."
+SAVE_FAILED = "⚠️ Couldn't save that just now. Try again."
+EXPIRED = "These buttons have expired. Run `/settings` again."
+
+# asyncio keeps only a weak reference to a task; hold the ladder redraws here
+# until they finish so one is not collected mid-flight.
+_background: "set[asyncio.Task[None]]" = set()
+
+
+def _line(on: bool, label: str) -> str:
+    return f"● On  {label}" if on else f"○ Off  {label}"
+
+
+def _groups(settings: Settings) -> list[tuple[str, list[str]]]:
+    """Each embed field: its group name and its lines. Empty groups are left out."""
+    drafting: list[str] = []
+    return [
+        (name, lines) for name, lines in (
+            ("Drafting", drafting),
+            ("Notifications", [_line(settings.dms, DMS_LABEL)]),
+            ("Privacy", [_line(settings.hide_from_ladder, HIDE_LABEL),
+                         _line(settings.anonymous, ANONYMOUS_LABEL)]),
+        ) if lines
+    ]
+
+
+def settings_embed(guild_name: str, settings: Settings) -> discord.Embed:
+    embed = discord.Embed(title=f"⚙️ Your settings: {guild_name}",
+                          color=discord.Color.blurple())
+    for name, lines in _groups(settings):
+        embed.add_field(name=name, value="\n".join(lines), inline=False)
+    embed.set_footer(text="Settings are per server.")
+    return embed
+
+
+def _style(on: bool) -> discord.ButtonStyle:
+    return discord.ButtonStyle.success if on else discord.ButtonStyle.secondary
+
+
+class SettingsView(discord.ui.View):
+    def __init__(self, player_id: str, guild_id: str, guild_name: str,
+                 settings: Settings) -> None:
+        super().__init__(timeout=600)
+        self.player_id = player_id
+        self.guild_id = guild_id
+        self.guild_name = guild_name
+        self.settings = settings
+        # The interaction that opened this message, set by the command, so a
+        # timeout can edit the ephemeral message it sent.
+        self.opener: discord.Interaction | None = None
+        self._restyle()
+
+    def _restyle(self) -> None:
+        self.dms_button.style = _style(self.settings.dms)
+        self.hide_button.style = _style(self.settings.hide_from_ladder)
+        self.anonymous_button.style = _style(self.settings.anonymous)
+
+    async def _toggle(self, interaction: discord.Interaction, setting: Setting) -> None:
+        if str(not_none(interaction.user).id) != self.player_id:
+            await interaction.response.send_message(NOT_YOURS, ephemeral=True)
+            return
+        await interaction.response.defer()
+        if await flip(self.player_id, self.guild_id, setting) is None:
+            await interaction.followup.send(SAVE_FAILED, ephemeral=True)
+            return
+        self.settings = await load_settings(self.player_id, self.guild_id)
+        self._restyle()
+        await interaction.edit_original_response(
+            embed=settings_embed(self.guild_name, self.settings), view=self)
+        if setting is Setting.HIDE_FROM_LADDER:
+            task = asyncio.create_task(
+                redraw_leaderboard(interaction.client, self.guild_id, "sr_ladder"))
+            _background.add(task)
+            task.add_done_callback(_background.discard)
+
+    @ui_button(label="Ready-check DMs", row=1)
+    async def dms_button(self, _button: discord.ui.Button[Any],
+                         interaction: discord.Interaction) -> None:
+        await self._toggle(interaction, Setting.DMS)
+
+    @ui_button(label="Hide from ladder", row=2)
+    async def hide_button(self, _button: discord.ui.Button[Any],
+                          interaction: discord.Interaction) -> None:
+        await self._toggle(interaction, Setting.HIDE_FROM_LADDER)
+
+    @ui_button(label="Anonymous donor", row=2)
+    async def anonymous_button(self, _button: discord.ui.Button[Any],
+                               interaction: discord.Interaction) -> None:
+        await self._toggle(interaction, Setting.ANONYMOUS)
+
+    @override
+    async def on_timeout(self) -> None:
+        for item in self.children:
+            if isinstance(item, (discord.ui.Button, discord.ui.Select)):
+                item.disabled = True
+        if self.opener is None:
+            return
+        try:
+            await self.opener.edit_original_response(content=EXPIRED, view=self)
+        except discord.HTTPException:
+            pass

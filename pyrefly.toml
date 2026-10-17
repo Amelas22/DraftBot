@@ -68,6 +68,9 @@ project-includes = [
     "helpers/mtgo_untradeable.py",
     "services/card_substitution_service.py",
     "models/card_substitution.py",
+    "player_settings.py",
+    "player_settings_view.py",
+    "cogs/settings_commands.py",
 ]
 
 # SQLAlchemy 1.x-style Column() declarations type column attributes as Column[T]
