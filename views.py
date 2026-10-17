@@ -3425,14 +3425,20 @@ class BetCapToggleButton(CallbackButton):
     
     async def update_cap_status(self, interaction, user_id, guild_id, is_capped):
         """Helper method to update cap status"""
-        if not await apply_cap_to_entry(interaction.client, self.draft_session_id, user_id, is_capped,
-                                        redraw=False):
+        outcome = await apply_cap_to_entry(self.draft_session_id, user_id, is_capped)
+        if outcome == "no_entry":
             await interaction.response.send_message("Error: your entry could not be found.", ephemeral=True)
+            return
+        if outcome == "closed":
+            await interaction.response.send_message(
+                "This draft has already started, so your entry can't change now.", ephemeral=True)
             return
 
         # Update the player's preference for future drafts
         from preference_service import update_player_bet_capping_preference
-        await update_player_bet_capping_preference(user_id, guild_id, is_capped)
+        remembered = ("This preference is remembered for future drafts."
+                      if await update_player_bet_capping_preference(user_id, guild_id, is_capped)
+                      else "⚠️ I couldn't remember this for future drafts; try again.")
 
         # Update the draft message
         await update_draft_message(interaction.client, self.draft_session_id)
@@ -3442,7 +3448,7 @@ class BetCapToggleButton(CallbackButton):
         description_text = entry_cap_phrase(is_capped)
         
         await interaction.response.send_message(
-            f"Your entry cap is now {status_text}. Your entry is {description_text}.\n\nThis preference is remembered for future drafts.",
+            f"Your entry cap is now {status_text}. Your entry is {description_text}.\n\n{remembered}",
             ephemeral=True
         )
 

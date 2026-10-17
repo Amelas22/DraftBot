@@ -253,16 +253,78 @@ async def test_a_live_draft_without_a_stake_is_skipped(test_db, redraw):
     assert live_result_text(result) == ""
 
 
-async def test_one_failing_draft_does_not_stop_the_others(test_db, redraw):
+async def test_one_failing_draft_does_not_stop_the_others(test_db, redraw, monkeypatch):
     for sid in ("a", "b"):
         await draft(sid, ["p1"]); await stake(sid, "p1", capped=True)
-    redraw.side_effect = [RuntimeError("discord"), None]
+    real = player_settings.apply_cap_to_entry
+
+    async def fails_on_a(session_id, player_id, is_capped):
+        if session_id == "a":
+            raise RuntimeError("db")
+        return await real(session_id, player_id, is_capped)
+    monkeypatch.setattr(player_settings, "apply_cap_to_entry", fails_on_a)
     result = await apply_cap_to_live_drafts(BOT, "p1", "g", False)
-    assert len(result.changed) == 1 and len(result.failed) == 1
+    assert [d.session_id for d in result.changed] == ["b"]
+    assert [d.session_id for d in result.failed] == ["a"]
+    assert (await stake_row("a", "p1")).is_capped is True
+    assert (await stake_row("b", "p1")).is_capped is False
     text = live_result_text(result)
     assert "couldn't" in text.lower()
     assert "https://discord.com/channels/g/chan/msg-a" in text
     assert "https://discord.com/channels/g/chan/msg-b" in text
+
+
+async def test_a_failed_board_redraw_still_counts_the_entry_as_changed(test_db, redraw):
+    await draft("open", ["p1"]); await stake("open", "p1", capped=True)
+    redraw.side_effect = RuntimeError("discord")
+    result = await apply_cap_to_live_drafts(BOT, "p1", "g", False)
+    assert [d.session_id for d in result.changed] == ["open"] and result.failed == []
+    assert (await stake_row("open", "p1")).is_capped is False
+
+
+async def close(sid, **fields):
+    """The draft moves on after live_drafts read it, before the write."""
+    async with AsyncSessionLocal() as s:
+        row = (await s.execute(select(DraftSession).where(
+            DraftSession.session_id == sid))).scalars().one()
+        for k, v in fields.items():
+            setattr(row, k, v)
+        await s.commit()
+
+
+CLOSINGS = [dict(session_stage="teams"), dict(teams_start_time=datetime.now()),
+            dict(pool_matched_at=datetime.now())]
+
+
+@pytest.mark.parametrize("closing", CLOSINGS)
+async def test_a_draft_that_moved_on_before_the_write_keeps_its_entry(test_db, closing):
+    await draft("open", ["p1"]); await stake("open", "p1", capped=True)
+    await close("open", **closing)
+    assert await player_settings.apply_cap_to_entry("open", "p1", False) == "closed"
+    assert (await stake_row("open", "p1")).is_capped is True
+
+
+async def test_the_entry_write_says_whether_it_changed_or_found_none(test_db):
+    await draft("open", ["p1"]); await stake("open", "p1", capped=True)
+    await draft("empty", ["p1"])
+    assert await player_settings.apply_cap_to_entry("open", "p1", False) == "changed"
+    assert await player_settings.apply_cap_to_entry("empty", "p1", False) == "no_entry"
+
+
+async def test_a_draft_closing_mid_settings_is_neither_changed_nor_failed(
+        test_db, redraw, monkeypatch):
+    await draft("open", ["p1"]); await stake("open", "p1", capped=True)
+    real = player_settings.live_drafts
+
+    async def then_teams(player_id, guild_id):
+        drafts = await real(player_id, guild_id)
+        await close("open", session_stage="teams")
+        return drafts
+    monkeypatch.setattr(player_settings, "live_drafts", then_teams)
+    result = await apply_cap_to_live_drafts(BOT, "p1", "g", False)
+    assert result == LiveResult(changed=[], failed=[])
+    assert (await stake_row("open", "p1")).is_capped is True
+    redraw.assert_not_awaited()
 
 
 async def test_the_cap_button_saves_the_preference_and_reports_the_draft(test_db, redraw, money):
@@ -355,6 +417,32 @@ async def test_the_panel_without_an_entry_says_so(test_db, redraw):
     assert i.response.send_message.await_args.args[0] == "Error: your entry could not be found."
     assert await get_player_bet_capping_preference("p1", "g") is True
     redraw.assert_not_awaited()
+
+
+async def test_the_panel_on_a_draft_that_has_started_changes_nothing(test_db, redraw):
+    await draft("open", ["p1"]); await stake("open", "p1", capped=True)
+    await close("open", session_stage="teams")
+    i = SimpleNamespace(client=BOT, response=SimpleNamespace(send_message=AsyncMock()))
+    await views.BetCapToggleButton("open").update_cap_status(i, "p1", "g", is_capped=False)
+    assert i.response.send_message.await_args.args[0] == (
+        "This draft has already started, so your entry can't change now.")
+    assert (await stake_row("open", "p1")).is_capped is True
+    assert await get_player_bet_capping_preference("p1", "g") is True
+    redraw.assert_not_awaited()
+
+
+async def test_the_panel_says_when_the_preference_did_not_save(test_db, redraw, monkeypatch):
+    import preference_service
+    await draft("open", ["p1"]); await stake("open", "p1", capped=True)
+    monkeypatch.setattr(preference_service, "update_player_bet_capping_preference",
+                        AsyncMock(return_value=False))
+    i = SimpleNamespace(client=BOT, response=SimpleNamespace(send_message=AsyncMock()))
+    await views.BetCapToggleButton("open").update_cap_status(i, "p1", "g", is_capped=False)
+    text = i.response.send_message.await_args.args[0]
+    assert (await stake_row("open", "p1")).is_capped is False
+    assert "Your entry cap is now OFF" in text
+    assert "⚠️ I couldn't remember this for future drafts; try again." in text
+    assert "This preference is remembered for future drafts." not in text
 
 
 async def test_a_failed_message_edit_still_redraws_the_ladder(test_db, monkeypatch):
@@ -489,6 +577,23 @@ async def test_a_draft_that_cannot_be_checked_says_so_and_the_rest_go_on(test_db
         "q1", f"https://discord.com/channels/{GUILD}/chan/msg-q1\n{COULD_NOT_CHECK}", None)
     assert results[1][0].session_id == "q2"
     assert results[1][1].startswith(f"https://discord.com/channels/{GUILD}/chan/msg-q2\n")
+
+
+async def test_a_draft_that_started_before_the_reclaim_is_skipped(test_db, shelf, monkeypatch):
+    import services.library_prompt as library_prompt
+    await _lounge(stock={"Swamp": 4}); await _drafted(PLAYER, 3); await _queue([PLAYER])
+    reclaim = AsyncMock()
+    monkeypatch.setattr(library_prompt, "reclaim_player", reclaim)
+    real = player_settings.live_drafts
+
+    async def then_started(player_id, guild_id):
+        drafts = await real(player_id, guild_id)
+        await close("q1", teams_start_time=datetime.now())
+        return drafts
+    monkeypatch.setattr(player_settings, "live_drafts", then_started)
+    await set_uses_library(PLAYER, GUILD, True)
+    assert await player_settings.apply_library_to_live_drafts(PLAYER, GUILD) == []
+    reclaim.assert_not_awaited()
 
 
 async def test_a_draft_of_a_cube_the_library_does_not_lend_is_left_out(test_db, shelf):

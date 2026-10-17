@@ -8,11 +8,11 @@ library prompt) agree on what is stored.
 import enum
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 import discord
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import exists, select, update
 
 from config import is_money_server
 from database.db_session import AsyncSessionLocal
@@ -115,6 +115,19 @@ async def flip(player_id: str, guild_id: str, setting: Setting) -> bool | None:
 
 # --- carrying the cap into the drafts a player is signed up for ------------
 
+# A draft whose entries can still change. Change Entry / Settings stops at
+# 'teams', and matching the pool reads the caps, so a draft at any stage, with
+# teams made, or with its pool matched is past that point.
+_OPEN = (DraftSession.session_stage.is_(None),
+         DraftSession.teams_start_time.is_(None),
+         DraftSession.pool_matched_at.is_(None))
+
+
+def _still_open(draft: DraftSession | None) -> bool:
+    return (draft is not None and draft.session_stage is None
+            and draft.teams_start_time is None and draft.pool_matched_at is None)
+
+
 async def live_drafts(player_id: str, guild_id: str) -> list[DraftSession]:
     """The drafts in this server the player is signed up for whose entries can
     still change: no stage yet, teams not made, pool not matched, not expired."""
@@ -122,38 +135,36 @@ async def live_drafts(player_id: str, guild_id: str) -> list[DraftSession]:
         rows = (await session.execute(
             select(DraftSession).where(
                 DraftSession.guild_id == guild_id,
-                DraftSession.teams_start_time.is_(None),
-                DraftSession.pool_matched_at.is_(None),
                 DraftSession.deletion_time > datetime.now(),
-                # Change Entry / Settings stops at 'teams'; a draft at any
-                # stage is past the point where an entry can change.
-                DraftSession.session_stage.is_(None),
+                *_OPEN,
             ).order_by(DraftSession.id))).scalars().all()
     # sign_ups is a JSON column, so membership is checked here, not in SQL.
     return [d for d in rows if str(player_id) in {str(k) for k in (d.sign_ups or {})}]
 
 
-async def apply_cap_to_entry(bot: Any, session_id: str, player_id: str, is_capped: bool,
-                             redraw: bool = True) -> bool:
-    """Set the cap on the player's entry in one draft and redraw its board.
+CapOutcome = Literal["changed", "no_entry", "closed"]
 
-    False when the player has no entry (StakeInfo) in that draft. With
-    redraw=False the caller redraws the board itself, once it has done what
-    must not depend on that redraw succeeding.
+
+async def apply_cap_to_entry(session_id: str, player_id: str, is_capped: bool) -> CapOutcome:
+    """Set the cap on the player's entry in one draft, only while it is open.
+
+    The check and the write are one statement, so a draft that moves on in
+    the meantime (team creation commits its stage before the pool is matched)
+    keeps the entry it had. "no_entry" when the player has no StakeInfo
+    there; "closed" when they do but the draft is past changing it. The
+    caller redraws the board.
     """
     async with AsyncSessionLocal() as session:
         async with session.begin():
-            stake = (await session.execute(select(StakeInfo).where(
-                StakeInfo.session_id == session_id,
-                StakeInfo.player_id == player_id,
-            ))).scalars().first()
-            if stake is None:
-                return False
-            stake.is_capped = is_capped
-    if redraw:
-        from views import update_draft_message
-        await update_draft_message(bot, session_id)
-    return True
+            entry = (StakeInfo.session_id == session_id, StakeInfo.player_id == player_id)
+            written = await session.execute(
+                update(StakeInfo)
+                .where(*entry, exists().where(DraftSession.session_id == session_id, *_OPEN))
+                .values(is_capped=is_capped))
+            if written.rowcount:
+                return "changed"
+            found = (await session.execute(select(StakeInfo.id).where(*entry))).first()
+    return "closed" if found is not None else "no_entry"
 
 
 @dataclass(frozen=True)
@@ -166,17 +177,28 @@ async def apply_cap_to_live_drafts(bot: Any, player_id: str, guild_id: str,
                                    is_capped: bool) -> LiveResult:
     """Carry a new cap into every live draft the player has an entry in.
 
-    One draft failing does not stop the rest; it is reported in `failed`.
+    One draft failing does not stop the rest; it is reported in `failed`. An
+    entry counts as changed once its write commits: a board that then fails
+    to redraw is only logged, since the entry itself is right.
     """
+    from views import update_draft_message
     result = LiveResult()
     for draft in await live_drafts(player_id, guild_id):
         try:
-            if await apply_cap_to_entry(bot, draft.session_id, player_id, is_capped):
-                result.changed.append(draft)
+            outcome = await apply_cap_to_entry(draft.session_id, player_id, is_capped)
         except Exception:
             logger.exception("settings: couldn't set the cap for {} in draft {}",
                              player_id, draft.session_id)
             result.failed.append(draft)
+            continue
+        if outcome != "changed":
+            continue    # no entry there, or the draft moved on meanwhile
+        result.changed.append(draft)
+        try:
+            await update_draft_message(bot, draft.session_id)
+        except Exception:
+            logger.exception("settings: set the cap for {} in draft {} but couldn't "
+                             "redraw its board", player_id, draft.session_id)
     return result
 
 
@@ -226,7 +248,12 @@ async def apply_library_to_live_drafts(player_id: str, guild_id: str
             library = await library_to_ask_about(guild_id, draft.cube, player_id)
             if library is None:
                 continue
-            text, view = await reserve_and_say(player_id, draft, library, reclaim=True)
+            # Reclaiming takes the copy back from another queue, so not for a
+            # draft that started while the library was being checked.
+            fresh = await DraftSession.get_by_session_id(draft.session_id)
+            if not _still_open(fresh):
+                continue
+            text, view = await reserve_and_say(player_id, fresh, library, reclaim=True)
         except Exception:
             logger.exception("settings: couldn't hold a library copy for {} in draft {}",
                              player_id, draft.session_id)
