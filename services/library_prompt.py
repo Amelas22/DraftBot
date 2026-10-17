@@ -72,16 +72,16 @@ def saved_text(uses_library: bool) -> str:
 
 
 AGREE_LABEL = "I agree and wish to use the library"
-# Where the setting lives: Change Entry / Settings on a staked board, the
-# Library button on every other (services/library_boards).
-WHERE_TO_CHANGE = ("`/settings`, or the draft's **Change Entry / Settings** button "
-                   "(**Library 🏛️** on other drafts)")
-TOO_LATE = ("⚠️ Too late to agree: this draft has already started, so it "
-            "won't borrow from the library.")
-# Only the draft's own panel: it has the **Borrow from the library** button,
-# where /settings has a toggle that would switch an On library off.
+# The draft's own panel: Change Entry / Settings on a staked board, the
+# Library button on every other (services/library_boards). Alone, it is where
+# to retry a borrow: it has the **Borrow from the library** button, where
+# /settings has a toggle that would switch an On library off.
 DRAFT_PANEL = ("the draft's **Change Entry / Settings** button "
                "(**Library 🏛️** on other drafts)")
+# Where the setting lives.
+WHERE_TO_CHANGE = f"`/settings`, or {DRAFT_PANEL}"
+TOO_LATE = ("⚠️ Too late to agree: this draft has already started, so it "
+            "won't borrow from the library.")
 COULD_NOT_CHECK = ("⚠️ Couldn't check the library just now. Try again in a minute "
                    f"from {DRAFT_PANEL}.")
 

@@ -14,6 +14,7 @@ import discord
 from loguru import logger
 from typing_extensions import override
 
+from helpers.money_gate import spawn_followup
 from helpers.utils import not_none, ui_button
 from player_settings import (Setting, Settings, apply_cap_to_live_drafts,
                              apply_library_to_live_drafts, flip, live_result_text,
@@ -33,10 +34,6 @@ EXPIRED = "These buttons have expired. Run `/settings` again."
 NOTHING_AFFECTED = "No draft you're signed up for right now was affected."
 LIVE_FAILED = ("⚠️ Saved, but I couldn't update the drafts you're signed up for. "
                "Use each draft's **Change Entry / Settings** button.")
-
-# asyncio keeps only a weak reference to a task; hold the ladder redraws here
-# until they finish so one is not collected mid-flight.
-_background: "set[asyncio.Task[None]]" = set()
 
 # One lock per (player, server): two quick clicks run one after the other, so
 # a flip and its live-draft writes can't interleave with the next click's and
@@ -124,6 +121,9 @@ class SettingsView(discord.ui.View):
             if new is None:
                 await interaction.followup.send(SAVE_FAILED, ephemeral=True)
                 return
+            # Side effects first, so a failed edit of this message can't skip them.
+            if setting is Setting.HIDE_FROM_LADDER:
+                self._redraw_ladder(interaction)
             live = await self._carry_into_live_drafts(interaction, setting, new)
         self.settings = await load_settings(self.player_id, self.guild_id)
         self._restyle()
@@ -135,29 +135,27 @@ class SettingsView(discord.ui.View):
             else:
                 await interaction.followup.send(text, view=view, ephemeral=True)
 
+    def _redraw_ladder(self, interaction: discord.Interaction) -> None:
+        """Redraw the Skill Rating Ladder board in the background."""
+        spawn_followup("settings ladder redraw",
+                       redraw_leaderboard(interaction.client, self.guild_id, "sr_ladder"))
+
     async def _carry_into_live_drafts(self, interaction: discord.Interaction,
                                       setting: Setting, new: bool
                                       ) -> list[tuple[str, discord.ui.View | None]]:
-        """The side effects of a saved flip, and the follow-ups to send."""
-        # Side effects first, so a failed edit of this message can't skip them.
-        if setting is Setting.HIDE_FROM_LADDER:
-            task = asyncio.create_task(
-                redraw_leaderboard(interaction.client, self.guild_id, "sr_ladder"))
-            _background.add(task)
-            task.add_done_callback(_background.discard)
-        # Each follow-up: its text and the view to send with it, if any. The
-        # preference is saved by now, so a failure here must not escape.
+        """Carry a saved cap, or the library switched on, into the player's
+        live sign-ups; the follow-ups to send, each with its view if any.
+
+        The preference is saved by now, so a failure here must not escape.
+        """
         try:
             if setting is Setting.STAKE_CAP:
                 text = live_result_text(await apply_cap_to_live_drafts(
                     interaction.client, self.player_id, self.guild_id, new))
                 return [(text or NOTHING_AFFECTED, None)]
             if setting is Setting.LIBRARY and new:
-                live: list[tuple[str, discord.ui.View | None]] = [
-                    (text, view) for _draft, text, view
-                    in await apply_library_to_live_drafts(self.player_id, self.guild_id)
-                    if text is not None]
-                return live or [(NOTHING_AFFECTED, None)]
+                return (await apply_library_to_live_drafts(self.player_id, self.guild_id)
+                        or [(NOTHING_AFFECTED, None)])
         except Exception:
             logger.exception("settings: saved {} for {} but couldn't update their live drafts",
                              setting.value, self.player_id)

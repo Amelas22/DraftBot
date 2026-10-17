@@ -6,6 +6,7 @@ and the other places that change a setting (a draft's sign-up panel, the
 library prompt) agree on what is stored.
 """
 import enum
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
@@ -32,6 +33,7 @@ from preference_service import (
 )
 from services.library_access_service import may_borrow
 from services.library_prompt import COULD_NOT_CHECK, library_to_ask_about, reserve_and_say
+from services.library_reservation import queue_link
 from services.library_service import rental_library_for
 
 
@@ -83,6 +85,31 @@ async def load_settings(player_id: str, guild_id: str) -> Settings:
     )
 
 
+_Getter = Callable[[str, str], Awaitable[bool]]
+_Setter = Callable[[str, str, bool], Awaitable[Any]]    # truthy when saved
+
+
+def _as_bool(get: Callable[[str, str], Awaitable[Any]]) -> _Getter:
+    async def read(player_id: str, guild_id: str) -> bool:
+        return bool(await get(player_id, guild_id))
+    return read
+
+
+# Each setting's stored value, read as a bool, and its setter. The library's
+# "not set" reads as off, so the first click turns it on. The stake cap and
+# the library only save the preference here; the caller carries them into
+# live sign-ups (apply_cap_to_live_drafts, apply_library_to_live_drafts).
+_STORE: dict[Setting, tuple[_Getter, _Setter]] = {
+    Setting.DMS: (_as_bool(get_player_dm_notification_preference),
+                  update_player_dm_notification_preference),
+    Setting.HIDE_FROM_LADDER: (_as_bool(get_hide_from_sr_ladder), set_hide_from_sr_ladder),
+    Setting.ANONYMOUS: (_anonymous, set_donation_anonymous),
+    Setting.STAKE_CAP: (_as_bool(get_player_bet_capping_preference),
+                        update_player_bet_capping_preference),
+    Setting.LIBRARY: (_as_bool(get_uses_library), set_uses_library),
+}
+
+
 async def flip(player_id: str, guild_id: str, setting: Setting) -> bool | None:
     """Write the opposite of what is stored now, and return it.
 
@@ -90,27 +117,9 @@ async def flip(player_id: str, guild_id: str, setting: Setting) -> bool | None:
     click on an older /settings message cannot write back a stale state.
     None if the save failed.
     """
-    match setting:
-        case Setting.DMS:
-            new = not await get_player_dm_notification_preference(player_id, guild_id)
-            saved = await update_player_dm_notification_preference(player_id, guild_id, new)
-        case Setting.HIDE_FROM_LADDER:
-            new = not await get_hide_from_sr_ladder(player_id, guild_id)
-            saved = await set_hide_from_sr_ladder(player_id, guild_id, new)
-        case Setting.ANONYMOUS:
-            new = not await _anonymous(player_id, guild_id)
-            saved = await set_donation_anonymous(player_id, guild_id, new)
-        case Setting.STAKE_CAP:
-            # Only the preference; the caller carries it into live sign-ups
-            # (apply_cap_to_live_drafts), which needs the bot.
-            new = not await get_player_bet_capping_preference(player_id, guild_id)
-            saved = await update_player_bet_capping_preference(player_id, guild_id, new)
-        case Setting.LIBRARY:
-            # Not set reads as off, so the first click turns it on. The caller
-            # holds copies in live sign-ups (apply_library_to_live_drafts).
-            new = not await get_uses_library(player_id, guild_id)
-            saved = await set_uses_library(player_id, guild_id, new)
-    return new if saved else None
+    get, put = _STORE[setting]
+    new = not await get(player_id, guild_id)
+    return new if await put(player_id, guild_id, new) else None
 
 
 # --- carrying the cap into the drafts a player is signed up for ------------
@@ -131,6 +140,8 @@ def _still_open(draft: DraftSession | None) -> bool:
 async def live_drafts(player_id: str, guild_id: str) -> list[DraftSession]:
     """The drafts in this server the player is signed up for whose entries can
     still change: no stage yet, teams not made, pool not matched, not expired."""
+    # Stricter than library_boards._taking_signups: the panel's controls stop
+    # at 'teams', and matching the pool reads the caps.
     async with AsyncSessionLocal() as session:
         rows = (await session.execute(
             select(DraftSession).where(
@@ -167,10 +178,10 @@ async def apply_cap_to_entry(session_id: str, player_id: str, is_capped: bool) -
     return "closed" if found is not None else "no_entry"
 
 
-@dataclass(frozen=True)
+@dataclass
 class LiveResult:
-    changed: list[DraftSession] = field(default_factory=lambda: list[DraftSession]())
-    failed: list[DraftSession] = field(default_factory=lambda: list[DraftSession]())
+    changed: list[DraftSession] = field(default_factory=list)
+    failed: list[DraftSession] = field(default_factory=list)
 
 
 async def apply_cap_to_live_drafts(bot: Any, player_id: str, guild_id: str,
@@ -202,20 +213,15 @@ async def apply_cap_to_live_drafts(bot: Any, player_id: str, guild_id: str,
     return result
 
 
-def _link(d: DraftSession) -> str:
-    return f"https://discord.com/channels/{d.guild_id}/{d.draft_channel_id}/{d.message_id}"
-
-
 def _links(drafts: list[DraftSession]) -> str:
-    return ", ".join(_link(d) for d in drafts)
+    return ", ".join(link for d in drafts if (link := queue_link(d)) is not None)
 
 
 def _naming(draft: DraftSession, text: str) -> str:
     """The text, under a link to the draft's board so it says which draft;
     as it is when the board's ids are missing."""
-    if not (draft.guild_id and draft.draft_channel_id and draft.message_id):
-        return text
-    return f"{_link(draft)}\n{text}"
+    link = queue_link(draft)
+    return text if link is None else f"{link}\n{text}"
 
 
 def live_result_text(result: LiveResult) -> str:
@@ -232,17 +238,16 @@ def live_result_text(result: LiveResult) -> str:
 # --- carrying the card library into the drafts a player is signed up for ---
 
 async def apply_library_to_live_drafts(player_id: str, guild_id: str
-                                       ) -> list[tuple[DraftSession, str | None,
-                                                       discord.ui.View | None]]:
+                                       ) -> list[tuple[str, discord.ui.View | None]]:
     """After switching the library on: hold a copy in each live draft whose
     cube the library lends this player, and say where each stands.
 
     Switching off needs nothing here: a held copy goes once its player no
     longer uses the library. One draft failing does not stop the rest; it is
     reported with COULD_NOT_CHECK. Each text starts with a link to that
-    draft's board.
+    draft's board; a draft with nothing to say is left out.
     """
-    results: list[tuple[DraftSession, str | None, discord.ui.View | None]] = []
+    results: list[tuple[str, discord.ui.View | None]] = []
     for draft in await live_drafts(player_id, guild_id):
         try:
             library = await library_to_ask_about(guild_id, draft.cube, player_id)
@@ -258,5 +263,6 @@ async def apply_library_to_live_drafts(player_id: str, guild_id: str
             logger.exception("settings: couldn't hold a library copy for {} in draft {}",
                              player_id, draft.session_id)
             text, view = COULD_NOT_CHECK, None
-        results.append((draft, None if text is None else _naming(draft, text), view))
+        if text is not None:
+            results.append((_naming(draft, text), view))
     return results

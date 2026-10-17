@@ -13,6 +13,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock
 import discord
 import pytest
 
+from conftest import GUILD, PLAYER, _drafted, _labels, _lounge, _queue, _row
 import player_settings
 import player_settings_view
 from cogs.settings_commands import SettingsCommands
@@ -29,8 +30,6 @@ from preference_service import (get_anonymous_donors, get_player_bet_capping_pre
                                 set_uses_library)
 from services.library_prompt import AGREE_LABEL, COULD_NOT_CHECK
 from services.library_reservation import reserve, still_reserved
-from test_library_preference_prompt import (GUILD, PLAYER, _drafted, _labels, _lounge,
-                                            _queue, _row, shelf)
 from sqlalchemy import select
 import views
 import utils
@@ -68,9 +67,9 @@ async def test_each_flip_changes_only_its_own_setting(test_db, setting, field):
 
 async def test_a_click_flips_the_stored_value_not_the_shown_one(test_db):
     stale = SettingsView("p1", "g", "Lounge", await load_settings("p1", "g"))
-    await flip("p1", "g", Setting.DMS)  # another message changed it
+    other = await flip("p1", "g", Setting.DMS)  # another message changed it
     await stale.dms_button.callback(_interaction("p1"))
-    assert (await load_settings("p1", "g")).dms == (await load_settings("p2", "g")).dms
+    assert await get_player_dm_notification_preference("p1", "g") is (not other)
 
 
 async def test_the_embed_shows_on_and_off_and_buttons_match(test_db):
@@ -118,7 +117,9 @@ async def test_other_toggles_leave_the_ladder_alone(test_db, monkeypatch):
 
 
 async def test_a_failed_save_says_so_and_changes_nothing(test_db, monkeypatch):
-    monkeypatch.setattr(player_settings, "set_donation_anonymous", AsyncMock(return_value=False))
+    get, _put = player_settings._STORE[Setting.ANONYMOUS]
+    monkeypatch.setitem(player_settings._STORE, Setting.ANONYMOUS,
+                        (get, AsyncMock(return_value=False)))
     i = _interaction("p1")
     view = SettingsView("p1", "g", "Lounge", await load_settings("p1", "g"))
     await view.anonymous_button.callback(i)
@@ -155,6 +156,18 @@ async def test_redraw_without_a_leaderboard_message_does_nothing(test_db):
     await redraw_leaderboard(MagicMock(), "g", "sr_ladder")
 
 
+def _board_bot(fetch_message, embed_links=True):
+    """A bot that sees guild 1 and its leaderboard channel 2."""
+    perms = SimpleNamespace(send_messages=True, embed_links=embed_links,
+                            read_message_history=True)
+    channel = SimpleNamespace(name="leaderboard", fetch_message=fetch_message,
+                              permissions_for=lambda _member: perms)
+    guild = SimpleNamespace(get_channel=lambda cid: channel if cid == 2 else None,
+                            get_member=lambda _uid: "bot-member")
+    return SimpleNamespace(user=SimpleNamespace(id=99),
+                           get_guild=lambda gid: guild if gid == 1 else None)
+
+
 async def test_redraw_edits_only_that_category(test_db, monkeypatch):
     async with AsyncSessionLocal() as session:
         session.add(LeaderboardMessage(
@@ -169,15 +182,24 @@ async def test_redraw_edits_only_that_category(test_db, monkeypatch):
         fetched_ids.append(mid)
         return message
 
-    channel = SimpleNamespace(fetch_message=fetch_message)
-    guild = SimpleNamespace(get_channel=lambda cid: channel if cid == 2 else None)
-    bot = SimpleNamespace(get_guild=lambda gid: guild if gid == 1 else None)
+    bot = _board_bot(fetch_message)
     monkeypatch.setattr(utils, "create_leaderboard_embed", AsyncMock(return_value="E"))
 
     await redraw_leaderboard(bot, "1", "sr_ladder")
 
     assert fetched_ids == [11]
     message.edit.assert_awaited_once_with(embed="E", view=None)  # pinned board: no selector
+
+
+async def test_redraw_without_permission_in_the_channel_does_nothing(test_db, monkeypatch):
+    async with AsyncSessionLocal() as session:
+        session.add(LeaderboardMessage(guild_id="1", channel_id="2", message_id="10",
+                                       sr_ladder_view_message_id="11"))
+        await session.commit()
+    fetch_message = AsyncMock()
+    monkeypatch.setattr(utils, "create_leaderboard_embed", AsyncMock(return_value="E"))
+    await redraw_leaderboard(_board_bot(fetch_message, embed_links=False), "1", "sr_ladder")
+    fetch_message.assert_not_awaited()
 
 
 # --- the stake cap, and the live sign-ups it carries into --------------------
@@ -547,7 +569,7 @@ async def test_a_library_note_without_board_ids_has_no_link(test_db, shelf):
         row.message_id = None
         await s.commit()
     await set_uses_library(PLAYER, GUILD, True)
-    [(_d, text, _v)] = await player_settings.apply_library_to_live_drafts(PLAYER, GUILD)
+    [(text, _v)] = await player_settings.apply_library_to_live_drafts(PLAYER, GUILD)
     assert text.startswith("🏛️")
 
 
@@ -572,11 +594,9 @@ async def test_a_draft_that_cannot_be_checked_says_so_and_the_rest_go_on(test_db
         return await real(player_id, d, library, **kw)
     monkeypatch.setattr(player_settings, "reserve_and_say", flaky)
     await set_uses_library(PLAYER, GUILD, True)
-    results = await player_settings.apply_library_to_live_drafts(PLAYER, GUILD)
-    assert [(d.session_id, text, view) for d, text, view in results][0] == (
-        "q1", f"https://discord.com/channels/{GUILD}/chan/msg-q1\n{COULD_NOT_CHECK}", None)
-    assert results[1][0].session_id == "q2"
-    assert results[1][1].startswith(f"https://discord.com/channels/{GUILD}/chan/msg-q2\n")
+    first, second = await player_settings.apply_library_to_live_drafts(PLAYER, GUILD)
+    assert first == (f"https://discord.com/channels/{GUILD}/chan/msg-q1\n{COULD_NOT_CHECK}", None)
+    assert second[0].startswith(f"https://discord.com/channels/{GUILD}/chan/msg-q2\n")
 
 
 async def test_a_draft_that_started_before_the_reclaim_is_skipped(test_db, shelf, monkeypatch):
