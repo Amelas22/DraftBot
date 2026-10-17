@@ -56,7 +56,7 @@ G, P, Q, POT = "g1", "100", "200", "prize:tourney:1"
 
 
 async def _seed():
-    """Tix: P +10 (deposit), P -4 -> POT (pay/receive). Other: P +7 (adjust), P -2 -> POT."""
+    """Q -> P transfers of 6 tix and 9 'other', then P -> POT transfers of 4 tix and 2 'other'."""
     async with db_session() as session:
         await wallet_service.transfer_in(session, G, Q, P, 6, "t-in")
         await wallet_service.transfer_in(session, G, P, POT, 4, "t-out")

@@ -34,6 +34,14 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Dropping the column would fold non-tix claims into tix balances.
+    foreign = op.get_bind().execute(
+        sa.text("SELECT COUNT(*) FROM wallet_tx WHERE asset != 'tix'")).scalar()
+    if foreign:
+        raise RuntimeError(
+            f"Refusing to downgrade: {foreign} wallet_tx row(s) carry a non-tix asset, and "
+            "dropping wallet_tx.asset would silently merge them into tix balances. "
+            "Delete or migrate those rows first.")
     with op.batch_alter_table('wallet_tx', schema=None) as batch_op:
         batch_op.drop_index('uq_wallet_tx_transfer_legs')
         batch_op.create_index('uq_wallet_tx_transfer_legs', ['source', 'kind'],

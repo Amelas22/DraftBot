@@ -57,7 +57,7 @@ def entry_source(tournament_id, team_id, attempt: int = 0) -> str:
     cannot be recycled.
 
     ``attempt`` numbers the registrations. The ledger keeps one 'pay' and one
-    'receive' per source -- enforced by uq_wallet_tx_transfer_legs -- so a team
+    'receive' per source and asset -- enforced by uq_wallet_tx_transfer_legs -- so a team
     that drops and registers again cannot book a second pair under the same key:
     the write is rejected and the team is left unpaid. A refund does not remove
     the first entry, it books a compensating pair, so the key has to move on

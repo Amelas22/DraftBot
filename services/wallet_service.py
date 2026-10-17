@@ -27,7 +27,7 @@ holder (see SYSTEM_IN_FLIGHT). While the trade is open those tix belong to that 
 so they're unspendable by the player without any special-casing in the balance query.
 Success books the boundary debit against in-flight; failure transfers them back.
 
-Reconciliation: ``reconcile()`` asserts vault tix == SUM(all wallet rows).
+Reconciliation: ``reconcile()`` asserts vault tix == SUM over the *tix* wallet rows (other assets have no vault).
 """
 import asyncio
 import uuid
@@ -256,8 +256,8 @@ async def get_wallet(guild_id: str, player_id: str, *, asset: str = TIX) -> Wall
 
 
 async def total_wallets(*, asset: str = TIX) -> int:
-    """SUM of every tix row — the claim side of the reconciliation invariant. Global on
-    purpose: the physical vault (one MTGO custodian) is shared across guilds."""
+    """SUM of every row of ``asset`` (tix by default); the tix total is the claim side of
+    the reconciliation invariant. Global on purpose: the physical vault (one MTGO custodian) is shared across guilds."""
     async with db_session() as session:
         return await _sum_amount(session, WalletTx.asset == asset)
 
@@ -390,7 +390,7 @@ async def pay(
     notes: str | None = None,
     asset: str = TIX,
 ) -> tuple[WalletTx, WalletTx]:
-    """Move ``amount`` tix between two holders — no MTGO trade, no change to the system
+    """Move ``amount`` of ``asset`` (tix by default) between two holders — no MTGO trade, no change to the system
     total. Checks the payer's funds. Idempotent by ``source`` (a uuid is generated when
     none is given)."""
     if source is None:
