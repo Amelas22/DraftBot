@@ -222,9 +222,9 @@ def _release_view(player_id: str, session_id: str, cube: Any, hold: int,
     return view
 
 
-async def _reserve_and_say(player_id: str, draft: Any, library: Library,
-                           agree: bool = False, reclaim: bool = False
-                           ) -> "tuple[Optional[str], Optional[discord.ui.View]]":
+async def reserve_and_say(player_id: str, draft: Any, library: Library,
+                          agree: bool = False, reclaim: bool = False
+                          ) -> "tuple[Optional[str], Optional[discord.ui.View]]":
     """Reserve if a copy is free and say where things stand.
 
     `reclaim` only for the player switching borrowing on: that is asking
@@ -288,8 +288,8 @@ class _Answer(discord.ui.Button[Any]):
         if self.uses_library:
             # The question quoted the hold, so answering yes is agreeing.
             try:
-                said, view = await _reserve_and_say(self.player_id, self.draft,
-                                                    self.library, agree=True)
+                said, view = await reserve_and_say(self.player_id, self.draft,
+                                                   self.library, agree=True)
             except Exception:
                 logger.exception("library: saved {}'s yes but could not reserve in {}",
                                  self.player_id, self.draft.session_id)
@@ -376,7 +376,7 @@ async def library_after_sign_up(interaction: discord.Interaction, draft: Any) ->
             prompt.sent = await interaction.followup.send(
                 prompt_text(library, hold), view=prompt, ephemeral=True, wait=True)
             return
-        text, view = await _reserve_and_say(player_id, draft, library)
+        text, view = await reserve_and_say(player_id, draft, library)
         if text:
             if view is None:
                 await interaction.followup.send(text, ephemeral=True)
@@ -452,8 +452,8 @@ class _SetLibrary(discord.ui.Button[Any]):
         text, view = saved_text(self.uses_library), None
         if self.uses_library and self.draft is not None and self.library is not None:
             try:
-                said, view = await _reserve_and_say(self.player_id, self.draft,
-                                                    self.library, reclaim=True)
+                said, view = await reserve_and_say(self.player_id, self.draft,
+                                                   self.library, reclaim=True)
             except Exception:
                 logger.exception("library: saved {}'s yes but could not reserve in {}",
                                  self.player_id, self.draft.session_id)

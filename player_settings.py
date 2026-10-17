@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+import discord
 from loguru import logger
 from sqlalchemy import select
 
@@ -21,11 +22,16 @@ from preference_service import (
     get_hide_from_sr_ladder,
     get_player_bet_capping_preference,
     get_player_dm_notification_preference,
+    get_uses_library,
     set_donation_anonymous,
     set_hide_from_sr_ladder,
+    set_uses_library,
     update_player_bet_capping_preference,
     update_player_dm_notification_preference,
 )
+from services.library_access_service import may_borrow
+from services.library_prompt import COULD_NOT_CHECK, library_to_ask_about, reserve_and_say
+from services.library_service import rental_library_for
 
 
 class Setting(enum.Enum):
@@ -50,6 +56,20 @@ async def _anonymous(player_id: str, guild_id: str) -> bool:
     return player_id in await get_anonymous_donors([player_id], guild_id)
 
 
+async def _library_offered(player_id: str, guild_id: str) -> bool:
+    """Whether this server has a rental library this player may borrow from.
+
+    A failed lookup only leaves the library row out; the rest still loads.
+    """
+    try:
+        library = await rental_library_for(guild_id)
+        return library is not None and await may_borrow(library.id, player_id)
+    except Exception:
+        logger.exception("settings: couldn't look up the library for {} in {}",
+                         player_id, guild_id)
+        return False
+
+
 async def load_settings(player_id: str, guild_id: str) -> Settings:
     return Settings(
         dms=bool(await get_player_dm_notification_preference(player_id, guild_id)),
@@ -57,6 +77,8 @@ async def load_settings(player_id: str, guild_id: str) -> Settings:
         anonymous=await _anonymous(player_id, guild_id),
         stake_cap=(bool(await get_player_bet_capping_preference(player_id, guild_id))
                    if is_money_server(guild_id) else None),
+        library=await get_uses_library(player_id, guild_id),
+        library_offered=await _library_offered(player_id, guild_id),
     )
 
 
@@ -83,7 +105,10 @@ async def flip(player_id: str, guild_id: str, setting: Setting) -> bool | None:
             new = not await get_player_bet_capping_preference(player_id, guild_id)
             saved = await update_player_bet_capping_preference(player_id, guild_id, new)
         case Setting.LIBRARY:
-            raise NotImplementedError(setting)
+            # Not set reads as off, so the first click turns it on. The caller
+            # holds copies in live sign-ups (apply_library_to_live_drafts).
+            new = not await get_uses_library(player_id, guild_id)
+            saved = await set_uses_library(player_id, guild_id, new)
     return new if saved else None
 
 
@@ -169,3 +194,30 @@ def live_result_text(result: LiveResult) -> str:
         parts.append(f"⚠️ Couldn't update {_links(result.failed)}; "
                      "use that draft's **Change Entry / Settings** button.")
     return "\n".join(parts)
+
+
+# --- carrying the card library into the drafts a player is signed up for ---
+
+async def apply_library_to_live_drafts(player_id: str, guild_id: str
+                                       ) -> list[tuple[DraftSession, str | None,
+                                                       discord.ui.View | None]]:
+    """After switching the library on: hold a copy in each live draft whose
+    cube the library lends this player, and say where each stands.
+
+    Switching off needs nothing here: a held copy goes once its player no
+    longer uses the library. One draft failing does not stop the rest; it is
+    reported with COULD_NOT_CHECK.
+    """
+    results: list[tuple[DraftSession, str | None, discord.ui.View | None]] = []
+    for draft in await live_drafts(player_id, guild_id):
+        try:
+            library = await library_to_ask_about(guild_id, draft.cube, player_id)
+            if library is None:
+                continue
+            text, view = await reserve_and_say(player_id, draft, library, reclaim=True)
+        except Exception:
+            logger.exception("settings: couldn't hold a library copy for {} in draft {}",
+                             player_id, draft.session_id)
+            text, view = COULD_NOT_CHECK, None
+        results.append((draft, text, view))
+    return results

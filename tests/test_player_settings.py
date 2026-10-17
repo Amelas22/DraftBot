@@ -22,9 +22,14 @@ from models.draft_session import DraftSession
 from models.stake import StakeInfo
 from player_settings import (LiveResult, Setting, Settings, apply_cap_to_live_drafts, flip,
                              live_drafts, live_result_text, load_settings)
-from player_settings_view import SettingsView, settings_embed
+from player_settings_view import LIVE_FAILED, SettingsView, settings_embed
 from preference_service import (get_anonymous_donors, get_player_bet_capping_preference,
-                                get_player_dm_notification_preference)
+                                get_player_dm_notification_preference, get_uses_library,
+                                set_uses_library)
+from services.library_prompt import AGREE_LABEL, COULD_NOT_CHECK
+from services.library_reservation import reserve, still_reserved
+from test_library_preference_prompt import (GUILD, PLAYER, _drafted, _labels, _lounge,
+                                            _queue, _row, shelf)
 from sqlalchemy import select
 import views
 import utils
@@ -338,3 +343,113 @@ async def test_a_failed_panel_redraw_keeps_the_entry_and_the_preference(test_db,
         await views.BetCapToggleButton("open").update_cap_status(i, "p1", "g", is_capped=False)
     assert (await stake_row("open", "p1")).is_capped is False
     assert await get_player_bet_capping_preference("p1", "g") is False
+
+
+async def test_a_cap_live_step_that_raises_still_keeps_the_preference(test_db, money, monkeypatch):
+    monkeypatch.setattr(player_settings_view, "apply_cap_to_live_drafts",
+                        AsyncMock(side_effect=RuntimeError("db")))
+    v = SettingsView("p1", "g", "Lounge", await load_settings("p1", "g"))
+    i = _interaction("p1")
+    await v.cap_button.callback(i)
+    assert await get_player_bet_capping_preference("p1", "g") is False
+    i.edit_original_response.assert_awaited_once()
+    sent = i.followup.send.await_args
+    assert sent.args[0] == LIVE_FAILED and sent.kwargs["ephemeral"] is True
+
+
+# --- the card library, and the live sign-ups it carries into -----------------
+
+async def test_the_library_row_shows_only_where_the_player_may_borrow(test_db, shelf):
+    assert (await load_settings(PLAYER, GUILD)).library_offered is False   # no library
+    await _lounge(); await _drafted(PLAYER, 3)
+    assert (await load_settings(PLAYER, GUILD)).library_offered is True
+
+
+async def test_a_library_lookup_failure_leaves_the_row_out(test_db, monkeypatch):
+    monkeypatch.setattr(player_settings, "rental_library_for", AsyncMock(side_effect=RuntimeError))
+    s = await load_settings(PLAYER, GUILD)
+    assert s.library_offered is False and s.dms in (True, False)        # the rest still loads
+
+
+async def test_not_set_goes_on_then_off(test_db, shelf):
+    await _lounge(); await _drafted(PLAYER, 3)
+    assert "Not set (you'll be asked at sign-up)" in str(settings_embed("L", await load_settings(PLAYER, GUILD)).to_dict())
+    assert await flip(PLAYER, GUILD, Setting.LIBRARY) is True
+    assert await flip(PLAYER, GUILD, Setting.LIBRARY) is False
+    assert await get_uses_library(PLAYER, GUILD) is False
+
+
+async def test_the_library_line_and_button_follow_the_stored_answer(test_db):
+    for stored, mark, style in ((True, "● On", discord.ButtonStyle.success),
+                                (False, "○ Off", discord.ButtonStyle.secondary),
+                                (None, "○ Not set (you'll be asked at sign-up)",
+                                 discord.ButtonStyle.secondary)):
+        s = Settings(dms=True, hide_from_ladder=False, anonymous=False,
+                     library=stored, library_offered=True)
+        drafting = settings_embed("L", s).fields[0]
+        assert drafting.name == "Drafting"
+        assert f"{mark}  Offer me a library deck" in drafting.value
+        v = SettingsView(PLAYER, GUILD, "L", s)
+        assert v.library_button in v.children and v.library_button.row == 0
+        assert v.library_button.label == "Card library" and v.library_button.style is style
+
+
+async def test_no_library_row_where_none_is_offered(test_db):
+    s = Settings(dms=True, hide_from_ladder=False, anonymous=False, library=True)
+    v = SettingsView(PLAYER, GUILD, "L", s)
+    assert v.library_button not in v.children
+    assert "Offer me a library deck" not in str(settings_embed("L", s).to_dict())
+
+
+async def test_switching_on_holds_the_copy_in_the_live_draft(test_db, shelf):
+    await _lounge(stock={"Swamp": 4}); await _drafted(PLAYER, 3); await _queue([PLAYER])
+    v = SettingsView(PLAYER, GUILD, "L", await load_settings(PLAYER, GUILD)); i = _interaction(PLAYER)
+    await v.library_button.callback(i)
+    sent = i.followup.send.await_args
+    assert "held for this draft" in sent.args[0] and AGREE_LABEL in _labels(sent.kwargs["view"])
+
+
+async def test_switching_off_lets_the_live_copy_go(test_db, shelf):
+    await _lounge(stock={"Swamp": 4}); await _drafted(PLAYER, 3)
+    await set_uses_library(PLAYER, GUILD, True); await _queue([PLAYER])
+    assert (await reserve("q1")).status == "reserved"
+    i = _interaction(PLAYER)
+    await SettingsView(PLAYER, GUILD, "L", await load_settings(PLAYER, GUILD)).library_button.callback(i)
+    assert not await still_reserved(await _row())
+    i.followup.send.assert_not_awaited()
+
+
+async def test_a_draft_that_cannot_be_checked_says_so_and_the_rest_go_on(test_db, shelf, monkeypatch):
+    await _lounge(stock={"Swamp": 4}); await _drafted(PLAYER, 3)
+    await _queue([PLAYER], sid="q1"); await _queue([PLAYER], sid="q2")
+    real = player_settings.reserve_and_say
+
+    async def flaky(player_id, d, library, **kw):
+        if d.session_id == "q1":
+            raise RuntimeError("cube list")
+        return await real(player_id, d, library, **kw)
+    monkeypatch.setattr(player_settings, "reserve_and_say", flaky)
+    await set_uses_library(PLAYER, GUILD, True)
+    results = await player_settings.apply_library_to_live_drafts(PLAYER, GUILD)
+    assert [(d.session_id, text, view) for d, text, view in results][0] == ("q1", COULD_NOT_CHECK, None)
+    assert results[1][0].session_id == "q2" and results[1][1]
+
+
+async def test_a_draft_of_a_cube_the_library_does_not_lend_is_left_out(test_db, shelf):
+    await _lounge(stock={"Swamp": 4}); await _drafted(PLAYER, 3)
+    await _queue([PLAYER], sid="other", cube="not-lent")
+    await set_uses_library(PLAYER, GUILD, True)
+    assert await player_settings.apply_library_to_live_drafts(PLAYER, GUILD) == []
+
+
+async def test_a_library_live_step_that_raises_still_keeps_the_preference(test_db, shelf, monkeypatch):
+    await _lounge(); await _drafted(PLAYER, 3)
+    monkeypatch.setattr(player_settings_view, "apply_library_to_live_drafts",
+                        AsyncMock(side_effect=RuntimeError("db")))
+    v = SettingsView(PLAYER, GUILD, "L", await load_settings(PLAYER, GUILD))
+    i = _interaction(PLAYER)
+    await v.library_button.callback(i)
+    assert await get_uses_library(PLAYER, GUILD) is True
+    i.edit_original_response.assert_awaited_once()
+    sent = i.followup.send.await_args
+    assert sent.args[0] == LIVE_FAILED and sent.kwargs["ephemeral"] is True
