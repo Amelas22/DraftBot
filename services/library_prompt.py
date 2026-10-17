@@ -74,7 +74,7 @@ def saved_text(uses_library: bool) -> str:
 AGREE_LABEL = "I agree and wish to use the library"
 # Where the setting lives: Change Entry / Settings on a staked board, the
 # Library button on every other (services/library_boards).
-WHERE_TO_CHANGE = ("the draft's **Change Entry / Settings** button "
+WHERE_TO_CHANGE = ("`/settings`, or the draft's **Change Entry / Settings** button "
                    "(**Library 🏛️** on other drafts)")
 TOO_LATE = ("⚠️ Too late to agree: this draft has already started, so it "
             "won't borrow from the library.")
@@ -108,7 +108,7 @@ def reservation_text(answer: ReserveAnswer, cube: Any, hold: int,
                 f"your own cards for this draft.")
     if answer.status == "unknown":
         return (f"⚠️ Couldn't check the library's shelf for **{cube}** just now. "
-                f"Press **Borrow from the library** on {WHERE_TO_CHANGE} to try again.")
+                f"To try again, use {WHERE_TO_CHANGE} and press **Borrow from the library**.")
     return None
 
 
@@ -323,7 +323,7 @@ class LibraryPreferenceView(discord.ui.View):
 
 
 UNANSWERED = ("Not saved. To borrow your deck from the library, use "
-              f"{WHERE_TO_CHANGE}, or answer next time you sign up.")
+              f"{WHERE_TO_CHANGE}; or answer next time you sign up.")
 
 
 # Running library steps, held so the event loop's weak reference is not the

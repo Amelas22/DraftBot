@@ -9,7 +9,6 @@ from session import DraftSession, MatchResult
 from views import MatchResultSelect
 from config import is_money_server
 from services.donation_day import get_event, resolve_draft_kind
-from preference_service import get_player_dm_notification_preference, update_player_dm_notification_preference
 from helpers.display_names import get_display_name
 from helpers.permissions import is_bot_manager
 from helpers.substitutes import is_sub_target_channel, resolve_sub_grant
@@ -176,53 +175,6 @@ class DraftCommands(commands.Cog):
             view=view,
             ephemeral=True
         )
-
-    @discord.slash_command(
-        name='toggle_dm_notifications',
-        description='Toggle DM notifications for ready checks',
-        guild_ids=None
-    )
-    async def toggle_dm_notifications(self, ctx):
-        """Toggle DM notifications for ready checks"""
-        logger.info(f"📱 Received toggle_dm_notifications command from user {ctx.author.id} ({get_display_name(ctx.author, ctx.guild)}) in guild {ctx.guild.id}")
-        await ctx.response.defer(ephemeral=True)
-
-        user_id = str(ctx.author.id)
-        guild_id = str(ctx.guild.id)
-
-        # Get current preference
-        logger.debug(f"🔍 Getting current DM notification preference for user {user_id} in guild {guild_id}")
-        current_preference = await get_player_dm_notification_preference(user_id, guild_id)
-        logger.info(f"Current preference for {get_display_name(ctx.author, ctx.guild)}: {current_preference}")
-
-        # Toggle the preference
-        new_preference = not current_preference
-        logger.info(f"🔄 Toggling preference from {current_preference} to {new_preference}")
-
-        # Update the preference
-        logger.debug(f"💾 Updating preference in database...")
-        success = await update_player_dm_notification_preference(user_id, guild_id, new_preference)
-
-        if success:
-            logger.success(f"✅ Successfully updated DM notification preference for {get_display_name(ctx.author, ctx.guild)} to {new_preference}")
-            if new_preference:
-                await ctx.followup.send(
-                    f"✅ DM notifications **enabled** for {ctx.guild.name}.\n"
-                    f"You'll receive DMs when ready checks start for drafts you've signed up for.",
-                    ephemeral=True
-                )
-            else:
-                await ctx.followup.send(
-                    f"🔕 DM notifications **disabled** for {ctx.guild.name}.\n"
-                    f"Use `/toggle_dm_notifications` to re-enable if you change your mind.",
-                    ephemeral=True
-                )
-        else:
-            logger.error(f"❌ Failed to update DM notification preference for {get_display_name(ctx.author, ctx.guild)}")
-            await ctx.followup.send(
-                "Failed to update your DM notification preference. Please try again later.",
-                ephemeral=True
-            )
 
     @discord.slash_command(
         name='add_sub',

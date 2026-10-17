@@ -3,7 +3,6 @@
 /donation_day setup      -- a bot manager starts an event and publishes its page.
 /donation_day end        -- publish a final snapshot and deactivate the event.
 /donation_day status     -- totals so far and the page link.
-/donation_day anonymous  -- a player opts to show as Anonymous on the page.
 /donation_day paid_cash  -- a loser marks their donation debt to DraftBot as
 paid in cash (GitHub Sponsors or otherwise). On trust; every mark is logged.
 """
@@ -16,7 +15,6 @@ from discord.ext import commands
 from helpers.digital_ocean_helper import DigitalOceanHelper
 from helpers.permissions import has_bot_manager_role
 from helpers.utils import not_none
-from preference_service import set_donation_anonymous
 from services.donation_day import Event, build_payload, get_event, save_event, slugify
 from services.donation_day_discord import get_state, save_state, state_for_setup
 from services.donation_day_publisher import publish_event
@@ -142,18 +140,6 @@ class DonationDayCommands(commands.Cog):
         await ctx.followup.send(
             f"**{event['name']}** ({state}): ${payload['raised']} raised of "
             f"${event['goal_usd']}, ${payload['pledged']} pledged.\n{url}", ephemeral=True)
-
-    @donation_day.command(name="anonymous", description="Show as Anonymous on the donation page")
-    @option("hide", bool, description="True to show as Anonymous, False to show your name")
-    async def anonymous(self, ctx: discord.ApplicationContext, hide: bool) -> None:
-        await ctx.defer(ephemeral=True)
-        saved = await set_donation_anonymous(str(ctx.author.id), str(not_none(ctx.guild).id), hide)
-        if not saved:
-            await ctx.followup.send("Couldn't save that; please try again.", ephemeral=True)
-            return
-        await ctx.followup.send(
-            "You'll show as **Anonymous**; your donations still count." if hide
-            else "You'll show by name.", ephemeral=True)
 
 
 def setup(bot: discord.Bot) -> None:
