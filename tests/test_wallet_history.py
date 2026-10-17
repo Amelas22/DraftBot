@@ -47,6 +47,8 @@ def _withdrawal_and_its_return():
     ("return:wd:commit-1", "receive", wh.MTGO, "returned", None),
     (None, "withdraw", wh.MTGO, "withdraw", None),
     ("admin", "receive", wh.ADJUST, "adjust", None),
+    ("loan-hold:209:p1:0:0-100", "pay", wh.LIBRARY, "deposit", "209"),
+    ("loan-back:209:p1:1:100-0", "receive", wh.LIBRARY, "returned", "209"),
     ("430aa70e-cf55-4f0e-86ef-36e7174518fb", "pay", wh.TRANSFER, "pay", None),
 ])
 def test_classify_maps_every_source_the_codebase_writes(source, kind, category, event, ref):
@@ -176,6 +178,25 @@ def test_a_transfer_to_a_system_holder_mentions_nobody():
     """A synthetic holder is not a person to @-mention."""
     tx = _tx(kind="pay", amount=-10, source="uuid-2", counterparty_id="prize:tourney:3")
     assert "<@" not in _line(tx)
+
+
+def test_a_card_library_deposit_and_its_return_name_the_loan():
+    """The library's holder is not a person, so without its own text a deposit
+    and its return read as a bare "Sent" and "Received"."""
+    held = _tx(kind="pay", amount=-100, source="loan-hold:209:p1:0:0-100",
+               counterparty_id="library:collateral:g1")
+    back = _tx(kind="receive", amount=100, source="loan-back:209:p1:1:100-0",
+               counterparty_id="library:collateral:g1")
+    assert _line(held) == "`−100` Card library deposit (loan 209)"
+    assert _line(back) == "`+100` Card library deposit returned (loan 209)"
+
+
+def test_a_transfer_to_a_system_holder_falls_back_to_its_note():
+    """A writer whose source this table does not know yet, paying a holder that
+    is not a person, still says what it was rather than a bare direction."""
+    tx = _tx(kind="pay", amount=-160, source="correct:07f5",
+             counterparty_id=ws.SYSTEM_IN_FLIGHT, notes="reverses a returned withdraw")
+    assert _line(tx) == "`−160` Sent · reverses a returned withdraw"
 
 
 def test_an_adjustment_shows_the_note_that_explains_it():
@@ -328,12 +349,15 @@ async def _one_of_each(guild="g1", player="p1"):
     await ws.pay(guild, player, "222", 4, source="debt:abc")                    # debt
     await ws.pay(guild, player, "333", 3, source=None)                          # transfer (uuid)
     await ws.pay(guild, player, "444", 2, source="some-future-thing:9")         # unknown
+    await ws.pay(guild, player, "library:collateral:g1", 1,
+                 source="loan-hold:209:p1:0:0-1")                               # library
 
 
 @pytest.mark.parametrize("category, expected", [
     (wh.DRAFT, ["draft-entry:sid1:p1:0:0-10"]),
     (wh.TOURNAMENT, ["tourney:3:18"]),
     (wh.DEBT, ["debt:abc"]),
+    (wh.LIBRARY, ["loan-hold:209:p1:0:0-1"]),
 ])
 @pytest.mark.asyncio
 async def test_each_category_selects_exactly_its_own_rows(test_db, category, expected):  # noqa: F811
@@ -366,7 +390,7 @@ async def test_transfers_are_the_complement_of_the_known_prefixes(test_db):  # n
 @pytest.mark.asyncio
 async def test_no_category_is_everything(test_db):  # noqa: F811
     await _one_of_each()
-    assert (await wh.get_history_page("g1", "p1")).total == 6
+    assert (await wh.get_history_page("g1", "p1")).total == 7
 
 
 @pytest.mark.asyncio
@@ -406,7 +430,7 @@ async def test_categories_partition_the_ledger(test_db):  # noqa: F811
         await session.commit()
 
     all_ids = {r.id for r in (await wh.get_history_page("g1", "p1", size=100)).rows}
-    assert len(all_ids) == 7  # the six _one_of_each rows plus the adjust row
+    assert len(all_ids) == 8  # the seven _one_of_each rows plus the adjust row
 
     seen: set[int] = set()
     for category in wh.CATEGORIES:

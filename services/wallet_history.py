@@ -32,6 +32,7 @@ DRAFT = "draft"
 TOURNAMENT = "tournament"
 DEBT = "debt"
 MTGO = "mtgo"
+LIBRARY = "library"
 TRANSFER = "transfer"
 ADJUST = "adjust"
 
@@ -39,9 +40,9 @@ ADJUST = "adjust"
 @dataclass(frozen=True)
 class Origin:
     """What a ledger row was for. Derived from the row alone -- no I/O."""
-    category: str            # DRAFT | TOURNAMENT | DEBT | MTGO | TRANSFER | ADJUST
+    category: str            # DRAFT | TOURNAMENT | DEBT | MTGO | LIBRARY | TRANSFER | ADJUST
     event: str               # entry | winnings | refund | prize | deposit | withdraw | returned | settled | pay | adjust
-    ref: str | None = None   # the draft session_id or tournament id to name
+    ref: str | None = None   # the draft session_id, tournament id or library loan id to name
     detail: str | None = None  # a draft refund's reason, which its key carries
 
 
@@ -65,6 +66,8 @@ KNOWN_PREFIXES: tuple[tuple[str, str, str, int | None, int | None], ...] = (
     ("debt:",           DEBT,       "settled",  None, None),
     ("wd:",             MTGO,       "withdraw", None, None),
     ("return:",         MTGO,       "returned", None, None),
+    ("loan-hold:",      LIBRARY,    "deposit",  0,    None),
+    ("loan-back:",      LIBRARY,    "returned", 0,    None),
 )
 
 # Exact-match sources. Not prefixes: 'serve' and 'admin' are whole keys.
@@ -80,7 +83,7 @@ _EXACT = {
 # with classify() about which kinds they are.
 _MTGO_BOUNDARY_KINDS = ("deposit", "withdraw")
 
-CATEGORIES = (DRAFT, TOURNAMENT, DEBT, MTGO, TRANSFER)
+CATEGORIES = (DRAFT, TOURNAMENT, DEBT, MTGO, LIBRARY, TRANSFER)
 
 # The category a prefix belongs to, read straight off the classifier's table so
 # the filter cannot drift from what the lines say. A prefix added there is
@@ -92,14 +95,14 @@ _PREFIX_CATEGORY = {prefix: category for prefix, category, *_ in KNOWN_PREFIXES}
 # It maps "admin" to ADJUST, which is deliberately not one of CATEGORIES: an
 # adjustment belongs in the player-to-player residual, and it lands there
 # because _claimed() is never asked about ADJUST -- neither as a filter of its
-# own nor as one of the four the residual subtracts. Listing ADJUST in either
+# own nor as one of the categories the residual subtracts. Listing ADJUST in either
 # place would claim those rows out of TRANSFER, which is what the partition
 # test guards.
 _EXACT_CATEGORY = {source: category for source, (category, _) in _EXACT.items()}
 
 
 def _claimed(category: str) -> ColumnElement[bool]:
-    """What DRAFT/TOURNAMENT/DEBT/MTGO each own: their prefixes from
+    """What DRAFT/TOURNAMENT/DEBT/MTGO/LIBRARY each own: their prefixes from
     KNOWN_PREFIXES, their whole-key sources from _EXACT, and -- for MTGO alone
     -- the boundary `kind`s, because a withdraw row carries no source at all.
     This is the single definition of a category's ownership; TRANSFER's residual
@@ -140,7 +143,7 @@ def category_conditions(category: str | None) -> list[ColumnElement[bool]]:
         # learns it. A `kind IN ('pay', 'receive')` restriction would instead
         # drop `adjust` rows (kind="adjust") out of every filter, which is
         # exactly the bug this replaced.
-        claimed = [_claimed(c) for c in (DRAFT, TOURNAMENT, DEBT, MTGO)]
+        claimed = [_claimed(c) for c in CATEGORIES if c != TRANSFER]
         return [not_(or_(*claimed))]
     return [_claimed(category)]
 
@@ -236,6 +239,8 @@ _EVENT_TEXT = {
     (MTGO, "deposit"): "Deposit from MTGO",
     (MTGO, "withdraw"): "Withdrawal to MTGO",
     (MTGO, "returned"): "Withdrawal returned",
+    (LIBRARY, "deposit"): "Card library deposit",
+    (LIBRARY, "returned"): "Card library deposit returned",
     (ADJUST, "adjust"): "Adjustment",
 }
 
@@ -259,7 +264,11 @@ def _what(tx: WalletTx, origin: Origin, labels: dict[tuple[str, str], str]) -> s
         who = _person(tx.counterparty_id)
         direction = "Sent" if tx.amount < 0 else "Received"
         preposition = "to" if tx.amount < 0 else "from"
-        return f"{direction} {preposition} {who}" if who else direction
+        if who:
+            return f"{direction} {preposition} {who}"
+        # No person to name: the note is then the only thing that says what
+        # the row was, for a writer whose source this table hasn't learned.
+        return f"{direction} · {_short(tx.notes)}" if tx.notes else direction
     if origin.category == DEBT:
         who = _person(tx.counterparty_id)
         return f"{text} ↔ {who}" if who else text
@@ -281,6 +290,10 @@ def _what(tx: WalletTx, origin: Origin, labels: dict[tuple[str, str], str]) -> s
         if origin.event == "deposit" and tx.counterparty_id:
             return f"{text} ({_short(tx.counterparty_id)})"
         return text
+    if origin.category == LIBRARY:
+        # The holder is the library's collateral account, not a person, so the
+        # loan id is what ties a deposit to its return.
+        return f"{text} (loan {origin.ref})" if origin.ref else text
     if origin.category == ADJUST:
         return f"{text} · {_short(tx.notes)}" if tx.notes else text
     name = labels.get((origin.category, origin.ref or ""))

@@ -26,6 +26,7 @@ CATEGORY_LABELS = {
     wallet_history.TOURNAMENT: "Tournaments",
     wallet_history.DEBT: "Debt settlements",
     wallet_history.MTGO: "MTGO deposits & withdrawals",
+    wallet_history.LIBRARY: "Card library deposits",
     wallet_history.TRANSFER: "Player-to-player & other",
 }
 _LABEL_CATEGORY = {label: category for category, label in CATEGORY_LABELS.items()}
