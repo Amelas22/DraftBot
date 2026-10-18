@@ -18,7 +18,7 @@ import discord
 from loguru import logger
 
 from helpers.utils import ui_button, ui_select
-from services import wallet_history, wallet_service
+from services import voucher_service, wallet_history, wallet_service
 
 CATEGORY_LABELS = {
     None: "All activity",
@@ -27,6 +27,7 @@ CATEGORY_LABELS = {
     wallet_history.DEBT: "Debt settlements",
     wallet_history.MTGO: "MTGO deposits & withdrawals",
     wallet_history.LIBRARY: "Card library deposits",
+    wallet_history.VOUCHERS: "Vouchers",
     wallet_history.TRANSFER: "Player-to-player & other",
 }
 _LABEL_CATEGORY = {label: category for category, label in CATEGORY_LABELS.items()}
@@ -95,14 +96,18 @@ async def wallet_embed(guild_id: str, player_id: str, display_name: str,
     """
     # Two independent reads, each opening its own session, on a path that runs
     # again on every page turn: overlapped rather than queued behind each other.
-    wallet, history = await asyncio.gather(
+    wallet, vouchers, history = await asyncio.gather(
         wallet_service.get_wallet(guild_id, player_id),
+        voucher_service.vouchers_held(guild_id, player_id),
         wallet_history.get_history_page(guild_id, player_id, page=page,
                                         category=category),
     )
 
     embed = discord.Embed(title=f"{display_name}'s Tix Wallet", color=discord.Color.gold())
     embed.add_field(name="Balance", value=f"**{wallet.balance}** tix", inline=True)
+    if vouchers > 0:
+        embed.add_field(name="Vouchers",
+                        value=f"🎟️ Draft vouchers: {vouchers}", inline=True)
     if history.rows:
         lines = await wallet_history.describe_rows(history.rows)
         embed.add_field(name="Recent activity",

@@ -2,6 +2,9 @@ from sqlalchemy import Column, Integer, String, DateTime, Index, text
 from datetime import datetime
 from database.models_base import Base
 
+TIX = "tix"
+VOUCHER = "voucher"
+
 
 class WalletTx(Base):
     """
@@ -28,7 +31,7 @@ class WalletTx(Base):
     ``system:in-flight`` (tix committed to an open withdraw trade) and
     ``prize:tourney:<id>`` (a tournament pot). See wallet_service.is_system_account.
 
-    Reconciliation invariant: bot's on-MTGO tix == SUM(amount).
+    Reconciliation invariant: bot's on-MTGO tix == SUM(amount) over tix rows.
 
     ``job_id`` links a boundary row to its MTGO serve job and is that row's idempotency
     key (a replayed poll can't double-book); ``source`` is the transfer pair's key. Both
@@ -41,6 +44,8 @@ class WalletTx(Base):
     player_id = Column(String(64), nullable=False)  # holder (may be synthetic)
 
     kind = Column(String(32), nullable=False)   # deposit | withdraw | pay | receive | adjust
+    asset = Column(String(16), nullable=False, default=TIX,
+                   server_default=text("'tix'"))  # what the claim is denominated in
     amount = Column(Integer, nullable=False)     # + credit, - debit (holder's perspective)
 
     counterparty_id = Column(String(64), nullable=True)  # other holder (transfers); MTGO user (boundary)
@@ -59,10 +64,11 @@ class WalletTx(Base):
         #
         # Partial, because both keys are nullable: a boundary crossing is
         # unique per (job_id, kind), and a transfer's legs are unique per
-        # (source, kind) -- one 'pay' and one 'receive' per source, no more.
+        # (source, kind, asset) -- one 'pay' and one 'receive' per source and
+        # asset, no more. (walletasset01 widened this from (source, kind).)
         Index('uq_wallet_tx_job_kind', 'job_id', 'kind', unique=True,
               sqlite_where=text('job_id IS NOT NULL')),
-        Index('uq_wallet_tx_transfer_legs', 'source', 'kind', unique=True,
+        Index('uq_wallet_tx_transfer_legs', 'source', 'kind', 'asset', unique=True,
               sqlite_where=text("kind IN ('pay', 'receive') AND source IS NOT NULL")),
     )
 

@@ -25,7 +25,7 @@ from sqlalchemy.exc import IntegrityError
 from database.db_session import db_session
 from database.retry import with_db_retry
 from models.tournament import Tournament, TournamentParticipant
-from models.wallet_tx import WalletTx
+from models.wallet_tx import TIX, WalletTx
 from services import wallet_service
 from services.wallet_service import prize_wallet_id
 from services.tournament_service import (get_active_tournament, list_participants,
@@ -57,7 +57,7 @@ def entry_source(tournament_id, team_id, attempt: int = 0) -> str:
     cannot be recycled.
 
     ``attempt`` numbers the registrations. The ledger keeps one 'pay' and one
-    'receive' per source -- enforced by uq_wallet_tx_transfer_legs -- so a team
+    'receive' per source and asset -- enforced by uq_wallet_tx_transfer_legs -- so a team
     that drops and registers again cannot book a second pair under the same key:
     the write is rejected and the team is left unpaid. A refund does not remove
     the first entry, it books a compensating pair, so the key has to move on
@@ -80,6 +80,7 @@ async def _entry_sources(session, tournament_id: int, team_id) -> list[str]:
     base = entry_source(tournament_id, team_id)
     rows = (await session.execute(
         select(WalletTx.source).where(
+            WalletTx.asset == TIX,
             WalletTx.kind == "receive",
             or_(WalletTx.source == base,
                 WalletTx.source.like(f"{base}#%")),
@@ -444,6 +445,7 @@ async def _pool(session, guild_id: str, tournament_id: int) -> int:
 async def _already_paid(session, tournament_id: int) -> bool:
     r = await session.execute(
         select(WalletTx.id).where(
+            WalletTx.asset == TIX,
             WalletTx.source.like(f"payout:{tournament_id}:%")).limit(1))
     return r.scalar() is not None
 

@@ -7,7 +7,7 @@ from discord import SelectOption
 from discord.ui import Button, View, Select, select
 from config import (
     is_test_mode, should_reset_on_signup, get_queue_inactivity_minutes,
-    get_config,
+    get_config, vouchers_enabled,
 )
 from notification_service import send_ready_check_dms
 from ready_check import ReadyCheckView, ReadyCheckSession
@@ -58,7 +58,7 @@ from cube_views.pack_options import (
 from loguru import logger
 
 from services.state_manager import state_manager
-from services import stake_funding, wallet_service
+from services import stake_funding, voucher_service, wallet_service
 from services.library_boards import has_library_button
 from services.library_prompt import (library_after_sign_up_soon, library_agree_button,
                                      library_setting_buttons, library_settings_panel,
@@ -565,13 +565,17 @@ class PersistentView(discord.ui.View):
         else:
             # Handle staked drafts differently - show dropdown first before adding to sign_ups
             if self.session_type == "staked":
+                vouchers = (await voucher_service.vouchers_held(str(draft_session.guild_id), user_id)
+                            if vouchers_enabled(draft_session.guild_id) and not draft_session.donation
+                            else 0)
                 # Create and send the stake options view
                 stake_options_view = StakeOptionsView(
                     draft_session_id=self.draft_session_id,
                     draft_link=draft_session.draft_link,
                     user_display_name=interaction.user.display_name,
                     min_stake=draft_session.min_stake,
-                    has_draftmancer_role=has_draftmancer_role  
+                    has_draftmancer_role=has_draftmancer_role,
+                    vouchers=vouchers,
                 )
                 # Say how a bet is actually paid BEFORE it is placed, not only after
                 # it is lost.
@@ -723,8 +727,12 @@ class PersistentView(discord.ui.View):
             async with wallet_service.MONEY_LOCK:
                 async with AsyncSessionLocal() as session:
                     async with session.begin():
+                        had_voucher = await voucher_service.entered_with_voucher_in(
+                            session, guild_id, self.draft_session_id, user_id)
                         await entry_in(session, guild_id, self.draft_session_id,
                                        user_id, 0, "left")
+                        voucher_back = had_voucher and not await voucher_service.entered_with_voucher_in(
+                            session, guild_id, self.draft_session_id, user_id)
                         # Directly update the 'sign_ups' and 'draftmancer_role_users' of the draft session
                         await session.execute(
                             update(DraftSession).
@@ -748,6 +756,8 @@ class PersistentView(discord.ui.View):
 
             
             cancel_message = "Your sign up has been canceled!"
+            if voucher_back:
+                cancel_message += " Your draft voucher is back in your wallet."
             await interaction.response.send_message(cancel_message, ephemeral=True)
 
             # After committing, re-fetch the draft session to work with updated data
@@ -2815,7 +2825,8 @@ async def refuse_unfunded_stake(interaction, draft_session_id, guild_id,
 
 
 class StakeOptionsSelect(discord.ui.Select):
-    def __init__(self, draft_session_id, draft_link, user_display_name, min_stake, has_draftmancer_role=False):
+    def __init__(self, draft_session_id, draft_link, user_display_name, min_stake,
+                 has_draftmancer_role=False, *, vouchers: int = 0):
         self.draft_session_id = draft_session_id
         self.draft_link = draft_link
         self.user_display_name = user_display_name
@@ -2823,6 +2834,10 @@ class StakeOptionsSelect(discord.ui.Select):
         self.has_draftmancer_role = has_draftmancer_role
 
         options = []
+        if vouchers > 0 and self.min_stake <= voucher_service.VOUCHER_VALUE:
+            options.append(discord.SelectOption(
+                label=f"🎟️ Use a voucher: 20 tix entry, paid by DraftBot (you have {vouchers})",
+                value="voucher"))
         if self.min_stake <= 10:
             options.append(discord.SelectOption(label="10 TIX", value="10"))
         if self.min_stake <= 20:
@@ -2859,6 +2874,9 @@ class StakeOptionsSelect(discord.ui.Select):
             stake_modal.cap_checkbox.value = "yes" if is_capped else "no"
             
             await interaction.response.send_modal(stake_modal)
+        elif selected_value == "voucher":
+            await self.handle_stake_submission(
+                interaction, voucher_service.VOUCHER_VALUE, is_capped=is_capped, voucher=True)
         else:
             # Process the selected preset stake amount with the saved preference
             stake_amount = int(selected_value)
@@ -2866,17 +2884,21 @@ class StakeOptionsSelect(discord.ui.Select):
             # Add user to sign_ups and handle stake submission using saved preference
             await self.handle_stake_submission(interaction, stake_amount, is_capped=is_capped)
             
-    async def handle_stake_submission(self, interaction, stake_amount, is_capped=True):
+    async def handle_stake_submission(self, interaction, stake_amount, is_capped=True,
+                                      *, voucher=False):
         user_id = str(interaction.user.id)
         guild_id = str(interaction.guild_id)
         display_name = str(interaction.user.display_name)
 
         # The wallet has to cover this player's whole position, not just this
         # entry: what they already owe, and what they could still lose in other
-        # drafts. The charge below only knows about this one.
-        if await refuse_unfunded_stake(interaction, self.draft_session_id,
-                                       guild_id, user_id, stake_amount):
+        # drafts. The charge below only knows about this one. A voucher entry
+        # risks none of the player's own tix, so it has nothing to cover.
+        if not voucher and await refuse_unfunded_stake(
+                interaction, self.draft_session_id, guild_id, user_id, stake_amount):
             return
+        if voucher:
+            stake_amount = voucher_service.VOUCHER_VALUE
 
         # The entry and the sign-up in ONE transaction, under the lock every
         # transfer takes. Charging first and writing the roster second is two
@@ -2888,6 +2910,7 @@ class StakeOptionsSelect(discord.ui.Select):
         # holds the SQLite write lock until it commits.
         charged: dict = {"ok": False, "deficit": 0}
         missing = False
+        refusal = None
         should_ping = False
         try:
             async with wallet_service.MONEY_LOCK:
@@ -2902,8 +2925,15 @@ class StakeOptionsSelect(discord.ui.Select):
                             missing = True
                             raise _EntryAborted
 
-                        charged = await entry_in(session, guild_id, self.draft_session_id,
-                                                 user_id, stake_amount, "joined")
+                        if voucher:
+                            refusal = await voucher_service.enter_with_voucher_in(
+                                session, guild_id, self.draft_session_id, user_id)
+                            if refusal:
+                                raise _EntryAborted
+                            charged = {"ok": True, "deficit": 0}
+                        else:
+                            charged = await entry_in(session, guild_id, self.draft_session_id,
+                                                     user_id, stake_amount, "joined")
                         if not charged["ok"]:
                             raise _EntryAborted
                 
@@ -2970,10 +3000,22 @@ class StakeOptionsSelect(discord.ui.Select):
                         await session.commit()
         except _EntryAborted:
             pass
+        except voucher_service.VoucherChangeRefused as refused:
+            # A second, stale menu tried to top up or cash out a voucher entry.
+            refusal = str(refused)
+        except voucher_service.VoucherEntryRefused:
+            # The pool refused a voucher entry that passed every voucher check
+            # (a stale menu submitted after the queue closed); all of it rolled back.
+            logger.exception(f"voucher entry for {user_id} in {self.draft_session_id} rolled back")
+            refusal = ("Your voucher entry couldn't be completed, so nothing moved. "
+                       "The draft may no longer be taking sign-ups.")
 
         if missing:
             await interaction.response.send_message(
                 "Draft session not found.", ephemeral=True)
+            return
+        if refusal:
+            await interaction.response.send_message(refusal, ephemeral=True)
             return
         if not charged["ok"]:
             await interaction.response.send_message(
@@ -3020,7 +3062,10 @@ class StakeOptionsSelect(discord.ui.Select):
                         ))
 
         # Confirm stake and provide draft link
-        if draft_session_updated.donation:
+        if voucher:
+            signup_message = (f"Your maximum entry is {stake_amount} tix.\n"
+                              "🎟️ Entered with a voucher: DraftBot pays your 20 tix entry.")
+        elif draft_session_updated.donation:
             signup_message = (f"Your maximum entry is {stake_amount} tix. "
                               + SIGNUP_DONATION_NOTE)
         else:
@@ -3030,11 +3075,16 @@ class StakeOptionsSelect(discord.ui.Select):
         # Said here because the dropdown never asks: the cap is on by default and
         # only the over-100 modal offers the choice, so for most players this is
         # the one place they learn it applies to them.
-        signup_message += ("\nYour entry is **capped** to your share of your team (🧢) — "
-                           "use **Change Entry / Settings** to turn it off."
-                           if is_capped else
-                           "\nYour entry is **uncapped** (🏎️): you keep it all, however "
-                           "your team is made up.")
+        if voucher:
+            # Change Entry refuses a voucher entry, so there is nowhere to point.
+            if is_capped:
+                signup_message += "\nYour entry is **capped** to your share of your team."
+        else:
+            signup_message += ("\nYour entry is **capped** to your share of your team (🧢) — "
+                               "use **Change Entry / Settings** to turn it off."
+                               if is_capped else
+                               "\nYour entry is **uncapped** (🏎️): you keep it all, however "
+                               "your team is made up.")
             
         signup_message += "\n\nYou are now signed up! Your Draftmancer link will be provided once teams are created."
 
@@ -3049,14 +3099,16 @@ class StakeOptionsSelect(discord.ui.Select):
 
 
 class StakeOptionsView(discord.ui.View):
-    def __init__(self, draft_session_id, draft_link, user_display_name, min_stake, has_draftmancer_role=False):
+    def __init__(self, draft_session_id, draft_link, user_display_name, min_stake,
+                 has_draftmancer_role=False, *, vouchers: int = 0):
         super().__init__(timeout=300)  # 5 minute timeout
         self.add_item(StakeOptionsSelect(
             draft_session_id, 
             draft_link, 
             user_display_name, 
             min_stake,
-            has_draftmancer_role
+            has_draftmancer_role,
+            vouchers=vouchers,
         ))
         
 class StakeModal(discord.ui.Modal):
@@ -3143,71 +3195,72 @@ class StakeModal(discord.ui.Modal):
 
             await update_player_bet_capping_preference(user_id, guild_id, is_capped)
             
-            async with AsyncSessionLocal() as session:
-                async with session.begin():
-                    # Check if draft_session_id is set properly
-                    if not self.draft_session_id:
-                        raise _EntryAborted
+            async with wallet_service.MONEY_LOCK:
+                async with AsyncSessionLocal() as session:
+                    async with session.begin():
+                        # Check if draft_session_id is set properly
+                        if not self.draft_session_id:
+                            raise _EntryAborted
                     
-                    # Get the draft session to check min stake
-                    draft_stmt = select(DraftSession).where(DraftSession.session_id == self.draft_session_id)
-                    draft_result = await session.execute(draft_stmt)
-                    draft_session = draft_result.scalars().first()
+                        # Get the draft session to check min stake
+                        draft_stmt = select(DraftSession).where(DraftSession.session_id == self.draft_session_id)
+                        draft_result = await session.execute(draft_stmt)
+                        draft_session = draft_result.scalars().first()
                     
-                    if not draft_session:
-                        raise _EntryAborted
+                        if not draft_session:
+                            raise _EntryAborted
 
-                    # The money and the sign-up in ONE commit: charging first
-                    # and seating second leaves a player paying for a draft
-                    # they are not in if the write below fails.
-                    charged = await entry_in(session, guild_id, self.draft_session_id,
-                                             user_id, max_stake, "joined")
-                    if not charged["ok"]:
-                        raise _EntryAborted
+                        # The money and the sign-up in ONE commit: charging first
+                        # and seating second leaves a player paying for a draft
+                        # they are not in if the write below fails.
+                        charged = await entry_in(session, guild_id, self.draft_session_id,
+                                                 user_id, max_stake, "joined")
+                        if not charged["ok"]:
+                            raise _EntryAborted
 
-                    # The minimum was checked before the charge, above.
-                    sign_ups = draft_session.sign_ups or {}
-                    display_name = self.user_display_name or interaction.user.display_name
-                    sign_ups[user_id] = display_name
+                        # The minimum was checked before the charge, above.
+                        sign_ups = draft_session.sign_ups or {}
+                        display_name = self.user_display_name or interaction.user.display_name
+                        sign_ups[user_id] = display_name
                     
-                    # Update draftmancer_role_users if user has the role
-                    draftmancer_role_users = draft_session.draftmancer_role_users or []
-                    if self.has_draftmancer_role and display_name not in draftmancer_role_users:
-                        draftmancer_role_users.append(display_name)
+                        # Update draftmancer_role_users if user has the role
+                        draftmancer_role_users = draft_session.draftmancer_role_users or []
+                        if self.has_draftmancer_role and display_name not in draftmancer_role_users:
+                            draftmancer_role_users.append(display_name)
                     
-                    # Update the draft session with the new sign_ups and draftmancer_role_users
-                    await session.execute(
-                        update(DraftSession).
-                        where(DraftSession.session_id == self.draft_session_id).
-                        values(
-                            sign_ups=sign_ups,
-                            draftmancer_role_users=draftmancer_role_users
+                        # Update the draft session with the new sign_ups and draftmancer_role_users
+                        await session.execute(
+                            update(DraftSession).
+                            where(DraftSession.session_id == self.draft_session_id).
+                            values(
+                                sign_ups=sign_ups,
+                                draftmancer_role_users=draftmancer_role_users
+                            )
                         )
-                    )
                     
-                    # Check if a stake record already exists for this player
-                    stake_stmt = select(StakeInfo).where(and_(
-                        StakeInfo.session_id == self.draft_session_id,
-                        StakeInfo.player_id == user_id
-                    ))
-                    stake_result = await session.execute(stake_stmt)
-                    stake_info = stake_result.scalars().first()
+                        # Check if a stake record already exists for this player
+                        stake_stmt = select(StakeInfo).where(and_(
+                            StakeInfo.session_id == self.draft_session_id,
+                            StakeInfo.player_id == user_id
+                        ))
+                        stake_result = await session.execute(stake_stmt)
+                        stake_info = stake_result.scalars().first()
                     
-                    if stake_info:
-                        # Update existing stake
-                        stake_info.max_stake = max_stake
-                        stake_info.is_capped = is_capped
-                    else:
-                        # Create new stake record
-                        stake_info = StakeInfo(
-                            session_id=self.draft_session_id,
-                            player_id=user_id,
-                            max_stake=max_stake,
-                            is_capped=is_capped
-                        )
-                        session.add(stake_info)
+                        if stake_info:
+                            # Update existing stake
+                            stake_info.max_stake = max_stake
+                            stake_info.is_capped = is_capped
+                        else:
+                            # Create new stake record
+                            stake_info = StakeInfo(
+                                session_id=self.draft_session_id,
+                                player_id=user_id,
+                                max_stake=max_stake,
+                                is_capped=is_capped
+                            )
+                            session.add(stake_info)
                     
-                    await session.commit()
+                        await session.commit()
             
             # Create a response that includes the stake confirmation, reminder about stake usage, and draft link
             cap_status = entry_cap_phrase(is_capped)
@@ -3244,6 +3297,9 @@ class StakeModal(discord.ui.Modal):
             else:
                 await interaction.response.send_message(
                     "Draft session not found.", ephemeral=True)
+        except voucher_service.VoucherChangeRefused as refused:
+            # A stale modal tried to top up a voucher entry; nothing was written.
+            await interaction.response.send_message(str(refused), ephemeral=True)
         except Exception as e:
             # Add detailed error handling to help diagnose the issue
             error_message = f"An error occurred: {str(e)}"
@@ -3298,6 +3354,13 @@ class BetCapToggleButton(CallbackButton):
                 
                 if not stake_info:
                     await interaction.response.send_message("You need to set an entry first.", ephemeral=True)
+                    return
+
+                # A voucher pays exactly 20 tix: there is nothing to raise, lower or cap.
+                if await voucher_service.entered_with_voucher_in(
+                        session, guild_id, self.draft_session_id, user_id):
+                    await interaction.response.send_message(
+                        voucher_service.CHANGE_REFUSAL, ephemeral=True)
                     return
                 
                 # Get user's current status
@@ -3514,6 +3577,7 @@ class CombinedStakeSelect(discord.ui.Select):
         # entry untouched, with the StakeInfo below never written.
         changed: dict = {"ok": False, "deficit": 0}
         missing = False
+        refusal = None
         try:
             async with wallet_service.MONEY_LOCK:
                 async with AsyncSessionLocal() as session:
@@ -3568,10 +3632,16 @@ class CombinedStakeSelect(discord.ui.Select):
                         await session.commit()
         except _EntryAborted:
             pass
+        except voucher_service.VoucherChangeRefused as refused:
+            # A Change Entry panel opened before a voucher entry tried to revise it.
+            refusal = str(refused)
 
         if missing:
             await interaction.response.send_message(
                 "Draft session not found.", ephemeral=True)
+            return
+        if refusal:
+            await interaction.response.send_message(refusal, ephemeral=True)
             return
         if not changed["ok"]:
             await interaction.response.send_message(

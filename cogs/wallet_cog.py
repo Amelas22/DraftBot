@@ -25,8 +25,10 @@ from discord.ext import commands
 from discord.commands import SlashCommandGroup, option
 from loguru import logger
 
+from config import vouchers_enabled
 from models.mtgo_account import MtgoAccount
-from services import wallet_service
+from notification_service import notify_voucher_received, notify_wallet
+from services import voucher_service, wallet_service
 from services import mtgo_resolution_service as resolution
 from services import tournament_escrow_service as escrow
 from services.mtgo_tradebot_client import DEFAULT_MAX_CARDS_PER_TRADE, EVENT_TICKET
@@ -381,6 +383,43 @@ class WalletCommands(commands.Cog):
             f"Sent **{amount} tix** to <@{player.id}>. Your balance: **{payer_bal} tix**.",
             ephemeral=True)
 
+    # ----- /wallet give-voucher @player [count] -----
+    @wallet.command(name="give-voucher", description="Give draft vouchers to another member")
+    @option("player", discord.Member, description="Who to give them to")
+    @option("count", int, description="How many vouchers", min_value=1, default=1)
+    async def wallet_give_voucher(self, ctx: discord.ApplicationContext,
+                                  player: discord.Member, count: int = 1):
+        await ctx.defer(ephemeral=True)
+        err = gate_read(ctx)
+        if err:
+            return await ctx.followup.send(err, ephemeral=True)
+        guild_id = str(ctx.guild.id)
+        if not vouchers_enabled(guild_id):
+            return await ctx.followup.send(
+                "Draft vouchers aren't available on this server.", ephemeral=True)
+        if player.id == ctx.author.id:
+            return await ctx.followup.send(
+                "You can't give a voucher to yourself.", ephemeral=True)
+        if player.bot:
+            return await ctx.followup.send(
+                "Vouchers can only go to members, not bots.", ephemeral=True)
+
+        sender = str(ctx.author.id)
+        held = await voucher_service.vouchers_held(guild_id, sender)
+        if count > held:
+            return await ctx.followup.send(
+                f"You have {_vouchers(held)}; you can't give {count}.", ephemeral=True)
+        try:
+            await voucher_service.give(guild_id, sender, str(player.id), count)
+        except wallet_service.InsufficientFunds as e:
+            # Spent between the check above and the transfer.
+            return await ctx.followup.send(
+                f"You have {_vouchers(e.available)}; you can't give {count}.", ephemeral=True)
+
+        await ctx.followup.send(
+            f"Gave **{_vouchers(count)}** to <@{player.id}>.", ephemeral=True)
+        await notify_wallet(notify_voucher_received, guild_id, str(player.id), sender, count)
+
     # ----- /wallet reconcile (admin) -----
     @wallet_admin.command(
         name="reconcile", description="[Admin] Audit: vault tix vs. total of all wallets")
@@ -403,6 +442,10 @@ class WalletCommands(commands.Cog):
         embed.set_footer(text="✅ Balanced" if res["ok"]
                          else "⚠️ MISMATCH — the vault and the ledger disagree.")
         await ctx.followup.send(embed=embed, ephemeral=True)
+
+
+def _vouchers(n: int) -> str:
+    return f"{n} {voucher_service.voucher_noun(n)}"
 
 
 def setup(bot):

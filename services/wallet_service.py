@@ -27,7 +27,8 @@ holder (see SYSTEM_IN_FLIGHT). While the trade is open those tix belong to that 
 so they're unspendable by the player without any special-casing in the balance query.
 Success books the boundary debit against in-flight; failure transfers them back.
 
-Reconciliation: ``reconcile()`` asserts vault tix == SUM(all wallet rows).
+Reconciliation: ``reconcile()`` asserts vault tix == SUM over the *tix* wallet rows
+(other assets have no vault).
 """
 import asyncio
 import uuid
@@ -38,7 +39,7 @@ from sqlalchemy.exc import IntegrityError
 
 from database.db_session import db_session
 from database.retry import with_db_retry
-from models.wallet_tx import WalletTx
+from models.wallet_tx import TIX, WalletTx
 
 # Synthetic holders. Not people: they own claims the same way a player does, which is
 # what keeps every movement a plain transfer.
@@ -156,14 +157,15 @@ class InsufficientFunds(ValueError):
         self.available = available
 
 
-async def balance_in(session, guild_id: str, player_id: str) -> int:
+async def balance_in(session, guild_id: str, player_id: str, *, asset: str = TIX) -> int:
     """A holder's balance inside an existing session/transaction — the single definition,
     reused by every caller that needs to check funds within its own transaction."""
     return await _sum_amount(
-        session, WalletTx.guild_id == guild_id, WalletTx.player_id == player_id)
+        session, WalletTx.guild_id == guild_id, WalletTx.player_id == player_id,
+        WalletTx.asset == asset)
 
 
-async def balances_for(guild_id: str, player_ids) -> dict[str, int]:
+async def balances_for(guild_id: str, player_ids, *, asset: str = TIX) -> dict[str, int]:
     """Balance per holder in one grouped query — rendering N pending teams costs one
     read, not N. Holders with no rows come back as 0 so callers needn't re-check."""
     ids = [str(p) for p in (player_ids or [])]
@@ -172,14 +174,16 @@ async def balances_for(guild_id: str, player_ids) -> dict[str, int]:
     async with db_session() as session:
         rows = (await session.execute(
             select(WalletTx.player_id, func.coalesce(func.sum(WalletTx.amount), 0))
-            .where(WalletTx.guild_id == guild_id, WalletTx.player_id.in_(ids))
+            .where(WalletTx.guild_id == guild_id, WalletTx.player_id.in_(ids),
+                   WalletTx.asset == asset)
             .group_by(WalletTx.player_id)
         )).all()
     found = {pid: int(total) for pid, total in rows}
     return {pid: found.get(pid, 0) for pid in ids}
 
 
-async def movements_in(session, guild_id: str, holder: str, party: str) -> int:
+async def movements_in(session, guild_id: str, holder: str, party: str,
+                       *, asset: str = TIX) -> int:
     """How many transfers `holder` has exchanged with `party`, in the caller's
     own session.
 
@@ -192,11 +196,12 @@ async def movements_in(session, guild_id: str, holder: str, party: str) -> int:
         select(func.count()).select_from(WalletTx)
         .where(WalletTx.guild_id == guild_id,
                WalletTx.player_id == holder,
-               WalletTx.counterparty_id == party)
+               WalletTx.counterparty_id == party,
+               WalletTx.asset == asset)
     )).scalar() or 0)
 
 
-async def contributions_to(guild_id: str, holder: str) -> dict[str, int]:
+async def contributions_to(guild_id: str, holder: str, *, asset: str = TIX) -> dict[str, int]:
     """Net tix each counterparty currently has sitting in `holder`.
 
     A grouped SUM, deliberately -- not a page of get_history, which clamps to
@@ -205,23 +210,26 @@ async def contributions_to(guild_id: str, holder: str) -> dict[str, int]:
     refunded out of a pool does not show up as holding nothing.
     """
     async with db_session() as session:
-        return await contributions_to_in(session, guild_id, holder)
+        return await contributions_to_in(session, guild_id, holder, asset=asset)
 
 
-async def contributions_to_in(session, guild_id: str, holder: str) -> dict[str, int]:
+async def contributions_to_in(session, guild_id: str, holder: str,
+                              *, asset: str = TIX) -> dict[str, int]:
     """contributions_to, inside an existing session/transaction."""
     rows = (await session.execute(
         select(WalletTx.counterparty_id, func.coalesce(func.sum(WalletTx.amount), 0))
         .where(WalletTx.guild_id == guild_id,
                WalletTx.player_id == holder,
-               WalletTx.counterparty_id.isnot(None))
+               WalletTx.counterparty_id.isnot(None),
+               WalletTx.asset == asset)
         .group_by(WalletTx.counterparty_id)
         .having(func.coalesce(func.sum(WalletTx.amount), 0) != 0)
     )).all()
     return {str(party): int(total) for party, total in rows}
 
 
-async def net_between(session, guild_id: str, holder: str, party: str) -> int:
+async def net_between(session, guild_id: str, holder: str, party: str,
+                      *, asset: str = TIX) -> int:
     """What one counterparty currently has sitting in `holder`, inside an
     existing session/transaction -- contributions_to for a single party, read
     from the snapshot the caller is about to write into."""
@@ -229,36 +237,41 @@ async def net_between(session, guild_id: str, holder: str, party: str) -> int:
         select(func.coalesce(func.sum(WalletTx.amount), 0))
         .where(WalletTx.guild_id == guild_id,
                WalletTx.player_id == holder,
-               WalletTx.counterparty_id == party)
+               WalletTx.counterparty_id == party,
+               WalletTx.asset == asset)
     )).scalar() or 0)
 
 
 # ---------------------------------------------------------------------------
 # reads
 # ---------------------------------------------------------------------------
-async def get_balance(guild_id: str, player_id: str) -> int:
+async def get_balance(guild_id: str, player_id: str, *, asset: str = TIX) -> int:
     async with db_session() as session:
-        return await balance_in(session, guild_id, player_id)
+        return await balance_in(session, guild_id, player_id, asset=asset)
 
 
-async def get_wallet(guild_id: str, player_id: str) -> Wallet:
+async def get_wallet(guild_id: str, player_id: str, *, asset: str = TIX) -> Wallet:
     async with db_session() as session:
-        return Wallet(guild_id, player_id, await balance_in(session, guild_id, player_id))
+        return Wallet(guild_id, player_id,
+                      await balance_in(session, guild_id, player_id, asset=asset))
 
 
-async def total_wallets() -> int:
-    """SUM of every row — the claim side of the reconciliation invariant. Global on
-    purpose: the physical vault (one MTGO custodian) is shared across guilds."""
+async def total_wallets(*, asset: str = TIX) -> int:
+    """SUM of every row of ``asset`` (tix by default); the tix total is the claim side of
+    the reconciliation invariant. Global on purpose: the physical vault (one MTGO
+    custodian) is shared across guilds."""
     async with db_session() as session:
-        return await _sum_amount(session)
+        return await _sum_amount(session, WalletTx.asset == asset)
 
 
-async def get_history(guild_id: str, player_id: str, limit: int = 25) -> list[WalletTx]:
+async def get_history(guild_id: str, player_id: str, limit: int = 25,
+                      *, asset: str = TIX) -> list[WalletTx]:
     limit = min(limit, 100)
     async with db_session() as session:
         query = (
             select(WalletTx)
-            .where(WalletTx.guild_id == guild_id, WalletTx.player_id == player_id)
+            .where(WalletTx.guild_id == guild_id, WalletTx.player_id == player_id,
+                   WalletTx.asset == asset)
             .order_by(WalletTx.created_at.desc(), WalletTx.id.desc())
             .limit(limit)
         )
@@ -277,6 +290,8 @@ async def _book_boundary(guild_id: str, player_id: str, amount: int, kind: str,
     impossible (these run lock-free, unlike transfers)."""
     async def _do():
         async with db_session() as session:
+            # Not asset-filtered: boundary rows are tix-only, and uq_wallet_tx_job_kind
+            # is (job_id, kind) with no asset, so one job can only ever book one row.
             row = (await session.execute(
                 select(WalletTx).where(WalletTx.job_id == job_id, WalletTx.kind == kind)
             )).scalars().first()
@@ -286,6 +301,7 @@ async def _book_boundary(guild_id: str, player_id: str, amount: int, kind: str,
             tx = WalletTx(
                 guild_id=guild_id, player_id=player_id, kind=kind, amount=amount,
                 counterparty_id=counterparty_id, job_id=job_id, source=source, notes=notes,
+                asset=TIX,
             )
             session.add(tx)
             await session.flush()
@@ -325,27 +341,30 @@ async def debit_done(guild_id: str, player_id: str, amount: int, *, job_id: str,
 # ---------------------------------------------------------------------------
 # transfers — 2 rows, net 0, idempotent by source
 # ---------------------------------------------------------------------------
-async def transfer_legs(session, source: str) -> list[WalletTx]:
+async def transfer_legs(session, source: str, *, asset: str = TIX) -> list[WalletTx]:
     """The rows of the transfer booked under ``source`` (empty if never booked) — the one
     'has this already happened?' probe for transfers. Constrains ``kind`` so the partial
     uq_wallet_tx_transfer_legs index serves it."""
     return list((await session.execute(
         select(WalletTx).where(
-            WalletTx.source == source, WalletTx.kind.in_(("pay", "receive"))
+            WalletTx.source == source, WalletTx.kind.in_(("pay", "receive")),
+            WalletTx.asset == asset
         ).order_by(WalletTx.id))).scalars().all())
 
 
-async def transfer_credit(session, source: str) -> WalletTx | None:
+async def transfer_credit(session, source: str, *, asset: str = TIX) -> WalletTx | None:
     """The credit ('receive') leg of a booked transfer, or None — what a reversal needs
     to know the amount that moved."""
     return (await session.execute(
         select(WalletTx).where(
-            WalletTx.source == source, WalletTx.kind == "receive").limit(1)
+            WalletTx.source == source, WalletTx.kind == "receive",
+            WalletTx.asset == asset).limit(1)
     )).scalars().first()
 
 
 async def transfer_in(session, guild_id: str, from_player: str, to_player: str,
-                      amount: int, source: str, notes: str | None = None):
+                      amount: int, source: str, notes: str | None = None,
+                      *, asset: str = TIX):
     """Write a transfer inside the CALLER's session/transaction — a pure writer: the
     caller owns the funds check (under MONEY_LOCK) because only it knows whether this
     is a spend or the unwinding of a holder it just funded."""
@@ -354,9 +373,11 @@ async def transfer_in(session, guild_id: str, from_player: str, to_player: str,
     if from_player == to_player:
         raise ValueError("Cannot transfer to the same holder")
     debit = WalletTx(guild_id=guild_id, player_id=from_player, kind="pay", amount=-amount,
-                     counterparty_id=to_player, source=source, notes=notes)
+                     counterparty_id=to_player, source=source, notes=notes,
+                     asset=asset)
     credit = WalletTx(guild_id=guild_id, player_id=to_player, kind="receive", amount=amount,
-                      counterparty_id=from_player, source=source, notes=notes)
+                      counterparty_id=from_player, source=source, notes=notes,
+                      asset=asset)
     session.add(debit)
     session.add(credit)
     await session.flush()
@@ -371,32 +392,34 @@ async def pay(
     *,
     source: str | None = None,
     notes: str | None = None,
+    asset: str = TIX,
 ) -> tuple[WalletTx, WalletTx]:
-    """Move ``amount`` tix between two holders — no MTGO trade, no change to the system
-    total. Checks the payer's funds. Idempotent by ``source`` (a uuid is generated when
+    """Move ``amount`` of ``asset`` (tix by default) between two holders — no MTGO trade,
+    no change to the system total. Checks the payer's funds. Idempotent by ``source`` (a uuid is generated when
     none is given)."""
     if source is None:
         source = str(uuid.uuid4())
 
     async def _do():
         async with db_session() as session:
-            existing = await transfer_legs(session, source)
+            existing = await transfer_legs(session, source, asset=asset)
             if existing:
                 logger.info(f"pay: source {source} already settled (idempotent)")
                 return existing[0], existing[1]
-            balance = await balance_in(session, guild_id, from_player)
+            balance = await balance_in(session, guild_id, from_player, asset=asset)
             if amount > balance:
                 raise InsufficientFunds(from_player, amount, balance)
             rows = await transfer_in(session, guild_id, from_player, to_player,
-                                     amount, source, notes)
-            logger.info(f"pay: {from_player} -> {to_player} {amount} tix (source {source})")
+                                     amount, source, notes, asset=asset)
+            logger.info(f"pay: {from_player} -> {to_player} {amount} {asset} (source {source})")
             return rows
 
     async with MONEY_LOCK:
         return await with_db_retry(_do)
 
 
-async def adjust(guild_id: str, player_id: str, amount: int, notes: str, created_by: str) -> WalletTx:
+async def adjust(guild_id: str, player_id: str, amount: int, notes: str, created_by: str,
+                 *, asset: str = TIX) -> WalletTx:
     """Admin correction (signed, one-sided — it deliberately changes the system total, so
     it will show up in reconciliation). Bypasses the funds check: an admin may drive a
     balance negative to record a real-world discrepancy."""
@@ -407,7 +430,7 @@ async def adjust(guild_id: str, player_id: str, amount: int, notes: str, created
         async with db_session() as session:
             tx = WalletTx(
                 guild_id=guild_id, player_id=player_id, kind="adjust", amount=amount,
-                source="admin", notes=f"{notes} (by {created_by})",
+                source="admin", notes=f"{notes} (by {created_by})", asset=asset,
             )
             session.add(tx)
             await session.flush()

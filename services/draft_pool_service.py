@@ -114,6 +114,9 @@ async def _held_in(session: AsyncSession, guild_id: str, session_id: str,
     return max(net, 0)
 
 
+held_in = _held_in
+
+
 async def held_by(guild_id: str, session_id: str, player_id: str) -> int:
     """What one player currently has at risk in this draft."""
     async with db_session() as session:
@@ -159,6 +162,10 @@ async def _refund_in(session: AsyncSession, guild_id: str, session_id: str, play
     await wallet_service.transfer_in(
         session, guild_id, holder, player_id, amount, source,
         notes=f"Draft refund ({reason}) {session_id}")
+    # Deferred: voucher_service imports this module.
+    from services import voucher_service
+    await voucher_service.after_refund_in(session, guild_id, session_id, player_id,
+                                          amount, source)
     logger.info(f"draft pool {session_id}: refunded {amount} to {player_id} ({reason})")
     return True
 
@@ -288,6 +295,16 @@ async def entry_in(session: AsyncSession, guild_id: str, session_id: str,
     # their money has to come with them whenever that happens. Every other
     # reason is a player revising a stake, which is what a stale panel replays.
     teardown = reason in ("left", "removed")
+    if amount != held and not teardown:
+        # Deferred: voucher_service imports this module.
+        from services import voucher_service
+        if await voucher_service.entered_with_voucher_in(session, guild_id,
+                                                         session_id, player_id):
+            # A voucher entry pays exactly its 20 tix: a stale menu, modal or
+            # Change Entry panel must neither top it up with the player's own
+            # tix nor cash part of it out. Raised, not returned, so the caller's
+            # transaction rolls back whatever it wrote alongside.
+            raise voucher_service.VoucherChangeRefused()
     if amount != held and not teardown and not await _queue_open_in(session, session_id):
         # Money may not move in EITHER direction once the queue closes. A
         # stake select or modal opened while queueing can be submitted after
@@ -758,7 +775,11 @@ async def settle_pool(guild_id: str, session_id: str,
         # the sides no longer level -- and the next attempt runs check_pool,
         # sees the imbalance it caused, and refuses. An error in the middle of
         # paying a draft out would make that draft unsettleable forever.
+        # Deferred: voucher_service imports this module.
+        from services import voucher_service
         holder = pool_wallet_id(session_id)
+        voucher_entrants = await voucher_service.voucher_entrants_in(
+            session, guild_id, session_id)
         settled: dict[str, int] = {}
         for player_id, amount in shares.items():
             if amount <= 0:
@@ -776,12 +797,20 @@ async def settle_pool(guild_id: str, session_id: str,
             await wallet_service.transfer_in(
                 session, guild_id, holder, player_id, amount, source,
                 notes=f"Draft winnings {session_id}")
+            # What the player keeps, not what the pool paid: a voucher entry's
+            # stake goes back to the voucher reserve, and the winnings DM and the
+            # debt auto-pay downstream both read this figure.
             settled[player_id] = amount
+            if player_id in voucher_entrants:
+                settled[player_id] = await voucher_service.after_payout_in(
+                    session, guild_id, session_id, player_id, amount, source)
+        if voucher_entrants:
+            await voucher_service.retire_in(session, guild_id, session_id)
         return settled
 
     paid = await _money_transaction(pay)
 
-    logger.info(f"draft pool {session_id}: paid {sum(paid.values())} to {len(paid)} winners")
+    logger.info(f"draft pool {session_id}: credited {sum(paid.values())} tix (kept) to {len(paid)} winners")
     await check_pool(guild_id, session_id)
     return {"paid": paid}
 
@@ -963,15 +992,21 @@ async def format_outcomes(guild_id: str, session_id: str, sign_ups: dict[str, st
     if not ledger:
         return [], 0
 
+    # Deferred: voucher_service imports this module.
+    from services import voucher_service
     winners = set(winning_team or [])
     lines: list[str] = []
     pot = 0
+    async with db_session() as session:
+        voucher_entries = await voucher_service.voucher_entrants_in(
+            session, guild_id, session_id)
     for player_id, net in sorted(ledger.items(), key=itemgetter(1)):
         name = sign_ups.get(player_id, "Unknown")
+        suffix = " (entered with a voucher)" if player_id in voucher_entries else ""
         if player_id in winners:
             # net is negative for a paid winner: they put in c and took 2c.
-            lines.append(f"**{name}** won {-net} tix")
+            lines.append(f"**{name}** won {-net} tix{suffix}")
             pot += -net
         elif net > 0:
-            lines.append(f"**{name}** lost {net} tix")
+            lines.append(f"**{name}** lost {net} tix{suffix}")
     return lines, pot

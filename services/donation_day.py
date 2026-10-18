@@ -22,7 +22,7 @@ from database.db_session import db_session
 from models.debt_ledger import DebtLedger
 from models.draft_session import DraftSession
 from models.stake import StakeInfo
-from models.wallet_tx import WalletTx
+from models.wallet_tx import TIX, WalletTx
 from preference_service import get_anonymous_donors
 from services.debt_service import TIX_ONLY
 from services.donation_service import DONATION_SOURCE
@@ -195,7 +195,8 @@ async def gather_credits(session: AsyncSession, guild_id: str, bot_id: str,
             select(WalletTx.id, WalletTx.counterparty_id, WalletTx.amount, WalletTx.created_at,
                    WalletTx.source)
             .where(WalletTx.guild_id == guild_id, WalletTx.player_id == bot_id,
-                   WalletTx.kind == "receive", WalletTx.created_at >= since))).all():
+                   WalletTx.asset == TIX, WalletTx.kind == "receive",
+                   WalletTx.created_at >= since))).all():
         if (source or "").startswith("debt:") or not payer or is_system_account(payer):
             continue
         credits.append(Credit(payer, int(amount), at, "paid", key=f"gift:{tx_id}",

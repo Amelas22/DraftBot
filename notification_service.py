@@ -326,6 +326,19 @@ async def notify_payment_received(bot, guild_id: str, recipient_id: str, sender_
     await send_dm(bot, recipient_id, msg, label=f"payment to {recipient_id}")
 
 
+@_best_effort
+async def notify_voucher_received(bot, guild_id: str, recipient_id: str, sender_id: str,
+                                  count: int):
+    """Someone gave you draft vouchers."""
+    from services.voucher_service import voucher_noun
+
+    sender = _wallet_name(bot, guild_id, sender_id)
+    await send_dm(bot, recipient_id,
+                  f"🎟️ You received **{count} {voucher_noun(count)}** from {sender}. Use one at sign-up "
+                  f"for a staked draft: a 20 tix entry, paid by DraftBot.",
+                  label=f"voucher to {recipient_id}")
+
+
 def _owed_clause(remaining, owes_phrase: str, settled_phrase: str) -> str:
     """The "and here is where you stand now" tail of a settlement DM.
 

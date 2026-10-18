@@ -47,6 +47,8 @@ def _patched_wallet(balance=120, history=()):
     get_wallet = AsyncMock(return_value=MagicMock(balance=balance))
     with patch("cogs.wallet_cog.gate_read", return_value=None), \
          patch("wallet_history_view.wallet_service.get_wallet", new=get_wallet), \
+         patch("wallet_history_view.voucher_service.vouchers_held",
+               new=AsyncMock(return_value=0)), \
          patch("wallet_history_view.wallet_history.get_history_page",
                new=AsyncMock(return_value=HistoryPage(list(history), len(history), 0, 10))):
         yield get_wallet
@@ -109,7 +111,7 @@ def test_the_audit_command_moved_too():
 
 def test_no_admin_command_is_left_in_the_player_group():
     player_cmds = sorted(c.name for c in WalletCommands.wallet.subcommands)
-    assert player_cmds == ["deposit", "pay", "show", "withdraw"], player_cmds
+    assert player_cmds == ["deposit", "give-voucher", "pay", "show", "withdraw"], player_cmds
 
 
 def test_admin_show_is_restricted_to_bot_managers():

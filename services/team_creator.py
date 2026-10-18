@@ -258,6 +258,7 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                 from services.entry_notices import announce_refunds
                 await announce_refunds(
                     pool_sides[1],
+                    guild_id=pool_sides[0],
                     refunded=result.get("refunded") or {},
                     capped=result.get("capped") or {},
                     held=result.get("held") or {},
