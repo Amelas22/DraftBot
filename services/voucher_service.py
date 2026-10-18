@@ -168,3 +168,55 @@ async def enter_with_voucher_in(session: Any, guild_id: str, session_id: str,
         raise VoucherEntryRefused(
             f"voucher entry for {player_id} in {session_id} was refused by the pool")
     return None
+
+
+# --- the money coming back --------------------------------------------------
+# A voucher entry's 20 tix reached the pot through the player's own wallet, so the
+# pool pays refunds and winnings to the player like any other entry. These hooks
+# run right after such a transfer, in the same transaction and under the same
+# MONEY_LOCK, and sweep the voucher's share on to the reserve. They are plain
+# transfers with no funds check, so a sweep cannot fail for a short wallet, and
+# they never call on_inflow: a debt must not eat the reserve's share.
+
+async def after_refund_in(session: Any, guild_id: str, session_id: str, player_id: str,
+                          refunded: int, refund_source: str) -> None:
+    """Sweep a refund of a voucher entry to the reserve; hand the voucher back
+    once the player holds nothing in the pot. A no-op for any other entry."""
+    if not await entered_with_voucher_in(session, guild_id, session_id, player_id):
+        return
+    await wallet_service.transfer_in(
+        session, guild_id, player_id, RESERVE, refunded, f"voucher-sweep:{refund_source}",
+        "Draft voucher entry returned", asset=TIX)
+    if await draft_pool_service._held_in(session, guild_id, session_id, player_id) > 0:
+        return
+    spent = spent_holder(session_id)
+    moves = await wallet_service.movements_in(session, guild_id, spent, player_id, asset=VOUCHER)
+    await wallet_service.transfer_in(
+        session, guild_id, spent, player_id, 1,
+        f"voucher-return:{session_id}:{player_id}:{moves}", "Draft voucher returned",
+        asset=VOUCHER)
+
+
+async def after_payout_in(session: Any, guild_id: str, session_id: str, player_id: str,
+                          credited: int, payout_source: str) -> int:
+    """Sweep the voucher's half of a payout to the reserve; returns what the player
+    keeps. A payout of 2m on a matched m keeps m, the winnings."""
+    if not await entered_with_voucher_in(session, guild_id, session_id, player_id):
+        return credited
+    stake = credited // 2
+    await wallet_service.transfer_in(
+        session, guild_id, player_id, RESERVE, stake, f"voucher-sweep:{payout_source}",
+        "Draft voucher entry returned", asset=TIX)
+    return credited - stake
+
+
+async def retire_in(session: Any, guild_id: str, session_id: str) -> int:
+    """Retire every voucher spent on a settled draft; returns how many. Idempotent."""
+    source = f"voucher-retire:{session_id}"
+    spent = spent_holder(session_id)
+    count = await wallet_service.balance_in(session, guild_id, spent, asset=VOUCHER)
+    if count <= 0 or await wallet_service.transfer_legs(session, source, asset=VOUCHER):
+        return 0
+    await wallet_service.transfer_in(
+        session, guild_id, spent, RETIRED, count, source, "Draft voucher used", asset=VOUCHER)
+    return count

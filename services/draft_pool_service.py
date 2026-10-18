@@ -159,6 +159,10 @@ async def _refund_in(session: AsyncSession, guild_id: str, session_id: str, play
     await wallet_service.transfer_in(
         session, guild_id, holder, player_id, amount, source,
         notes=f"Draft refund ({reason}) {session_id}")
+    # Deferred: voucher_service imports this module.
+    from services import voucher_service
+    await voucher_service.after_refund_in(session, guild_id, session_id, player_id,
+                                          amount, source)
     logger.info(f"draft pool {session_id}: refunded {amount} to {player_id} ({reason})")
     return True
 
@@ -758,6 +762,8 @@ async def settle_pool(guild_id: str, session_id: str,
         # the sides no longer level -- and the next attempt runs check_pool,
         # sees the imbalance it caused, and refuses. An error in the middle of
         # paying a draft out would make that draft unsettleable forever.
+        # Deferred: voucher_service imports this module.
+        from services import voucher_service
         holder = pool_wallet_id(session_id)
         settled: dict[str, int] = {}
         for player_id, amount in shares.items():
@@ -776,7 +782,12 @@ async def settle_pool(guild_id: str, session_id: str,
             await wallet_service.transfer_in(
                 session, guild_id, holder, player_id, amount, source,
                 notes=f"Draft winnings {session_id}")
-            settled[player_id] = amount
+            # What the player keeps, not what the pool paid: a voucher entry's
+            # stake goes back to the voucher reserve, and the winnings DM and the
+            # debt auto-pay downstream both read this figure.
+            settled[player_id] = await voucher_service.after_payout_in(
+                session, guild_id, session_id, player_id, amount, source)
+        await voucher_service.retire_in(session, guild_id, session_id)
         return settled
 
     paid = await _money_transaction(pay)
