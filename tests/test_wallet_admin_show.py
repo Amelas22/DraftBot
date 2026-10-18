@@ -111,7 +111,7 @@ def test_the_audit_command_moved_too():
 
 def test_no_admin_command_is_left_in_the_player_group():
     player_cmds = sorted(c.name for c in WalletCommands.wallet.subcommands)
-    assert player_cmds == ["deposit", "pay", "show", "withdraw"], player_cmds
+    assert player_cmds == ["deposit", "give-voucher", "pay", "show", "withdraw"], player_cmds
 
 
 def test_admin_show_is_restricted_to_bot_managers():
