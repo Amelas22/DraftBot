@@ -164,9 +164,18 @@ async def entered_with_voucher_in(session: Any, guild_id: str, session_id: str,
     return held > 0
 
 
-async def entered_with_voucher(guild_id: str, session_id: str, player_id: str) -> bool:
-    async with db_session() as session:
-        return await entered_with_voucher_in(session, guild_id, session_id, player_id)
+async def voucher_entrants_in(session: Any, guild_id: str, session_id: str) -> set[str]:
+    """Every player whose entry in this draft is a voucher entry, in one query.
+
+    The set form of ``entered_with_voucher_in``: each counterparty with a positive
+    net voucher into the draft's spent holder."""
+    rows = (await session.execute(
+        select(WalletTx.counterparty_id)
+        .where(WalletTx.guild_id == guild_id, WalletTx.asset == VOUCHER,
+               WalletTx.player_id == spent_holder(session_id))
+        .group_by(WalletTx.counterparty_id)
+        .having(func.sum(WalletTx.amount) > 0))).scalars().all()
+    return {str(player_id) for player_id in rows}
 
 
 async def enter_with_voucher_in(session: Any, guild_id: str, session_id: str,

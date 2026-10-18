@@ -67,6 +67,7 @@ async def announce_refunds(session_id: Any, *,
     borrower with closed DMs must not turn a settled pool into an error.
     """
     import notification_service
+    from database.db_session import db_session
     from services import voucher_service
     from bot_registry import get_bot
 
@@ -74,14 +75,19 @@ async def announce_refunds(session_id: Any, *,
     if bot is None:      # no bot (tests, migrations, CLI): nobody to tell
         return 0
 
+    voucher_entrants: set[str] = set()
+    if guild_id is not None:
+        async with db_session() as session:
+            voucher_entrants = await voucher_service.voucher_entrants_in(
+                session, str(guild_id), str(session_id))
+
     told = 0
     for player_id in dict.fromkeys([*refunded, *capped]):
         by_cap = int(capped.get(player_id, 0) or 0)
         total = int(refunded.get(player_id, 0) or 0) + by_cap
         if total <= 0:
             continue
-        if guild_id is not None and await voucher_service.entered_with_voucher(
-                str(guild_id), str(session_id), str(player_id)):
+        if str(player_id) in voucher_entrants:
             # The refund went to DraftBot's voucher reserve, not to the player.
             which = f" in **{friendly_id}**" if friendly_id else ""
             text = (f"🎟️ Your voucher entry{which} is playing for "

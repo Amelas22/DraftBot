@@ -96,13 +96,13 @@ async def test_voucher_entry_moves_the_voucher_and_puts_twenty_in_the_pot_from_t
     assert await _bal(vs.RESERVE) == 20
     async with db_session() as session:
         assert await vs.entered_with_voucher_in(session, GUILD, SID, PID)
+        assert await vs.voucher_entrants_in(session, GUILD, SID) == {PID}
         signed = (await session.execute(select(DraftSession.sign_ups)
                   .where(DraftSession.session_id == SID))).scalars().first()
         stake = (await session.execute(select(StakeInfo)
                  .where(StakeInfo.session_id == SID))).scalars().one()
     assert PID in signed
     assert stake.max_stake == 20 and stake.is_capped is True
-    assert await vs.entered_with_voucher(GUILD, SID, PID)
 
 
 @pytest.mark.asyncio

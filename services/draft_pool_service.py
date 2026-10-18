@@ -775,6 +775,8 @@ async def settle_pool(guild_id: str, session_id: str,
         # Deferred: voucher_service imports this module.
         from services import voucher_service
         holder = pool_wallet_id(session_id)
+        voucher_entrants = await voucher_service.voucher_entrants_in(
+            session, guild_id, session_id)
         settled: dict[str, int] = {}
         for player_id, amount in shares.items():
             if amount <= 0:
@@ -795,9 +797,12 @@ async def settle_pool(guild_id: str, session_id: str,
             # What the player keeps, not what the pool paid: a voucher entry's
             # stake goes back to the voucher reserve, and the winnings DM and the
             # debt auto-pay downstream both read this figure.
-            settled[player_id] = await voucher_service.after_payout_in(
-                session, guild_id, session_id, player_id, amount, source)
-        await voucher_service.retire_in(session, guild_id, session_id)
+            settled[player_id] = amount
+            if player_id in voucher_entrants:
+                settled[player_id] = await voucher_service.after_payout_in(
+                    session, guild_id, session_id, player_id, amount, source)
+        if voucher_entrants:
+            await voucher_service.retire_in(session, guild_id, session_id)
         return settled
 
     paid = await _money_transaction(pay)
@@ -990,10 +995,8 @@ async def format_outcomes(guild_id: str, session_id: str, sign_ups: dict[str, st
     lines: list[str] = []
     pot = 0
     async with db_session() as session:
-        voucher_entries = {
-            player_id for player_id in ledger
-            if await voucher_service.entered_with_voucher_in(
-                session, guild_id, session_id, player_id)}
+        voucher_entries = await voucher_service.voucher_entrants_in(
+            session, guild_id, session_id)
     for player_id, net in sorted(ledger.items(), key=itemgetter(1)):
         name = sign_ups.get(player_id, "Unknown")
         suffix = " (entered with a voucher)" if player_id in voucher_entries else ""
