@@ -467,3 +467,27 @@ async def test_cancelling_a_voucher_entry_says_the_voucher_is_back(test_db):  # 
 async def test_cancelling_an_ordinary_entry_does_not_mention_a_voucher(test_db):  # noqa: F811
     await seed_session(SID, guild=GUILD, stype="staked", stage=None, sign_ups={PID: "Ada"})
     assert _said(await _cancel()) == "Your sign up has been canceled!"
+
+
+@pytest.mark.asyncio
+async def test_the_pool_refuses_to_change_a_voucher_entry_but_tears_it_down(test_db):  # noqa: F811
+    await seed_session(SID, guild=GUILD, stype="staked", stage=None, sign_ups={})
+    await wallet_service.adjust(GUILD, PID, 100, "seed", "t")
+    await _give_vouchers(1)
+    assert await _enter_direct() is None
+    rows = await _rows()
+
+    for amount in (50, 10):
+        with pytest.raises(vs.VoucherChangeRefused) as refused:
+            async with wallet_service.MONEY_LOCK:
+                async with db_session() as session:
+                    async with session.begin():
+                        await pool.entry_in(session, GUILD, SID, PID, amount, "revised")
+        assert str(refused.value) == CHANGE_REFUSAL
+        assert await _rows() == rows
+        assert await pool.held_by(GUILD, SID, PID) == 20
+
+    assert (await pool.set_entry(GUILD, SID, PID, 0, "left"))["ok"] is True
+    assert await pool.held_by(GUILD, SID, PID) == 0
+    assert await vs.vouchers_held(GUILD, PID) == 1
+    assert await _bal(PID) == 100

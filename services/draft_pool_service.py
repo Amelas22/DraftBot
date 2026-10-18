@@ -292,6 +292,16 @@ async def entry_in(session: AsyncSession, guild_id: str, session_id: str,
     # their money has to come with them whenever that happens. Every other
     # reason is a player revising a stake, which is what a stale panel replays.
     teardown = reason in ("left", "removed")
+    if amount != held and not teardown:
+        # Deferred: voucher_service imports this module.
+        from services import voucher_service
+        if await voucher_service.entered_with_voucher_in(session, guild_id,
+                                                         session_id, player_id):
+            # A voucher entry pays exactly its 20 tix: a stale menu, modal or
+            # Change Entry panel must neither top it up with the player's own
+            # tix nor cash part of it out. Raised, not returned, so the caller's
+            # transaction rolls back whatever it wrote alongside.
+            raise voucher_service.VoucherChangeRefused()
     if amount != held and not teardown and not await _queue_open_in(session, session_id):
         # Money may not move in EITHER direction once the queue closes. A
         # stake select or modal opened while queueing can be submitted after

@@ -2931,11 +2931,6 @@ class StakeOptionsSelect(discord.ui.Select):
                             if refusal:
                                 raise _EntryAborted
                             charged = {"ok": True, "deficit": 0}
-                        elif await voucher_service.entered_with_voucher_in(
-                                session, guild_id, self.draft_session_id, user_id):
-                            # A second, stale menu must not top up or cash out a voucher entry.
-                            refusal = voucher_service.CHANGE_REFUSAL
-                            raise _EntryAborted
                         else:
                             charged = await entry_in(session, guild_id, self.draft_session_id,
                                                      user_id, stake_amount, "joined")
@@ -3005,6 +3000,9 @@ class StakeOptionsSelect(discord.ui.Select):
                         await session.commit()
         except _EntryAborted:
             pass
+        except voucher_service.VoucherChangeRefused as refused:
+            # A second, stale menu tried to top up or cash out a voucher entry.
+            refusal = str(refused)
         except voucher_service.VoucherEntryRefused:
             # The pool refused a voucher entry that passed every voucher check
             # (a stale menu submitted after the queue closed); all of it rolled back.
@@ -3188,7 +3186,6 @@ class StakeModal(discord.ui.Modal):
             return
 
         charged: dict = {"ok": False, "deficit": 0}
-        refusal = None
         try:
             # Update the player's preference in the database for future drafts
             from preference_service import update_player_bet_capping_preference
@@ -3211,12 +3208,6 @@ class StakeModal(discord.ui.Modal):
                         draft_session = draft_result.scalars().first()
                     
                         if not draft_session:
-                            raise _EntryAborted
-
-                        # A second, stale menu must not top up or cash out a voucher entry.
-                        if await voucher_service.entered_with_voucher_in(
-                                session, guild_id, self.draft_session_id, user_id):
-                            refusal = voucher_service.CHANGE_REFUSAL
                             raise _EntryAborted
 
                         # The money and the sign-up in ONE commit: charging first
@@ -3299,15 +3290,16 @@ class StakeModal(discord.ui.Modal):
             # answer here rather than inside it, where a Discord round trip
             # would be made holding the write lock. Ahead of the generic
             # handler below, which would report it as an error.
-            if refusal:
-                await interaction.response.send_message(refusal, ephemeral=True)
-            elif not charged["ok"] and charged["deficit"]:
+            if not charged["ok"] and charged["deficit"]:
                 await interaction.response.send_message(
                     f"You need {charged['deficit']} more tix to enter for "
                     f"{max_stake}. Add funds, or enter for less.", ephemeral=True)
             else:
                 await interaction.response.send_message(
                     "Draft session not found.", ephemeral=True)
+        except voucher_service.VoucherChangeRefused as refused:
+            # A stale modal tried to top up a voucher entry; nothing was written.
+            await interaction.response.send_message(str(refused), ephemeral=True)
         except Exception as e:
             # Add detailed error handling to help diagnose the issue
             error_message = f"An error occurred: {str(e)}"
@@ -3599,13 +3591,6 @@ class CombinedStakeSelect(discord.ui.Select):
                             missing = True
                             raise _EntryAborted
 
-                        # A Change Entry panel opened before a voucher entry must not
-                        # top it up or cash it out.
-                        if await voucher_service.entered_with_voucher_in(
-                                session, guild_id, self.draft_session_id, user_id):
-                            refusal = voucher_service.CHANGE_REFUSAL
-                            raise _EntryAborted
-
                         changed = await entry_in(session, guild_id,
                                                  self.draft_session_id,
                                                  user_id, stake_amount)
@@ -3647,6 +3632,9 @@ class CombinedStakeSelect(discord.ui.Select):
                         await session.commit()
         except _EntryAborted:
             pass
+        except voucher_service.VoucherChangeRefused as refused:
+            # A Change Entry panel opened before a voucher entry tried to revise it.
+            refusal = str(refused)
 
         if missing:
             await interaction.response.send_message(

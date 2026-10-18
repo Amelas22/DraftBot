@@ -36,6 +36,14 @@ class VoucherEntryRefused(RuntimeError):
     caller's transaction must roll back the voucher and reserve legs."""
 
 
+class VoucherChangeRefused(RuntimeError):
+    """A voucher entry's stake would have changed. Raised by
+    ``draft_pool_service.entry_in``; the message is the player-facing refusal."""
+
+    def __init__(self, message: str = CHANGE_REFUSAL) -> None:
+        super().__init__(message)
+
+
 def spent_holder(session_id: str) -> str:
     return f"voucher:spent:{session_id}"
 
@@ -191,10 +199,8 @@ async def enter_with_voucher_in(session: Any, guild_id: str, session_id: str,
 
     spent = spent_holder(session_id)
     moves = await wallet_service.movements_in(session, guild_id, spent, player_id, asset=VOUCHER)
-    await wallet_service.transfer_in(
-        session, guild_id, player_id, spent, 1,
-        f"voucher-spend:{session_id}:{player_id}:{moves}", "Draft voucher entry",
-        asset=VOUCHER)
+    # The reserve's 20 tix first, so the pool's funds check passes; the voucher
+    # leg last, so entry_in does not yet see a voucher entry to refuse changing.
     await wallet_service.transfer_in(
         session, guild_id, RESERVE, player_id, VOUCHER_VALUE,
         f"voucher-fund:{session_id}:{player_id}:{moves}", "Draft voucher entry",
@@ -204,6 +210,10 @@ async def enter_with_voucher_in(session: Any, guild_id: str, session_id: str,
     if not charged["ok"]:
         raise VoucherEntryRefused(
             f"voucher entry for {player_id} in {session_id} was refused by the pool")
+    await wallet_service.transfer_in(
+        session, guild_id, player_id, spent, 1,
+        f"voucher-spend:{session_id}:{player_id}:{moves}", "Draft voucher entry",
+        asset=VOUCHER)
     return None
 
 
