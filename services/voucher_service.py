@@ -25,6 +25,17 @@ MINT = "voucher:mint"
 RETIRED = "voucher:retired"
 
 
+# Said wherever a voucher entry's stake would be changed: it pays exactly 20 tix,
+# so there is nothing to raise, lower or top up with the player's own tix.
+CHANGE_REFUSAL = ("You entered with a voucher. To change your entry, cancel your "
+                  "sign-up (your voucher comes back) and join again.")
+
+
+class VoucherEntryRefused(RuntimeError):
+    """The pool refused a voucher entry that passed every voucher check; the
+    caller's transaction must roll back the voucher and reserve legs."""
+
+
 def spent_holder(session_id: str) -> str:
     return f"voucher:spent:{session_id}"
 
@@ -154,6 +165,6 @@ async def enter_with_voucher_in(session: Any, guild_id: str, session_id: str,
     charged = await draft_pool_service.entry_in(
         session, guild_id, session_id, player_id, VOUCHER_VALUE, "joined")
     if not charged["ok"]:
-        raise RuntimeError(
+        raise VoucherEntryRefused(
             f"voucher entry for {player_id} in {session_id} was refused by the pool")
     return None

@@ -181,13 +181,16 @@ async def test_voucher_entry_refuses_donation_tournament_and_min_stake_above_twe
 @pytest.mark.asyncio
 async def test_voucher_entry_refuses_when_off_unheld_or_the_reserve_is_short(test_db):  # noqa: F811
     await seed_session(SID, guild=GUILD, stype="staked", stage=None, sign_ups={})
+    rows = await _rows()
 
     with patch("config.vouchers_enabled", return_value=False):
         async with db_session() as session:
             assert (await vs.enter_with_voucher_in(session, GUILD, SID, PID)
                     == "Draft vouchers aren't available on this server.")
+    assert await _rows() == rows
 
     assert await _enter_direct() == "You don't have a draft voucher."
+    assert await _rows() == rows
 
     await _give_vouchers(1)
     async with db_session() as session:
@@ -249,3 +252,99 @@ async def test_change_entry_is_refused_for_a_voucher_entry(test_db):  # noqa: F8
 
     assert _said(interaction) == ("You entered with a voucher. To change your entry, "
                                   "cancel your sign-up (your voucher comes back) and join again.")
+
+
+CHANGE_REFUSAL = ("You entered with a voucher. To change your entry, cancel your "
+                  "sign-up (your voucher comes back) and join again.")
+
+
+async def _voucher_entered_with_spare_tix():
+    """A voucher entry by a player who also holds 100 tix of their own."""
+    await seed_session(SID, guild=GUILD, stype="staked", stage=None, sign_ups={})
+    await wallet_service.adjust(GUILD, PID, 100, "seed", "t")
+    await _give_vouchers(1)
+    await _enter_through_the_menu()
+    assert await pool.held_by(GUILD, SID, PID) == 20
+    return await _rows()
+
+
+async def _assert_untouched(rows, interaction):
+    assert _said(interaction) == CHANGE_REFUSAL, _said(interaction)
+    assert await _rows() == rows, "a refused stake change wrote rows"
+    assert await pool.pool_balance(GUILD, SID) == 20
+    assert await _bal(PID) == 100
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("amount", [50, 10])
+async def test_a_second_stale_menu_cannot_top_up_or_cash_out_a_voucher_entry(test_db, amount):  # noqa: F811
+    from views import StakeOptionsSelect
+
+    rows = await _voucher_entered_with_spare_tix()
+    chooser = StakeOptionsSelect.__new__(StakeOptionsSelect)
+    chooser.draft_session_id = SID
+    chooser.has_draftmancer_role = False
+    interaction = _interaction()
+    with patch("views.update_draft_message", new=AsyncMock()), \
+         patch("views.library_after_sign_up_soon"):
+        await StakeOptionsSelect.handle_stake_submission(chooser, interaction, amount)
+
+    await _assert_untouched(rows, interaction)
+
+
+@pytest.mark.asyncio
+async def test_the_over_100_modal_cannot_top_up_a_voucher_entry(test_db):  # noqa: F811
+    from views import StakeModal
+
+    rows = await _voucher_entered_with_spare_tix()
+    await wallet_service.adjust(GUILD, PID, 50, "seed", "t")  # enough to pass the funds gate
+    rows += 1
+    modal = StakeModal.__new__(StakeModal)
+    modal.draft_session_id = SID
+    modal.over_100 = True
+    modal.has_draftmancer_role = False
+    modal.user_display_name = "Ada"
+    modal.stake_input = MagicMock(value="150")
+    modal.cap_checkbox = MagicMock(value="yes")
+    interaction = _interaction()
+    with patch("views.update_draft_message", new=AsyncMock()), \
+         patch("views.library_after_sign_up_soon"), \
+         patch("preference_service.update_player_bet_capping_preference", new=AsyncMock()):
+        await StakeModal.callback(modal, interaction)
+
+    assert _said(interaction) == CHANGE_REFUSAL, _said(interaction)
+    assert await _rows() == rows, "a refused stake change wrote rows"
+    assert await pool.pool_balance(GUILD, SID) == 20
+    assert await _bal(PID) == 150
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("amount", [50, 10])
+async def test_a_stale_change_entry_panel_cannot_revise_a_voucher_entry(test_db, amount):  # noqa: F811
+    from views import CombinedStakeSelect
+
+    rows = await _voucher_entered_with_spare_tix()
+    chooser = CombinedStakeSelect.__new__(CombinedStakeSelect)
+    chooser.draft_session_id = SID
+    chooser.current_stake = 0  # opened before the voucher entry
+    interaction = _interaction()
+    with patch("views.update_draft_message", new=AsyncMock()):
+        await CombinedStakeSelect.handle_stake_submission(chooser, interaction, amount)
+
+    await _assert_untouched(rows, interaction)
+
+
+@pytest.mark.asyncio
+async def test_a_pool_refusal_of_a_voucher_entry_rolls_it_all_back(test_db):  # noqa: F811
+    await seed_session(SID, guild=GUILD, stype="staked", stage=None, sign_ups={})
+    await _give_vouchers(1)
+    rows = await _rows()
+
+    with patch("services.draft_pool_service.entry_in",
+               new=AsyncMock(return_value={"ok": False, "deficit": 0})):
+        interaction = await _enter_through_the_menu()
+
+    assert _said(interaction) == ("Your voucher entry couldn't be completed, so nothing "
+                                  "moved. The draft may no longer be taking sign-ups.")
+    assert await _rows() == rows
+    assert await vs.vouchers_held(GUILD, PID) == 1
