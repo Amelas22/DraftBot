@@ -10,9 +10,14 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
+from loguru import logger
+from sqlalchemy import select
+
+import config
+from models.draft_session import DraftSession
 from models.wallet_tx import TIX, VOUCHER
 from database.db_session import db_session
-from services import wallet_service
+from services import draft_pool_service, wallet_service
 
 VOUCHER_VALUE = 20
 RESERVE = "voucher:reserve"
@@ -92,3 +97,63 @@ async def give(guild_id: str, from_player: str, to_player: str, count: int) -> N
     await wallet_service.pay(
         guild_id, from_player, to_player, count, asset=VOUCHER,
         source=f"voucher-give:{uuid.uuid4()}", notes="Draft voucher gift")
+
+
+async def entered_with_voucher_in(session: Any, guild_id: str, session_id: str,
+                                  player_id: str) -> bool:
+    """Whether the player's entry in this draft is a voucher entry.
+
+    True while the spent voucher sits in the draft's spent holder or after it has
+    been retired from there; false once it has been returned to the player."""
+    held = await wallet_service.net_between(
+        session, guild_id, spent_holder(session_id), player_id, asset=VOUCHER)
+    return held > 0
+
+
+async def entered_with_voucher(guild_id: str, session_id: str, player_id: str) -> bool:
+    async with db_session() as session:
+        return await entered_with_voucher_in(session, guild_id, session_id, player_id)
+
+
+async def enter_with_voucher_in(session: Any, guild_id: str, session_id: str,
+                                player_id: str) -> str | None:
+    """Enter the player for 20 tix paid from the reserve. The caller holds ``MONEY_LOCK``.
+
+    Returns None on success, or a player-facing refusal (nothing written). The
+    pot check doubles as the double-click guard: a second call under the lock
+    sees the first entry and refuses."""
+    if not config.vouchers_enabled(guild_id):
+        return "Draft vouchers aren't available on this server."
+    draft = (await session.execute(
+        select(DraftSession).where(DraftSession.session_id == session_id))).scalars().first()
+    if draft is None or draft.session_type != "staked" or draft.donation:
+        return "Vouchers can only be used for staked drafts."
+    if (draft.min_stake or 10) > VOUCHER_VALUE:
+        return "This draft's minimum entry is above 20 tix, so a voucher can't cover it."
+    if await wallet_service.balance_in(session, guild_id, player_id, asset=VOUCHER) < 1:
+        return "You don't have a draft voucher."
+    if await draft_pool_service._held_in(session, guild_id, session_id, player_id) > 0:
+        return ("You're already entered in this draft. "
+                "Cancel your sign-up first to use a voucher.")
+    reserve = await wallet_service.balance_in(session, guild_id, RESERVE, asset=TIX)
+    if reserve < VOUCHER_VALUE:
+        logger.error(f"voucher reserve in guild {guild_id} holds {reserve} tix, "
+                     f"short of one {VOUCHER_VALUE} tix entry for {player_id} in {session_id}")
+        return "Vouchers can't be used right now. Please let an admin know."
+
+    spent = spent_holder(session_id)
+    moves = await wallet_service.movements_in(session, guild_id, spent, player_id, asset=VOUCHER)
+    await wallet_service.transfer_in(
+        session, guild_id, player_id, spent, 1,
+        f"voucher-spend:{session_id}:{player_id}:{moves}", "Draft voucher entry",
+        asset=VOUCHER)
+    await wallet_service.transfer_in(
+        session, guild_id, RESERVE, player_id, VOUCHER_VALUE,
+        f"voucher-fund:{session_id}:{player_id}:{moves}", "Draft voucher entry",
+        asset=TIX)
+    charged = await draft_pool_service.entry_in(
+        session, guild_id, session_id, player_id, VOUCHER_VALUE, "joined")
+    if not charged["ok"]:
+        raise RuntimeError(
+            f"voucher entry for {player_id} in {session_id} was refused by the pool")
+    return None
