@@ -25,7 +25,7 @@ from sqlalchemy.sql.elements import ColumnElement
 from database.db_session import db_session
 from models.draft_session import DraftSession
 from models.tournament import Tournament
-from models.wallet_tx import TIX, WalletTx
+from models.wallet_tx import TIX, VOUCHER, WalletTx
 from services.wallet_service import is_system_account
 
 DRAFT = "draft"
@@ -33,6 +33,7 @@ TOURNAMENT = "tournament"
 DEBT = "debt"
 MTGO = "mtgo"
 LIBRARY = "library"
+VOUCHERS = "vouchers"
 TRANSFER = "transfer"
 ADJUST = "adjust"
 
@@ -68,6 +69,14 @@ KNOWN_PREFIXES: tuple[tuple[str, str, str, int | None, int | None], ...] = (
     ("return:",         MTGO,       "returned", None, None),
     ("loan-hold:",      LIBRARY,    "deposit",  0,    None),
     ("loan-back:",      LIBRARY,    "returned", 0,    None),
+    ("voucher-give:",   VOUCHERS,   "give",     None, None),
+    ("voucher-mint:",   VOUCHERS,   "mint",     None, None),
+    ("voucher-spend:",  VOUCHERS,   "spend",    None, None),
+    ("voucher-fund:",   VOUCHERS,   "fund",     None, None),
+    ("voucher-sweep:",  VOUCHERS,   "sweep",    None, None),
+    ("voucher-return:", VOUCHERS,   "return",   None, None),
+    ("voucher-retire:", VOUCHERS,   "retire",   None, None),
+    ("voucher-free:",   VOUCHERS,   "free",     None, None),
 )
 
 # Exact-match sources. Not prefixes: 'serve' and 'admin' are whole keys.
@@ -83,7 +92,7 @@ _EXACT = {
 # with classify() about which kinds they are.
 _MTGO_BOUNDARY_KINDS = ("deposit", "withdraw")
 
-CATEGORIES = (DRAFT, TOURNAMENT, DEBT, MTGO, LIBRARY, TRANSFER)
+CATEGORIES = (DRAFT, TOURNAMENT, DEBT, MTGO, LIBRARY, VOUCHERS, TRANSFER)
 
 # The category a prefix belongs to, read straight off the classifier's table so
 # the filter cannot drift from what the lines say. A prefix added there is
@@ -241,6 +250,14 @@ _EVENT_TEXT = {
     (MTGO, "returned"): "Withdrawal returned",
     (LIBRARY, "deposit"): "Card library deposit",
     (LIBRARY, "returned"): "Card library deposit returned",
+    (VOUCHERS, "give"): "Voucher gift",
+    (VOUCHERS, "mint"): "Vouchers minted",
+    (VOUCHERS, "spend"): "Voucher entry",
+    (VOUCHERS, "fund"): "Voucher entry, paid by DraftBot",
+    (VOUCHERS, "sweep"): "Returned to the voucher reserve",
+    (VOUCHERS, "return"): "Voucher returned",
+    (VOUCHERS, "retire"): "Voucher used",
+    (VOUCHERS, "free"): "Free voucher reserve returned",
     (ADJUST, "adjust"): "Adjustment",
 }
 
@@ -310,7 +327,10 @@ def line(tx: WalletTx, origin: Origin, labels: dict[tuple[str, str], str]) -> st
     timezone and needs no formatting decision from us.
     """
     sign = "+" if tx.amount >= 0 else "−"
-    rendered = f"`{sign}{abs(tx.amount)}` {_what(tx, origin, labels)}"
+    count = abs(tx.amount)
+    # A voucher row counts vouchers, not tix; a tix line carries no unit.
+    unit = (f" voucher{'' if count == 1 else 's'}" if tx.asset == VOUCHER else "")
+    rendered = f"`{sign}{count}{unit}` {_what(tx, origin, labels)}"
     when = tx.created_at
     return f"{rendered} — <t:{int(when.timestamp())}:R>" if when else rendered
 
@@ -385,7 +405,7 @@ async def get_history_page(guild_id: str, player_id: str, *,
     """
     size = max(1, size)   # a page of nothing is a division by zero, not a page
     where = (WalletTx.guild_id == guild_id, WalletTx.player_id == player_id,
-             WalletTx.asset == TIX, *category_conditions(category))
+             WalletTx.asset.in_((TIX, VOUCHER)), *category_conditions(category))
     async with db_session() as session:
         total = int((await session.execute(
             select(func.count()).select_from(WalletTx).where(*where))).scalar() or 0)
