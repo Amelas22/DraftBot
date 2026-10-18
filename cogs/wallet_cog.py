@@ -445,7 +445,7 @@ class WalletCommands(commands.Cog):
 
 
 def _vouchers(n: int) -> str:
-    return f"{n} draft voucher" if n == 1 else f"{n} draft vouchers"
+    return f"{n} {voucher_service.voucher_noun(n)}"
 
 
 def setup(bot):

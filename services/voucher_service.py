@@ -44,6 +44,11 @@ class VoucherChangeRefused(RuntimeError):
         super().__init__(message)
 
 
+def voucher_noun(n: int) -> str:
+    """"draft voucher" or "draft vouchers", for a count of ``n``."""
+    return "draft voucher" if n == 1 else "draft vouchers"
+
+
 def spent_holder(session_id: str) -> str:
     return f"voucher:spent:{session_id}"
 
