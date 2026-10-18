@@ -101,7 +101,7 @@ async def _in_play_in(session: Any, guild_id: str) -> int:
             # Settled: its vouchers are retired, and a loser's entry still nets
             # into the emptied pot, so it must not count as held.
             continue
-        total += await draft_pool_service._held_in(session, guild_id, session_id, player_id)
+        total += await draft_pool_service.held_in(session, guild_id, session_id, player_id)
     return total
 
 
@@ -195,7 +195,7 @@ async def enter_with_voucher_in(session: Any, guild_id: str, session_id: str,
         return "This draft's minimum entry is above 20 tix, so a voucher can't cover it."
     if await wallet_service.balance_in(session, guild_id, player_id, asset=VOUCHER) < 1:
         return "You don't have a draft voucher."
-    if await draft_pool_service._held_in(session, guild_id, session_id, player_id) > 0:
+    if await draft_pool_service.held_in(session, guild_id, session_id, player_id) > 0:
         return ("You're already entered in this draft. "
                 "Cancel your sign-up first to use a voucher.")
     if await wallet_service.balance_in(session, guild_id, player_id, asset=TIX) < 0:
@@ -243,7 +243,7 @@ async def after_refund_in(session: Any, guild_id: str, session_id: str, player_i
     await wallet_service.transfer_in(
         session, guild_id, player_id, RESERVE, refunded, f"voucher-sweep:{refund_source}",
         "Draft voucher entry returned", asset=TIX)
-    if await draft_pool_service._held_in(session, guild_id, session_id, player_id) > 0:
+    if await draft_pool_service.held_in(session, guild_id, session_id, player_id) > 0:
         return
     spent = spent_holder(session_id)
     if await wallet_service.balance_in(session, guild_id, spent, asset=VOUCHER) <= 0:

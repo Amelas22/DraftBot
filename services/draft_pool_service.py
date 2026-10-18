@@ -114,6 +114,9 @@ async def _held_in(session: AsyncSession, guild_id: str, session_id: str,
     return max(net, 0)
 
 
+held_in = _held_in
+
+
 async def held_by(guild_id: str, session_id: str, player_id: str) -> int:
     """What one player currently has at risk in this draft."""
     async with db_session() as session:
