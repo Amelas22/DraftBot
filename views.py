@@ -727,8 +727,12 @@ class PersistentView(discord.ui.View):
             async with wallet_service.MONEY_LOCK:
                 async with AsyncSessionLocal() as session:
                     async with session.begin():
+                        had_voucher = await voucher_service.entered_with_voucher_in(
+                            session, guild_id, self.draft_session_id, user_id)
                         await entry_in(session, guild_id, self.draft_session_id,
                                        user_id, 0, "left")
+                        voucher_back = had_voucher and not await voucher_service.entered_with_voucher_in(
+                            session, guild_id, self.draft_session_id, user_id)
                         # Directly update the 'sign_ups' and 'draftmancer_role_users' of the draft session
                         await session.execute(
                             update(DraftSession).
@@ -752,6 +756,8 @@ class PersistentView(discord.ui.View):
 
             
             cancel_message = "Your sign up has been canceled!"
+            if voucher_back:
+                cancel_message += " Your draft voucher is back in your wallet."
             await interaction.response.send_message(cancel_message, ephemeral=True)
 
             # After committing, re-fetch the draft session to work with updated data
@@ -3071,11 +3077,16 @@ class StakeOptionsSelect(discord.ui.Select):
         # Said here because the dropdown never asks: the cap is on by default and
         # only the over-100 modal offers the choice, so for most players this is
         # the one place they learn it applies to them.
-        signup_message += ("\nYour entry is **capped** to your share of your team (🧢) — "
-                           "use **Change Entry / Settings** to turn it off."
-                           if is_capped else
-                           "\nYour entry is **uncapped** (🏎️): you keep it all, however "
-                           "your team is made up.")
+        if voucher:
+            # Change Entry refuses a voucher entry, so there is nowhere to point.
+            if is_capped:
+                signup_message += "\nYour entry is **capped** to your share of your team."
+        else:
+            signup_message += ("\nYour entry is **capped** to your share of your team (🧢) — "
+                               "use **Change Entry / Settings** to turn it off."
+                               if is_capped else
+                               "\nYour entry is **uncapped** (🏎️): you keep it all, however "
+                               "your team is made up.")
             
         signup_message += "\n\nYou are now signed up! Your Draftmancer link will be provided once teams are created."
 

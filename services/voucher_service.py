@@ -181,6 +181,8 @@ async def enter_with_voucher_in(session: Any, guild_id: str, session_id: str,
     if await draft_pool_service._held_in(session, guild_id, session_id, player_id) > 0:
         return ("You're already entered in this draft. "
                 "Cancel your sign-up first to use a voucher.")
+    if await wallet_service.balance_in(session, guild_id, player_id, asset=TIX) < 0:
+        return "Your wallet is below zero, so a voucher can't be used until that's settled."
     reserve = await wallet_service.balance_in(session, guild_id, RESERVE, asset=TIX)
     if reserve < VOUCHER_VALUE:
         logger.error(f"voucher reserve in guild {guild_id} holds {reserve} tix, "
@@ -225,6 +227,8 @@ async def after_refund_in(session: Any, guild_id: str, session_id: str, player_i
     if await draft_pool_service._held_in(session, guild_id, session_id, player_id) > 0:
         return
     spent = spent_holder(session_id)
+    if await wallet_service.balance_in(session, guild_id, spent, asset=VOUCHER) <= 0:
+        return  # already retired: there is no voucher left to hand back
     moves = await wallet_service.movements_in(session, guild_id, spent, player_id, asset=VOUCHER)
     await wallet_service.transfer_in(
         session, guild_id, spent, player_id, 1,

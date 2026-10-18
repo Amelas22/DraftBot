@@ -348,3 +348,122 @@ async def test_a_pool_refusal_of_a_voucher_entry_rolls_it_all_back(test_db):  # 
                                   "moved. The draft may no longer be taking sign-ups.")
     assert await _rows() == rows
     assert await vs.vouchers_held(GUILD, PID) == 1
+
+
+async def _enter_ordinary_through_the_menu(is_capped):
+    from views import StakeOptionsSelect
+
+    chooser = StakeOptionsSelect.__new__(StakeOptionsSelect)
+    chooser.draft_session_id = SID
+    chooser.has_draftmancer_role = False
+    interaction = _interaction()
+    with patch("config.vouchers_enabled", return_value=True), \
+         patch("views.update_draft_message", new=AsyncMock()), \
+         patch("views.library_after_sign_up_soon"):
+        await StakeOptionsSelect.handle_stake_submission(
+            chooser, interaction, 20, is_capped=is_capped)
+    return interaction
+
+
+@pytest.mark.asyncio
+async def test_the_voucher_confirmation_points_nowhere_but_an_ordinary_one_keeps_its_pointer(test_db):  # noqa: F811
+    await seed_session(SID, guild=GUILD, stype="staked", stage=None, sign_ups={})
+    await _give_vouchers(1)
+    said = _said(await _enter_through_the_menu())
+    assert "Entered with a voucher" in said
+    assert "Your entry is **capped** to your share of your team." in said
+    assert "Change Entry" not in said
+
+    await seed_session("s2", guild=GUILD, stype="staked", stage=None, sign_ups={})
+    await wallet_service.adjust(GUILD, "22222", 100, "seed", "t")
+    from views import StakeOptionsSelect
+    chooser = StakeOptionsSelect.__new__(StakeOptionsSelect)
+    chooser.draft_session_id = "s2"
+    chooser.has_draftmancer_role = False
+    interaction = _interaction(22222)
+    with patch("config.vouchers_enabled", return_value=True), \
+         patch("views.update_draft_message", new=AsyncMock()), \
+         patch("views.library_after_sign_up_soon"):
+        await StakeOptionsSelect.handle_stake_submission(chooser, interaction, 20, is_capped=True)
+    ordinary = _said(interaction)
+    assert "use **Change Entry / Settings** to turn it off." in ordinary, ordinary
+
+
+@pytest.mark.asyncio
+async def test_an_uncapped_voucher_confirmation_says_nothing_about_the_cap(test_db):  # noqa: F811
+    from views import StakeOptionsSelect
+
+    await seed_session(SID, guild=GUILD, stype="staked", stage=None, sign_ups={})
+    await _give_vouchers(1)
+    chooser = StakeOptionsSelect.__new__(StakeOptionsSelect)
+    chooser.draft_session_id = SID
+    chooser.has_draftmancer_role = False
+    interaction = _interaction()
+    with patch("config.vouchers_enabled", return_value=True), \
+         patch("views.update_draft_message", new=AsyncMock()), \
+         patch("views.library_after_sign_up_soon"):
+        await StakeOptionsSelect.handle_stake_submission(
+            chooser, interaction, 20, is_capped=False, voucher=True)
+    said = _said(interaction)
+    assert "Entered with a voucher" in said
+    assert "capped" not in said and "Change Entry" not in said
+
+
+@pytest.mark.asyncio
+async def test_a_negative_wallet_is_refused_up_front_with_nothing_written(test_db):  # noqa: F811
+    await seed_session(SID, guild=GUILD, stype="staked", stage=None, sign_ups={})
+    await _give_vouchers(1)
+    await wallet_service.adjust(GUILD, PID, -5, "seed", "t")
+    rows = await _rows()
+    assert (await _enter_direct()
+            == "Your wallet is below zero, so a voucher can't be used until that's settled.")
+    assert await _rows() == rows
+
+
+@pytest.mark.asyncio
+async def test_a_retired_voucher_is_not_handed_back_by_a_later_refund(test_db):  # noqa: F811
+    await seed_session(SID, guild=GUILD, stype="staked", stage=None, sign_ups={})
+    await _give_vouchers(1)
+    assert await _enter_direct() is None
+    async with db_session() as session:
+        await vs.retire_in(session, GUILD, SID)
+        await session.commit()
+    # The pot is refunded after the voucher was retired: the sweep still runs,
+    # but there is no voucher left to hand back.
+    async with wallet_service.MONEY_LOCK:
+        async with db_session() as session:
+            async with session.begin():
+                await pool.entry_in(session, GUILD, SID, PID, 0, "left")
+    async with db_session() as session:
+        assert await wallet_service.balance_in(session, GUILD, PID, asset=vs.VOUCHER) == 0
+        assert await wallet_service.balance_in(session, GUILD, vs.RETIRED, asset=vs.VOUCHER) == 1
+        assert await wallet_service.balance_in(session, GUILD, PID, asset=TIX) == 0
+        assert await wallet_service.balance_in(session, GUILD, vs.RESERVE, asset=TIX) == 20
+
+
+async def _cancel(user_id=11111):
+    from views import PersistentView
+
+    view = PersistentView.__new__(PersistentView)
+    view.draft_session_id = SID
+    interaction = _interaction(user_id)
+    with patch("views.update_draft_message", new=AsyncMock()), \
+         patch("views.SignUpHistory.record_signup_event", new=AsyncMock()):
+        await PersistentView.cancel_sign_up_callback(view, interaction, MagicMock())
+    return interaction
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_voucher_entry_says_the_voucher_is_back(test_db):  # noqa: F811
+    await seed_session(SID, guild=GUILD, stype="staked", stage=None, sign_ups={PID: "Ada"})
+    await _give_vouchers(1)
+    assert await _enter_direct() is None
+    said = _said(await _cancel())
+    assert said == "Your sign up has been canceled! Your draft voucher is back in your wallet."
+    assert await vs.vouchers_held(GUILD, PID) == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelling_an_ordinary_entry_does_not_mention_a_voucher(test_db):  # noqa: F811
+    await seed_session(SID, guild=GUILD, stype="staked", stage=None, sign_ups={PID: "Ada"})
+    assert _said(await _cancel()) == "Your sign up has been canceled!"
