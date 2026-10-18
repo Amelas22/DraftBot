@@ -792,7 +792,7 @@ async def settle_pool(guild_id: str, session_id: str,
 
     paid = await _money_transaction(pay)
 
-    logger.info(f"draft pool {session_id}: paid {sum(paid.values())} to {len(paid)} winners")
+    logger.info(f"draft pool {session_id}: credited {sum(paid.values())} tix (kept) to {len(paid)} winners")
     await check_pool(guild_id, session_id)
     return {"paid": paid}
 
@@ -974,15 +974,23 @@ async def format_outcomes(guild_id: str, session_id: str, sign_ups: dict[str, st
     if not ledger:
         return [], 0
 
+    # Deferred: voucher_service imports this module.
+    from services import voucher_service
     winners = set(winning_team or [])
     lines: list[str] = []
     pot = 0
+    async with db_session() as session:
+        voucher_entries = {
+            player_id for player_id in ledger
+            if await voucher_service.entered_with_voucher_in(
+                session, guild_id, session_id, player_id)}
     for player_id, net in sorted(ledger.items(), key=itemgetter(1)):
         name = sign_ups.get(player_id, "Unknown")
+        suffix = " (entered with a voucher)" if player_id in voucher_entries else ""
         if player_id in winners:
             # net is negative for a paid winner: they put in c and took 2c.
-            lines.append(f"**{name}** won {-net} tix")
+            lines.append(f"**{name}** won {-net} tix{suffix}")
             pot += -net
         elif net > 0:
-            lines.append(f"**{name}** lost {net} tix")
+            lines.append(f"**{name}** lost {net} tix{suffix}")
     return lines, pot

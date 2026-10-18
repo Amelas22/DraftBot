@@ -55,7 +55,8 @@ async def announce_refunds(session_id: Any, *,
                            refunded: Mapping[str, int],
                            capped: Mapping[str, int],
                            held: Mapping[str, int],
-                           friendly_id: Optional[str] = None) -> int:
+                           friendly_id: Optional[str] = None,
+                           guild_id: Optional[str] = None) -> int:
     """DM everyone who got something back. Returns how many were told.
 
     One message per player, not per reason: capping runs before levelling, so a
@@ -66,6 +67,7 @@ async def announce_refunds(session_id: Any, *,
     borrower with closed DMs must not turn a settled pool into an error.
     """
     import notification_service
+    from services import voucher_service
     from bot_registry import get_bot
 
     bot = get_bot()
@@ -78,15 +80,24 @@ async def announce_refunds(session_id: Any, *,
         total = int(refunded.get(player_id, 0) or 0) + by_cap
         if total <= 0:
             continue
+        if guild_id is not None and await voucher_service.entered_with_voucher(
+                str(guild_id), str(session_id), str(player_id)):
+            # The refund went to DraftBot's voucher reserve, not to the player.
+            which = f" in **{friendly_id}**" if friendly_id else ""
+            text = (f"🎟️ Your voucher entry{which} is playing for "
+                    f"**{int(held.get(player_id, 0) or 0)} tix**. The other {total} "
+                    "went back to DraftBot's voucher reserve, so nothing changes "
+                    "in your wallet.")
+        else:
+            text = refund_message(total, int(held.get(player_id, 0) or 0), by_cap,
+                                  friendly_id)
         # No try/except, for the reason library_reminders._dm documents: send_dm
         # catches Forbidden, HTTPException and anything else itself and returns
         # False. A guard here would catch nothing and would state a contract
         # opposite to the one that module states in writing.
         sent = await notification_service.send_dm(
             bot, player_id,
-            refund_message(total, int(held.get(player_id, 0) or 0), by_cap,
-                           friendly_id),
-            label=f"entry refund for {player_id}")
+            text, label=f"entry refund for {player_id}")
         told += bool(sent)
     if told:
         logger.info("entry notices: told {} player(s) what came back on {}",

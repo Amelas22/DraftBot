@@ -370,3 +370,70 @@ async def test_ordinary_entries_are_untouched(test_db):  # noqa: F811
     assert {p: await _bal(p) for p in (V, P, P2, V2)} == {V: 30, P: 30, P2: 0, V2: 0}
     assert await _voucher_sources() == []
     assert await _bal(vs.RESERVE) == 0
+
+
+# --- the words -------------------------------------------------------------
+
+async def _played_out(winners):
+    await _seed([V, P2], [P])
+    await _mint(1)
+    await _fund(P, 20)
+    await _fund(P2, 20)
+    await _enter(V)
+    await pool.set_entry(GUILD, SID, P, 20)
+    await pool.set_entry(GUILD, SID, P2, 20)
+    await pool.match_pool(GUILD, SID, [V, P2], [P])
+    await _set_stage("teams")
+    await pool.settle_pool(GUILD, SID, winners)
+
+
+@pytest.mark.asyncio
+async def test_outcome_line_says_entered_with_a_voucher(test_db):  # noqa: F811
+    await _seed([V], [P])
+    await _mint(1)
+    await _fund(P, 20)
+    await _enter(V)
+    await pool.set_entry(GUILD, SID, P, 20)
+    await pool.match_pool(GUILD, SID, [V], [P])
+    await _set_stage("teams")
+    await pool.settle_pool(GUILD, SID, [V])
+
+    lines, _ = await pool.format_outcomes(GUILD, SID, {V: "Vee", P: "Pea"}, [V])
+    assert "**Vee** won 20 tix (entered with a voucher)" in lines
+    assert "**Pea** lost 20 tix" in lines, "an ordinary loser's line is unchanged"
+
+
+@pytest.mark.asyncio
+async def test_voucher_loser_line_and_ordinary_lines_are_unchanged(test_db):  # noqa: F811
+    await _played_out([P])
+    lines, _ = await pool.format_outcomes(
+        GUILD, SID, {V: "Vee", P: "Pea", P2: "Pea2"}, [P])
+    assert "**Vee** lost 10 tix (entered with a voucher)" in lines
+    assert "**Pea2** lost 10 tix" in lines
+    assert "**Pea** won 20 tix" in lines
+
+
+@pytest.mark.asyncio
+async def test_levelling_refund_dm_for_a_voucher_entry_says_where_it_went(test_db):  # noqa: F811
+    import notification_service as ns
+    import bot_registry
+    from services.entry_notices import announce_refunds
+
+    await _seed([V], [P])
+    await _mint(1)
+    await _enter(V)
+    sent = []
+
+    async def rec(bot, user_id, message, label=None, view=None):
+        sent.append((str(user_id), message))
+        return True
+
+    with patch.object(bot_registry, "get_bot", lambda: object()), \
+            patch.object(ns, "send_dm", rec):
+        await announce_refunds(SID, guild_id=GUILD, friendly_id="fid",
+                               refunded={V: 10, P: 10}, capped={}, held={V: 10, P: 10})
+    by = dict(sent)
+    assert by[V] == ("🎟️ Your voucher entry in **fid** is playing for **10 tix**. "
+                     "The other 10 went back to DraftBot's voucher reserve, so "
+                     "nothing changes in your wallet.")
+    assert "came back from your entry" in by[P], "an ordinary player's DM is unchanged"
