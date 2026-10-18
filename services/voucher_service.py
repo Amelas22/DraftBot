@@ -11,11 +11,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 import config
 from models.draft_session import DraftSession
-from models.wallet_tx import TIX, VOUCHER
+from models.wallet_tx import TIX, VOUCHER, WalletTx
 from database.db_session import db_session
 from services import draft_pool_service, wallet_service
 
@@ -42,10 +42,18 @@ def spent_holder(session_id: str) -> str:
 
 @dataclass(frozen=True)
 class Backing:
+    """``free = reserve + in_play - VOUCHER_VALUE * outstanding``, and ``ok`` is ``free >= 0``.
+
+    ``in_play`` is the tix that voucher entries still hold in their open pots: a
+    voucher spent on a draft that has not settled is still outstanding, but its 20
+    tix sit in the pot rather than in the reserve, and whatever the pot hands back
+    is swept to the reserve. It never exceeds 20 per voucher in a draft, so
+    ``free <= reserve`` always holds."""
     outstanding: int
     reserve: int
     free: int
     ok: bool
+    in_play: int = 0
 
 
 async def vouchers_held(guild_id: str, player_id: str) -> int:
@@ -58,8 +66,35 @@ async def backing_in(session: Any, guild_id: str) -> Backing:
     retired = await wallet_service.balance_in(session, guild_id, RETIRED, asset=VOUCHER)
     outstanding = -(minted + retired)
     reserve = await wallet_service.balance_in(session, guild_id, RESERVE, asset=TIX)
-    free = reserve - VOUCHER_VALUE * outstanding
-    return Backing(outstanding, reserve, free, free >= 0)
+    in_play = await _in_play_in(session, guild_id)
+    free = reserve + in_play - VOUCHER_VALUE * outstanding
+    return Backing(outstanding, reserve, free, free >= 0, in_play)
+
+
+_SPENT_PREFIX = spent_holder("")
+
+
+async def _in_play_in(session: Any, guild_id: str) -> int:
+    """Tix that voucher entries still hold in the pots of unsettled drafts.
+
+    A draft's spent holder keeps a positive balance until settlement retires it;
+    each counterparty with a positive net into it entered with a voucher that is
+    still spent (a returned voucher nets to zero)."""
+    spent_rows = (await session.execute(
+        select(WalletTx.player_id, WalletTx.counterparty_id)
+        .where(WalletTx.guild_id == guild_id, WalletTx.asset == VOUCHER,
+               WalletTx.player_id.like(f"{_SPENT_PREFIX}%"))
+        .group_by(WalletTx.player_id, WalletTx.counterparty_id)
+        .having(func.sum(WalletTx.amount) > 0))).all()
+    total = 0
+    for holder, player_id in spent_rows:
+        session_id = holder[len(_SPENT_PREFIX):]
+        if await wallet_service.balance_in(session, guild_id, holder, asset=VOUCHER) <= 0:
+            # Settled: its vouchers are retired, and a loser's entry still nets
+            # into the emptied pot, so it must not count as held.
+            continue
+        total += await draft_pool_service._held_in(session, guild_id, session_id, player_id)
+    return total
 
 
 async def backing(guild_id: str) -> Backing:

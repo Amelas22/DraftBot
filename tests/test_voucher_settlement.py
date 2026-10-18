@@ -80,10 +80,12 @@ async def _voucher_sources():
 
 
 async def _same_total(work):
-    """Run one step and pin that it neither created nor destroyed tix."""
+    """Run one step and pin that it neither created nor destroyed tix, and that the
+    vouchers are still fully backed after it -- mid-draft as much as at rest."""
     before = await wallet_service.total_wallets(asset=TIX)
     result = await work
     assert await wallet_service.total_wallets(asset=TIX) == before, "a voucher leg moved the tix total"
+    await _backed()
     return result
 
 
@@ -116,7 +118,7 @@ async def test_voucher_winner_keeps_the_match_and_the_reserve_gets_its_share_bac
     await _mint(1)
     await _fund(P, 20)
     await _enter(V)
-    await pool.set_entry(GUILD, SID, P, 20)
+    await _same_total(pool.set_entry(GUILD, SID, P, 20))
     await _same_total(pool.match_pool(GUILD, SID, [V], [P]))
     await _set_stage("teams")
 
@@ -140,8 +142,8 @@ async def test_voucher_loser_pays_nothing_and_the_voucher_is_retired(test_db):  
     await _mint(1)
     await _fund(P, 20)
     await _enter(V)
-    await pool.set_entry(GUILD, SID, P, 20)
-    await pool.match_pool(GUILD, SID, [V], [P])
+    await _same_total(pool.set_entry(GUILD, SID, P, 20))
+    await _same_total(pool.match_pool(GUILD, SID, [V], [P]))
     await _set_stage("teams")
     assert (await vs.backing(GUILD)).outstanding == 1
 
@@ -166,10 +168,12 @@ async def test_partial_levelling_then_loss_and_then_win_keep_the_backing_exact(t
     await _mint(1)
     for player, amount in ((P, 20), (P2, 10), (V2, 10)):
         await _fund(player, amount)
+    assert await vs.backing(GUILD) == vs.Backing(1, 20, 0, True, 0)
     await _enter(V)
-    await pool.set_entry(GUILD, SID, P, 20)
-    await pool.set_entry(GUILD, SID, P2, 10)
-    await pool.set_entry(GUILD, SID, V2, 10)
+    assert await vs.backing(GUILD) == vs.Backing(1, 0, 0, True, 20), "the 20 is in play, not gone"
+    await _same_total(pool.set_entry(GUILD, SID, P, 20))
+    await _same_total(pool.set_entry(GUILD, SID, P2, 10))
+    await _same_total(pool.set_entry(GUILD, SID, V2, 10))
 
     levelled = await _same_total(pool.match_pool(GUILD, SID, team_a, team_b))
     await _set_stage("teams")
@@ -181,11 +185,9 @@ async def test_partial_levelling_then_loss_and_then_win_keep_the_backing_exact(t
     assert await _bal(vs.spent_holder(SID), VOUCHER) == 1, "still entered, so still spent"
     assert await _with_voucher(V)
     assert len(await _legs(f"voucher-sweep:draft-refund:unmatched:{SID}:{V}:1")) == 2
-    # In play: the reserve plus the voucher money still at risk in the pot is
-    # exactly what the outstanding voucher needs.
-    mid = await vs.backing(GUILD)
-    assert mid.outstanding == 1
-    assert mid.reserve + await pool.held_by(GUILD, SID, V) == vs.VOUCHER_VALUE * mid.outstanding
+    # The reserve plus the voucher money still at risk in the pot is exactly what
+    # the outstanding voucher needs.
+    assert await vs.backing(GUILD) == vs.Backing(1, 10, 0, True, 10)
 
     result = await _same_total(pool.settle_pool(GUILD, SID, team_a if voucher_wins else team_b))
 
@@ -198,9 +200,8 @@ async def test_partial_levelling_then_loss_and_then_win_keep_the_backing_exact(t
         assert await _bal(V) == 0
         assert await _bal(vs.RESERVE) == 10
     assert await _bal(vs.RETIRED, VOUCHER) == 1
-    backing = await _backed()
-    assert backing.outstanding == 0
-    assert backing.free == (20 if voucher_wins else 10)
+    free = 20 if voucher_wins else 10
+    assert await vs.backing(GUILD) == vs.Backing(0, free, free, True, 0)
 
 
 @pytest.mark.asyncio
@@ -212,8 +213,8 @@ async def test_voucher_winner_with_a_debt_only_their_kept_share_reaches_on_inflo
     await _mint(1)
     await _fund(P, 20)
     await _enter(V)
-    await pool.set_entry(GUILD, SID, P, 20)
-    await pool.match_pool(GUILD, SID, [V], [P])
+    await _same_total(pool.set_entry(GUILD, SID, P, 20))
+    await _same_total(pool.match_pool(GUILD, SID, [V], [P]))
     await _set_stage("teams")
     await create_ledger_entries(guild_id=GUILD, debtor_id=V, creditor_id=P,
                                 amount=30, source_type="draft", source_id="older-draft")
@@ -225,7 +226,7 @@ async def test_voucher_winner_with_a_debt_only_their_kept_share_reaches_on_inflo
         seen.append((player_id, credited))
         return await real_on_inflow(guild_id, player_id, notifier, credited, *rest, **kw)
 
-    result = await pool.settle_pool(GUILD, SID, [V])
+    result = await _same_total(pool.settle_pool(GUILD, SID, [V]))
     with patch.object(resolution, "on_inflow", spy), \
          patch("bot_registry.get_bot", return_value=MagicMock()), \
          patch("notification_service.send_dm", AsyncMock(return_value=True)):
@@ -244,12 +245,12 @@ async def test_settle_twice_retires_once_and_sweeps_once(test_db):  # noqa: F811
     await _mint(1)
     await _fund(P, 20)
     await _enter(V)
-    await pool.set_entry(GUILD, SID, P, 20)
-    await pool.match_pool(GUILD, SID, [V], [P])
+    await _same_total(pool.set_entry(GUILD, SID, P, 20))
+    await _same_total(pool.match_pool(GUILD, SID, [V], [P]))
     await _set_stage("teams")
 
-    first = await pool.settle_pool(GUILD, SID, [V])
-    second = await pool.settle_pool(GUILD, SID, [V])
+    first = await _same_total(pool.settle_pool(GUILD, SID, [V]))
+    second = await _same_total(pool.settle_pool(GUILD, SID, [V]))
     async with wallet_service.MONEY_LOCK:
         async with db_session() as session:
             again = await vs.retire_in(session, GUILD, SID)
@@ -301,8 +302,8 @@ async def test_join_leave_rejoin_with_vouchers_keeps_sources_distinct(test_db): 
     await _enter(V)
     await _same_total(pool.set_entry(GUILD, SID, V, 0, "left"))
     # A third entry with the player's own tix is ordinary: no voucher leg follows it.
-    await pool.set_entry(GUILD, SID, V, 30)
-    await pool.set_entry(GUILD, SID, V, 0, "left")
+    await _same_total(pool.set_entry(GUILD, SID, V, 30))
+    await _same_total(pool.set_entry(GUILD, SID, V, 0, "left"))
 
     assert await _voucher_sources() == sorted([
         f"voucher-fund:{SID}:{V}:0",
@@ -327,8 +328,8 @@ async def test_draw_and_cancel_with_delete_draft_return_the_voucher(test_db, how
     await _mint(1)
     await _fund(P, 20)
     await _enter(V)
-    await pool.set_entry(GUILD, SID, P, 20)
-    await pool.match_pool(GUILD, SID, [V], [P])
+    await _same_total(pool.set_entry(GUILD, SID, P, 20))
+    await _same_total(pool.match_pool(GUILD, SID, [V], [P]))
     await _set_stage("teams")
 
     if how == "draw":
