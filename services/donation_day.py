@@ -195,7 +195,8 @@ async def gather_credits(session: AsyncSession, guild_id: str, bot_id: str,
             select(WalletTx.id, WalletTx.counterparty_id, WalletTx.amount, WalletTx.created_at,
                    WalletTx.source)
             .where(WalletTx.guild_id == guild_id, WalletTx.player_id == bot_id,
-                   WalletTx.asset == TIX, WalletTx.kind == "receive", WalletTx.created_at >= since))).all():
+                   WalletTx.asset == TIX, WalletTx.kind == "receive",
+                   WalletTx.created_at >= since))).all():
         if (source or "").startswith("debt:") or not payer or is_system_account(payer):
             continue
         credits.append(Credit(payer, int(amount), at, "paid", key=f"gift:{tx_id}",

@@ -27,7 +27,8 @@ holder (see SYSTEM_IN_FLIGHT). While the trade is open those tix belong to that 
 so they're unspendable by the player without any special-casing in the balance query.
 Success books the boundary debit against in-flight; failure transfers them back.
 
-Reconciliation: ``reconcile()`` asserts vault tix == SUM over the *tix* wallet rows (other assets have no vault).
+Reconciliation: ``reconcile()`` asserts vault tix == SUM over the *tix* wallet rows
+(other assets have no vault).
 """
 import asyncio
 import uuid
@@ -257,7 +258,8 @@ async def get_wallet(guild_id: str, player_id: str, *, asset: str = TIX) -> Wall
 
 async def total_wallets(*, asset: str = TIX) -> int:
     """SUM of every row of ``asset`` (tix by default); the tix total is the claim side of
-    the reconciliation invariant. Global on purpose: the physical vault (one MTGO custodian) is shared across guilds."""
+    the reconciliation invariant. Global on purpose: the physical vault (one MTGO
+    custodian) is shared across guilds."""
     async with db_session() as session:
         return await _sum_amount(session, WalletTx.asset == asset)
 
@@ -288,6 +290,8 @@ async def _book_boundary(guild_id: str, player_id: str, amount: int, kind: str,
     impossible (these run lock-free, unlike transfers)."""
     async def _do():
         async with db_session() as session:
+            # Not asset-filtered: boundary rows are tix-only, and uq_wallet_tx_job_kind
+            # is (job_id, kind) with no asset, so one job can only ever book one row.
             row = (await session.execute(
                 select(WalletTx).where(WalletTx.job_id == job_id, WalletTx.kind == kind)
             )).scalars().first()
@@ -390,8 +394,8 @@ async def pay(
     notes: str | None = None,
     asset: str = TIX,
 ) -> tuple[WalletTx, WalletTx]:
-    """Move ``amount`` of ``asset`` (tix by default) between two holders — no MTGO trade, no change to the system
-    total. Checks the payer's funds. Idempotent by ``source`` (a uuid is generated when
+    """Move ``amount`` of ``asset`` (tix by default) between two holders — no MTGO trade,
+    no change to the system total. Checks the payer's funds. Idempotent by ``source`` (a uuid is generated when
     none is given)."""
     if source is None:
         source = str(uuid.uuid4())
