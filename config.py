@@ -84,6 +84,7 @@ class Config:
                 "voice_channels": False,
                 "bot_detection": False,
                 "money_server": False,
+                "vouchers": False,
                 "tournament": True,
                 "quiz_pack_images": {
                     "enabled": True,
@@ -195,6 +196,7 @@ class Config:
                 "voice_channels": True,
                 "bot_detection": True,
                 "money_server": False,
+                "vouchers": False,
                 "tournament": True,
                 "quiz_pack_images": {
                     "enabled": True,
@@ -337,6 +339,12 @@ def is_money_server(guild_id):
     """Helper function to check if this guild is configured for money drafts"""
     config = get_config(guild_id)
     return config.get("features", {}).get("money_server", False)
+
+
+def vouchers_enabled(guild_id):
+    """Whether draft vouchers may be spent in this guild (default off)."""
+    config = get_config(guild_id)
+    return config.get("features", {}).get("vouchers", False)
 
 def get_draftmancer_base_url():
     """Return the draftmancer base URL"""

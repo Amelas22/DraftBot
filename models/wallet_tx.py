@@ -3,6 +3,7 @@ from datetime import datetime
 from database.models_base import Base
 
 TIX = "tix"
+VOUCHER = "voucher"
 
 
 class WalletTx(Base):
