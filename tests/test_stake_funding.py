@@ -174,7 +174,7 @@ async def test_an_abandoned_draft_is_not_a_potential_obligation(test_db):
 def test_every_stake_declaration_passes_through_the_gate():
     """Three UI paths declare a stake, and a gate on two of them is a gate on
     none: a player refused at the dropdown can raise the same amount through
-    the "Over 100 TIX" modal or the combined settings panel.
+    the "Other amount…" modal or the combined settings panel.
     """
     import ast
     import inspect

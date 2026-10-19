@@ -2824,6 +2824,20 @@ async def refuse_unfunded_stake(interaction, draft_session_id, guild_id,
     return True
 
 
+# The stake menu's presets. Any other amount is typed into "Other amount…".
+STAKE_PRESETS = (20, 50, 100)
+OTHER_AMOUNT = "other"
+
+
+def stake_menu_options(min_stake):
+    """The sign-up and Change Entry menus: the presets the draft allows, then
+    "Other amount…". One builder, so the two menus never disagree."""
+    options = [discord.SelectOption(label=f"{amount} TIX", value=str(amount))
+               for amount in STAKE_PRESETS if amount >= min_stake]
+    options.append(discord.SelectOption(label="Other amount…", value=OTHER_AMOUNT))
+    return options
+
+
 class StakeOptionsSelect(discord.ui.Select):
     def __init__(self, draft_session_id, draft_link, user_display_name, min_stake,
                  has_draftmancer_role=False, *, vouchers: int = 0):
@@ -2838,15 +2852,7 @@ class StakeOptionsSelect(discord.ui.Select):
             options.append(discord.SelectOption(
                 label=f"🎟️ Use a voucher: 20 tix entry, paid by DraftBot (you have {vouchers})",
                 value="voucher"))
-        if self.min_stake <= 10:
-            options.append(discord.SelectOption(label="10 TIX", value="10"))
-        if self.min_stake <= 20:
-            options.append(discord.SelectOption(label="20 TIX", value="20"))
-        if self.min_stake <= 50:   
-            options.append(discord.SelectOption(label="50 TIX", value="50"))
-        if self.min_stake <= 100:   
-            options.append(discord.SelectOption(label="100 TIX", value="100"))
-        options.append(discord.SelectOption(label="Over 100 TIX", value="over_100"))
+        options += stake_menu_options(self.min_stake)
 
         super().__init__(placeholder="Choose your maximum entry...", min_values=1, max_values=1, options=options)
         
@@ -2860,9 +2866,8 @@ class StakeOptionsSelect(discord.ui.Select):
         
         selected_value = self.values[0]
         
-        if selected_value == "over_100":
-            # Create modal for custom amount over 100
-            stake_modal = StakeModal(over_100=True)
+        if selected_value == OTHER_AMOUNT:
+            stake_modal = StakeModal()
             stake_modal.draft_session_id = self.draft_session_id
             stake_modal.draft_link = self.draft_link
             stake_modal.user_display_name = self.user_display_name
@@ -3112,30 +3117,26 @@ class StakeOptionsView(discord.ui.View):
         ))
         
 class StakeModal(discord.ui.Modal):
-    def __init__(self, over_100=False):
+    def __init__(self):
         super().__init__(title="Set Your Maximum Entry")
         
-        self.over_100 = over_100
         self.default_cap_setting = True  
         self.has_draftmancer_role = False  
-        placeholder_text = "A multiple of 50 — e.g. 150, 200, 300" if over_100 else "The most you're willing to put in"
         
         self.stake_input = discord.ui.InputText(
-            label="Maximum entry (multiples of 50)",
-            placeholder=placeholder_text,
+            label="Maximum entry (a multiple of 10)",
+            placeholder="e.g. 30, 70, 120",
             required=True
         )
         self.add_item(self.stake_input)
         
-        # Add checkbox for bet capping (only visible for over_100)
-        if over_100:
-            self.cap_checkbox = discord.ui.InputText(
-                label="Cap my entry to my share of my team",
-                placeholder="Type 'yes' to cap, or 'no' to keep your full entry",
-                required=True,
-                value="yes"  # Will be updated with default_cap_setting before showing
-            )
-            self.add_item(self.cap_checkbox)
+        self.cap_checkbox = discord.ui.InputText(
+            label="Cap my entry to my share of my team",
+            placeholder="Type 'yes' to cap, or 'no' to keep your full entry",
+            required=True,
+            value="yes"  # Will be updated with default_cap_setting before showing
+        )
+        self.add_item(self.cap_checkbox)
         
         # These will be set separately before sending the modal
         self.draft_session_id = None
@@ -3153,26 +3154,20 @@ class StakeModal(discord.ui.Modal):
             await interaction.response.send_message("Please enter a valid number.", ephemeral=True)
             return
         
-        # Determine if bet should be capped
-        is_capped = True  # Default for regular stakes
-        if self.over_100:
-            cap_value = self.cap_checkbox.value.lower()
-            is_capped = cap_value in ('yes', 'y', 'true')
+        is_capped = self.cap_checkbox.value.lower() in ('yes', 'y', 'true')
         
-        # Validation for over 100 stakes
-        if self.over_100:
-            if max_stake <= 100:
-                await interaction.response.send_message("Amount must be greater than 100 tix.", ephemeral=True)
-                return
-            if max_stake % 50 != 0:
-                await interaction.response.send_message("Amount must be a multiple of 50 (e.g., 150, 200, 250).", ephemeral=True)
-                return
+        # The pool matches in tens (draft_pool_service._STAKE_STEP), so any
+        # other amount would never play for what it says.
+        if max_stake % 10 != 0:
+            await interaction.response.send_message(
+                "Your entry must be a multiple of 10 tix, like 30, 70 or 120.", ephemeral=True)
+            return
         
         # Validate BEFORE taking the money. The minimum-stake check used to sit
         # inside the sign-up transaction below, which only opens after the
         # charge -- so a stake under the draft's minimum was refused with the
         # tix already in the holder and the player still out of the queue. This
-        # is the modal behind "Over 100 TIX", so those were the largest amounts
+        # is the modal behind "Other amount…", which takes the largest amounts
         # in the game.
         draft_session = await get_draft_session(self.draft_session_id)
         if not draft_session:
@@ -3375,16 +3370,7 @@ class BetCapToggleButton(CallbackButton):
                 # Create a custom view that combines stake options and cap settings
                 # First add the stake options dropdown
                 min_stake = draft_session.min_stake or 10
-                options = []
-                if min_stake <= 10:
-                    options.append(discord.SelectOption(label="10 TIX", value="10"))
-                if min_stake <= 20:
-                    options.append(discord.SelectOption(label="20 TIX", value="20"))
-                if min_stake <= 50:   
-                    options.append(discord.SelectOption(label="50 TIX", value="50"))
-                if min_stake <= 100:   
-                    options.append(discord.SelectOption(label="100 TIX", value="100"))
-                options.append(discord.SelectOption(label="Over 100 TIX", value="over_100"))
+                options = stake_menu_options(min_stake)
                 
                 # Create the stake options dropdown
                 stake_select = CombinedStakeSelect(
@@ -3538,9 +3524,8 @@ class CombinedStakeSelect(discord.ui.Select):
         
         selected_value = self.values[0]
         
-        if selected_value == "over_100":
-            # Create modal for custom amount over 100
-            stake_modal = StakeModal(over_100=True)
+        if selected_value == OTHER_AMOUNT:
+            stake_modal = StakeModal()
             stake_modal.draft_session_id = self.draft_session_id
             stake_modal.draft_link = self.draft_link
             stake_modal.user_display_name = self.user_display_name

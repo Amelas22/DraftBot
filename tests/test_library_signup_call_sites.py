@@ -80,14 +80,13 @@ async def test_a_stake_that_was_refused_starts_nothing(test_db):
     library.assert_not_called()
 
 
-async def test_the_over_100_modal_starts_the_library_step_even_if_the_redraw_fails(test_db):
+async def test_the_other_amount_modal_starts_the_library_step_even_if_the_redraw_fails(test_db):
     from views import StakeModal
 
     await seed_session("s1", guild=GUILD, stype="staked", stage=None, sign_ups={})
     await wallet_service.adjust(GUILD, PLAYER, 200, "seed", "t")
     modal = StakeModal.__new__(StakeModal)
     modal.draft_session_id = "s1"
-    modal.over_100 = True
     modal.has_draftmancer_role = False
     modal.user_display_name = "Ada"
     modal.stake_input = MagicMock(value="150")
@@ -102,14 +101,13 @@ async def test_the_over_100_modal_starts_the_library_step_even_if_the_redraw_fai
     assert _started(library) == ["s1"]
 
 
-async def test_the_over_100_modal_refused_starts_nothing(test_db):
+async def test_the_other_amount_modal_refused_starts_nothing(test_db):
     from views import StakeModal
 
     await seed_session("s1", guild=GUILD, stype="staked", stage=None, sign_ups={})
     await wallet_service.adjust(GUILD, PLAYER, 60, "seed", "t")
     modal = StakeModal.__new__(StakeModal)
     modal.draft_session_id = "s1"
-    modal.over_100 = True
     modal.has_draftmancer_role = False
     modal.user_display_name = "Ada"
     modal.stake_input = MagicMock(value="150")
