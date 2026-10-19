@@ -81,6 +81,7 @@ project-includes = [
     "library_views/sub_picker.py",
     "library_views/some_cards.py",
     "library_views/dm_view.py",
+    "services/library_ledger.py",
     "models/library_member.py",
     "models/card_loan.py",
     "models/library_hold.py",
