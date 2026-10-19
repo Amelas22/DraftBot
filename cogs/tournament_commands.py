@@ -898,7 +898,7 @@ class TournamentCog(commands.Cog):
             # wherever registration is being announced, which is why the
             # organizer ran /tournament create there. Only standings (buried by
             # its own updates) and pairings get fixed homes.
-            await post_registration_board(ctx.channel, tournament.id)
+            await post_registration_board(self.bot, ctx.channel, tournament.id)
         except Exception as e:
             logger.warning(f"Could not post registration board: {e}")
 

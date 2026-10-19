@@ -406,10 +406,7 @@ async def update_registration_board(bot, tournament_id):
         tournament = await session.get(Tournament, tournament_id)
         if tournament is None or not tournament.board_message_id:
             return
-        closed = tournament.status != "registration"
-        participants, pot, deficits, rosters = await _board_state(session, tournament)
-        embed = create_registration_embed(tournament, participants, pot, deficits, closed,
-                                          rosters)
+        embed = await registration_board_embed(session, tournament)
         channel_id = int(tournament.board_channel_id)
         message_id = int(tournament.board_message_id)
 
@@ -421,26 +418,35 @@ async def update_registration_board(bot, tournament_id):
         message = await channel.fetch_message(message_id)
         await message.edit(embed=embed)
     except discord.NotFound:
-        logger.warning(f"Board message gone for tournament {tournament_id}; clearing ids")
+        # A sticky repost moves the board and deletes the old message; a refresh
+        # that fetched the old one just before must not orphan the new board.
         async with db_session() as session:
             t = await session.get(Tournament, tournament_id)
-            if t is not None:
+            if t is not None and t.board_message_id == str(message_id):
+                logger.warning(f"Board message gone for tournament {tournament_id}; clearing ids")
                 t.board_channel_id = None
                 t.board_message_id = None
     except discord.HTTPException as e:
         logger.warning(f"Board edit failed for tournament {tournament_id}: {e}")
 
 
-async def post_registration_board(channel, tournament_id):
-    """Post the board for a freshly created tournament and remember it. Returns the
-    message, or None if posting failed (the tournament is unaffected either way)."""
+async def registration_board_embed(session, tournament):
+    """The board as it should read now; open or closed is derived from the tournament."""
+    participants, pot, deficits, rosters = await _board_state(session, tournament)
+    return create_registration_embed(tournament, participants, pot, deficits,
+                                     tournament.status != "registration", rosters)
+
+
+async def post_registration_board(bot, channel, tournament_id):
+    """Post the board for a freshly created tournament, remember it, and make it
+    sticky so it stays at the bottom of the channel while registration is open.
+    Returns the message, or None if posting failed (the tournament is unaffected
+    either way)."""
     async with db_session() as session:
         tournament = await session.get(Tournament, tournament_id)
         if tournament is None:
             return None
-        participants, pot, deficits, rosters = await _board_state(session, tournament)
-        embed = create_registration_embed(tournament, participants, pot, deficits,
-                                          rosters=rosters)
+        embed = await registration_board_embed(session, tournament)
     try:
         message = await channel.send(embed=embed)
     except discord.HTTPException as e:
@@ -451,7 +457,31 @@ async def post_registration_board(channel, tournament_id):
         if t is not None:
             t.board_channel_id = str(message.channel.id)
             t.board_message_id = str(message.id)
+    try:
+        await _make_board_sticky(bot, message, tournament_id)
+    except Exception as e:
+        logger.warning(f"Could not make the registration board for {tournament_id} sticky: {e}")
     return message
+
+
+async def _make_board_sticky(bot, message, tournament_id):
+    # Local import: message_management pulls in views, which is heavy and cyclic here.
+    from database.message_management import (
+        TOURNAMENT_BOARD_VIEW_TYPE, fetch_sticky_message, is_sticky_live, make_message_sticky)
+
+    channel_id = str(message.channel.id)
+    async with db_session() as session:
+        existing = await fetch_sticky_message(channel_id, session)
+        blocked = (await is_sticky_live(existing, session)
+                   and existing.view_metadata.get("view_type") != TOURNAMENT_BOARD_VIEW_TYPE)
+    # A channel holds one sticky; never evict a live draft's sign-up message for a
+    # board. A cancelled queue's leftover sticky is fair game.
+    if blocked:
+        logger.info(f"Channel {channel_id} already has a sticky; board {message.id} stays pinned only")
+        return
+    await make_message_sticky(
+        str(message.guild.id), channel_id, message, None, bot,
+        view_metadata={"view_type": TOURNAMENT_BOARD_VIEW_TYPE, "tournament_id": tournament_id})
 
 
 async def update_standings_message_for_match(bot, match_id):
