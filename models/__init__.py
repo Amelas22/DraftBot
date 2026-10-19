@@ -4,6 +4,7 @@ from .player import PlayerStats, PlayerLimit
 from .team import Team, WeeklyLimit
 from .challenge import Challenge, SwissChallenge
 from .card_loan import CardLoan, ACTIVE_STATES
+from .library_hold import LibraryHold
 from .library import Library, COMMUNAL, RENTAL
 from .library_server import LibraryServer
 from .card_substitution import CardSubstitution
@@ -90,6 +91,7 @@ __all__ = [
     'COMMUNAL',
     'RENTAL',
     'CardLoan',
+    'LibraryHold',
     'ACTIVE_STATES',
     'PlayerAvailability',
     'PlayerDayOverride',
