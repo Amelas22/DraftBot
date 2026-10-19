@@ -134,3 +134,12 @@ async def test_give_voucher_needs_no_mtgo_link(test_db):  # noqa: F811
         await _run(ctx, _member())
     links.assert_not_awaited()
     assert await vs.vouchers_held(GUILD, str(TAKER)) == 1
+
+
+def test_only_bot_managers_can_give_a_voucher():
+    # Players can spend a voucher on an entry, but vouchers don't change hands
+    # between players.
+    from cogs.wallet_cog import WalletCommands
+    from helpers.permissions import is_bot_manager
+
+    assert is_bot_manager in WalletCommands.wallet_give_voucher.checks
