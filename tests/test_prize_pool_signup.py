@@ -122,8 +122,8 @@ async def test_a_raise_they_cannot_afford_leaves_the_stake_alone(test_db):
 
 
 @pytest.mark.asyncio
-async def test_the_over_100_modal_also_charges(test_db):
-    """The modal behind "Over 100 TIX" is a fourth signup writer. Missing it
+async def test_the_other_amount_modal_also_charges(test_db):
+    """The modal behind "Other amount…" is a fourth signup writer. Missing it
     meant the LARGEST stakes in the game were the only ones entering free."""
     from views import StakeModal
 
@@ -136,7 +136,6 @@ async def test_the_over_100_modal_also_charges(test_db):
 
     modal = StakeModal.__new__(StakeModal)
     modal.draft_session_id = "s1"
-    modal.over_100 = True
     modal.has_draftmancer_role = False
     modal.user_display_name = "Ada"
     modal.stake_input = MagicMock(value="150")
@@ -197,12 +196,12 @@ async def test_an_admin_removing_a_player_returns_their_entry(test_db):
     assert await wallet_service.get_balance("99", "777") == 100
 
 
-def test_the_over_100_modal_validates_the_minimum_before_charging():
+def test_the_other_amount_modal_validates_the_minimum_before_charging():
     """A rejected stake must not have already taken the money.
 
     The min-stake check lived inside the sign-up transaction, which opens after
-    the charge. A player entering below a draft's minimum through the "Over 100
-    TIX" modal was told no with their tix already in the holder and their name
+    the charge. A player entering below a draft's minimum through the "Other
+    amount…" modal was told no with their tix already in the holder and their name
     not in the queue -- and since the modal is the path for the LARGEST stakes,
     it was the largest amounts that could be stranded that way.
     """

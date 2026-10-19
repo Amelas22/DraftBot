@@ -363,8 +363,8 @@ async def entry_in(session: AsyncSession, guild_id: str, session_id: str,
     return {"ok": True, "deficit": 0}
 
 
-# Tix are wagered in tens -- the queue offers 20, 50, 100, and multiples of 50
-# above that -- so a matched stake of 96 is not a bet anyone placed.
+# Tix are wagered in tens -- the queue offers 20, 50, 100, and any other multiple
+# of 10 typed in -- so a matched stake of 96 is not a bet anyone placed.
 _STAKE_STEP = 10
 
 # How much of their own side a capped player may carry.

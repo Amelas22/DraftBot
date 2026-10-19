@@ -293,7 +293,7 @@ async def test_a_second_stale_menu_cannot_top_up_or_cash_out_a_voucher_entry(tes
 
 
 @pytest.mark.asyncio
-async def test_the_over_100_modal_cannot_top_up_a_voucher_entry(test_db):  # noqa: F811
+async def test_the_other_amount_modal_cannot_top_up_a_voucher_entry(test_db):  # noqa: F811
     from views import StakeModal
 
     rows = await _voucher_entered_with_spare_tix()
@@ -301,7 +301,6 @@ async def test_the_over_100_modal_cannot_top_up_a_voucher_entry(test_db):  # noq
     rows += 1
     modal = StakeModal.__new__(StakeModal)
     modal.draft_session_id = SID
-    modal.over_100 = True
     modal.has_draftmancer_role = False
     modal.user_display_name = "Ada"
     modal.stake_input = MagicMock(value="150")
