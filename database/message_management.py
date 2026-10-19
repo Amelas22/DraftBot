@@ -147,6 +147,11 @@ class StickyStrategy:
         """
         pass
 
+    async def after_commit(self, sticky_message: Message, bot: discord.Client) -> None:
+        """Hook run once the repost is committed and the old message deleted, for
+        work that must see the committed state (re-renders racing the repost)."""
+        pass
+
 
 class DraftStickyStrategy(StickyStrategy):
     """Strategy for Draft Session sticky messages."""
@@ -316,12 +321,61 @@ class DebtSummaryStickyStrategy(StickyStrategy):
         pass
 
 
+TOURNAMENT_BOARD_VIEW_TYPE = "tournament_board"
+
+
+class TournamentBoardStickyStrategy(StickyStrategy):
+    """Keeps a tournament's registration board at the bottom of its channel while
+    registration is open. The tournament's board pointer moves with every repost,
+    so update_registration_board keeps editing the live copy."""
+
+    @staticmethod
+    async def _tournament(sticky_message: Message, session: AsyncSession):
+        from models.tournament import Tournament
+
+        tournament_id = sticky_message.view_metadata.get("tournament_id")
+        return await session.get(Tournament, tournament_id) if tournament_id else None
+
+    async def validate_state(self, sticky_message: Message, session: AsyncSession) -> bool:
+        tournament = await self._tournament(sticky_message, session)
+        # Once registration closes the sticky ends; the board stays put and keeps
+        # updating in place. A board moved by hand is no longer this sticky's to move.
+        return (tournament is not None and tournament.status == "registration"
+                and tournament.board_message_id == sticky_message.message_id)
+
+    async def generate_content(
+        self, sticky_message: Message, bot: discord.Client, session: AsyncSession
+    ) -> Tuple[str, Optional[discord.Embed], Optional[discord.ui.View], Dict[str, Any]]:
+        from services.tournament_formatter import registration_board_embed
+
+        embed = await registration_board_embed(session, await self._tournament(sticky_message, session))
+        return sticky_message.content, embed, None, sticky_message.view_metadata
+
+    async def on_update_success(
+        self, sticky_message: Message, new_message: discord.Message, bot: discord.Client, session: AsyncSession
+    ) -> None:
+        # Repoint before the caller commits and deletes the old message.
+        tournament = await self._tournament(sticky_message, session)
+        if tournament is not None:
+            tournament.board_channel_id = str(new_message.channel.id)
+            tournament.board_message_id = str(new_message.id)
+
+    async def after_commit(self, sticky_message: Message, bot: discord.Client) -> None:
+        from services.tournament_formatter import update_registration_board
+
+        # The embed was rendered before the send; a registration (or the close)
+        # committed meanwhile refreshed the old message. Redraw from committed state.
+        await update_registration_board(bot, sticky_message.view_metadata["tournament_id"])
+
+
 def get_sticky_strategy(view_metadata: Dict[str, Any]) -> StickyStrategy:
     """Factory method to get the appropriate strategy."""
     view_type = view_metadata.get("view_type", "draft")
     
     if view_type == "debt_summary":
         return DebtSummaryStickyStrategy()
+    elif view_type == TOURNAMENT_BOARD_VIEW_TYPE:
+        return TournamentBoardStickyStrategy()
     elif view_type == "draft" or view_type == "quiz":
         return DraftStickyStrategy()
     else:
@@ -331,6 +385,14 @@ def get_sticky_strategy(view_metadata: Dict[str, Any]) -> StickyStrategy:
 
 
 # --- Sticky Message Management Functions ---
+
+async def is_sticky_live(sticky_message: Optional[Message], session: AsyncSession) -> bool:
+    """Whether a sticky still stands for something. A dead one (its draft cancelled,
+    its tournament closed) lingers until its next repost attempt cleans it up."""
+    if sticky_message is None or not sticky_message.view_metadata:
+        return False
+    return await get_sticky_strategy(sticky_message.view_metadata).validate_state(sticky_message, session)
+
 
 async def delete_sticky_message_record(sticky_message: Message, session: AsyncSession) -> None:
     """Safely deletes a sticky message record and its associated notification."""
@@ -422,6 +484,11 @@ async def handle_sticky_message_update(
     except Exception as e:
         logger.warning(f"Failed to delete old message: {e}")
 
+    try:
+        await strategy.after_commit(sticky_message, bot)
+    except Exception as e:
+        logger.warning(f"Post-repost hook failed for channel {sticky_message.channel_id}: {e}")
+
     return StickyUpdateResult.SUCCESS
 
 
@@ -502,7 +569,8 @@ async def setup_sticky_handler(bot: discord.Client) -> None:
 
 
 async def make_message_sticky(
-    guild_id: str, channel_id: str, message: discord.Message, view, bot: discord.Client
+    guild_id: str, channel_id: str, message: discord.Message, view, bot: discord.Client,
+    view_metadata: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Pins a message in a channel and saves it as sticky in the database.
 
@@ -512,14 +580,13 @@ async def make_message_sticky(
         message: The Discord message to make sticky
         view: The view associated with the message (must have to_metadata() method)
         bot: The Discord bot client instance
+        view_metadata: Used instead of view.to_metadata(), for messages without a view
     """
     async with AsyncSessionLocal() as session:
         existing_sticky = await fetch_sticky_message(channel_id, session)
 
-        if hasattr(view, "to_metadata"):
-            view_metadata = view.to_metadata()
-        else:
-            view_metadata = {}
+        if view_metadata is None:
+            view_metadata = view.to_metadata() if hasattr(view, "to_metadata") else {}
 
         if not message.pinned:
             await safe_pin(message)
