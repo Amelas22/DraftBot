@@ -384,7 +384,10 @@ class WalletCommands(commands.Cog):
             ephemeral=True)
 
     # ----- /wallet give-voucher @player [count] -----
-    @wallet.command(name="give-voucher", description="Give draft vouchers to another member")
+    # Bot managers hand vouchers out; players only spend them, so they never
+    # circulate between players as a second currency.
+    @wallet.command(name="give-voucher", description="[Admin] Give draft vouchers to a member")
+    @has_bot_manager_role()
     @option("player", discord.Member, description="Who to give them to")
     @option("count", int, description="How many vouchers", min_value=1, default=1)
     async def wallet_give_voucher(self, ctx: discord.ApplicationContext,
