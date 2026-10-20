@@ -259,6 +259,12 @@ _CLOSED_WITH_NOTHING_MOVED = (
     "the open trade is with '",
     "the partner closed the trade before it was complete",
     "a DIFFERENT trade replaced ours mid-negotiation",
+    # The pull from the partner's binder stalled during negotiation, so the serve
+    # cancelled before approval. Only a job that receives (a deposit or a card
+    # return) pulls from the partner; a withdraw never reaches these.
+    "partner's presented binder does not contain",
+    "partner's binder does not hold enough (",
+    "partner's card is presented but could not be pulled",
 )
 
 

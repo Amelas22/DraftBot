@@ -296,6 +296,22 @@ async def test_a_deposit_proven_closed_is_failed(test_db):  # noqa: F811
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("detail", [
+    "partner's presented binder does not contain 20x Event Ticket (Event Ticket)",
+    "partner's binder does not hold enough (Event Ticket: your binder has 5, I need 20)",
+    "partner's card is presented but could not be pulled (stale trade view-model)",
+])
+async def test_a_deposit_cancelled_while_pulling_from_the_partner_is_failed(test_db, detail):  # noqa: F811
+    """The serve cancels these before approval, so an unchanged vault is a plain failure:
+    the player is told to try again and no admin is alerted."""
+    await resolution._record_job("d4c", "deposit", GUILD, PLAYER, MTGO, 20, VaultReading(1000, NOW))
+    res = await _finish_deposit("d4c", "failed", 1000, detail=detail)
+
+    assert res["outcome"] == "failed" and await _balances() == (0, 0)
+    assert await _assumed("d4c") is None
+
+
+@pytest.mark.asyncio
 async def test_a_deposit_that_may_still_be_open_is_not_credited_and_flagged(test_db):  # noqa: F811
     """Its tix can still arrive once the player confirms; nothing is credited on a guess,
     and an admin is told to watch for them."""
@@ -722,6 +738,7 @@ def test_only_a_failure_that_proves_the_trade_closed_counts():
     assert resolution.proves_closed(CLOSED)
     assert resolution.proves_closed("the trade closed as 'Cancelled' — treat as NOT completed")
     assert resolution.proves_closed("cancelled before it started")
+    assert resolution.proves_closed("partner's presented binder does not contain 20x Event Ticket")
     assert not resolution.proves_closed(NEVER_CONFIRMED), "can still be open on the confirm screen"
     assert not resolution.proves_closed("the trade wasn't completed in time")
     assert not resolution.proves_closed("x")
