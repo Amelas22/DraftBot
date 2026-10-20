@@ -426,3 +426,17 @@ async def test_a_subs_return_is_worded_for_the_deck_they_hand_back(monkeypatch):
     assert said.startswith("📬 Returning **Bob**'s deck.")
     assert said.rstrip().endswith("✅ **Bob**'s deck is back on the shelf. y")
     assert "Deck returned. Thanks" not in said
+
+
+async def test_status_command_reports_unreadable_cube(monkeypatch):
+    import cogs.library_commands as mod
+
+    cog = LibraryCommands(bot=SimpleNamespace())
+    ctx = _ctx()
+    monkeypatch.setattr(mod, "defer_if_usable", AsyncMock(return_value=True))
+    stub_library(monkeypatch, mod)
+    monkeypatch.setattr(mod, "owned_copies", AsyncMock(return_value=None))
+
+    await mod.LibraryCommands.status.callback(cog, ctx, cube="somecube")
+
+    assert _said(ctx) == "Couldn't read that cube right now; try again in a minute."
