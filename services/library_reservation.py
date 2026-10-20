@@ -45,6 +45,7 @@ from models.card_loan import CardLoan
 from models.draft_session import DraftSession
 from models.library_server import LibraryServer
 from models.match import MatchResult
+from services.library_ledger import Verdict
 
 # A deck the borrower has taken, or is taking. A player holding one still needs
 # the reservation however many matches they have played.
@@ -60,6 +61,71 @@ _RESERVE_LOCK = asyncio.Lock()
 # write them back; two players pressing at once would otherwise each write over
 # the other. Never held while _RESERVE_LOCK is taken.
 _LISTS_LOCK = asyncio.Lock()
+
+# The library ledger (services/library_ledger_store) judges each server
+# reservation against its time-boxed holds. "shadow" only logs what it would
+# decide and books the holds; "enforce" lets its refusal stand.
+LEDGER_MODES = ("shadow", "enforce")
+
+
+def ledger_mode(guild_id: Any) -> str:
+    """This server's library_ledger_mode: "shadow" unless set to "enforce"."""
+    import config
+
+    mode = config.get_config(guild_id).get("library_ledger_mode", "shadow")
+    if mode not in LEDGER_MODES:
+        logger.warning("library ledger: unknown library_ledger_mode {!r} for "
+                       "guild {}; reading it as shadow", mode, guild_id)
+        return "shadow"
+    return str(mode)
+
+
+async def _ledger_verdict(library_id: Any, draft: Any, now: datetime,
+                          fetch: Any) -> Optional[Verdict]:
+    """The ledger's verdict on a server hold for this draft, or None if it has
+    none. Never raises: the ledger must not break a sign-up."""
+    from services import library_ledger_store
+
+    try:
+        verdict = await library_ledger_store.server_verdict(
+            str(library_id), str(draft.cube), now, fetch=fetch)
+    except Exception:
+        logger.opt(exception=True).warning(
+            "library ledger: verdict failed for {}", draft.session_id)
+        return None
+    if verdict is None:
+        logger.info("library ledger: unknown for {}", draft.session_id)
+    return verdict
+
+
+def _ledger_enforces(guild_id: Any) -> bool:
+    try:
+        return ledger_mode(guild_id) == "enforce"
+    except Exception:
+        logger.opt(exception=True).warning(
+            "library ledger: could not read the mode for guild {}; shadow", guild_id)
+        return False
+
+
+async def _book_hold(library_id: Any, draft: Any, now: datetime) -> None:
+    from services import library_ledger_store
+
+    try:
+        await library_ledger_store.book_server_hold(
+            str(library_id), str(draft.cube), str(draft.session_id), now)
+    except Exception:
+        logger.opt(exception=True).warning(
+            "library ledger: could not book a hold for {}", draft.session_id)
+
+
+async def _release_hold(draft: Any, when: datetime) -> None:
+    from services import library_ledger_store
+
+    try:
+        await library_ledger_store.release_server_hold(str(draft.session_id), when)
+    except Exception:
+        logger.opt(exception=True).warning(
+            "library ledger: could not release the hold for {}", draft.session_id)
 
 
 @dataclass(frozen=True)
@@ -197,6 +263,7 @@ async def still_reserved(draft: Any, now: Optional[datetime] = None, *,
     draft.library_released_at = when
     logger.info("library: draft {} released its reservation of {}: {}",
                 draft.session_id, draft.cube, why)
+    await _release_hold(draft, when)
     return False
 
 
@@ -257,8 +324,18 @@ async def reserve(session_id: Any) -> ReserveAnswer:
             logger.warning("library: could not read {} to reserve it for draft {}",
                            draft.cube, draft.session_id)
             return ReserveAnswer("unknown")
+        # The ledger is asked only once today's check has read the other
+        # reservations, which writes down any release it notices; asked before,
+        # it would still count a hold that has just ended.
         if seen.cards and cube_support(
                 seen.cards, await library_available(library.id, fetch=read)).ok:
+            now = datetime.now()
+            ledger = await _ledger_verdict(library.id, draft, now, read)
+            if ledger is not None and not ledger.ok:
+                logger.info("library ledger: would refuse {} ({})",
+                            draft.session_id, ledger.reason)
+                if _ledger_enforces(draft.guild_id):
+                    return ReserveAnswer("short")
             async with AsyncSessionLocal() as session:
                 row = await session.get(DraftSession, draft.id)
                 if row is None:
@@ -268,10 +345,15 @@ async def reserve(session_id: Any) -> ReserveAnswer:
                 await session.commit()
             logger.info("library: draft {} reserved {} from {}",
                         draft.session_id, draft.cube, library.id)
+            await _book_hold(library.id, draft, now)
             return ReserveAnswer("reserved")
 
         using = [d for d in await reservations(library.id)
                  if d.cube == draft.cube and d.session_id != draft.session_id]
+        ledger = await _ledger_verdict(library.id, draft, datetime.now(), read)
+        if ledger is not None and ledger.ok:
+            logger.info("library ledger: would allow {} ({})",
+                        draft.session_id, ledger.reason)
         if using:
             return ReserveAnswer("in_use", by=_first_reserved(using))
         return ReserveAnswer("short")
