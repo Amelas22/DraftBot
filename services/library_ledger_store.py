@@ -10,28 +10,79 @@ from typing import Any, Callable
 from sqlalchemy import select, update
 
 from database.db_session import AsyncSessionLocal
+from models.draft_session import DraftSession
 from models.library_hold import LibraryHold
 from services.library_ledger import (
     SERVER_WINDOW, Span, Verdict, copies_owned, counts_until, verdict)
 
 
+STALE = "ledger:stale"
+
+
 async def spans_overlapping(
     library_id: str, start: datetime, end: datetime, now: datetime,
 ) -> list[Span]:
-    """Every hold on the library whose effective interval meets ``[start, end)``."""
+    """Every hold on the library whose effective interval meets ``[start, end)``.
+
+    The reservation is the source of truth for a server hold. A live server
+    hold whose draft is gone, never reserved, or has released its reservation
+    is stale: it is released here (at the draft's release, or ``now`` if the
+    draft is gone) and left out, so any way a reservation ends that skipped the
+    release hook heals itself on the next read.
+    """
     async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(LibraryHold).where(
-                LibraryHold.library_id == library_id,
-                LibraryHold.starts_at < end,
-                (LibraryHold.released_at.is_(None))
-                | (LibraryHold.released_at > start),
-            ))
-        rows = result.scalars().all()
+        async with session.begin():
+            result = await session.execute(
+                select(LibraryHold).where(
+                    LibraryHold.library_id == library_id,
+                    LibraryHold.starts_at < end,
+                    (LibraryHold.released_at.is_(None))
+                    | (LibraryHold.released_at > start),
+                ))
+            rows = list(result.scalars().all())
+            stale = await _release_stale(session, rows, now)
     spans = [
-        Span(r.kind, r.starts_at, r.ends_at, r.released_at) for r in rows
+        Span(r.kind, r.starts_at, r.ends_at, r.released_at)
+        for r in rows if r.id not in stale
     ]
     return [s for s in spans if counts_until(s, now) > start]
+
+
+async def _release_stale(
+    session: Any, rows: list[LibraryHold], now: datetime,
+) -> set[int]:
+    """Release the live server holds among ``rows`` whose reservation has ended.
+
+    Returns their ids. Runs inside the caller's transaction.
+    """
+    candidates = [r for r in rows if r.kind == "server"
+                  and r.released_at is None and r.draft_session_id is not None]
+    if not candidates:
+        return set()
+    drafts = {
+        str(sid): (reserved_at, released_at)
+        for sid, reserved_at, released_at in (await session.execute(
+            select(DraftSession.session_id, DraftSession.library_reserved_at,
+                   DraftSession.library_released_at)
+            .where(DraftSession.session_id.in_(
+                {str(r.draft_session_id) for r in candidates})))).all()
+    }
+    stale: set[int] = set()
+    for hold in candidates:
+        found = drafts.get(str(hold.draft_session_id))
+        if found is None:
+            when = now
+        else:
+            reserved_at, released_at = found
+            if reserved_at is not None and released_at is None:
+                continue
+            when = released_at or now
+        await session.execute(
+            update(LibraryHold)
+            .where(LibraryHold.id == hold.id, LibraryHold.released_at.is_(None))
+            .values(released_at=when, released_by=STALE))
+        stale.add(int(hold.id))
+    return stale
 
 
 async def owned_copies(

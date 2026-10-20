@@ -17,6 +17,7 @@ import config
 import services.library_ledger_store as store
 import services.library_reservation as resv
 from database.db_session import AsyncSessionLocal
+from models.draft_session import DraftSession
 from models.library_hold import LibraryHold
 from test_library_reservation import (  # noqa: F401  (lounge is a fixture)
     ANN, BEN, CUBE, GUILD, LIB, _borrower, _queue, _row, _set, lounge)
@@ -52,7 +53,12 @@ async def _holds(sid=None):
 
 
 async def _another_draft_holds_the_copy():
-    """A live server hold the reservation check doesn't know about."""
+    """A live server hold the reservation check doesn't know about: its draft
+    holds a reservation, but in a server not bound to this library."""
+    async with AsyncSessionLocal() as s:
+        s.add(DraftSession(session_id="elsewhere", guild_id="unbound",
+                           cube=CUBE, library_reserved_at=datetime.now()))
+        await s.commit()
     async with resv._RESERVE_LOCK:
         await store.book_server_hold(LIB, CUBE, "elsewhere", datetime.now())
 
@@ -191,3 +197,16 @@ async def test_a_release_noticed_by_todays_check_frees_the_ledger_too(
 
     assert "library ledger: would refuse" not in logs.text
     assert sum(h.released_at is None for h in await _holds()) == 1
+
+
+async def test_switching_to_a_cube_the_library_lacks_ends_the_hold(lounge, mode):
+    await _borrower(ANN)
+    await _queue("q1", [ANN])
+    await resv.reserve("q1")
+    await _set("q1", cube="some-other-cube")
+
+    assert (await resv.cube_changed("q1")).status == "not_applicable"
+
+    holds = await _holds("q1")
+    assert len(holds) == 1 and holds[0].released_at is not None
+    assert holds[0].released_by is None, "released by the hook, not healed"

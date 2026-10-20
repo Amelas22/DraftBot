@@ -118,14 +118,14 @@ async def _book_hold(library_id: Any, draft: Any, now: datetime) -> None:
             "library ledger: could not book a hold for {}", draft.session_id)
 
 
-async def _release_hold(draft: Any, when: datetime) -> None:
+async def _release_hold(session_id: Any, when: datetime) -> None:
     from services import library_ledger_store
 
     try:
-        await library_ledger_store.release_server_hold(str(draft.session_id), when)
+        await library_ledger_store.release_server_hold(str(session_id), when)
     except Exception:
         logger.opt(exception=True).warning(
-            "library ledger: could not release the hold for {}", draft.session_id)
+            "library ledger: could not release the hold for {}", session_id)
 
 
 @dataclass(frozen=True)
@@ -263,7 +263,7 @@ async def still_reserved(draft: Any, now: Optional[datetime] = None, *,
     draft.library_released_at = when
     logger.info("library: draft {} released its reservation of {}: {}",
                 draft.session_id, draft.cube, why)
-    await _release_hold(draft, when)
+    await _release_hold(draft.session_id, when)
     return False
 
 
@@ -430,14 +430,17 @@ async def cube_changed(session_id: Any) -> ReserveAnswer:
     """The queue switched cube. What it held was the old cube's copy, so that
     goes, and the new cube is reserved if it is the library's and somebody in
     the queue wants it."""
+    when = datetime.now()
     async with AsyncSessionLocal() as session:
-        await session.execute(
+        result = await session.execute(
             update(DraftSession)
             .where(DraftSession.session_id == str(session_id),
                    DraftSession.library_reserved_at.isnot(None),
                    DraftSession.library_released_at.is_(None))
-            .values(library_released_at=datetime.now()))
+            .values(library_released_at=when))
         await session.commit()
+    if result.rowcount:
+        await _release_hold(session_id, when)
     return await reserve(session_id)
 
 
