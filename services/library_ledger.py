@@ -14,7 +14,7 @@ from typing import Any
 
 SERVER_WINDOW = timedelta(hours=4)
 SERVER_SET_ASIDE = 1
-_LEAGUE_KINDS = {"match", "sitting"}
+LEAGUE_KINDS = {"match", "sitting"}
 
 
 @dataclass(frozen=True)
@@ -98,12 +98,12 @@ def verdict(
 ) -> Verdict:
     """Decide whether one more hold of ``kind`` over ``[start, end)`` fits."""
     total = peak_held(spans, start, end, now)
-    if kind not in _LEAGUE_KINDS:
+    if kind not in LEAGUE_KINDS:
         ok = total + 1 <= owned
         return Verdict(ok, owned, total, owned, "ok" if ok else "library full")
 
     ceiling = max(owned - SERVER_SET_ASIDE, 0)
-    league = peak_held(spans, start, end, now, _LEAGUE_KINDS)
+    league = peak_held(spans, start, end, now, LEAGUE_KINDS)
     if total + 1 > owned:
         return Verdict(False, owned, total, ceiling, "library full")
     if league + 1 > ceiling:

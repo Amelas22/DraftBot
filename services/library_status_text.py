@@ -5,12 +5,10 @@ a database or a Discord client.
 """
 from datetime import datetime, timedelta
 
-from services.library_ledger import SERVER_SET_ASIDE, Span, peak_held
+from services.library_ledger import LEAGUE_KINDS, SERVER_SET_ASIDE, Span, peak_held
 
 DISCORD_LIMIT = 2000
 _HOURS = 24
-# The kinds that may not touch the server's copy (mirrors library_ledger).
-_LEAGUE_KINDS = {"match", "sitting"}
 
 
 def status_lines(cube: str, owned: int, spans: list[Span], now: datetime) -> list[str]:
@@ -22,7 +20,7 @@ def status_lines(cube: str, owned: int, spans: list[Span], now: datetime) -> lis
     hour = timedelta(hours=1)
     held_now = peak_held(spans, now, now + timedelta(microseconds=1), now)
     league_now = peak_held(
-        spans, now, now + timedelta(microseconds=1), now, kinds=_LEAGUE_KINDS)
+        spans, now, now + timedelta(microseconds=1), now, kinds=LEAGUE_KINDS)
     league_total = max(owned - SERVER_SET_ASIDE, 0)
     # A league hold needs room in league stock and in the total.
     league_free = max(min(league_total - league_now, owned - held_now), 0)

@@ -37,3 +37,24 @@ def test_status_fits_discord():
              for _ in range(300)]
     lines = status_lines("PowerLSV", 400, spans, NOW)
     assert len("\n".join(lines)) <= 2000
+
+
+def test_status_truncates_with_an_ellipsis(monkeypatch):
+    import services.library_status_text as mod
+    monkeypatch.setattr(mod, "DISCORD_LIMIT", 200)
+    lines = status_lines("PowerLSV", 4, [], NOW)
+    assert len("\n".join(lines)) <= 200
+    assert lines[-1] == "…"
+    assert len(lines) < 26
+
+
+def test_league_free_counts_league_holds_and_the_server_copy():
+    live = _hold("match", NOW - timedelta(minutes=10), NOW + timedelta(hours=3))
+    lines = status_lines("PowerLSV", 4, [live], NOW)
+    assert "2 of 3 free" in lines[1]
+
+
+def test_small_libraries_show_no_league_stock():
+    assert "0 of 0 free" in status_lines("PowerLSV", 1, [], NOW)[1]
+    assert "0 of 0 free" in status_lines("PowerLSV", 0, [], NOW)[1]
+    assert "0 free" in status_lines("PowerLSV", 0, [], NOW)[0]
