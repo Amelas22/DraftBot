@@ -55,6 +55,10 @@ class Tournament(Base):
     # Who runs the tournament: the user who created it, allowed to settle a
     # match the players cannot (see the bracket's organizer actions).
     organizer_user_id = Column(String(64), nullable=True)
+    # The tournament's promotional site, set by a mod with /tournament set_website.
+    # Every board links to it as another view of the same teams, standings and
+    # pairings; None links nothing.
+    website_url = Column(String(512), nullable=True)
 
     def __repr__(self):
         return f"<Tournament(id={self.id}, name={self.name!r}, status={self.status})>"
