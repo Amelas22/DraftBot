@@ -81,3 +81,9 @@ def test_small_libraries_never_go_negative():
     assert verdict("server", 1, [], *window).ok
     assert not verdict("match", 0, [], *window).ok
     assert not verdict("server", 0, [], *window).ok
+
+
+def test_an_overdue_hold_counts_in_a_later_window():
+    spans = [span("sitting", 0, 4)]
+    now = T0 + 6 * H
+    assert peak_held(spans, T0 + 7 * H, T0 + 9 * H, now) == 1

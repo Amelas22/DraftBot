@@ -51,12 +51,15 @@ def copies_owned(holdings: dict[str, int], cube_cards: list[dict[str, Any]]) -> 
 def counts_until(span: Span, now: datetime) -> datetime:
     """End of the span's effective interval.
 
-    An unreleased hold keeps counting past ``ends_at`` because the deck is still
-    live until someone releases it.
+    A released hold counts until its release. An unreleased hold counts until
+    ``ends_at``; once that has passed it has no end until someone releases it,
+    because the decks are still out.
     """
     if span.released_at is not None:
         return span.released_at
-    return max(span.ends_at, now)
+    if span.ends_at > now:
+        return span.ends_at
+    return datetime.max
 
 
 def peak_held(
