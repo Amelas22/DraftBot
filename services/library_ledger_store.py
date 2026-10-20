@@ -14,14 +14,15 @@ the re-reserve booked.
 from datetime import datetime
 from typing import Any, Callable
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.db_session import AsyncSessionLocal
 from models.draft_session import DraftSession
 from models.library_hold import LibraryHold
 from services.library_ledger import (
-    SERVER_WINDOW, Span, Verdict, copies_owned, counts_until, verdict)
+    SERVER_WINDOW, Span, Verdict, copies_owned, counts_until, same_stock,
+    verdict)
 
 
 STALE = "ledger:stale"
@@ -29,8 +30,10 @@ STALE = "ledger:stale"
 
 async def spans_overlapping(
     library_id: str, start: datetime, end: datetime, now: datetime,
+    cube_ids: frozenset[str],
 ) -> list[Span]:
-    """Every hold on the library whose effective interval meets ``[start, end)``.
+    """Every hold on the library, for the cubes in ``cube_ids`` (lowercase ids
+    of one stock), whose effective interval meets ``[start, end)``.
 
     The reservation is the source of truth for a server hold. A live server
     hold whose draft is gone, never reserved, or has released its reservation
@@ -43,6 +46,7 @@ async def spans_overlapping(
             result = await session.execute(
                 select(LibraryHold).where(
                     LibraryHold.library_id == library_id,
+                    func.lower(LibraryHold.cube_id).in_(cube_ids),
                     LibraryHold.starts_at < end,
                     (LibraryHold.released_at.is_(None))
                     | (LibraryHold.released_at > start),
@@ -116,7 +120,8 @@ async def server_verdict(
     if owned is None:
         return None
     end = now + SERVER_WINDOW
-    spans = await spans_overlapping(library_id, now, end, now)
+    spans = await spans_overlapping(
+        library_id, now, end, now, same_stock(cube_id))
     return verdict("server", owned, spans, now, end, now)
 
 

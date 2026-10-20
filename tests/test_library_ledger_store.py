@@ -12,6 +12,7 @@ from services.library_ledger import SERVER_WINDOW
 NOW = datetime(2026, 10, 18, 12, 0)
 LIB = "lib1"
 CUBE = "cube1"
+FAMILY = frozenset({CUBE})
 
 
 async def fake_fetch(cube_id):
@@ -83,7 +84,7 @@ async def test_release_ends_the_live_hold(test_db):
     await _hold("d1")
     after = NOW + SERVER_WINDOW + timedelta(hours=1)
     assert await store.release_server_hold("d1", NOW + timedelta(minutes=1))
-    spans = await store.spans_overlapping(LIB, after, after + SERVER_WINDOW, after)
+    spans = await store.spans_overlapping(LIB, after, after + SERVER_WINDOW, after, FAMILY)
     assert spans == []
     assert not await store.release_server_hold("d1", after)
 
@@ -92,7 +93,7 @@ async def test_release_ends_the_live_hold(test_db):
 async def test_spans_include_a_live_hold_past_its_window(test_db):
     await _reserved("d1", NOW - timedelta(hours=5))
     await store.book_server_hold(LIB, CUBE, "d1", NOW - timedelta(hours=5))
-    spans = await store.spans_overlapping(LIB, NOW, NOW + SERVER_WINDOW, NOW)
+    spans = await store.spans_overlapping(LIB, NOW, NOW + SERVER_WINDOW, NOW, FAMILY)
     assert len(spans) == 1
 
 
@@ -100,7 +101,7 @@ async def test_spans_include_a_live_hold_past_its_window(test_db):
 async def test_a_hold_whose_draft_is_gone_is_released_and_not_counted(test_db):
     await store.book_server_hold(LIB, CUBE, "gone", NOW)
 
-    assert await store.spans_overlapping(LIB, NOW, NOW + SERVER_WINDOW, NOW) == []
+    assert await store.spans_overlapping(LIB, NOW, NOW + SERVER_WINDOW, NOW, FAMILY) == []
 
     async with AsyncSessionLocal() as s:
         hold = (await s.scalars(select(LibraryHold))).one()
@@ -119,7 +120,7 @@ async def test_a_hold_whose_reservation_ended_is_released_at_that_moment(test_db
         await s.commit()
 
     later = NOW + timedelta(minutes=20)
-    spans = await store.spans_overlapping(LIB, later, later + SERVER_WINDOW, later)
+    spans = await store.spans_overlapping(LIB, later, later + SERVER_WINDOW, later, FAMILY)
 
     assert len(spans) == 1, "d2 still counts; d1 does not"
     async with AsyncSessionLocal() as s:
@@ -136,7 +137,7 @@ async def test_a_hold_whose_draft_never_reserved_is_released(test_db):
         await s.commit()
     await store.book_server_hold(LIB, CUBE, "d1", NOW)
 
-    assert await store.spans_overlapping(LIB, NOW, NOW + SERVER_WINDOW, NOW) == []
+    assert await store.spans_overlapping(LIB, NOW, NOW + SERVER_WINDOW, NOW, FAMILY) == []
     assert await _live_holds() == []
 
 
@@ -153,3 +154,41 @@ async def test_a_stale_release_never_ends_a_newer_hold(test_db):
 
     live = await _live_holds()
     assert len(live) == 1 and live[0].starts_at == rebooked
+
+
+async def _hold_cube(draft, cube):
+    async with AsyncSessionLocal() as s:
+        s.add(DraftSession(session_id=draft, guild_id="g1", cube=cube,
+                           library_reserved_at=NOW))
+        await s.commit()
+    await store.book_server_hold(LIB, cube, draft, NOW)
+
+
+def test_same_stock_is_case_insensitive():
+    from services.library_ledger import same_stock
+
+    assert same_stock("PowerLSV") == frozenset({"powerlsv", "lsvcube"})
+    assert same_stock("LSVcube") == frozenset({"powerlsv", "lsvcube"})
+    assert same_stock("Succube") == frozenset({"succube"})
+
+
+@pytest.mark.asyncio
+async def test_another_cubes_hold_does_not_count_against_a_verdict(test_db, monkeypatch):
+    async def fake(library_id):
+        return {"Island": 1}
+
+    monkeypatch.setattr("services.card_library_inventory.library_holdings", fake)
+    await _hold_cube("d1", "Succube")
+    v = await store.server_verdict(LIB, "PowerLSV", NOW, fetch=fake_fetch)
+    assert v is not None and v.ok and v.peak == 0
+
+
+@pytest.mark.asyncio
+async def test_a_hold_on_the_same_stock_counts_against_a_verdict(test_db, monkeypatch):
+    async def fake(library_id):
+        return {"Island": 1}
+
+    monkeypatch.setattr("services.card_library_inventory.library_holdings", fake)
+    await _hold_cube("d1", "LSVCube")
+    v = await store.server_verdict(LIB, "powerlsv", NOW, fetch=fake_fetch)
+    assert v is not None and not v.ok and v.peak == 1

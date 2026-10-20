@@ -16,6 +16,18 @@ SERVER_WINDOW = timedelta(hours=4)
 SERVER_SET_ASIDE = 1
 LEAGUE_KINDS = {"match", "sitting"}
 
+# Cubes that share one physical stock: a hold on any of them uses the same cards.
+STOCK_FAMILIES: tuple[frozenset[str], ...] = (frozenset({"powerlsv", "lsvcube"}),)
+
+
+def same_stock(cube_id: str) -> frozenset[str]:
+    """The lowercased cube ids that share stock with ``cube_id`` (itself included)."""
+    key = cube_id.lower()
+    for family in STOCK_FAMILIES:
+        if key in family:
+            return family
+    return frozenset({key})
+
 
 @dataclass(frozen=True)
 class Span:
