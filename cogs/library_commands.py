@@ -55,8 +55,11 @@ from services.library_loan_actions import (
 )
 from services.library_ledger import same_stock
 from services.library_ledger_store import owned_copies, spans_overlapping
+from services import library_reservation
 from services.library_reservation import _RESERVE_LOCK
-from services.library_service import first_offered_cube, is_communal, library_for, offer_cube
+from services.library_service import (
+    first_offered_cube, is_communal, library_for, offer_cube, offers,
+)
 from services.library_status_text import status_lines
 from services.mtgo_tradebot_client import get_lending_client, max_cards_per_trade
 
@@ -597,6 +600,10 @@ class LibraryCommands(commands.Cog):
             await ctx.followup.send(
                 "This library doesn't offer any cubes yet.", ephemeral=True)
             return
+        if not await offers(library.id, cube_id):
+            await ctx.followup.send(
+                f"The library doesn't lend for {cube_id}.", ephemeral=True)
+            return
         owned = await owned_copies(str(library.id), cube_id)
         if owned is None:
             await ctx.followup.send(
@@ -606,6 +613,9 @@ class LibraryCommands(commands.Cog):
         now = datetime.now()
         # The read can heal-write stale holds, so it takes the reservation lock.
         async with _RESERVE_LOCK:
+            # Reading the reservations writes down any that have ended, so
+            # their holds self-heal in the read below.
+            await library_reservation.reservations(str(library.id))
             spans = await spans_overlapping(
                 str(library.id), now, now + timedelta(hours=24), now,
                 same_stock(cube_id))

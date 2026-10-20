@@ -332,8 +332,10 @@ async def reserve(session_id: Any) -> ReserveAnswer:
             now = datetime.now()
             ledger = await _ledger_verdict(library.id, draft, now, read)
             if ledger is not None and not ledger.ok:
-                logger.info("library ledger: would refuse {} ({})",
-                            draft.session_id, ledger.reason)
+                logger.info(
+                    "library ledger: would refuse {} ({}) cube={} owned={} "
+                    "peak={} limit={}", draft.session_id, ledger.reason,
+                    draft.cube, ledger.owned, ledger.peak, ledger.limit)
                 if _ledger_enforces(draft.guild_id):
                     return ReserveAnswer("short")
             async with AsyncSessionLocal() as session:
@@ -352,8 +354,10 @@ async def reserve(session_id: Any) -> ReserveAnswer:
                  if d.cube == draft.cube and d.session_id != draft.session_id]
         ledger = await _ledger_verdict(library.id, draft, datetime.now(), read)
         if ledger is not None and ledger.ok:
-            logger.info("library ledger: would allow {} ({})",
-                        draft.session_id, ledger.reason)
+            logger.info(
+                "library ledger: would allow {} ({}) cube={} owned={} "
+                "peak={} limit={}", draft.session_id, ledger.reason,
+                draft.cube, ledger.owned, ledger.peak, ledger.limit)
         if using:
             return ReserveAnswer("in_use", by=_first_reserved(using))
         return ReserveAnswer("short")

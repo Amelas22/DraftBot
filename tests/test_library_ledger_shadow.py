@@ -71,6 +71,7 @@ async def test_shadow_logs_a_refusal_but_still_reserves(lounge, logs, mode):
     assert (await resv.reserve("q1")).status == "reserved"
 
     assert "library ledger: would refuse q1" in logs.text
+    assert f"cube={CUBE} owned=1 peak=1 limit=1" in logs.text
     assert [h.released_at for h in await _holds("q1")] == [None]
 
 
@@ -160,6 +161,7 @@ async def test_shadow_logs_what_it_would_allow(lounge, logs, mode, monkeypatch):
 
     assert answer.status == "in_use" and answer.by.session_id == "q1"
     assert "library ledger: would allow q2" in logs.text
+    assert f"cube={CUBE} owned=1 peak=0 limit=1" in logs.text
     assert await _holds("q2") == []
 
 
@@ -210,3 +212,24 @@ async def test_switching_to_a_cube_the_library_lacks_ends_the_hold(lounge, mode)
     holds = await _holds("q1")
     assert len(holds) == 1 and holds[0].released_at is not None
     assert holds[0].released_by is None, "released by the hook, not healed"
+
+
+async def test_enforce_mode_still_answers_when_the_ledger_fails(
+        lounge, logs, mode, monkeypatch):
+    """A broken ledger is no reason to refuse: enforce falls back to today's check."""
+    async def broken(*_args, **_kwargs):
+        raise RuntimeError("ledger down")
+    mode("enforce")
+    monkeypatch.setattr(store, "server_verdict", broken)
+    monkeypatch.setattr(store, "book_server_hold", broken)
+    await _borrower(ANN, BEN)
+    await _queue("q1", [ANN])
+    await _queue("q2", [BEN])
+
+    assert (await resv.reserve("q1")).status == "reserved"
+    answer = await resv.reserve("q2")
+    assert answer.status == "in_use" and answer.by.session_id == "q1"
+
+    assert "library ledger: verdict failed for q1" in logs.text
+    assert "would refuse" not in logs.text
+    assert (await _row("q1")).library_reserved_at is not None

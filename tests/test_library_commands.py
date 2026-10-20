@@ -435,8 +435,56 @@ async def test_status_command_reports_unreadable_cube(monkeypatch):
     ctx = _ctx()
     monkeypatch.setattr(mod, "defer_if_usable", AsyncMock(return_value=True))
     stub_library(monkeypatch, mod)
+    monkeypatch.setattr(mod, "offers", AsyncMock(return_value=True))
     monkeypatch.setattr(mod, "owned_copies", AsyncMock(return_value=None))
 
     await mod.LibraryCommands.status.callback(cog, ctx, cube="somecube")
 
     assert _said(ctx) == "Couldn't read that cube right now; try again in a minute."
+
+
+@pytest.mark.asyncio
+async def test_status_command_refuses_a_cube_the_library_does_not_offer(monkeypatch):
+    import cogs.library_commands as mod
+
+    cog = LibraryCommands(bot=SimpleNamespace())
+    ctx = _ctx()
+    monkeypatch.setattr(mod, "defer_if_usable", AsyncMock(return_value=True))
+    stub_library(monkeypatch, mod)
+    monkeypatch.setattr(mod, "offers", AsyncMock(return_value=False))
+    owned = AsyncMock(return_value=3)
+    monkeypatch.setattr(mod, "owned_copies", owned)
+
+    await mod.LibraryCommands.status.callback(cog, ctx, cube="somecube")
+
+    assert _said(ctx) == "The library doesn't lend for somecube."
+    assert ctx.followup.send.await_args.kwargs["ephemeral"] is True
+    owned.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_status_command_refreshes_reservations_before_reading_holds(monkeypatch):
+    import cogs.library_commands as mod
+
+    order = []
+
+    async def refresh(library_id):
+        order.append("reservations")
+        return []
+
+    async def spans(*args):
+        order.append("spans")
+        return []
+
+    cog = LibraryCommands(bot=SimpleNamespace())
+    ctx = _ctx()
+    monkeypatch.setattr(mod, "defer_if_usable", AsyncMock(return_value=True))
+    stub_library(monkeypatch, mod)
+    monkeypatch.setattr(mod, "offers", AsyncMock(return_value=True))
+    monkeypatch.setattr(mod, "owned_copies", AsyncMock(return_value=2))
+    monkeypatch.setattr(mod.library_reservation, "reservations", refresh)
+    monkeypatch.setattr(mod, "spans_overlapping", spans)
+
+    await mod.LibraryCommands.status.callback(cog, ctx, cube="somecube")
+
+    assert order == ["reservations", "spans"]
