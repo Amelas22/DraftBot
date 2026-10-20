@@ -138,3 +138,18 @@ async def test_a_hold_whose_draft_never_reserved_is_released(test_db):
 
     assert await store.spans_overlapping(LIB, NOW, NOW + SERVER_WINDOW, NOW) == []
     assert await _live_holds() == []
+
+
+@pytest.mark.asyncio
+async def test_a_stale_release_never_ends_a_newer_hold(test_db):
+    """A release decided before a re-reserve must not end the hold the
+    re-reserve booked: it can only end a hold that began by then."""
+    await _hold("d1")
+    rebooked = NOW + timedelta(seconds=1)
+    await store.book_server_hold(LIB, CUBE, "d1", rebooked)
+
+    assert not await store.release_server_hold(
+        "d1", NOW + timedelta(milliseconds=500))
+
+    live = await _live_holds()
+    assert len(live) == 1 and live[0].starts_at == rebooked

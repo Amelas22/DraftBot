@@ -1,13 +1,21 @@
 """The card-library ledger's store: book, release and read holds in ``library_hold``.
 
-Locking: these functions assume the caller holds
-``library_reservation._RESERVE_LOCK`` when booking, so the read of existing holds
-and the booking that follows it cannot interleave with another reserve.
+Locking: booking assumes the caller holds ``library_reservation._RESERVE_LOCK``,
+so the read of existing holds and the booking that follows it cannot interleave
+with another reserve. Reading writes too: ``spans_overlapping`` (and so
+``server_verdict``) releases stale holds as it reads them. Call them under the
+lock as well, or accept a concurrent heal write; it is idempotent, guarded by
+``released_at IS NULL``.
+
+Releasing needs no lock: ``release_server_hold`` only ends a hold that began by
+the release time, so a release decided before a re-reserve cannot end the hold
+the re-reserve booked.
 """
 from datetime import datetime
 from typing import Any, Callable
 
 from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.db_session import AsyncSessionLocal
 from models.draft_session import DraftSession
@@ -49,7 +57,7 @@ async def spans_overlapping(
 
 
 async def _release_stale(
-    session: Any, rows: list[LibraryHold], now: datetime,
+    session: AsyncSession, rows: list[LibraryHold], now: datetime,
 ) -> set[int]:
     """Release the live server holds among ``rows`` whose reservation has ended.
 
@@ -134,7 +142,11 @@ async def book_server_hold(
 async def release_server_hold(
     draft_session_id: str, when: datetime, by: str | None = None,
 ) -> bool:
-    """End the draft's live server hold. True if there was one to release."""
+    """End the draft's live server hold, if it began by ``when``.
+
+    True if there was one to release. A hold booked after ``when`` belongs to a
+    later reservation, so a release decided before it leaves it alone.
+    """
     async with AsyncSessionLocal() as session:
         async with session.begin():
             result = await session.execute(
@@ -142,6 +154,7 @@ async def release_server_hold(
                 .where(
                     LibraryHold.draft_session_id == draft_session_id,
                     LibraryHold.kind == "server",
-                    LibraryHold.released_at.is_(None))
+                    LibraryHold.released_at.is_(None),
+                    LibraryHold.starts_at <= when)
                 .values(released_at=when, released_by=by))
             return bool(getattr(result, "rowcount", 0))
