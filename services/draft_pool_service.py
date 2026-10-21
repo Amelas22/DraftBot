@@ -537,6 +537,19 @@ async def declared_bets(session_id: str) -> tuple[dict[str, int], set[str]]:
             {player_id for player_id, _, capped in rows if capped is True})
 
 
+async def draft_min_stake(session_id: str) -> int:
+    """The draft's minimum entry, which the entry cap holds a capped player to
+    on a team of minimum entries (cap_targets). 0 for a draft with none."""
+    from models.draft_session import DraftSession
+    from sqlalchemy import select
+
+    async with db_session() as session:
+        value = (await session.execute(
+            select(DraftSession.min_stake)
+            .where(DraftSession.session_id == session_id))).scalar_one_or_none()
+    return int(value or 0)
+
+
 def _trim(held: dict[str, int], players: list[str],
           stays: dict[str, int]) -> dict[str, int]:
     """Plan the refund of whatever each of `players` holds above `stays`.
@@ -589,7 +602,7 @@ async def _apply_refunds(guild_id: str, session_id: str,
 
 
 def cap_targets(side: list[str], bets: dict[str, int], wants_cap: set[str],
-                held: dict[str, int]) -> dict[str, int]:
+                held: dict[str, int], min_stake: int = 0) -> dict[str, int]:
     """What each player on `side` may keep once their own entry cap is applied.
 
     "Cap my entry so I never carry more than my share of my own team" is a
@@ -616,14 +629,23 @@ def cap_targets(side: list[str], bets: dict[str, int], wants_cap: set[str],
     allowance and trim again. The declared figure is what the player agreed to
     and levelling never writes to it, so every pass computes the same ceiling
     and the second finds nothing left to trim.
+
+    One exception to the share: when every teammate is on the draft's minimum
+    entry, a capped player is held to the minimum too. Beside three teammates
+    on 20 a 50 is only 45% of its side and the share would let it stand, but a
+    capped player asked never to be the one carrying the team, and on a team
+    of minimum entries anything above the minimum is exactly that.
     """
     targets = {}
     for player in side:
         if player not in wants_cap:
             targets[player] = held[player]
             continue
-        mates = sum(bets.get(p, 0) for p in side if p != player)
-        ceiling = snap_to_step(int(mates * CAP_SHARE / (1 - CAP_SHARE)))
+        mates = [bets.get(p, 0) for p in side if p != player]
+        if min_stake > 0 and mates and all(0 < bet <= min_stake for bet in mates):
+            targets[player] = min(held[player], min_stake)
+            continue
+        ceiling = snap_to_step(int(sum(mates) * CAP_SHARE / (1 - CAP_SHARE)))
         if ceiling <= 0:
             # Nothing to cap against: a solo side, teammates with no declared
             # entry, or an allowance too small to reach one whole step. The test
@@ -645,7 +667,8 @@ class MatchResult(TypedDict):
 
 
 def plan_levelling(team_a: list[str], team_b: list[str], held: dict[str, int],
-                   bets: dict[str, int], wants_cap: set[str]) -> MatchResult:
+                   bets: dict[str, int], wants_cap: set[str],
+                   min_stake: int = 0) -> MatchResult:
     """Both ceilings match_pool applies, as a plan that moves no money.
 
     `held` is what each player has at stake going in: the pool's holdings for
@@ -661,7 +684,7 @@ def plan_levelling(team_a: list[str], team_b: list[str], held: dict[str, int],
 
     capped: dict[str, int] = {}
     for side in sides:
-        capped |= _trim(held, side, cap_targets(side, bets, wants_cap, held))
+        capped |= _trim(held, side, cap_targets(side, bets, wants_cap, held, min_stake))
 
     # What each side can actually put up in whole tens. A stake is matched in
     # units of ten, so an entry of 25 backs 20 of the other side and hands back
@@ -710,7 +733,8 @@ async def match_pool(guild_id: str, session_id: str,
     """
     held = await contributions(guild_id, session_id)
     bets, wants_cap = await declared_bets(session_id)
-    plan = plan_levelling(team_a, team_b, held, bets, wants_cap)
+    plan = plan_levelling(team_a, team_b, held, bets, wants_cap,
+                          await draft_min_stake(session_id))
     matched, capped, refunded = plan["matched"], plan["capped"], plan["refunded"]
 
     await _apply_refunds(guild_id, session_id,

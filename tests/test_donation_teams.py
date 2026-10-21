@@ -105,3 +105,26 @@ async def test_a_donation_draft_whose_shares_cannot_be_recorded_returns_to_sign_
     said = " ".join(str(c.args[0]) for c in interaction.followup.send.await_args_list)
     assert "Create Teams" in said
     interaction.channel.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_donation_draft_holds_a_capped_entry_to_the_draft_minimum(test_db):
+    """50 beside three teammates on 20 is 45% of its side, which the share
+    alone would let stand; on a team of minimum entries the cap holds it to 20."""
+    from sqlalchemy import update
+    from models.draft_session import DraftSession
+
+    team_a, team_b = ["a1", "a2", "a3", "a4"], ["b1", "b2", "b3", "b4"]
+    await seed_session("d1", guild="g", stage="teams", donation=True,
+                       sign_ups={p: p for p in team_a + team_b},
+                       teams=(team_a, team_b))
+    async with db_session() as s:
+        await s.execute(update(DraftSession).where(DraftSession.session_id == "d1")
+                        .values(min_stake=20))
+    await seed_stakes("d1", {**{p: (50, False) for p in team_a},
+                             "b1": (50, True), "b2": (20, False),
+                             "b3": (20, False), "b4": (20, False)})
+
+    await level_donation("d1", team_a, team_b)
+
+    assert await donation_shares("d1") == {p: 20 for p in team_a + team_b}
