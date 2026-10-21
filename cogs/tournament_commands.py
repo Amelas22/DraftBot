@@ -40,12 +40,14 @@ from services.tournament_formatter import (
     create_bracket_embed,
     create_registration_embed,
     create_standings_embed,
+    pairings_header,
     post_registration_board,
     refresh_boards,
     round_label,
     round_name,
     update_bracket_message,
     update_standings_message,
+    validate_website_url,
 )
 from services.tournament_service import (
     _cut_eligible,
@@ -1785,7 +1787,8 @@ class TournamentCog(commands.Cog):
             organizer = getattr(source, "user", None) or getattr(source, "author", None)
             tournament.organizer_user_id = str(organizer.id) if organizer else None
             embed = create_bracket_embed(
-                tournament.name, await bracket_rows(session, tournament_id))
+                tournament.name, await bracket_rows(session, tournament_id),
+                tournament.website_url)
         message = await play.send(embed=embed)
         await safe_pin(message)
         async with db_session() as session:
@@ -1966,12 +1969,12 @@ class TournamentCog(commands.Cog):
                         rows.append((m.id, f"• **{part_a.team_name}** {m.team_a_wins}–"
                                            f"{m.team_b_wins} **{part_b.team_name}**", None))
 
+        site = tournament.website_url if tournament is not None else None
         if create_rooms:
-            await channel.send(f"**{label} pairings:**")
+            await channel.send(pairings_header(label, site))
         else:
-            await channel.send(
-                f"**{label} pairings:** — rooms open with "
-                f"`/tournament open_rooms {round_number}`")
+            await channel.send(pairings_header(
+                label, site, f" — rooms open with `/tournament open_rooms {round_number}`"))
 
         for match_id, text, names in rows:
             # One match's post failing (e.g. a transient Discord error) must not
@@ -2030,6 +2033,42 @@ class TournamentCog(commands.Cog):
             await self._post_standings(self._destination(ctx, STANDINGS.setting), tournament_id)
         logger.info(f"Standings message refreshed for tournament {tournament_id} by {ctx.author.id}")
         await ctx.followup.send("✅ Standings refreshed.", ephemeral=True)
+
+    @tournament.command(name="set_website",
+                        description="Admin: link the tournament's league site from every board")
+    @has_bot_manager_role()
+    async def set_website(
+        self, ctx,
+        url: discord.Option(str, "The league site's https:// address; leave empty to remove the link",
+                            required=False, default=None),
+    ):
+        if not await self._check_enabled(ctx):
+            return
+        await ctx.defer(ephemeral=True)
+        try:
+            cleaned = validate_website_url(url)
+        except ValueError as e:
+            await ctx.followup.send(f"❌ {e}", ephemeral=True)
+            return
+        async with db_session() as session:
+            tournament = await get_active_tournament(session, ctx.guild.id)
+            if tournament is None:
+                await ctx.followup.send("There is no active tournament.", ephemeral=True)
+                return
+            tournament.website_url = cleaned
+            tournament_id, name = tournament.id, tournament.name
+        # Redraw what is already posted so the link appears now, not on the next
+        # result. Each updater is a no-op for a board that was never posted.
+        await refresh_boards(self.bot, [tournament_id])
+        await update_standings_message(self.bot, tournament_id)
+        await update_bracket_message(self.bot, tournament_id)
+        logger.info(f"Website for tournament {tournament_id} set to {cleaned!r} by {ctx.author.id}")
+        if cleaned:
+            await ctx.followup.send(
+                f"✅ **{name}** now links to <{cleaned}> from its boards. Pairings link it "
+                f"from the next round posted.", ephemeral=True)
+        else:
+            await ctx.followup.send(f"✅ Removed the website link from **{name}**.", ephemeral=True)
 
     @tournament.command(name="recover_draft", description="Admin: recreate channels for a reaped in-progress match draft")
     @has_bot_manager_role()

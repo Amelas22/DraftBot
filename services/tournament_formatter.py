@@ -5,6 +5,8 @@ and the auto-updating message. `update_standings_message` edits the stored
 message in place on every result change, mirroring
 `utils.update_leaderboards_for_guild`.
 """
+from urllib.parse import urlsplit
+
 import discord
 from loguru import logger
 from sqlalchemy import func, select
@@ -102,6 +104,48 @@ def _add_chunked_field(embed, label, lines, cont_label=None):
         embed.add_field(name=label if i == 0 else cont, value=chunk, inline=False)
 
 
+WEBSITE_MAX_LENGTH = 512   # Tournament.website_url's width
+
+
+def validate_website_url(raw):
+    """The league-site link a mod typed, cleaned; None for a blank one (no link);
+    ValueError saying what is wrong.
+
+    Only https with a host: the link is rendered on every board, so it must open
+    for everyone. Parentheses and spaces are refused because the boards wrap the
+    link in markdown, where either one ends the link early."""
+    url = (raw or "").strip()
+    if not url:
+        return None
+    parts = urlsplit(url)
+    if parts.scheme != "https" or not parts.netloc:
+        raise ValueError("The link must be a full `https://` address.")
+    if any(c.isspace() or c in "()<>" for c in url):
+        raise ValueError("The link can't contain spaces, brackets or parentheses.")
+    if len(url) > WEBSITE_MAX_LENGTH:
+        raise ValueError(f"The link is too long (max {WEBSITE_MAX_LENGTH} characters).")
+    return url
+
+
+def add_website_link(embed, url):
+    """Link a board to the tournament's league site, if it has one: the title opens
+    it, and a closing line says what it shows. One helper so every board words it
+    the same way."""
+    if not url:
+        return embed
+    embed.url = url
+    line = f"🌐 [View teams, standings and pairings on the league site]({url})"
+    embed.description = f"{embed.description}\n\n{line}" if embed.description else line
+    return embed
+
+
+def pairings_header(label, url, suffix=""):
+    """A round's pairings header. Plain text, not an embed, so the site link is
+    wrapped in <> to stop Discord unfurling a preview card under every round."""
+    site = f" · [League site](<{url}>)" if url else ""
+    return f"**{label} pairings:**{site}{suffix}"
+
+
 def _bracket_side(side, feeder, won):
     if side is None:
         return f"winner of #{feeder}" if feeder else "TBD"
@@ -110,7 +154,7 @@ def _bracket_side(side, feeder, won):
     return f"**{text}**" if won else text
 
 
-def create_bracket_embed(tournament_name, rows):
+def create_bracket_embed(tournament_name, rows, website_url=None):
     """The live bracket: one aligned line per match, earliest first.
 
     The id and stage sit in a code span padded to one width, the same
@@ -128,7 +172,7 @@ def create_bracket_embed(tournament_name, rows):
         room = f" — <#{r.thread_id}>" if r.thread_id and r.a_wins is None else ""
         lines.append(f"`{f'#{r.match_id} {r.stage}'.ljust(width)}` {a}{middle}{b}{room}")
     _add_chunked_field(embed, "Matches", lines)
-    return embed
+    return add_website_link(embed, website_url)
 
 
 def _standings_rows(participants, omw):
@@ -217,7 +261,7 @@ def create_standings_embed(tournament, participants, stage=STAGE_SWISS, omw=None
         _add_chunked_field(embed, "Standings", rows)
     else:
         embed.add_field(name="Standings", value="No teams registered yet.", inline=False)
-    return embed
+    return add_website_link(embed, tournament.website_url)
 
 
 def _add_how_to_join(embed, fee, closed):
@@ -290,6 +334,7 @@ def create_registration_embed(tournament, participants, pot=0, deficits=None,
         desc += (" · " if desc else "") + f"**Cut:** top {tournament.cut_to}"
     embed = discord.Embed(title=title, description=desc,
                           color=discord.Color.gold())
+    add_website_link(embed, tournament.website_url)
 
     if not participants:
         embed.add_field(name="Teams (0)", value="No teams yet.", inline=False)
@@ -352,7 +397,8 @@ async def update_bracket_message(bot, tournament_id):
         if tournament is None or not tournament.bracket_message_id:
             return
         embed = create_bracket_embed(
-            tournament.name, await bracket_rows(session, tournament_id))
+            tournament.name, await bracket_rows(session, tournament_id),
+            tournament.website_url)
         channel_id = int(tournament.bracket_channel_id)
         message_id = int(tournament.bracket_message_id)
     try:
