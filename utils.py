@@ -901,6 +901,20 @@ async def update_draft_summary_message(bot, draft_session_id):
             print(f"Failed to update draft summary message: {e}")
 
 
+def add_draft_log_link(embed, draft_session) -> None:
+    """Link a victory embed to the draft's public log, once one is posted.
+
+    Keyed on the posted message, not data_received: the publish re-renders the
+    victory messages right after saving the message ids and before it sets
+    data_received, so that flag is still False on the one re-render meant to
+    add this link.
+    """
+    if draft_session.logs_channel_id and draft_session.logs_message_id:
+        logs_link = (f"https://discord.com/channels/{draft_session.guild_id}/"
+                     f"{draft_session.logs_channel_id}/{draft_session.logs_message_id}")
+        embed.add_field(name="Draft Logs", value=f"[View Draft Log]({logs_link})", inline=False)
+
+
 def results_channel_name_for(draft_session) -> str:
     """Which results channel a finished draft's victory embed belongs in.
 
@@ -1261,13 +1275,7 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                         main_embed, bet_embed = await generate_draft_summary_embed(bot, draft_session_id)
                         three_zero_drafters = await calculate_three_zero_drafters(session, draft_session_id, guild)
                         main_embed.add_field(name="3-0 Drafters", value=three_zero_drafters or "None", inline=False)
-                        if draft_session.data_received and hasattr(draft_session, 'logs_channel_id') and draft_session.logs_message_id:
-                            logs_link = f"https://discord.com/channels/{draft_session.guild_id}/{draft_session.logs_channel_id}/{draft_session.logs_message_id}"
-                            main_embed.add_field(
-                                name="Draft Logs",
-                                value=f"[View Draft Log]({logs_link})",
-                                inline=False
-                            )
+                        add_draft_log_link(main_embed, draft_session)
 
                         settle_view = None
                         # No debts exist under the pool -- the money moved when
@@ -1312,14 +1320,7 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                     main_embed, bet_embed = await generate_draft_summary_embed(bot, draft_session_id)
                     three_zero_drafters = await calculate_three_zero_drafters(session, draft_session_id, guild)
                     main_embed.add_field(name="3-0 Drafters", value=three_zero_drafters or "None", inline=False)
-                    # Add logs link to the embed if available
-                    if draft_session.data_received and hasattr(draft_session, 'logs_channel_id') and draft_session.logs_message_id:
-                        logs_link = f"https://discord.com/channels/{draft_session.guild_id}/{draft_session.logs_channel_id}/{draft_session.logs_message_id}"
-                        main_embed.add_field(
-                            name="Draft Logs",
-                            value=f"[View Draft Log]({logs_link})",
-                            inline=False
-                        )
+                    add_draft_log_link(main_embed, draft_session)
                     # Create settle debts view for staked drafts
                     settle_view = None
                     # A button to settle debts, only where debts exist. Under
