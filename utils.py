@@ -993,6 +993,49 @@ async def _sync_linked_tournament_match(bot, match_id, team_a_wins, team_b_wins,
         logger.error(f"Failed to auto-record tournament match {match_id}: {e}")
 
 
+async def release_decided_draft_log(draft_session_id):
+    """Make a decided draft's public log due now instead of at its timer.
+
+    The log is held back so a team can't study the other side's pools while
+    the result is still open. Once one side clinches, nothing is left to hide,
+    so the publish moves up to now and the log reconciler posts it on its next
+    tick. Swiss drafts keep their timer: their rounds aren't a team score.
+
+    Sits beside settle_decided_draft, outside the transaction below, for the
+    same reason: its own connection, and SQLite is single-writer. Idempotent;
+    a draft that is undecided, not yet captured, or already due costs one read.
+    """
+    draft_session = await get_draft_session(draft_session_id)
+    if (not draft_session
+            or draft_session.session_type == "swiss"
+            or draft_session.session_stage == "abandoned"
+            or draft_session.data_received
+            or draft_session.unlock_at is None):
+        return
+    now = datetime.now()
+    if draft_session.unlock_at <= now:
+        return
+    team_a_wins, team_b_wins = await calculate_team_wins(draft_session_id)
+    if decides_draft(team_a_wins, team_b_wins,
+                     total_matches_in(draft_session.match_counter)) is None:
+        return
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            await session.execute(
+                update(DraftSession)
+                .where(DraftSession.session_id == draft_session_id,
+                       DraftSession.unlock_at > now)
+                .values(unlock_at=now))
+    logger.info(f"Draft {draft_session_id} is decided; its log publishes on the next reconciler tick")
+    # Unlock Draftmancer too, and now: the manager holding the socket shuts
+    # itself down within seconds of unlock_at passing, before the reconciler's
+    # next tick could ask it to.
+    from services.draft_setup_manager import DraftSetupManager  # imports utils back
+    manager = DraftSetupManager.get_active_manager(draft_session_id)
+    if manager is not None:
+        await manager.release_draftmancer_log()
+
+
 async def sync_decided_draft_to_tournament(bot, draft_session_id):
     """Level a decided draft's linked tournament match with its current score.
 
@@ -1037,6 +1080,7 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
     await settle_decided_draft(draft_session_id)
     # Same rule, same reason: its own connection, so it cannot go inside.
     await sync_decided_draft_to_tournament(bot, draft_session_id)
+    await release_decided_draft_log(draft_session_id)
 
     async with AsyncSessionLocal() as session:
         async with session.begin():
@@ -1308,9 +1352,8 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                     else:
                         print(f"Results channel '{results_channel_name}' not found.")
 
-                    # Logs are posted by the deferred-capture publish timer (~180 min,
-                    # set at draft-end) or the manual release vote — no longer unlocked
-                    # at victory. See docs/superpowers/specs/2026-06-22-deferred-draft-log-capture-design.md
+                    # The log reconciler posts the log: release_decided_draft_log
+                    # (above) made it due at this clinch.
 
                     # Update draft win streaks (Order of the White Lotus) and collect extension info
                     draft_streak_extensions = {}
