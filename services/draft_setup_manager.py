@@ -1531,6 +1531,23 @@ class DraftSetupManager:
             self.logger.exception(f"Error capturing draft log: {e}")
             return False
 
+    async def release_draftmancer_log(self) -> None:
+        """Unlock the log in Draftmancer now, ahead of its own timer.
+
+        Best-effort and Draftmancer-only: posting to Discord is publish_draft_log's
+        job. Needs this manager's live socket and in-memory log, so it is a no-op
+        once the manager has disconnected.
+        """
+        if not (self.socket_client.connected and self.current_draft_log):
+            return
+        try:
+            log_copy = self.current_draft_log.copy()
+            log_copy['delayed'] = False
+            await self.socket_client.emit('shareDraftLog', log_copy)
+            self.logger.info(f"Released Draftmancer log for {self.session_id} early")
+        except Exception as e:
+            self.logger.error(f"Failed to release Draftmancer log for {self.session_id}: {e}")
+
     async def publish_draft_log(self, release=False):
         """Post the captured draft log to Discord and mark it published.
 
@@ -1566,15 +1583,8 @@ class DraftSetupManager:
                 self.logger.warning(f"No captured draft_data for {self.session_id}; nothing to publish")
                 return False
 
-            # Manual early release: unlock the Draftmancer log now (best-effort).
-            if release and self.socket_client.connected and self.current_draft_log:
-                try:
-                    log_copy = self.current_draft_log.copy()
-                    log_copy['delayed'] = False
-                    await self.socket_client.emit('shareDraftLog', log_copy)
-                    self.logger.info(f"Released Draftmancer log for {self.session_id} (manual early)")
-                except Exception as e:
-                    self.logger.error(f"Failed to release Draftmancer log for {self.session_id}: {e}")
+            if release:
+                await self.release_draftmancer_log()
 
             # Every draft gets a full table page, built before the embed because
             # its URL goes inside; best-effort, since the embed is the
