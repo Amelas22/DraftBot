@@ -963,3 +963,79 @@ async def test_a_ceiling_that_snaps_to_nothing_never_refunds_a_whole_entry(test_
 
     assert targets["x"] == 200, (
         f"a ceiling that snapped to nothing refunded the whole entry: {targets}")
+
+
+# ---- a team of minimum entries holds a capped player to the minimum ---------------
+#
+# The share alone lets a 50 stand beside three teammates on 20 -- it is 45% of its
+# side -- but on a team where everyone else put in the least they could, a capped
+# player above the minimum is still the one carrying it.
+
+def test_a_capped_entry_beside_only_minimum_entries_is_held_to_the_minimum():
+    from services.draft_pool_service import cap_targets
+
+    side = ["x", "m1", "m2", "m3"]
+    bets = {"x": 50, "m1": 20, "m2": 20, "m3": 20}
+
+    assert cap_targets(side, bets, {"x"}, dict(bets))["x"] == 50, (
+        "without the draft minimum this is the share rule, which leaves 45% alone")
+    assert cap_targets(side, bets, {"x"}, dict(bets), min_stake=20)["x"] == 20
+
+
+def test_one_teammate_above_the_minimum_restores_the_share_rule():
+    from services.draft_pool_service import cap_targets
+
+    side = ["x", "m1", "m2", "m3"]
+    bets = {"x": 50, "m1": 20, "m2": 20, "m3": 30}
+
+    assert cap_targets(side, bets, {"x"}, dict(bets), min_stake=20)["x"] == 50
+
+
+def test_minimum_teammates_never_trim_an_uncapped_entry():
+    from services.draft_pool_service import cap_targets
+
+    side = ["x", "m1", "m2"]
+    bets = {"x": 100, "m1": 20, "m2": 20}
+
+    assert cap_targets(side, bets, set(), dict(bets), min_stake=20)["x"] == 100
+
+
+def test_teammates_above_a_lower_draft_minimum_are_not_minimum_entries():
+    """20 is the usual minimum, not THE minimum: on a 10-minimum draft three
+    teammates on 20 are above it, so the share decides (50 of 110 stands)."""
+    from services.draft_pool_service import cap_targets
+
+    side = ["x", "m1", "m2", "m3"]
+    bets = {"x": 50, "m1": 20, "m2": 20, "m3": 20}
+
+    assert cap_targets(side, bets, {"x"}, dict(bets), min_stake=10)["x"] == 50
+
+
+def test_a_solo_capped_side_keeps_its_entry():
+    from services.draft_pool_service import cap_targets
+
+    assert cap_targets(["x"], {"x": 50}, {"x"}, {"x": 50}, min_stake=20)["x"] == 50
+
+
+async def _min_stake(session_id, amount):
+    async with AsyncSessionLocal() as db:
+        async with db.begin():
+            await db.execute(update(DraftSession)
+                             .where(DraftSession.session_id == session_id)
+                             .values(min_stake=amount))
+
+
+@pytest.mark.asyncio
+async def test_match_pool_holds_a_capped_entry_to_the_draft_minimum(test_db):
+    await _min_stake("s1", 20)
+    await _fund({"a1": 50, "a2": 50, "a3": 50, "a4": 50,
+                 "b1": 50, "b2": 20, "b3": 20, "b4": 20})
+    await seed_stakes("s1", {**{p: (50, False) for p in A},
+                             "b1": (50, True), "b2": (20, False),
+                             "b3": (20, False), "b4": (20, False)})
+
+    result = await pool.match_pool("g", "s1", A, B)
+
+    assert result["capped"] == {"b1": 30}, result
+    held = await pool.contributions("g", "s1")
+    assert held["b1"] == 20 and held["a1"] == 20, held

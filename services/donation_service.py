@@ -21,7 +21,8 @@ from models.draft_session import DraftSession
 from models.stake import StakeInfo
 from services import debt_service, wallet_service
 from services.debt_service import TIX_ONLY
-from services.draft_pool_service import MatchResult, declared_bets, plan_levelling
+from services.draft_pool_service import (MatchResult, declared_bets, draft_min_stake,
+                                         plan_levelling)
 
 
 async def level_donation(session_id: str, team_a: list[str],
@@ -36,7 +37,8 @@ async def level_donation(session_id: str, team_a: list[str],
     """
     bets, wants_cap = await declared_bets(session_id)
     entries = {p: int(n) for p, n in bets.items() if n and int(n) > 0}
-    plan = plan_levelling(team_a, team_b, entries, bets, wants_cap)
+    plan = plan_levelling(team_a, team_b, entries, bets, wants_cap,
+                          await draft_min_stake(session_id))
 
     async with db_session() as session:
         for player_id in [*team_a, *team_b]:

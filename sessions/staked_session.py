@@ -53,7 +53,9 @@ class StakedSession(RandomSession):
             # so the first a trimmed player heard of a default-on setting was
             # the refund. Listed first because that is the order it applies in.
             "• Your entry is **capped to your share of your team** unless you turn "
-            "that off, so you are never left funding most of your own side.\n"
+            "that off, so you are never left funding most of your own side. If "
+            "everyone else on your team is on the minimum entry, it holds you to "
+            "the minimum too.\n"
             "• Both sides have to be backing the same amount, so when teams form the "
             "heavier side is levelled down and the excess goes straight back to the "
             "players it came from.\n"
