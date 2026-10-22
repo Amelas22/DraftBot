@@ -335,3 +335,77 @@ def test_one_huge_roster_cannot_overflow_its_field():
         assert len(f.value) < 1024, f"field {f.name!r} is {len(f.value)} chars"
     text = "".join(f.value for f in embed.fields)
     assert "more" in text, "the dropped members should be accounted for, not silently lost"
+
+
+# Names, not mentions. An embed mention renders as a name only when the viewer's
+# client already has that member loaded, so a board full of mentions reads as
+# "<@913549164208590858>" for anyone who hasn't seen that player recently.
+
+def test_board_shows_names_rather_than_mentions_when_it_has_them():
+    teams = [_team(1, "Alpha", "10", "paid")]
+    rosters = {1: [_member("11", "Bob")]}
+    names = {"10": "Mayday", "11": "GreedyQasim"}
+    text = _text(create_registration_embed(_tournament(), teams, pot=1,
+                                           rosters=rosters, names=names))
+
+    assert "👑 Mayday · GreedyQasim" in text
+    assert "<@" not in text
+
+
+def test_board_falls_back_to_a_mention_for_a_player_it_cannot_name():
+    teams = [_team(1, "Alpha", "10", "paid")]
+    text = _text(create_registration_embed(_tournament(), teams, pot=1,
+                                           rosters={1: [_member("11")]},
+                                           names={"11": "Bob"}))
+
+    assert "👑 <@10> · Bob" in text
+
+
+def test_board_escapes_markdown_in_names():
+    """Lord_Delver_Ryan must not turn the rest of the line italic."""
+    teams = [_team(1, "Alpha", "10", "paid")]
+    text = _text(create_registration_embed(_tournament(), teams, pot=1,
+                                           names={"10": "Lord_Delver_Ryan"}))
+
+    assert r"Lord\_Delver\_Ryan" in text
+
+
+def test_long_names_cannot_overflow_a_teams_field():
+    """Names run longer than mentions once escaped, so the line has to stay in budget."""
+    teams = [_team(1, "A" * 128, "10", "paid")]
+    members = [_member(str(100 + i)) for i in range(60)]
+    names = {str(100 + i): "_" * 32 for i in range(60)} | {"10": "*" * 32}
+
+    embed = create_registration_embed(_tournament(), teams, pot=1,
+                                      rosters={1: members}, names=names)
+
+    for f in embed.fields:
+        assert len(f.value) < 1024, f"field {f.name!r} is {len(f.value)} chars"
+    assert "more" in "".join(f.value for f in embed.fields)
+
+
+class _Guild:
+    def __init__(self, members):
+        self._members = members
+
+    def get_member(self, user_id):
+        name = self._members.get(user_id)
+        return None if name is None else type("M", (), {"display_name": name})()
+
+
+def test_names_prefer_the_current_server_name_then_the_roster_snapshot():
+    from services.tournament_formatter import board_names
+    teams = [_team(1, "Alpha", "10", "paid")]
+    rosters = {1: [_member("11", "Old Bob"), _member("12", "Cara")]}
+    guild = _Guild({10: "Mayday", 11: "New Bob"})
+
+    assert board_names(guild, teams, rosters) == {
+        "10": "Mayday", "11": "New Bob", "12": "Cara"}
+
+
+def test_names_without_a_guild_use_the_roster_snapshot_only():
+    from services.tournament_formatter import board_names
+    teams = [_team(1, "Alpha", "10", "paid")]
+    rosters = {1: [_member("11", "Bob")]}
+
+    assert board_names(None, teams, rosters) == {"11": "Bob"}
