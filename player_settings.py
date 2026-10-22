@@ -78,8 +78,16 @@ async def _library_offered(player_id: str, guild_id: str) -> bool:
 
 
 async def _usual_week(player_id: str) -> list[str] | None:
-    week = await get_usual_week(player_id)
-    return None if week is None else next_week_lines(week, datetime.now(timezone.utc))
+    """The saved week as timestamp lines; None if never saved or unreadable.
+
+    A failure only leaves the week out; the rest of /settings still loads.
+    """
+    try:
+        week = await get_usual_week(player_id)
+        return None if week is None else next_week_lines(week, datetime.now(timezone.utc))
+    except Exception:
+        logger.exception("settings: couldn't read the usual week for {}", player_id)
+        return None
 
 
 async def load_settings(player_id: str, guild_id: str) -> Settings:

@@ -709,3 +709,23 @@ async def test_load_settings_reads_the_week_when_enabled(test_db, monkeypatch):
     monkeypatch.setattr(player_settings, "get_usual_week", AsyncMock(return_value=None))
     s = await load_settings("p1", "g")
     assert (s.scheduler, s.usual_week) == (True, None)
+
+
+async def test_week_button_says_so_on_any_failure(monkeypatch):
+    monkeypatch.setattr(player_settings_view, "DoSchedulerSpaces", MagicMock())
+    monkeypatch.setattr(player_settings_view, "DigitalOceanHelper", MagicMock())
+    monkeypatch.setattr(player_settings_view, "issue_usual_link",
+                        AsyncMock(side_effect=RuntimeError("db")))
+    view = SettingsView("p1", "g", "Lounge", _week_settings(scheduler=True))
+    i = _interaction("p1")
+    await view.week_button.callback(i)
+    assert i.followup.send.await_args.args[0] == (
+        "Couldn't make your link just now. Try again in a minute.")
+
+
+async def test_an_unreadable_week_does_not_break_settings(test_db, monkeypatch):
+    monkeypatch.setattr(player_settings, "scheduler_enabled", lambda g: True)
+    monkeypatch.setattr(player_settings, "get_usual_week",
+                        AsyncMock(side_effect=ValueError("bad cells")))
+    s = await load_settings("p1", "g")
+    assert (s.scheduler, s.usual_week) == (True, None)

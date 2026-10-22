@@ -8,13 +8,12 @@ player's live sign-ups.
 """
 import asyncio
 import weakref
+from datetime import datetime, timezone
 from typing import Any
 
 import discord
 from loguru import logger
 from typing_extensions import override
-
-from datetime import datetime, timezone
 
 from helpers.digital_ocean_helper import DigitalOceanHelper
 from helpers.money_gate import spawn_followup
@@ -23,7 +22,7 @@ from player_settings import (Setting, Settings, apply_cap_to_live_drafts,
                              apply_library_to_live_drafts, flip, live_result_text,
                              load_settings)
 from services.scheduler_links import issue_usual_link
-from services.scheduler_spaces import DoSchedulerSpaces, SpacesError
+from services.scheduler_spaces import DoSchedulerSpaces
 from utils import redraw_leaderboard
 
 CAP_LABEL = "Cap my entry to my share of my team"
@@ -229,7 +228,7 @@ class SettingsView(discord.ui.View):
         try:
             url = await issue_usual_link(DoSchedulerSpaces(DigitalOceanHelper()),
                                          self.player_id, datetime.now(timezone.utc))
-        except SpacesError:
+        except Exception:    # SpacesError, or the link row failing to commit
             logger.exception("settings: couldn't issue a usual-week link for {}",
                              self.player_id)
             await interaction.followup.send(WEEK_LINK_FAILED, ephemeral=True)
