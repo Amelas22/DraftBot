@@ -634,3 +634,78 @@ async def test_a_library_live_step_that_raises_still_keeps_the_preference(test_d
     i.edit_original_response.assert_awaited_once()
     sent = i.followup.send.await_args
     assert sent.args[0] == LIVE_FAILED and sent.kwargs["ephemeral"] is True
+
+
+# --- the usual week ---------------------------------------------------------
+
+def _week_settings(**fields):
+    return Settings(dms=True, hide_from_ladder=False, anonymous=False, **fields)
+
+
+def _week_field(embed):
+    return next((f for f in embed.fields if f.name == "Your usual week"), None)
+
+
+async def test_settings_line_for_unset_and_empty_week():
+    unset = _week_field(settings_embed("Lounge", _week_settings(scheduler=True, usual_week=None)))
+    assert unset.value.startswith("Not set.")
+    empty = _week_field(settings_embed("Lounge", _week_settings(scheduler=True, usual_week=[])))
+    assert empty.value == "No usual times."
+    two = _week_field(settings_embed(
+        "Lounge", _week_settings(scheduler=True, usual_week=["a", "b"])))
+    assert two.value == "a\nb"
+
+
+async def test_a_long_week_is_cut_at_a_line_boundary():
+    lines = [f"<t:{1700000000 + i}:F> to <t:{1700003600 + i}:t>" for i in range(60)]
+    value = _week_field(settings_embed(
+        "Lounge", _week_settings(scheduler=True, usual_week=lines))).value
+    assert len(value) <= 1024
+    assert all(part in lines for part in value.split("\n"))
+
+
+async def test_week_field_absent_when_scheduler_off():
+    e = settings_embed("Lounge", _week_settings(scheduler=False, usual_week=["a"]))
+    assert _week_field(e) is None
+
+
+async def test_week_button_only_when_enabled():
+    on = SettingsView("p1", "g", "Lounge", _week_settings(scheduler=True))
+    off = SettingsView("p1", "g", "Lounge", _week_settings(scheduler=False))
+    assert "My usual week" in [getattr(c, "label", None) for c in on.children]
+    assert "My usual week" not in [getattr(c, "label", None) for c in off.children]
+
+
+async def test_week_button_replies_with_a_link_button(monkeypatch):
+    from services.scheduler_spaces import PAGE_URL
+    monkeypatch.setattr(player_settings_view, "DoSchedulerSpaces", MagicMock())
+    monkeypatch.setattr(player_settings_view, "DigitalOceanHelper", MagicMock())
+    monkeypatch.setattr(player_settings_view, "issue_usual_link",
+                        AsyncMock(return_value=PAGE_URL + "#tok"))
+    view = SettingsView("p1", "g", "Lounge", _week_settings(scheduler=True))
+    i = _interaction("p1")
+    await view.week_button.callback(i)
+    kwargs = i.followup.send.await_args.kwargs
+    assert kwargs["ephemeral"] is True
+    buttons = [c for c in kwargs["view"].children if isinstance(c, discord.ui.Button)]
+    assert [(b.label, b.url) for b in buttons] == [("Open my week", PAGE_URL + "#tok")]
+
+
+async def test_week_button_says_so_when_spaces_fails(monkeypatch):
+    from services.scheduler_spaces import SpacesError
+    monkeypatch.setattr(player_settings_view, "DoSchedulerSpaces", MagicMock())
+    monkeypatch.setattr(player_settings_view, "DigitalOceanHelper", MagicMock())
+    monkeypatch.setattr(player_settings_view, "issue_usual_link",
+                        AsyncMock(side_effect=SpacesError("boom")))
+    view = SettingsView("p1", "g", "Lounge", _week_settings(scheduler=True))
+    i = _interaction("p1")
+    await view.week_button.callback(i)
+    assert i.followup.send.await_args.args[0] == (
+        "Couldn't make your link just now. Try again in a minute.")
+
+
+async def test_load_settings_reads_the_week_when_enabled(test_db, monkeypatch):
+    monkeypatch.setattr(player_settings, "scheduler_enabled", lambda g: True)
+    monkeypatch.setattr(player_settings, "get_usual_week", AsyncMock(return_value=None))
+    s = await load_settings("p1", "g")
+    assert (s.scheduler, s.usual_week) == (True, None)

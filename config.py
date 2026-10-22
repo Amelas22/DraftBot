@@ -85,6 +85,7 @@ class Config:
                 "bot_detection": False,
                 "money_server": False,
                 "vouchers": False,
+                "scheduler": False,
                 "tournament": True,
                 "quiz_pack_images": {
                     "enabled": True,
@@ -197,6 +198,7 @@ class Config:
                 "bot_detection": True,
                 "money_server": False,
                 "vouchers": False,
+                "scheduler": False,
                 "tournament": True,
                 "quiz_pack_images": {
                     "enabled": True,
@@ -345,6 +347,12 @@ def vouchers_enabled(guild_id):
     """Whether draft vouchers may be spent in this guild (default off)."""
     config = get_config(guild_id)
     return config.get("features", {}).get("vouchers", False)
+
+
+def scheduler_enabled(guild_id):
+    """Whether players may set their usual week in this guild (default off)."""
+    config = get_config(guild_id)
+    return config.get("features", {}).get("scheduler", False)
 
 def get_draftmancer_base_url():
     """Return the draftmancer base URL"""
