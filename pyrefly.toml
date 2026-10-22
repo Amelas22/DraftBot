@@ -14,6 +14,8 @@ project-includes = [
     "services/availability.py",
     "services/scheduler_spaces.py",
     "services/scheduler_links.py",
+    "services/availability_sync.py",
+    "cogs/scheduler_cog.py",
     "models/scheduler.py",
     "helpers/signup_board.py",
     "services/library_reminders.py",
