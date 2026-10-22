@@ -12,6 +12,7 @@ project-includes = [
     "helpers/background_tasks.py",
     "services/entry_notices.py",
     "services/availability.py",
+    "services/scheduler_spaces.py",
     "helpers/signup_board.py",
     "services/library_reminders.py",
     "cogs/server_draft_stats.py",

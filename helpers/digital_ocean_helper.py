@@ -3,7 +3,9 @@ import json
 import logging
 from typing import Dict, Any, Optional, Tuple, List
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import aiobotocore.session
+from botocore.config import Config
 
 
 # Draft logs carry every player's picks and decklist, so nothing the bot uploads
@@ -298,6 +300,100 @@ class DigitalOceanHelper:
         except Exception as e:
             self.logger.error(f"Error listing objects: {e}", exc_info=True)
             return []
+
+    async def create_presign_client(self):
+        """Client for presigning URLs the browser will use.
+
+        Region endpoint with virtual-hosted addressing, so the URL is
+        https://<bucket>.<region>.digitaloceanspaces.com/<key>. The
+        bucket-specific create_client() double-nests the key in presigned URLs;
+        never presign with it.
+        """
+        if not self.config_valid or not self.raw_endpoint:
+            return None
+
+        session = aiobotocore.session.AioSession()
+        return session.create_client(
+            's3',
+            region_name=self.region,
+            endpoint_url=self.raw_endpoint,
+            aws_access_key_id=self.key,
+            aws_secret_access_key=self.secret,
+            config=Config(s3={"addressing_style": "virtual"}, signature_version="s3v4"),
+        )
+
+    async def list_objects_with_modified(self, prefix: str) -> List[Tuple[str, datetime]]:
+        """List every object under prefix with its LastModified (aware UTC).
+
+        Pages through all results. Raises on failure (unlike list_objects, which
+        returns []), so a caller can tell "empty" from "could not list".
+        """
+        client = await self.create_raw_client()
+        if not client:
+            raise RuntimeError("Spaces is not configured")
+
+        found: List[Tuple[str, datetime]] = []
+        continuation_token = None
+        async with client as s3:
+            while True:
+                kwargs: Dict[str, Any] = {"Bucket": self.bucket, "Prefix": prefix}
+                if continuation_token:
+                    kwargs["ContinuationToken"] = continuation_token
+                response = await s3.list_objects_v2(**kwargs)
+                for obj in response.get("Contents", []):
+                    key = obj["Key"]
+                    # The raw endpoint may hand keys back prefixed with the bucket.
+                    bucket_prefix = f"{self.bucket}/"
+                    if not key.startswith(prefix) and key.startswith(bucket_prefix):
+                        key = key[len(bucket_prefix):]
+                    modified = obj["LastModified"]
+                    if modified.tzinfo is None:
+                        modified = modified.replace(tzinfo=timezone.utc)
+                    found.append((key, modified.astimezone(timezone.utc)))
+                continuation_token = response.get("NextContinuationToken")
+                if not (response.get("IsTruncated") and continuation_token):
+                    break
+        return found
+
+    async def download_bytes(self, key: str, max_bytes: int) -> Optional[bytes]:
+        """Download an object's raw bytes; None if it is larger than max_bytes.
+
+        The size check uses ContentLength, so an oversized object's body is never
+        read. Raises on failure.
+        """
+        client = await self.create_client()
+        if not client:
+            raise RuntimeError("Spaces is not configured")
+
+        async with client as s3:
+            response = await s3.get_object(Bucket=self.bucket, Key=key)
+            if response["ContentLength"] > max_bytes:
+                self.logger.warning(f"{key} is {response['ContentLength']} bytes, over {max_bytes}; skipped")
+                response["Body"].close()
+                return None
+            body: bytes = await response["Body"].read()
+            return body
+
+    async def put_public_json(self, key: str, body: Dict[str, Any]) -> bool:
+        """Write a public-read JSON object. Returns False on failure."""
+        folder, _, filename = key.rpartition("/")
+        result = await self.upload_json(body, folder, filename, acl=PUBLIC)
+        return result.success
+
+    async def delete_object(self, key: str) -> bool:
+        """Delete one object. Returns False on failure."""
+        if not self.config_valid:
+            return False
+        try:
+            client = await self.create_client()
+            if not client:
+                return False
+            async with client as s3:
+                await s3.delete_object(Bucket=self.bucket, Key=key)
+            return True
+        except Exception as e:
+            self.logger.error(f"Error deleting {key} from DigitalOcean Space: {e}")
+            return False
 
     def get_public_url(self, object_path: str) -> str:
         """
