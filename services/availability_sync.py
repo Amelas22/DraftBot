@@ -56,7 +56,9 @@ class AvailabilitySync:
     async def poll_once(self, now_utc: datetime) -> SyncResult:
         result = SyncResult()
         result.links_removed = await self._remove_expired_links(now_utc)
-        if not await link_issued_since(now_utc - timedelta(days=LINK_DAYS)):
+        # +1 day: presigned PUTs are signed just after issue and the bot may be
+        # down across a link's last moments, so a save can land after expiry.
+        if not await link_issued_since(now_utc - timedelta(days=LINK_DAYS + 1)):
             return result
         listing = await self._spaces.list_modified(f"{PREFIX}availability/")
         for key, modified in listing:

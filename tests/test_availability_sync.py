@@ -115,11 +115,19 @@ async def test_catches_up_after_restart(test_db):
 
 @pytest.mark.asyncio
 async def test_skips_spaces_when_no_recent_link(test_db):
-    spaces, sync = await _setup(issued=NOW - timedelta(days=8))
+    spaces, sync = await _setup(issued=NOW - timedelta(days=9))
     spaces.put(KEY, GOOD, T1)
     result = await sync.poll_once(NOW)
     assert spaces.list_calls == [] and spaces.fetch_calls == []
     assert result.stored == []
+
+
+@pytest.mark.asyncio
+async def test_lists_for_a_link_just_past_its_expiry(test_db):
+    spaces, sync = await _setup(issued=NOW - timedelta(days=7, hours=12))
+    spaces.put(KEY, GOOD, T1)
+    await sync.poll_once(NOW)
+    assert spaces.list_calls != []
 
 
 @pytest.mark.asyncio
