@@ -37,6 +37,7 @@ from models.tournament import (
 )
 from sqlalchemy import or_, select
 from services.tournament_formatter import (
+    board_names,
     create_bracket_embed,
     create_registration_embed,
     create_standings_embed,
@@ -2157,8 +2158,9 @@ class TournamentCog(commands.Cog):
                     str(ctx.guild.id), [p.captain_user_id for p in pending])
                 deficits = {p.id: max(fee - balances.get(p.captain_user_id, 0), 0)
                             for p in pending}
-            embed = create_registration_embed(tournament, participants, held, deficits,
-                                              rosters=rosters)
+            embed = create_registration_embed(
+                tournament, participants, held, deficits, rosters=rosters,
+                names=board_names(ctx.guild, participants, rosters))
         else:
             embed = create_standings_embed(
                 tournament, participants, stage, omw=omw,

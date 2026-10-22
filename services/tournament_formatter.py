@@ -291,15 +291,47 @@ def _add_how_to_join(embed, fee, closed):
 
 CAPTAIN_MARK = "👑"
 
-# A mention renders as ~24 characters with its separator, and every member of a team
-# shares one line. The field chunker below splits BETWEEN lines, so it cannot rescue a
-# single line that is itself over Discord's 1024-char cap -- past that, Discord rejects
-# the whole edit and the board freezes on a stale roster. Cap the names shown so one
-# line stays well inside the limit even beside a 128-char team name.
+# Every member of a team shares one line, and the field chunker below splits BETWEEN
+# lines, so it cannot rescue a single line that is itself over Discord's 1024-char cap
+# -- past that, Discord rejects the whole edit and the board freezes on a stale roster.
+# Cap the names shown, and the line's length, so one line stays inside the limit even
+# beside a 128-char team name and 32-char names full of escaped markdown.
 MAX_MEMBERS_SHOWN = 20
+LINE_BUDGET = 1000
+NAME_CHARS = 32  # Discord's own cap on a display name
 
 
-def _team_line(index, participant, fee, members):
+def board_names(guild, participants, rosters):
+    """{user id: name to show} for everyone on the board.
+
+    The board shows names, not mentions: an embed mention only resolves for a viewer
+    whose client already has that member loaded, and reads as a raw <@id> otherwise.
+    The server name now wins; a member's name from when they were added covers
+    someone the guild no longer has. Anyone left out renders as a mention.
+    """
+    names = {m.user_id: m.display_name for members in rosters.values() for m in members}
+    if guild is None:
+        return names
+    ids = {p.captain_user_id for p in participants} | set(names)
+    for user_id in ids:
+        member = guild.get_member(int(user_id)) if str(user_id).isdigit() else None
+        if member is not None:
+            names[user_id] = member.display_name
+    return names
+
+
+def _who(user_id, names):
+    name = names.get(user_id)
+    if not name:
+        return f"<@{user_id}>"
+    # Links are escaped too: a name like "https://x.y/**z" would otherwise leave a
+    # stray ** that bolds every team after it. A name typed as "<@123>" must read as
+    # text, not as someone else's mention.
+    return discord.utils.escape_mentions(
+        discord.utils.escape_markdown(name[:NAME_CHARS], ignore_links=False))
+
+
+def _team_line(index, participant, fee, members, names):
     """One roster row: rank, paid mark, team, then the full team inline.
 
     Members share the team's line rather than getting one each: at 25 teams a line
@@ -308,20 +340,29 @@ def _team_line(index, participant, fee, members):
     """
     paid = participant.status == "paid"
     mark = "✅" if paid or fee == 0 else "⏳"
-    roster = [f"{CAPTAIN_MARK} <@{participant.captain_user_id}>"]
-    roster += [f"<@{m.user_id}>" for m in members[:MAX_MEMBERS_SHOWN]]
-    overflow = len(members) - MAX_MEMBERS_SHOWN
+    head = f"{index}. {mark} **{participant.team_name}** — "
+    roster = [f"{CAPTAIN_MARK} {_who(participant.captain_user_id, names)}"]
+    room = LINE_BUDGET - len(head) - len(roster[0]) - len(" · +99 more")
+    for m in members[:MAX_MEMBERS_SHOWN]:
+        who = _who(m.user_id, names)
+        if len(who) + 3 > room:
+            break
+        roster.append(who)
+        room -= len(who) + 3
+    overflow = len(members) - (len(roster) - 1)
     if overflow > 0:
         roster.append(f"+{overflow} more")
-    return f"{index}. {mark} **{participant.team_name}** — {' · '.join(roster)}"
+    return head + " · ".join(roster)
 
 
 def create_registration_embed(tournament, participants, pot=0, deficits=None,
-                              closed=False, rosters=None):
+                              closed=False, rosters=None, names=None):
     """Build the registration board (pure): who is in, and for a paid tournament who
     has actually paid. ``deficits`` maps participant id -> tix still needed;
-    ``rosters`` maps participant id -> that team's TournamentTeamMember rows."""
+    ``rosters`` maps participant id -> that team's TournamentTeamMember rows;
+    ``names`` maps user id -> the name to show (see board_names)."""
     deficits = deficits or {}
+    names = names or {}
     rosters = rosters or {}
     fee = tournament.entry_fee or 0
     phase = "Registration closed" if closed else "Registration open"
@@ -343,7 +384,7 @@ def create_registration_embed(tournament, participants, pot=0, deficits=None,
 
     lines = []
     for i, p in enumerate(participants, start=1):
-        lines.append(_team_line(i, p, fee, rosters.get(p.id, [])))
+        lines.append(_team_line(i, p, fee, rosters.get(p.id, []), names))
         short = deficits.get(p.id, 0)
         if fee > 0 and p.status != "paid" and not closed and short > 0:
             lines.append(f"     needs {short} more tix — `/wallet deposit {short}`")
@@ -478,9 +519,15 @@ async def update_registration_board(bot, tournament_id):
 
 async def registration_board_embed(session, tournament):
     """The board as it should read now; open or closed is derived from the tournament."""
+    from bot_registry import get_bot
+
     participants, pot, deficits, rosters = await _board_state(session, tournament)
+    bot = get_bot()
+    guild_id = str(tournament.guild_id)
+    guild = bot.get_guild(int(guild_id)) if bot is not None and guild_id.isdigit() else None
     return create_registration_embed(tournament, participants, pot, deficits,
-                                     tournament.status != "registration", rosters)
+                                     tournament.status != "registration", rosters,
+                                     board_names(guild, participants, rosters))
 
 
 async def post_registration_board(bot, channel, tournament_id):
