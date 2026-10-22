@@ -362,7 +362,7 @@ class DigitalOceanHelper:
         it; the read itself is also capped at max_bytes + 1, so a wrong
         ContentLength cannot make us buffer more. Raises on failure.
         """
-        client = await self.create_client()
+        client = await self.create_raw_client()
         if not client:
             raise RuntimeError("Spaces is not configured")
 
@@ -387,17 +387,38 @@ class DigitalOceanHelper:
             return buf
 
     async def put_public_json(self, key: str, body: Dict[str, Any]) -> bool:
-        """Write a public-read JSON object. Returns False on failure."""
-        folder, _, filename = key.rpartition("/")
-        result = await self.upload_json(body, folder, filename, acl=PUBLIC)
-        return result.success
+        """Write a public-read JSON object at the true key. Returns False on failure.
+
+        Uses the RAW client, like upload_public_html: the bucket-specific
+        endpoint would store it at `magic-draft-logs/<key>`, where the page
+        (which addresses the true key) would never find it.
+        """
+        if not self.config_valid:
+            return False
+        try:
+            client = await self.create_raw_client()
+            if not client:
+                return False
+            async with client as s3:
+                await s3.put_object(
+                    Bucket=self.bucket,
+                    Key=key,
+                    Body=json.dumps(body).encode("utf-8"),
+                    ContentType="application/json",
+                    ACL=PUBLIC,
+                    CacheControl="no-cache",
+                )
+            return True
+        except Exception as e:
+            self.logger.error(f"Error publishing {key} to DigitalOcean Space: {e}")
+            return False
 
     async def delete_object(self, key: str) -> bool:
         """Delete one object. Returns False on failure."""
         if not self.config_valid:
             return False
         try:
-            client = await self.create_client()
+            client = await self.create_raw_client()
             if not client:
                 return False
             async with client as s3:
