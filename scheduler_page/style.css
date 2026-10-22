@@ -1,0 +1,63 @@
+:root {
+  color-scheme: light dark;
+  --bg: #f5f6f3; --surface: #ffffff; --fg: #1d221f; --muted: #66706a; --line: #d9ddd7;
+  --on: #ffffff; --s0: #17713f; --s1: #4fa772; --s2: #a7d5b6; --none: #e6e8e4;
+  --warn: #a35a00; --warnbg: #fbf0e1; --focus: #17713f;
+  --display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #141816; --surface: #1c211e; --fg: #e7ebe8; --muted: #9aa49e; --line: #2f3632;
+    --on: #0f1311; --s0: #3fbf72; --s1: #2f8f57; --s2: #245f3d; --none: #262c28;
+    --warn: #f0b062; --warnbg: #2e2416; --focus: #3fbf72;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 var(--body); }
+main { max-width: 760px; margin: 0 auto; padding: 20px 16px 40px; }
+h1 { font: 700 28px/1.15 var(--display); margin: 4px 0 6px; text-wrap: balance; }
+.eyebrow { font: 11px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0; }
+.lede { color: var(--muted); margin: 0 0 14px; }
+.notice { border: 1px solid var(--warn); background: var(--warnbg); border-radius: 8px; padding: 12px 14px; font-size: 15px; }
+.status { min-height: 20px; font-size: 13px; color: var(--muted); }
+.zonerow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; font-weight: 500; }
+select { font: inherit; max-width: 100%; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--fg); }
+button { font: inherit; }
+:focus-visible { outline: 3px solid var(--focus); outline-offset: 1px; }
+
+.grid { display: flex; gap: 3px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 8px; touch-action: pan-y; user-select: none; -webkit-user-select: none; }
+.col { display: flex; flex-direction: column; gap: 1px; flex: 1 1 0; min-width: 0; }
+.col.hours { flex: 0 0 52px; }
+.dayname, .hours::before { content: ""; height: 22px; font: 500 11px/22px var(--mono); text-align: center; color: var(--muted); }
+.hour { height: 16px; font: 11px/16px var(--mono); color: var(--muted); text-align: right; padding-right: 6px; white-space: nowrap; }
+.cell { height: 16px; padding: 0; border: 0; border-radius: 2px; background: var(--none); cursor: pointer; }
+.cell.on { background: var(--s0); }
+.cell.stroke { outline: 2px solid var(--s1); outline-offset: -2px; }
+.cell:focus-visible { outline-offset: 0; z-index: 1; }
+
+.daytabs { display: none; gap: 4px; margin-bottom: 8px; }
+.daytabs button { flex: 1; min-height: 44px; padding: 0; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--muted); font-weight: 500; cursor: pointer; }
+.daytabs button[aria-selected="true"] { background: var(--s0); color: var(--on); border-color: var(--s0); }
+
+.actions { display: flex; gap: 8px; margin-top: 14px; }
+.actions button { min-height: 44px; padding: 0 20px; border-radius: 6px; font-weight: 600; cursor: pointer; }
+.primary { background: var(--s0); color: var(--on); border: 0; }
+.secondary { background: transparent; color: var(--fg); border: 1px solid var(--line); }
+button:disabled { opacity: .6; cursor: default; }
+
+@media (max-width: 479px) {
+  main { padding: 16px 16px 32px; }
+  h1 { font-size: 24px; }
+  .daytabs { display: flex; }
+  .grid .day { display: none; }
+  .grid[data-active="0"] .day[data-day="0"], .grid[data-active="1"] .day[data-day="1"],
+  .grid[data-active="2"] .day[data-day="2"], .grid[data-active="3"] .day[data-day="3"],
+  .grid[data-active="4"] .day[data-day="4"], .grid[data-active="5"] .day[data-day="5"],
+  .grid[data-active="6"] .day[data-day="6"] { display: flex; }
+  .cell, .hour { height: 24px; line-height: 24px; }
+  .dayname { display: none; }
+  .hours::before { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; scroll-behavior: auto !important; } }
