@@ -61,6 +61,8 @@ def _doc(**over: object) -> bytes:
     [
         b" " * 4097,
         b"[]",
+        b"[" * 4000,
+        _doc(version=1.0),
         _doc(format="other"),
         _doc(version=2),
         _doc(zone="Mars/Olympus"),

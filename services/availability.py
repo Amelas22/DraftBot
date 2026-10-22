@@ -77,14 +77,14 @@ def parse_usual_week(raw: bytes) -> UsualWeek:
         raise InvalidWeek("file too large")
     try:
         doc = json.loads(raw)
-    except ValueError as exc:
+    except (ValueError, RecursionError) as exc:
         raise InvalidWeek("not JSON") from exc
     if not isinstance(doc, dict):
         raise InvalidWeek("not a JSON object")
     if doc.get("format") != _FORMAT:
         raise InvalidWeek("unknown format")
     version = doc.get("version")
-    if isinstance(version, bool) or version != _VERSION:
+    if type(version) is not int or version != _VERSION:
         raise InvalidWeek("unsupported version")
     zone = doc.get("zone")
     if not isinstance(zone, str) or zone not in available_timezones():
