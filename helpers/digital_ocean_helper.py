@@ -372,12 +372,19 @@ class DigitalOceanHelper:
                 self.logger.warning(f"{key} is {response['ContentLength']} bytes, over {max_bytes}; skipped")
                 response["Body"].close()
                 return None
-            body: bytes = await response["Body"].read(max_bytes + 1)
-            if len(body) > max_bytes:
+            # StreamingBody.read(n) may return fewer than n bytes, so loop until
+            # EOF or until we have seen more than max_bytes.
+            buf = b""
+            while len(buf) <= max_bytes:
+                chunk: bytes = await response["Body"].read(max_bytes + 1 - len(buf))
+                if not chunk:
+                    break
+                buf += chunk
+            if len(buf) > max_bytes:
                 self.logger.warning(f"{key} is over {max_bytes} bytes; skipped")
                 response["Body"].close()
                 return None
-            return body
+            return buf
 
     async def put_public_json(self, key: str, body: Dict[str, Any]) -> bool:
         """Write a public-read JSON object. Returns False on failure."""

@@ -118,8 +118,15 @@ async def test_list_pages_normalises_times_and_bucket_prefix():
 
 
 def _get_object_client(body_bytes: bytes, content_length: int, body):
+    pos = 0
+
     async def read(amt=None):
-        return body_bytes if amt is None else body_bytes[:amt]
+        # Like aiohttp's StreamReader: at most 2 bytes per call, b"" at EOF.
+        nonlocal pos
+        n = 2 if amt is None else min(amt, 2)
+        chunk = body_bytes[pos:pos + n]
+        pos += len(chunk)
+        return chunk
 
     body.read = read
 
@@ -152,3 +159,19 @@ async def test_download_bytes_returns_small_body():
     helper = _helper()
     _patched(helper, "create_client", _get_object_client(b"hello", 5, MagicMock()))
     assert await helper.download_bytes("scheduler/k.json", 5) == b"hello"
+
+
+@pytest.mark.asyncio
+async def test_download_bytes_assembles_a_body_delivered_in_short_reads():
+    helper = _helper()
+    _patched(helper, "create_client", _get_object_client(b"abcdefg", 7, MagicMock()))
+    assert await helper.download_bytes("scheduler/k.json", 10) == b"abcdefg"
+
+
+@pytest.mark.asyncio
+async def test_download_bytes_short_reads_over_limit_returns_none_and_closes():
+    helper = _helper()
+    body = MagicMock()
+    _patched(helper, "create_client", _get_object_client(b"abcdefghij", 3, body))
+    assert await helper.download_bytes("scheduler/k.json", 5) is None
+    body.close.assert_called_once()
