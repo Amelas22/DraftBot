@@ -370,6 +370,23 @@ def test_board_escapes_markdown_in_names():
     assert r"Lord\_Delver\_Ryan" in text
 
 
+def test_board_escapes_markdown_in_link_shaped_names():
+    """escape_markdown skips links by default, which would leak a stray ** here."""
+    teams = [_team(1, "Alpha", "10", "paid")]
+    text = _text(create_registration_embed(_tournament(), teams, pot=1,
+                                           names={"10": "https://x.y/**z"}))
+
+    assert r"\*\*z" in text
+
+
+def test_a_name_typed_as_a_mention_reads_as_text():
+    teams = [_team(1, "Alpha", "10", "paid")]
+    text = _text(create_registration_embed(_tournament(), teams, pot=1,
+                                           names={"10": "<@123456789012345678>"}))
+
+    assert "<@123456789012345678>" not in text
+
+
 def test_long_names_cannot_overflow_a_teams_field():
     """Names run longer than mentions once escaped, so the line has to stay in budget."""
     teams = [_team(1, "A" * 128, "10", "paid")]

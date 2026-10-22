@@ -324,7 +324,11 @@ def _who(user_id, names):
     name = names.get(user_id)
     if not name:
         return f"<@{user_id}>"
-    return discord.utils.escape_markdown(name[:NAME_CHARS])
+    # Links are escaped too: a name like "https://x.y/**z" would otherwise leave a
+    # stray ** that bolds every team after it. A name typed as "<@123>" must read as
+    # text, not as someone else's mention.
+    return discord.utils.escape_mentions(
+        discord.utils.escape_markdown(name[:NAME_CHARS], ignore_links=False))
 
 
 def _team_line(index, participant, fee, members, names):

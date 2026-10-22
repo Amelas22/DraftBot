@@ -53,9 +53,9 @@ async def resolve_display_names(session: Any, guild_id: str,
 
     Captains are the one roster slot with no name of their own:
     TournamentTeamMember deliberately excludes them (captain_user_id stays the
-    single authority for who owns a team), and the Discord board never needs
-    one because it renders `<@id>` and lets Discord resolve it. A web page has
-    no such renderer, so the name is looked up here instead -- from the DB, so
+    single authority for who owns a team). The Discord board names them from
+    the live guild member cache (tournament_formatter.board_names); a web page
+    has no guild to ask, so the name is looked up here instead -- from the DB, so
     the whole page stays buildable from a database copy with no Discord call.
 
     PlayerStats alone is not enough: it is keyed by guild, and on the live
