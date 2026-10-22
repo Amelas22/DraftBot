@@ -29,10 +29,11 @@ button { font: inherit; }
 
 .grid { display: flex; gap: 3px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 8px; touch-action: pan-y; user-select: none; -webkit-user-select: none; }
 .col { display: flex; flex-direction: column; gap: 1px; flex: 1 1 0; min-width: 0; }
-.col.hours { flex: 0 0 52px; }
+.col.hours { flex: 0 0 52px; touch-action: pan-y; }
+.touchhint { display: none; }
 .dayname, .hours::before { content: ""; height: 22px; font: 500 11px/22px var(--mono); text-align: center; color: var(--muted); }
 .hour { height: 16px; font: 11px/16px var(--mono); color: var(--muted); text-align: right; padding-right: 6px; white-space: nowrap; }
-.cell { height: 16px; padding: 0; border: 0; border-radius: 2px; background: var(--none); cursor: pointer; }
+.cell { touch-action: none; height: 16px; padding: 0; border: 0; border-radius: 2px; background: var(--none); cursor: pointer; }
 .cell.on { background: var(--s0); }
 .cell.stroke { outline: 2px solid var(--s1); outline-offset: -2px; }
 .cell:focus-visible { outline-offset: 0; z-index: 1; }
@@ -51,6 +52,7 @@ button:disabled { opacity: .6; cursor: default; }
   main { padding: 16px 16px 32px; }
   h1 { font-size: 24px; }
   .daytabs { display: flex; }
+  .touchhint { display: block; margin: 0 0 8px; font-size: 12px; color: var(--muted); }
   .grid .day { display: none; }
   .grid[data-active="0"] .day[data-day="0"], .grid[data-active="1"] .day[data-day="1"],
   .grid[data-active="2"] .day[data-day="2"], .grid[data-active="3"] .day[data-day="3"],

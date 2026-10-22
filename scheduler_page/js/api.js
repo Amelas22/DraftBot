@@ -2,6 +2,9 @@
 export class LinkExpired extends Error {
   constructor(message = "link expired") { super(message); this.name = "LinkExpired"; }
 }
+export class BrokenLink extends Error {
+  constructor(message = "link file is incomplete") { super(message); this.name = "BrokenLink"; }
+}
 export class NotFound extends Error {
   constructor(message = "not found") { super(message); this.name = "NotFound"; }
 }
@@ -30,7 +33,9 @@ export async function loadLink(hash, fetchFn = fetch) {
   const body = await res.json();
   if (!body || body.format !== LINK_FORMAT) throw new Error("unknown link format");
   if (!Number.isInteger(body.version) || body.version > 1) throw new Error("link file is newer than this page");
-  return { view: body.view, user: body.user, exp: body.exp, urls: body.urls || {}, fixture: false };
+  const urls = body.urls || {};
+  if (body.view === "usual" && (typeof urls.usual_get !== "string" || !urls.usual_get)) throw new BrokenLink("link file has no usual_get");
+  return { view: body.view, user: body.user, exp: body.exp, urls, fixture: false };
 }
 
 export async function getJson(url, fetchFn = fetch) {

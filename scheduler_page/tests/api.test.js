@@ -74,3 +74,9 @@ test("putJson 403 rejects with LinkExpired", async () => {
 test("putJson refuses a null url", async () => {
   await assert.rejects(putJson(null, {}, async () => reply(200, {})));
 });
+
+test("loadLink: a usual link without usual_get is broken", async () => {
+  const { BrokenLink } = await import("../js/api.js");
+  const bad = { ...LINK, urls: { usual_put: "https://x/put" } };
+  await assert.rejects(loadLink("#abc", async () => reply(200, bad)), BrokenLink);
+});

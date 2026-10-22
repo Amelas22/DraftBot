@@ -1,5 +1,5 @@
-import { loadLink, getJson, putJson, LinkExpired } from "./api.js";
-import { mountUsual, EXPIRED_MESSAGE } from "./usual.js";
+import { loadLink, getJson, putJson, LinkExpired, BrokenLink } from "./api.js";
+import { mountUsual, EXPIRED_MESSAGE, BROKEN_MESSAGE } from "./usual.js";
 
 const root = document.getElementById("app");
 const say = (text) => { root.replaceChildren(Object.assign(document.createElement("p"), { className: "notice", textContent: text })); };
@@ -12,6 +12,7 @@ async function main() {
     say("This page needs updating.");
   } catch (e) {
     if (e instanceof LinkExpired) say(EXPIRED_MESSAGE);
+    else if (e instanceof BrokenLink) say(BROKEN_MESSAGE);
     else { console.error(e); say("Something went wrong loading this page. Try the link again."); }
   }
 }

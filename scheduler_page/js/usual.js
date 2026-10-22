@@ -5,6 +5,7 @@ import { NotFound, LinkExpired } from "./api.js";
 const FORMAT = "draftbot.scheduler.usual_week";
 const PER_DAY = 48;
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+export const BROKEN_MESSAGE = "This link is broken. Press My usual week in /settings for a new one.";
 export const EXPIRED_MESSAGE = "This link has expired. Press My usual week in /settings for a new one.";
 
 // Fill the rectangle between two grid positions (same days range x same half-hour range).
@@ -180,8 +181,8 @@ export async function mountUsual(root, link, deps) {
       e.preventDefault();
       const j = i + step;
       if (j < 0 || j >= CELLS || (Math.abs(step) === 1 && Math.floor(j / PER_DAY) !== Math.floor(i / PER_DAY))) return;
-      c.tabIndex = -1; nodes[j].tabIndex = 0; nodes[j].focus();
       if (Math.floor(j / PER_DAY) !== activeDay) { activeDay = Math.floor(j / PER_DAY); grid.dataset.active = String(activeDay); syncTabs(); }
+      c.tabIndex = -1; nodes[j].tabIndex = 0; nodes[j].focus();
     } else if (e.key === " " || e.key === "Enter") {
       e.preventDefault();
       cells = applyStroke(cells, i, i, !cells.has(i));
@@ -193,7 +194,8 @@ export async function mountUsual(root, link, deps) {
   select.addEventListener("change", () => { zone = select.value; touched(); });
   clear.addEventListener("click", () => { cells = new Set(); paintView(cells); touched(); });
   save.addEventListener("click", async () => {
-    if (link.fixture || !link.urls.usual_put) { status.textContent = "Saved (fixture mode: nothing was sent)."; return; }
+    if (link.fixture) { status.textContent = "Saved (fixture mode: nothing was sent)."; return; }
+    if (!link.urls.usual_put) { status.textContent = BROKEN_MESSAGE; return; }
     save.disabled = true;
     status.textContent = "Saving…";
     try {
@@ -211,7 +213,7 @@ export async function mountUsual(root, link, deps) {
     el("h1", { text: "When are you usually free?" }),
     el("p", { class: "lede", text: "Drag or tap to paint the half-hours you can usually draft. Times are local to the zone below. Drag again over painted cells to erase." }),
     el("label", { class: "zonerow", for: "zone" }, "Time zone ", select),
-    tabs, grid,
+    tabs, el("p", { class: "touchhint", text: "Drag on the grid to paint. Drag the times on the left to scroll." }), grid,
     el("div", { class: "actions" }, save, clear),
     status,
   );
