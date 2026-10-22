@@ -1,0 +1,12 @@
+{
+  "format": "draftbot.scheduler.request",
+  "version": 1,
+  "request_id": "7f3c2a9e-4d1b-4b8e-9f0a-1c2d3e4f5a6b",
+  "match_id": "4-3-7",
+  "kind": "book_sitting",
+  "opponent": "900000000000000005",
+  "start_utc": "2026-10-20T23:00:00Z",
+  "reserve_deck": true,
+  "seen_seq": 16,
+  "made_at": "2026-10-19T13:55:00Z"
+}

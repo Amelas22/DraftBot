@@ -1,0 +1,41 @@
+{
+  "format": "draftbot.scheduler.lfg",
+  "version": 1,
+  "seq": 5,
+  "generated_at": "2026-10-19T14:00:00Z",
+  "guild": "1355718878298116096",
+  "cards": [
+    {
+      "card_id": "12",
+      "kind": "pair",
+      "note": "Pair, Eastern, need a 3rd",
+      "members": [
+        {
+          "user": "900000000000000011",
+          "name": "Rook",
+          "zone": "America/New_York",
+          "cells": "AAAAAAP8AAAAAAP8AAAAAAP8AAAAAAP8AAAAAAAAAAAAAAAAAAAAAAAA"
+        },
+        {
+          "user": "900000000000000012",
+          "name": "Wren",
+          "zone": "America/New_York",
+          "cells": "AAAAAAAAAAAAAAP/AAAAAAP/AAAAAAP/AAAAAAP/AAAAAAAAAAAAAAAA"
+        }
+      ]
+    },
+    {
+      "card_id": "13",
+      "kind": "solo",
+      "note": "Solo, UK evenings",
+      "members": [
+        {
+          "user": "900000000000000013",
+          "name": "Thistle",
+          "zone": "Europe/London",
+          "cells": "AAAAAAAAAAAAAAAADwAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAAAAAAAD"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "format": "draftbot.scheduler.request",
+  "version": 1,
+  "request_id": "0b9d6f1e-3a2c-4e5f-8a7b-9c0d1e2f3a4b",
+  "match_id": "4-3-7",
+  "kind": "book_draft",
+  "start_utc": "2026-10-21T00:00:00Z",
+  "seen_seq": 17,
+  "made_at": "2026-10-19T14:03:30Z"
+}
