@@ -73,6 +73,32 @@ async def test_spaces_failure_commits_nothing(test_db):
 
 
 @pytest.mark.asyncio
+async def test_commit_failure_warns_with_the_orphaned_key_and_reraises(test_db, monkeypatch):
+    from loguru import logger
+
+    import services.scheduler_links as links
+
+    class Boom:
+        async def __aenter__(self):
+            raise RuntimeError("commit failed")
+
+        async def __aexit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(links, "db_session", lambda: Boom())
+    messages: list[str] = []
+    sink = logger.add(lambda m: messages.append(str(m)), level="WARNING")
+    spaces = FakeSchedulerSpaces()
+    try:
+        with pytest.raises(RuntimeError, match="commit failed"):
+            await issue_usual_link(spaces, "123", NOW)
+    finally:
+        logger.remove(sink)
+    (key,) = [k for k in spaces.public if k.startswith("scheduler/link/")]
+    assert any(key in m for m in messages)
+
+
+@pytest.mark.asyncio
 async def test_link_issued_since(test_db):
     cutoff = NOW - timedelta(days=7)
     assert await link_issued_since(cutoff) is False

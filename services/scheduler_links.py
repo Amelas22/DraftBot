@@ -2,6 +2,7 @@
 import secrets
 from datetime import datetime, timedelta, timezone
 
+from loguru import logger
 from sqlalchemy import select
 
 from database.db_session import db_session
@@ -38,16 +39,23 @@ async def issue_usual_link(spaces: SchedulerSpaces, user_id: str, now_utc: datet
             },
         },
     )
-    async with db_session() as session:
-        session.add(
-            SchedulerLink(
-                token=token,
-                user_id=user_id,
-                view="usual",
-                issued_utc=_naive_utc(now_utc),
-                expires_utc=_naive_utc(expires),
+    try:
+        async with db_session() as session:
+            session.add(
+                SchedulerLink(
+                    token=token,
+                    user_id=user_id,
+                    view="usual",
+                    issued_utc=_naive_utc(now_utc),
+                    expires_utc=_naive_utc(expires),
+                )
             )
+    except Exception:
+        logger.warning(
+            f"Link row not saved; orphaned link file {PREFIX}link/{token}.json "
+            "needs removing by hand"
         )
+        raise
     return f"{PAGE_URL}#{token}"
 
 
