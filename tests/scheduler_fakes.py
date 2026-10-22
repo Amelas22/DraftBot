@@ -1,8 +1,10 @@
 """In-memory stand-in for the scheduler's Spaces access."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Literal
 import json
+
+from services.scheduler_spaces import SpacesError
 
 
 class FakeSchedulerSpaces:
@@ -22,17 +24,19 @@ class FakeSchedulerSpaces:
         return f"https://fake/{method}/{key}"
 
     async def put_public_json(self, key: str, body: dict[str, Any]) -> None:
-        self.objects[key] = (json.dumps(body).encode(), datetime.now().astimezone())
+        self.objects[key] = (json.dumps(body).encode(), datetime.now(timezone.utc))
         self.public.add(key)
 
     async def list_modified(self, prefix: str) -> list[tuple[str, datetime]]:
         self.list_calls.append(prefix)
-        return [(k, m) for k, (_, m) in self.objects.items() if k.startswith(prefix)]
+        return sorted((k, m) for k, (_, m) in self.objects.items() if k.startswith(prefix))
 
     async def fetch(self, key: str, max_bytes: int) -> bytes | None:
         self.fetch_calls.append(key)
         found = self.objects.get(key)
-        if found is None or len(found[0]) > max_bytes:
+        if found is None:
+            raise SpacesError(f"fetch {key} failed: NoSuchKey")
+        if len(found[0]) > max_bytes:
             return None
         return found[0]
 

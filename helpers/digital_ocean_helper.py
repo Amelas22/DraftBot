@@ -358,8 +358,9 @@ class DigitalOceanHelper:
     async def download_bytes(self, key: str, max_bytes: int) -> Optional[bytes]:
         """Download an object's raw bytes; None if it is larger than max_bytes.
 
-        The size check uses ContentLength, so an oversized object's body is never
-        read. Raises on failure.
+        ContentLength short-circuits an honest oversized object without reading
+        it; the read itself is also capped at max_bytes + 1, so a wrong
+        ContentLength cannot make us buffer more. Raises on failure.
         """
         client = await self.create_client()
         if not client:
@@ -371,7 +372,11 @@ class DigitalOceanHelper:
                 self.logger.warning(f"{key} is {response['ContentLength']} bytes, over {max_bytes}; skipped")
                 response["Body"].close()
                 return None
-            body: bytes = await response["Body"].read()
+            body: bytes = await response["Body"].read(max_bytes + 1)
+            if len(body) > max_bytes:
+                self.logger.warning(f"{key} is over {max_bytes} bytes; skipped")
+                response["Body"].close()
+                return None
             return body
 
     async def put_public_json(self, key: str, body: Dict[str, Any]) -> bool:

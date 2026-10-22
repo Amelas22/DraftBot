@@ -1,10 +1,11 @@
 from datetime import datetime, timezone
+from unittest.mock import MagicMock
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
 from helpers.digital_ocean_helper import DigitalOceanHelper
-from services.scheduler_spaces import DoSchedulerSpaces
+from services.scheduler_spaces import DoSchedulerSpaces, SpacesError
 from scheduler_fakes import FakeSchedulerSpaces
 
 
@@ -56,7 +57,8 @@ async def test_fake_honours_prefix_and_max_bytes_and_counts_calls():
     assert fake.list_calls == ["scheduler/availability/"]
     assert await fake.fetch("scheduler/availability/1.json", 5) == b"12345"
     assert await fake.fetch("scheduler/availability/1.json", 4) is None
-    assert await fake.fetch("scheduler/nope.json", 10) is None
+    with pytest.raises(SpacesError):
+        await fake.fetch("scheduler/nope.json", 10)
     assert len(fake.fetch_calls) == 3
 
     await fake.put_public_json("scheduler/link/x.json", {"a": 1})
@@ -64,3 +66,89 @@ async def test_fake_honours_prefix_and_max_bytes_and_counts_calls():
     await fake.delete("scheduler/link/x.json")
     assert "scheduler/link/x.json" not in fake.objects
     assert "scheduler/link/x.json" not in fake.public
+
+
+class _Client:
+    """Async-context stand-in for an S3 client."""
+
+    def __init__(self, **ops):
+        for name, fn in ops.items():
+            setattr(self, name, fn)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def _patched(helper, method, client):
+    async def factory():
+        return client
+
+    setattr(helper, method, factory)
+
+
+@pytest.mark.asyncio
+async def test_list_pages_normalises_times_and_bucket_prefix():
+    helper = _helper()
+    naive = datetime(2026, 10, 1, 12, 0)
+    aware = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
+    calls = []
+
+    async def list_objects_v2(**kwargs):
+        calls.append(kwargs)
+        if "ContinuationToken" not in kwargs:
+            return {
+                "Contents": [{"Key": "magic-draft-logs/scheduler/a.json", "LastModified": naive}],
+                "IsTruncated": True,
+                "NextContinuationToken": "t2",
+            }
+        return {"Contents": [{"Key": "scheduler/b.json", "LastModified": aware}], "IsTruncated": False}
+
+    _patched(helper, "create_raw_client", _Client(list_objects_v2=list_objects_v2))
+    result = await helper.list_objects_with_modified("scheduler/")
+
+    assert result == [
+        ("scheduler/a.json", naive.replace(tzinfo=timezone.utc)),
+        ("scheduler/b.json", aware),
+    ]
+    assert result[0][1].tzinfo is not None
+    assert calls[1]["ContinuationToken"] == "t2"
+
+
+def _get_object_client(body_bytes: bytes, content_length: int, body):
+    async def read(amt=None):
+        return body_bytes if amt is None else body_bytes[:amt]
+
+    body.read = read
+
+    async def get_object(**kwargs):
+        return {"ContentLength": content_length, "Body": body}
+
+    return _Client(get_object=get_object)
+
+
+@pytest.mark.asyncio
+async def test_download_bytes_refuses_oversized_by_content_length_and_closes():
+    helper = _helper()
+    body = MagicMock()
+    _patched(helper, "create_client", _get_object_client(b"x" * 10, 10, body))
+    assert await helper.download_bytes("scheduler/k.json", 5) is None
+    body.close.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_download_bytes_caps_the_read_when_content_length_lies():
+    helper = _helper()
+    body = MagicMock()
+    _patched(helper, "create_client", _get_object_client(b"x" * 100, 3, body))
+    assert await helper.download_bytes("scheduler/k.json", 5) is None
+    body.close.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_download_bytes_returns_small_body():
+    helper = _helper()
+    _patched(helper, "create_client", _get_object_client(b"hello", 5, MagicMock()))
+    assert await helper.download_bytes("scheduler/k.json", 5) == b"hello"
