@@ -7,6 +7,7 @@ import pytest
 
 from services.availability import (
     InvalidWeek,
+    CELLS,
     UsualWeek,
     decode_cells,
     encode_cells,
@@ -90,7 +91,17 @@ def test_next_week_lines_merge_blocks() -> None:
     assert len(lines) == 1
     first = int(datetime(2026, 10, 20, 19, 0, tzinfo=timezone.utc).timestamp())
     start = int(datetime(2026, 10, 20, 21, 0, tzinfo=timezone.utc).timestamp())
+    assert lines[0].startswith(f"<t:{first}:D>: ")
     assert lines[0] == (
-        f"<t:{first}:t>–<t:{start}:t> · "
+        f"<t:{first}:D>: <t:{first}:t>–<t:{start}:t> · "
         f"<t:{first + 3 * 3600}:t>–<t:{first + 3 * 3600 + 1800}:t>"
     )
+
+
+def test_worst_case_line_fits_a_discord_field() -> None:
+    # Clocks go back in New York on 2026-11-01 (25 local hours); every other
+    # cell painted so each cell is its own block.
+    cells = frozenset(range(0, CELLS, 2))
+    now = datetime(2026, 10, 31, 4, 0, tzinfo=timezone.utc)
+    lines = next_week_lines(UsualWeek("America/New_York", cells), now)
+    assert max(len(line) for line in lines) <= 1024

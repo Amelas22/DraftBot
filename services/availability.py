@@ -103,10 +103,15 @@ def next_week_lines(week: UsualWeek, now_utc: datetime) -> list[str]:
     )
     tz = ZoneInfo(week.zone)
     by_day: dict[date, list[str]] = {}
+    day_start: dict[date, int] = {}
     for first, end in merge_blocks(window_cells(week.zone, week.cells, start)):
         begin = start + timedelta(minutes=CELL_MINUTES * first)
         finish = start + timedelta(minutes=CELL_MINUTES * end)
-        by_day.setdefault(begin.astimezone(tz).date(), []).append(
+        day = begin.astimezone(tz).date()
+        day_start.setdefault(day, int(begin.timestamp()))
+        by_day.setdefault(day, []).append(
             f"<t:{int(begin.timestamp())}:t>–<t:{int(finish.timestamp())}:t>"
         )
-    return [" · ".join(by_day[day]) for day in sorted(by_day)]
+    # The leading date timestamp is the day's first block, so Discord renders
+    # the day in the viewer's zone, consistent with the times after it.
+    return [f"<t:{day_start[day]}:D>: " + " · ".join(by_day[day]) for day in sorted(by_day)]
