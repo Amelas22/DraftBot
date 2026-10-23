@@ -8,14 +8,14 @@ library prompt) agree on what is stored.
 import enum
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 import discord
 from loguru import logger
 from sqlalchemy import exists, select, update
 
-from config import is_money_server
+from config import is_money_server, scheduler_enabled
 from database.db_session import AsyncSessionLocal
 from models.draft_session import DraftSession
 from models.stake import StakeInfo
@@ -31,6 +31,7 @@ from preference_service import (
     update_player_bet_capping_preference,
     update_player_dm_notification_preference,
 )
+from services.availability import load_usual_week, next_week_lines
 from services.library_access_service import may_borrow
 from services.library_prompt import COULD_NOT_CHECK, library_to_ask_about, reserve_and_say
 from services.library_reservation import queue_link
@@ -53,6 +54,8 @@ class Settings:
     stake_cap: bool | None = None    # the stored cap on a money server; None elsewhere
     library: bool | None = None      # uses_library as stored; None = not set
     library_offered: bool = False
+    scheduler: bool = False
+    usual_week: list[str] | None = None   # next-week timestamp lines; None = never saved
 
 
 async def _anonymous(player_id: str, guild_id: str) -> bool:
@@ -73,7 +76,21 @@ async def _library_offered(player_id: str, guild_id: str) -> bool:
         return False
 
 
+async def _usual_week(player_id: str) -> list[str] | None:
+    """The saved week as timestamp lines; None if never saved or unreadable.
+
+    A failure only leaves the week out; the rest of /settings still loads.
+    """
+    try:
+        week = await load_usual_week(player_id)
+        return None if week is None else next_week_lines(week, datetime.now(timezone.utc))
+    except Exception:
+        logger.exception("settings: couldn't read the usual week for {}", player_id)
+        return None
+
+
 async def load_settings(player_id: str, guild_id: str) -> Settings:
+    scheduler = bool(scheduler_enabled(guild_id))
     return Settings(
         dms=bool(await get_player_dm_notification_preference(player_id, guild_id)),
         hide_from_ladder=await get_hide_from_sr_ladder(player_id, guild_id),
@@ -82,6 +99,8 @@ async def load_settings(player_id: str, guild_id: str) -> Settings:
                    if is_money_server(guild_id) else None),
         library=await get_uses_library(player_id, guild_id),
         library_offered=await _library_offered(player_id, guild_id),
+        scheduler=scheduler,
+        usual_week=await _usual_week(player_id) if scheduler else None,
     )
 
 

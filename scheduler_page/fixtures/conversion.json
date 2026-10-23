@@ -1,0 +1,87 @@
+{
+  "format": "draftbot.scheduler.test_conversion",
+  "version": 1,
+  "cases": [
+    {
+      "name": "new-york-fall-back",
+      "zone": "America/New_York",
+      "usual_cells": "AAAAAAPAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/AAAAAPA",
+      "usual_readable": [
+        "Sun 0-3",
+        "Sun 19-21",
+        "Mon 19-21"
+      ],
+      "window_start_utc": "2026-10-26T04:00:00Z",
+      "expected_window_cells": "AAAAAAPAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/wAAAADw",
+      "expected_free_utc": [
+        "2026-10-26T23:00:00Z",
+        "2026-10-26T23:30:00Z",
+        "2026-10-27T00:00:00Z",
+        "2026-10-27T00:30:00Z",
+        "2026-11-01T04:00:00Z",
+        "2026-11-01T04:30:00Z",
+        "2026-11-01T05:00:00Z",
+        "2026-11-01T05:30:00Z",
+        "2026-11-01T06:00:00Z",
+        "2026-11-01T06:30:00Z",
+        "2026-11-01T07:00:00Z",
+        "2026-11-01T07:30:00Z",
+        "2026-11-02T00:00:00Z",
+        "2026-11-02T00:30:00Z",
+        "2026-11-02T01:00:00Z",
+        "2026-11-02T01:30:00Z"
+      ]
+    },
+    {
+      "name": "london-fall-back",
+      "zone": "Europe/London",
+      "usual_cells": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADw/AAAAADw",
+      "usual_readable": [
+        "Sun 0-3",
+        "Sat 20-22",
+        "Sun 20-22"
+      ],
+      "window_start_utc": "2026-10-19T04:00:00Z",
+      "expected_window_cells": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA8P8AAAAAPAA",
+      "expected_free_utc": [
+        "2026-10-24T19:00:00Z",
+        "2026-10-24T19:30:00Z",
+        "2026-10-24T20:00:00Z",
+        "2026-10-24T20:30:00Z",
+        "2026-10-24T23:00:00Z",
+        "2026-10-24T23:30:00Z",
+        "2026-10-25T00:00:00Z",
+        "2026-10-25T00:30:00Z",
+        "2026-10-25T01:00:00Z",
+        "2026-10-25T01:30:00Z",
+        "2026-10-25T02:00:00Z",
+        "2026-10-25T02:30:00Z",
+        "2026-10-25T20:00:00Z",
+        "2026-10-25T20:30:00Z",
+        "2026-10-25T21:00:00Z",
+        "2026-10-25T21:30:00Z"
+      ]
+    },
+    {
+      "name": "new-york-spring-forward",
+      "zone": "America/New_York",
+      "usual_cells": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAPwAAAAPA",
+      "usual_readable": [
+        "Sun 1-4",
+        "Sun 19-21"
+      ],
+      "window_start_utc": "2027-03-08T05:00:00Z",
+      "expected_window_cells": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAPAAAAA8A",
+      "expected_free_utc": [
+        "2027-03-14T06:00:00Z",
+        "2027-03-14T06:30:00Z",
+        "2027-03-14T07:00:00Z",
+        "2027-03-14T07:30:00Z",
+        "2027-03-14T23:00:00Z",
+        "2027-03-14T23:30:00Z",
+        "2027-03-15T00:00:00Z",
+        "2027-03-15T00:30:00Z"
+      ]
+    }
+  ]
+}

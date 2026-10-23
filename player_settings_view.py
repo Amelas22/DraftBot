@@ -8,6 +8,7 @@ player's live sign-ups.
 """
 import asyncio
 import weakref
+from datetime import datetime, timezone
 from typing import Any
 
 import discord
@@ -19,6 +20,7 @@ from helpers.utils import not_none, ui_button
 from player_settings import (Setting, Settings, apply_cap_to_live_drafts,
                              apply_library_to_live_drafts, flip, live_result_text,
                              load_settings)
+from services.scheduler_links import issue_link
 from utils import redraw_leaderboard
 
 CAP_LABEL = "Cap my entry to my share of my team"
@@ -27,6 +29,13 @@ LIBRARY_NOT_SET = "○ Not set (you'll be asked at sign-up)"
 DMS_LABEL = "DM me when a ready check starts"
 HIDE_LABEL = "Hide me from the Skill Rating Ladder"
 ANONYMOUS_LABEL = "Show me as Anonymous on donation pages"
+
+WEEK_NOT_SET = "Not set. Press My usual week to add it."
+WEEK_EMPTY = "No usual times."
+WEEK_INTRO = ("Paint your usual week, then save. It shows here straight away. "
+              "The link works for 7 days.")
+WEEK_LINK_FAILED = "Couldn't make your link just now. Try again in a minute."
+FIELD_LIMIT = 1024    # Discord's cap on an embed field value
 
 NOT_YOURS = "These buttons are not for you."
 SAVE_FAILED = "⚠️ Couldn't save that just now. Try again."
@@ -72,11 +81,28 @@ def _groups(settings: Settings) -> list[tuple[str, list[str]]]:
     ]
 
 
+def _week_value(lines: list[str] | None) -> str:
+    """The week field's text: never empty, and cut at a line boundary to fit."""
+    if lines is None:
+        return WEEK_NOT_SET
+    kept: list[str] = []
+    size = 0
+    for line in lines:
+        size += len(line) + (1 if kept else 0)
+        if size > FIELD_LIMIT:
+            break
+        kept.append(line)
+    return "\n".join(kept) or WEEK_EMPTY
+
+
 def settings_embed(guild_name: str, settings: Settings) -> discord.Embed:
     embed = discord.Embed(title=f"⚙️ Your settings: {guild_name}",
                           color=discord.Color.blurple())
     for name, lines in _groups(settings):
         embed.add_field(name=name, value="\n".join(lines), inline=False)
+    if settings.scheduler:
+        embed.add_field(name="Your usual week", value=_week_value(settings.usual_week),
+                        inline=False)
     embed.set_footer(text="Settings are per server.")
     return embed
 
@@ -101,6 +127,8 @@ class SettingsView(discord.ui.View):
             self.remove_item(self.cap_button)
         if not settings.library_offered:
             self.remove_item(self.library_button)
+        if not settings.scheduler:
+            self.remove_item(self.week_button)
         self._restyle()
 
     def _restyle(self) -> None:
@@ -186,6 +214,26 @@ class SettingsView(discord.ui.View):
     async def anonymous_button(self, _button: discord.ui.Button[Any],
                                interaction: discord.Interaction) -> None:
         await self._toggle(interaction, Setting.ANONYMOUS)
+
+    @ui_button(label="My usual week", style=discord.ButtonStyle.primary, row=3)
+    async def week_button(self, _button: discord.ui.Button[Any],
+                          interaction: discord.Interaction) -> None:
+        if str(not_none(interaction.user).id) != self.player_id:
+            await interaction.response.send_message(NOT_YOURS, ephemeral=True)
+            return
+        await interaction.response.defer()
+        self.opener = interaction
+        try:
+            url = await issue_link(self.player_id, self.guild_id, "usual",
+                                   datetime.now(timezone.utc))
+        except Exception:    # the link row failing to commit
+            logger.exception("settings: couldn't issue a usual-week link for {}",
+                             self.player_id)
+            await interaction.followup.send(WEEK_LINK_FAILED, ephemeral=True)
+            return
+        link = discord.ui.View()
+        link.add_item(discord.ui.Button(label="Open my week", url=url))
+        await interaction.followup.send(WEEK_INTRO, view=link, ephemeral=True)
 
     @override
     async def on_timeout(self) -> None:

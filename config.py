@@ -85,6 +85,7 @@ class Config:
                 "bot_detection": False,
                 "money_server": False,
                 "vouchers": False,
+                "scheduler": False,
                 "tournament": True,
                 "quiz_pack_images": {
                     "enabled": True,
@@ -197,6 +198,7 @@ class Config:
                 "bot_detection": True,
                 "money_server": False,
                 "vouchers": False,
+                "scheduler": False,
                 "tournament": True,
                 "quiz_pack_images": {
                     "enabled": True,
@@ -345,6 +347,22 @@ def vouchers_enabled(guild_id):
     """Whether draft vouchers may be spent in this guild (default off)."""
     config = get_config(guild_id)
     return config.get("features", {}).get("vouchers", False)
+
+
+def scheduler_enabled(guild_id):
+    """Whether players may set their usual week in this guild (default off)."""
+    config = get_config(guild_id)
+    return config.get("features", {}).get("scheduler", False)
+
+def scheduler_base_url() -> str:
+    """Public base URL of the scheduler web app, without a trailing slash."""
+    return os.getenv("SCHEDULER_BASE_URL", "http://localhost:8787").rstrip("/")
+
+
+def scheduler_port() -> int:
+    """Port the scheduler web app listens on (127.0.0.1 only)."""
+    return int(os.getenv("SCHEDULER_PORT", "8787"))
+
 
 def get_draftmancer_base_url():
     """Return the draftmancer base URL"""

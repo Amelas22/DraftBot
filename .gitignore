@@ -4,6 +4,7 @@ key
 *.json
 !.claude/settings.json
 !tests/fixtures/*.json
+!scheduler_page/fixtures/*.json
 *.db
 *.xlsx
 *.csv
