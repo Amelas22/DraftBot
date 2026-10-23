@@ -353,8 +353,12 @@ export async function mountMatch(root, link, deps) {
     try {
       const next = await fetchBoth();
       if (disposed) return;
+      // File 6 is rewritten on its own (a deck check, a request's answer): redraw for either file.
+      const meChanged = next.me.seq !== me.seq;
       me = next.me;
-      if (next.shared.seq > shared.seq) { shared = next.shared; render(); }
+      const sharedChanged = next.shared.seq > shared.seq;
+      if (sharedChanged) shared = next.shared;
+      if (sharedChanged || meChanged) render();
     } catch (e) {
       if (e instanceof LinkExpired) {
         if (fromRequester) throw e;
