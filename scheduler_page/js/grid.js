@@ -55,9 +55,9 @@ export const formatCell = (startUtc, zone, j) => formatTime(addCells(startUtc, j
 // "7 PM" for hour h (0-23): the hour column of every grid.
 export const hourLabel = (h) => `${h % 12 === 0 ? 12 : h % 12} ${h < 12 ? "AM" : "PM"}`;
 
-// opts: { startUtc, zone, cellClass(j) -> string, cellLabel(j) -> string, onPick?(j) }
+// opts: { startUtc, zone, cellClass(j) -> string, cellLabel(j) -> string, cellText?(j) -> string, onPick?(j) }
 export function mountHeatmap(container, opts) {
-  const { startUtc, zone, cellClass, cellLabel, onPick } = opts;
+  const { startUtc, zone, cellClass, cellLabel, cellText, onPick } = opts;
   const days = layoutWindow(startUtc, zone);
 
   const tabs = el("div", { class: "daytabs", role: "tablist", "aria-label": "Day" });
@@ -99,6 +99,7 @@ export function mountHeatmap(container, opts) {
       if (n.className !== cls) n.className = cls;
       const label = cellLabel(j);
       if (n.title !== label) { n.title = label; n.setAttribute("aria-label", label); }
+      if (cellText) { const text = cellText(j); if (n.textContent !== text) n.textContent = text; }
     }
   };
 
