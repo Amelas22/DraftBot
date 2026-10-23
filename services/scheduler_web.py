@@ -17,6 +17,7 @@ from services.availability import (
     usual_week_doc,
 )
 from services.scheduler_links import LinkIdentity, resolve_token
+from services.team_finder import Notice
 
 TOKEN_LIMIT = 60
 IP_LIMIT = 120
@@ -31,6 +32,8 @@ _STATIC_DIR: web.AppKey[Path] = web.AppKey("static_dir")
 _LIMITER: web.AppKey["RateLimiter"] = web.AppKey("limiter")
 _ENABLED: web.AppKey[Callable[[str], bool]] = web.AppKey("enabled")
 _TRUSTED: web.AppKey[frozenset[str]] = web.AppKey("trusted_proxies")
+NOTIFY: web.AppKey[Callable[[Notice, str], Awaitable[bool]]] = web.AppKey("notify")
+DISPLAY_NAME: web.AppKey[Callable[[str, str], Awaitable[str]]] = web.AppKey("display_name")
 MAX_KEYS = 10_000
 _REPO_PAGE_DIR = Path(__file__).resolve().parent.parent / "scheduler_page"
 
@@ -148,17 +151,23 @@ async def get_usual_week(request: web.Request) -> web.Response:
     return web.json_response(usual_week_doc(week))
 
 
-@routes.put("/api/usual-week")
-async def put_usual_week(request: web.Request) -> web.Response:
-    if (request.content_length or 0) > MAX_FILE_BYTES:
-        return _error(413, "too_large")
+async def read_body(request: web.Request, limit: int) -> bytes | None:
+    """The request body, or None when it is larger than ``limit`` bytes."""
+    if (request.content_length or 0) > limit:
+        return None
     raw = b""
-    while len(raw) <= MAX_FILE_BYTES:
-        chunk = await request.content.read(MAX_FILE_BYTES + 1 - len(raw))
+    while len(raw) <= limit:
+        chunk = await request.content.read(limit + 1 - len(raw))
         if not chunk:
             break
         raw += chunk
-    if len(raw) > MAX_FILE_BYTES:
+    return raw if len(raw) <= limit else None
+
+
+@routes.put("/api/usual-week")
+async def put_usual_week(request: web.Request) -> web.Response:
+    raw = await read_body(request, MAX_FILE_BYTES)
+    if raw is None:
         return _error(413, "too_large")
     try:
         week = parse_usual_week(raw)
@@ -235,12 +244,25 @@ def register_routes(app: web.Application, extra: web.RouteTableDef) -> None:
     app.add_routes(extra)
 
 
+async def _no_notify(notice: Notice, guild_id: str) -> bool:
+    return False
+
+
+async def _id_as_name(guild_id: str, user_id: str) -> str:
+    return user_id
+
+
 def build_app(
     now: Callable[[], datetime] = utc_now,
     static_dir: Path = _REPO_PAGE_DIR,
     enabled: Callable[[str], bool] = scheduler_enabled,
     trusted_proxies: Collection[str] | None = None,
+    notify: Callable[[Notice, str], Awaitable[bool]] = _no_notify,
+    display_name: Callable[[str, str], Awaitable[str]] = _id_as_name,
 ) -> web.Application:
+    from services.scheduler_teams_api import routes as teams_routes  # imports this module
+
+
     app = web.Application(middlewares=[auth_middleware])
     app[_NOW] = now
     app[_STATIC_DIR] = static_dir
@@ -249,5 +271,8 @@ def build_app(
         scheduler_trusted_proxies() if trusted_proxies is None else trusted_proxies
     )
     app[_LIMITER] = RateLimiter()
+    app[NOTIFY] = notify
+    app[DISPLAY_NAME] = display_name
     register_routes(app, routes)
+    register_routes(app, teams_routes)
     return app
