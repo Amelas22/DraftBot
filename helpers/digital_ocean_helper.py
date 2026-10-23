@@ -217,7 +217,7 @@ class DigitalOceanHelper:
         """
         client = await self.create_raw_client()
         if client is None:
-            raise RuntimeError("DO_SPACES_RAW_ENDPOINT is not set -- cannot publish")
+            raise RuntimeError("Spaces is not configured (raw endpoint and credentials) -- cannot publish")
         async with client as s3:
             await s3.put_object(
                 Bucket=self.bucket,
