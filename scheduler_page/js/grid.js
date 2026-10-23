@@ -61,12 +61,20 @@ export const formatClock = (date, zone) => clockOf(timeParts(date, zone));
 // The label of window cell j, in zone.
 export const formatCell = (startUtc, zone, j) => formatTime(addCells(startUtc, j), zone);
 
+// The index of the day column holding cell j; the first day when j is missing or outside the window.
+export function dayIndexOf(days, j) {
+  if (!Number.isInteger(j)) return 0;
+  const i = days.findIndex((d) => d.cells.some((c) => c.j === j));
+  return i < 0 ? 0 : i;
+}
+
 // "7 PM" for hour h (0-23): the hour column of every grid.
 export const hourLabel = (h) => `${h % 12 === 0 ? 12 : h % 12} ${h < 12 ? "AM" : "PM"}`;
 
-// opts: { startUtc, zone, cellClass(j) -> string, cellLabel(j) -> string, cellText?(j) -> string, onPick?(j) }
+// opts: { startUtc, zone, cellClass(j) -> string, cellLabel(j) -> string, cellText?(j) -> string, onPick?(j),
+//         initialJ?: the cell whose day a narrow screen opens on }. Returns { update(), showCell(j) }.
 export function mountHeatmap(container, opts) {
-  const { startUtc, zone, cellClass, cellLabel, cellText, onPick } = opts;
+  const { startUtc, zone, cellClass, cellLabel, cellText, onPick, initialJ } = opts;
   const days = layoutWindow(startUtc, zone);
 
   const tabs = el("div", { class: "daytabs", role: "tablist", "aria-label": "Day" });
@@ -113,7 +121,9 @@ export function mountHeatmap(container, opts) {
   };
 
   container.replaceChildren(tabs, grid);
-  setDay(0);
+  setDay(dayIndexOf(days, initialJ));
   update();
-  return { update };
+  // Narrow screens show one day: point them at the day holding cell j.
+  const showCell = (j) => setDay(dayIndexOf(days, j));
+  return { update, showCell };
 }

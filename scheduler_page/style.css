@@ -166,3 +166,5 @@ button.hcell { cursor: pointer; }
 .slot .btns { display: flex; flex-wrap: wrap; gap: 6px; }
 .slot .btns:empty { display: none; }
 .tip .act + .act { margin-left: 6px; }
+.hcell.one, .sw.one { background: var(--s2); }
+.rail .booked + .act { align-self: flex-start; }

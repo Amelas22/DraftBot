@@ -15,11 +15,16 @@ const CELL_MS = CELL_MINUTES * 60000;
 const sameSet = (a, b) => a.length === b.length && a.every((x) => b.includes(x));
 
 export const draftBooked = (shared) => Boolean(shared.booking && shared.booking.draft) || shared.match.status === "booked";
-const nobodyFollows = (shared) => !shared.teams.some((t) => t.players.some((p) => p.plays_after_draft === true));
+export const nobodyFollows = (shared) => !shared.teams.some((t) => t.players.some((p) => p.plays_after_draft === true));
 
 // The Later games tab: the viewer has a pairing, and the draft is booked or nobody plays right after it.
 export function laterTabShown(shared, me) {
   return myOpponents(shared, me).length > 0 && (draftBooked(shared) || nobodyFollows(shared));
+}
+
+// A booked draft that nobody plays right after: the booked rail points the viewer to Later games.
+export function pointsToLater(shared, me) {
+  return nobodyFollows(shared) && draftBooked(shared) && laterTabShown(shared, me);
 }
 
 // Later games first only for a viewer who doesn't play right after an already booked draft.
@@ -51,10 +56,13 @@ export function bookedLine(sitting, viewer, zone) {
 export function applySitting(shared, me, request) {
   const players = [me.user, request.opponent];
   const booking = shared.booking || { draft: null, sittings: [] };
-  const sittings = (booking.sittings || []).filter((s) => !sameSet(s.players, players));
+  const old = (booking.sittings || []).find((s) => sameSet(s.players, players));
+  const sittings = (booking.sittings || []).filter((s) => s !== old);
+  // A move keeps the opponent's own reservation; ours follows this request.
+  const theirs = old ? (old.decks_reserved || []).filter((u) => u === request.opponent) : [];
   sittings.push({
     players, start_utc: request.start_utc, cells: shared.rules.sitting_cells, by: me.user,
-    decks_reserved: request.reserve_deck ? [me.user] : [],
+    decks_reserved: [...(request.reserve_deck ? [me.user] : []), ...theirs],
   });
   return { ...shared, booking: { ...booking, sittings } };
 }
@@ -106,6 +114,17 @@ export function mountLater(box, ctx) {
     el("section", { class: "work" }, el("div", { class: "workmain" }, heatBox, tip, legend), rail));
 
   // ---- heatmap: you and the selected opponent ----
+  // The cell a narrow screen opens on: the first offered time, else the first allowed cell.
+  function aim() {
+    const o = current();
+    if (!o) return null;
+    const first = draftBooked(shared()) ? sittingStarts(shared(), me(), o.user, now(), { reserve: false }, zone)[0] : null;
+    return first ? first.start : earliest(shared(), now());
+  }
+  function aimKey() {
+    const o = current();
+    return o ? `${o.user}|${o.booked ? o.booked.start_utc : ""}|${draftBooked(shared())}` : "";
+  }
   const cellState = (j) => {
     const o = current();
     if (!o) return { cls: "", words: "" };
@@ -113,10 +132,10 @@ export function mountLater(box, ctx) {
     const a = player(viewer), b = player(o.user);
     const mine = Boolean(a && a.cells.has(j)), theirs = Boolean(b && b.cells.has(j));
     if (mine && theirs) {
-      if (library() && !deckOk(me(), j)) return { cls: "s2 no-library", words: `you and ${o.name} free, your deck's cards are held` };
+      if (library() && !deckOk(me(), j)) return { cls: "s1 no-library", words: `you and ${o.name} free, your deck's cards are held` };
       return { cls: "s0", words: `you and ${o.name} free` };
     }
-    if (mine || theirs) return { cls: "short", words: mine ? "only you free" : `only ${o.name} free` };
+    if (mine || theirs) return { cls: "one", words: mine ? "only you free" : `only ${o.name} free` };
     return { cls: "", words: "neither of you free" };
   };
   const heat = mountHeatmap(heatBox, {
@@ -127,7 +146,11 @@ export function mountLater(box, ctx) {
       return `${timeLabel(instant(j), zone)}${w ? `: ${w}` : ""}${inBooked(j) ? ", your booked game" : ""}`;
     },
     onPick: (j) => { picked = j; ctx.render(); },
+    initialJ: aim(),
   });
+  // Re-aim the narrow day tabs when the opponent or the booking changes what is worth seeing first.
+  let aimedAt = aimKey();
+  const reaim = () => { const k = aimKey(); if (k !== aimedAt) { aimedAt = k; heat.showCell(aim()); } };
 
   // ---- booking ----
   const book = (o, start, reserve) => {
@@ -212,8 +235,8 @@ export function mountLater(box, ctx) {
     const name = o ? o.name : "your opponent";
     const sw = (cls, text) => el("span", {}, el("i", { class: `sw ${cls}` }), text);
     const items = [sw("s0", `you and ${name} free`)];
-    if (library()) items.push(sw("s2 nolib", "both free, your deck's cards held"));
-    items.push(sw("", "not both free"));
+    if (library()) items.push(sw("s1 nolib", "both free, your deck's cards held"));
+    items.push(sw("one", "only one of you free"), sw("", "neither free"));
     if (o && o.booked) items.push(sw("draftsw", "your booked game"));
     items.push(sw("pastsw", draftBooked(shared()) ? "past or before the draft ends" : "past"));
     legend.replaceChildren(...items);
@@ -275,6 +298,7 @@ export function mountLater(box, ctx) {
       renderTip();
       renderLegend();
       renderRail();
+      reaim();
       heat.update();
     },
   };

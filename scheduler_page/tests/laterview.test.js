@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { parseShared, parseMe } from "../js/match.js";
 import { sittingRequest } from "../js/later.js";
-import { laterTabShown, defaultTab, usesLibrary, sittingButtons, bookedLine, applySitting } from "../js/laterview.js";
+import { laterTabShown, defaultTab, usesLibrary, sittingButtons, bookedLine, applySitting, nobodyFollows, pointsToLater } from "../js/laterview.js";
 
 const fx = (name) =>
   JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures", name), "utf8"));
@@ -88,4 +88,29 @@ test("applySitting: adds the pair's sitting, then a second booking replaces it",
   assert.deepEqual(two.booking.sittings, [other,
     { players: [BEN, FAY], start_utc: "2026-10-21T22:00:00Z", cells: 3, by: BEN, decks_reserved: [] }]);
   assert.equal(base.booking.sittings.length, 1, "the input is not changed");
+});
+
+test("pointsToLater: a booked draft that nobody follows points to Later games", () => {
+  const nf = load("nofollow");
+  assert.equal(nobodyFollows(nf.shared), true);
+  assert.equal(pointsToLater(nf.shared, nf.me), false, "not before the draft is booked");
+  const booked = { ...nf.shared, booking: { ...nf.shared.booking, draft: { start_utc: "2026-10-21T00:00:00Z", by: BEN } } };
+  assert.equal(pointsToLater(booked, nf.me), true);
+  assert.equal(pointsToLater({ ...booked, pairings: [] }, nf.me), false, "no pairing, no Later games");
+  const good = load("good");
+  assert.equal(nobodyFollows(good.shared), false);
+  const goodBooked = { ...good.shared, booking: { ...good.shared.booking, draft: { start_utc: "2026-10-21T00:00:00Z", by: BEN } } };
+  assert.equal(pointsToLater(goodBooked, good.me), false, "someone follows");
+});
+
+test("applySitting: a move keeps the opponent's own reservation", () => {
+  const { shared, me } = load("later");
+  const now = new Date(shared.generated_at);
+  const wed = cellOf(shared, "2026-10-21T22:00:00Z"), thu = cellOf(shared, "2026-10-22T23:00:00Z");
+  const base = { ...shared, booking: { ...shared.booking, sittings: [
+    { players: [FAY, BEN], start_utc: "2026-10-23T00:00:00Z", cells: 3, by: FAY, decks_reserved: [FAY, BEN] }] } };
+  const moved = applySitting(base, me, sittingRequest(base, FAY, wed, false, now, "a"));
+  assert.deepEqual(moved.booking.sittings[0].decks_reserved, [FAY]);
+  const reserved = applySitting(base, me, sittingRequest(base, FAY, thu, true, now, "b"));
+  assert.deepEqual(reserved.booking.sittings[0].decks_reserved, [BEN, FAY]);
 });

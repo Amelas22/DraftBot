@@ -12,7 +12,7 @@ import { expiredMessage } from "./messages.js";
 import { el } from "./dom.js";
 import { plural, andList } from "./words.js";
 import { fakeSittingOutcome } from "./later.js";
-import { mountLater, laterTabShown, defaultTab } from "./laterview.js";
+import { mountLater, laterTabShown, defaultTab, pointsToLater } from "./laterview.js";
 
 const MATCH_EXPIRED = expiredMessage("match");
 const REFRESH_MS = 60000;
@@ -182,12 +182,20 @@ export async function mountMatch(root, link, deps) {
   const bestNow = () => (bestMemo ??= bestTimes(shared, off, now(), zone));
   const missesNow = () => (missMemo ??= closestMisses(shared, off, now(), zone));
   syncMemo();
+  // The cell a narrow screen opens on: the booked draft, else the best time, else the first future cell.
+  function firstUseful() {
+    if (isBooked()) return bookedStart() ?? futureCell();
+    const best = bestNow()[0];
+    return best ? best.start : futureCell();
+  }
+  function futureCell() { return Math.max(0, Math.ceil((now() - startUtc) / CELL_MS)); }
   const heat = mountHeatmap(heatBox, {
     startUtc, zone,
     cellClass: (j) => cellView(j).cls + (j === picked ? " picked" : ""),
     cellLabel: (j) => cellView(j).label,
     cellText: (j) => cellView(j).text,
     onPick: (j) => { picked = j; render(); },
+    initialJ: firstUseful(),
   });
 
   // ---- actions ----
@@ -204,6 +212,7 @@ export async function mountMatch(root, link, deps) {
           library_copy: copyNeeded(shared).needed,
         } };
       }
+      if (o.status === "booked" && bookedStart() !== null) heat.showCell(bookedStart());
       render();
       // A refusal may mean file 5 moved on (someone booked first): fetch it now rather than in a minute.
       if (o.status === "refused") refresh();
@@ -332,6 +341,11 @@ export async function mountMatch(root, link, deps) {
     if (isBooked()) {
       kids.push(el("h2", { text: "Booked" }), el("div", { class: "booked", role: "status" },
         el("b", { text: "Draft booked" }), bookedLabel() ? `: ${bookedLabel()}. Posted in the match thread.` : ". See the match thread."));
+      if (pointsToLater(shared, me)) {
+        const go = el("button", { type: "button", class: "act", text: "Book your games under Later games" });
+        go.addEventListener("click", () => { tab = "later"; render(); });
+        kids.push(go);
+      }
     } else {
       kids.push(el("h2", { text: "Best times" }), el("div", { class: "who", text: out.length ? `Counting without ${andList(out)}` : "Counting everyone" }));
       const best = bestNow();

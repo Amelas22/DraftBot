@@ -153,6 +153,7 @@ export async function mountLfg(root, link, deps) {
     list, summary, heatBox, legend,
     el("div", { class: "actions" }, editButton()),
   );
-  heat = mountHeatmap(heatBox, { startUtc, zone, cellClass, cellLabel });
+  heat = mountHeatmap(heatBox, { startUtc, zone, cellClass, cellLabel,
+    initialJ: Math.max(0, Math.ceil((now() - startUtc) / (30 * 60000))) });
   renderSummary();
 }
