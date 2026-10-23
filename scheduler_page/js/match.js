@@ -79,7 +79,7 @@ export function draftCheck(shared, start, off, nowUtc) {
 }
 
 // Consecutive-cell runs of the starts in `byStart` (a Map start -> info).
-const runsOf = (byStart) => mergeBlocks(new Set(byStart.keys())).map(([a, b]) => {
+export const runsOf = (byStart) => mergeBlocks(new Set(byStart.keys())).map(([a, b]) => {
   const starts = [];
   for (let j = a; j < b; j++) starts.push(j);
   return starts;
