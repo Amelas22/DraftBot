@@ -8,11 +8,9 @@ from loguru import logger
 from typing_extensions import override
 
 from config import scheduler_host, scheduler_port
-from notification_service import send_dm
-from services.scheduler_links import issue_link
-from services.scheduler_http import utc_now
 from services.scheduler_web import build_app
 from services.team_finder import Notice
+from services.team_finder_sync import notify
 
 
 class SchedulerWebCog(commands.Cog):
@@ -34,11 +32,7 @@ class SchedulerWebCog(commands.Cog):
         return user.global_name or user.name
 
     async def _notify(self, notice: Notice, guild_id: str) -> bool:
-        text = notice.text
-        if notice.link_view is not None:
-            link = await issue_link(notice.user_id, guild_id, notice.link_view, utc_now())
-            text += "\n" + link
-        return await send_dm(self.bot, notice.user_id, text)
+        return await notify(self.bot, notice, guild_id)
 
     async def _start(self) -> None:
         host, port = scheduler_host(), scheduler_port()

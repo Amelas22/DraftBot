@@ -6,7 +6,9 @@ from sqlalchemy import select
 from database.db_session import db_session
 from models.scheduler import PlayerAvailability
 from models.team_finder import LfgRequest, LfgTeam, LfgTeamMember
+from models.tournament import TournamentTeamMember
 from services.availability import UsualWeek, cells_to_bytes
+from services.tournament_service import add_teammate, create_tournament, register_team
 from services.team_finder import (
     accept,
     close_team,
@@ -15,6 +17,7 @@ from services.team_finder import (
     Notice,
     open_team,
     overlap_hours,
+    reconcile_registered,
     request_join,
     set_taking_requests,
     teams_state,
@@ -408,3 +411,93 @@ async def test_close_team(test_db):
         reqs = (await s.execute(select(LfgRequest))).scalars().all()
         assert {r.status for r in reqs} == {"accepted", "declined"}
         assert (await close_team(s, "cap", tid, NOW)).code == "team_closed"
+
+
+@pytest.mark.asyncio
+async def test_multi_team_warning_ignores_other_guilds_and_closed_teams(test_db):
+    async with db_session() as s:
+        t1 = await _open(s, "cap", "Rook")
+        assert (await open_team(s, "g2", "cap2", "Bishop", 3, "", NOW)).ok
+        other = (await s.execute(select(LfgTeam).where(LfgTeam.guild_id == "g2"))).scalars().one()
+        await _ask(s, t1, "ben", "Ben")
+        s.add(LfgRequest(team_id=other.id, user_id="ben", display_name="Ben", note="",
+                         status="pending", created_utc=NOW.replace(tzinfo=None)))
+        await s.flush()
+        assert (await accept(s, "cap2", str(other.id), "ben", NOW)).notices[0].text == "You're on Bishop's team."
+        r = await accept(s, "cap", t1, "ben", NOW)
+        assert r.notices[0].text == "You're on Rook's team."
+
+        t3 = await _open(s, "cap3", "Knight")
+        await _ask(s, t3, "amy", "Amy")
+        await accept(s, "cap3", t3, "amy", NOW)
+        await close_team(s, "cap3", t3, NOW)
+        t4 = await _open(s, "cap4", "Pawn")
+        await _ask(s, t4, "amy", "Amy")
+        r = await accept(s, "cap4", t4, "amy", NOW)
+        assert r.notices[0].text == "You're on Pawn's team."
+
+
+async def _tournament(s, *teams):
+    t = await create_tournament(s, G, "Cup", 3)
+    out = []
+    for name, captain in teams:
+        p, _ = await register_team(s, t.id, name, captain)
+        out.append(p)
+    await s.flush()
+    return out
+
+
+async def _team_row(s, tid):
+    return await s.get(LfgTeam, int(tid))
+
+
+@pytest.mark.asyncio
+async def test_reconcile_no_tournament_is_noop(test_db):
+    async with db_session() as s:
+        tid = await _open(s, "cap", "Rook")
+        assert await reconcile_registered(s, G, NOW) == []
+        assert (await _team_row(s, tid)).status == "open"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_closes_team_of_registered_captain(test_db):
+    async with db_session() as s:
+        tid = await _open(s, "cap", "Rook")
+        for u in ("ben", "amy"):
+            await _ask(s, tid, u, u.title())
+        await accept(s, "cap", tid, "ben", NOW)
+        await _ask(s, tid, "zed", "Zed")
+        await _tournament(s, ("Rooks", "cap"))
+        notices = await reconcile_registered(s, G, NOW)
+        assert notices == [Notice("ben", "Rook registered their team for the tournament.")]
+        team = await _team_row(s, tid)
+        assert team.status == "closed" and team.taking_requests is False
+        assert team.closed_utc is not None
+        statuses = {r.user_id: r.status for r in (await s.execute(select(LfgRequest))).scalars()}
+        assert statuses == {"ben": "accepted", "amy": "withdrawn", "zed": "withdrawn"}
+        assert await reconcile_registered(s, G, NOW) == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_member_leaves_other_teams(test_db):
+    async with db_session() as s:
+        tid = await _open(s, "cap", "Rook", 3)
+        for u in ("ben", "amy"):
+            await _ask(s, tid, u, u.title())
+            await accept(s, "cap", tid, u, NOW)
+        assert (await _team_row(s, tid)).status == "full"
+        other = await _open(s, "cap2", "Bishop")
+        await _ask(s, other, "amy", "Amy")
+        (p,) = await _tournament(s, ("Pawns", "zoe"))
+        s.add(TournamentTeamMember(participant_id=p.id, user_id="amy", display_name="Amy"))
+        await s.flush()
+        notices = await reconcile_registered(s, G, NOW)
+        assert notices == [Notice("cap", "Amy registered with another team.")]
+        team = await _team_row(s, tid)
+        assert team.status == "open" and team.taking_requests is True
+        st = await teams_state(s, G, "cap")
+        assert [m["user"] for m in st["teams"][0]["members"]] == ["cap", "ben"]
+        pending = (await s.execute(select(LfgRequest).where(LfgRequest.user_id == "amy",
+                                                            LfgRequest.team_id == int(other)))).scalars().one()
+        assert pending.status == "withdrawn"
+        assert await reconcile_registered(s, G, NOW) == []

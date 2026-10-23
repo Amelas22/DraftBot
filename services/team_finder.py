@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.scheduler import PlayerAvailability
 from models.team_finder import LfgRequest, LfgTeam, LfgTeamMember
+from models.tournament import TournamentParticipant, TournamentTeamMember
 from services.availability import (
     CELL_MINUTES,
     UsualWeek,
@@ -24,6 +25,7 @@ from services.availability import (
     naive_utc,
     window_cells,
 )
+from services.tournament_service import get_active_tournament
 
 TEAM_SIZES = (3, 4)
 NOTE_MAX = 200
@@ -143,6 +145,18 @@ async def _pending(session: AsyncSession, team_id: int, user_id: str) -> LfgRequ
             )
         )
     ).scalars().first()
+
+
+async def _pending_requests(session: AsyncSession, team_id: int) -> list[LfgRequest]:
+    return list(
+        (
+            await session.execute(
+                select(LfgRequest)
+                .where(LfgRequest.team_id == team_id, LfgRequest.status == "pending")
+                .order_by(LfgRequest.id)
+            )
+        ).scalars()
+    )
 
 
 async def open_team(
@@ -290,8 +304,8 @@ async def _own_team(session: AsyncSession, user_id: str, team_id: str) -> LfgTea
     return team
 
 
-async def _live_memberships(session: AsyncSession, user_id: str) -> int:
-    """Current memberships on teams that are still open or full."""
+async def _live_memberships(session: AsyncSession, user_id: str, guild_id: str) -> int:
+    """Current memberships in one guild on teams that are still open or full."""
     rows = (
         await session.execute(
             select(LfgTeamMember.id)
@@ -299,6 +313,7 @@ async def _live_memberships(session: AsyncSession, user_id: str) -> int:
             .where(
                 LfgTeamMember.user_id == user_id,
                 LfgTeamMember.left_utc.is_(None),
+                LfgTeam.guild_id == guild_id,
                 LfgTeam.status.in_(("open", "full")),
             )
         )
@@ -333,23 +348,14 @@ async def accept(
 
     captain_name = _name_of(members, captain_id)
     text = f"You're on {captain_name}'s team."
-    if await _live_memberships(session, requester) > 1:
+    if await _live_memberships(session, requester, str(team.guild_id)) > 1:
         text += f"\n{MULTI_TEAM_WARNING}"
     notices = [Notice(requester, text, "lfg")]
 
     if len(members) + 1 >= int(team.size):
         team.status = "full"
         team.taking_requests = False
-        others = list(
-            (
-                await session.execute(
-                    select(LfgRequest)
-                    .where(LfgRequest.team_id == team.id, LfgRequest.status == "pending")
-                    .order_by(LfgRequest.id)
-                )
-            ).scalars()
-        )
-        for other in others:
+        for other in await _pending_requests(session, int(team.id)):
             other.status = "filled"
             other.answered_utc = stamp
             notices.append(Notice(str(other.user_id), f"{captain_name}'s team filled up."))
@@ -393,15 +399,7 @@ async def close_team(
         return _refuse("team_closed")
     stamp = naive_utc(now)
     members = await _current_members(session, int(team.id))
-    pending = list(
-        (
-            await session.execute(
-                select(LfgRequest)
-                .where(LfgRequest.team_id == team.id, LfgRequest.status == "pending")
-                .order_by(LfgRequest.id)
-            )
-        ).scalars()
-    )
+    pending = await _pending_requests(session, int(team.id))
     team.status = "closed"
     team.closed_utc = stamp
     team.taking_requests = False
@@ -439,6 +437,87 @@ async def leave_team(
         ok=True,
         notices=[Notice(str(team.captain_id), f"{me.display_name} left your team.")],
     )
+
+
+async def reconcile_registered(session: AsyncSession, guild_id: str, now: datetime) -> list[Notice]:
+    """Close or leave forming teams for players already registered in the active tournament.
+
+    Idempotent. The caller holds WRITE_LOCK, commits, then sends the notices.
+    """
+    tournament = await get_active_tournament(session, guild_id)
+    if tournament is None:
+        return []
+    participants = (
+        await session.execute(
+            select(TournamentParticipant).where(TournamentParticipant.tournament_id == tournament.id)
+        )
+    ).scalars().all()
+    registered = {str(p.captain_user_id) for p in participants}
+    if participants:
+        registered |= {
+            str(uid)
+            for uid in (
+                await session.execute(
+                    select(TournamentTeamMember.user_id).where(
+                        TournamentTeamMember.participant_id.in_([p.id for p in participants])
+                    )
+                )
+            ).scalars()
+        }
+    if not registered:
+        return []
+
+    stamp = naive_utc(now)
+    notices: list[Notice] = []
+    teams = (
+        await session.execute(
+            select(LfgTeam).where(LfgTeam.guild_id == guild_id, LfgTeam.status.in_(("open", "full")))
+        )
+    ).scalars().all()
+    for team in teams:
+        members = await _current_members(session, int(team.id))
+        if str(team.captain_id) in registered:
+            for request in await _pending_requests(session, int(team.id)):
+                request.status = "withdrawn"
+                request.answered_utc = stamp
+            team.status = "closed"
+            team.closed_utc = stamp
+            team.taking_requests = False
+            text = f"{_name_of(members, str(team.captain_id))} registered their team for the tournament."
+            notices += [
+                Notice(str(m.user_id), text) for m in members if m.user_id != team.captain_id
+            ]
+            continue
+        for member in members:
+            if str(member.user_id) not in registered:
+                continue
+            member.left_utc = stamp
+            if team.status == "full":
+                team.status = "open"
+                team.taking_requests = True
+            notices.append(
+                Notice(
+                    str(team.captain_id),
+                    f"{member.display_name} registered with another team.",
+                )
+            )
+
+    pending = (
+        await session.execute(
+            select(LfgRequest)
+            .join(LfgTeam, LfgTeam.id == LfgRequest.team_id)
+            .where(
+                LfgTeam.guild_id == guild_id,
+                LfgRequest.status == "pending",
+                LfgRequest.user_id.in_(registered),
+            )
+        )
+    ).scalars().all()
+    for request in pending:
+        request.status = "withdrawn"
+        request.answered_utc = stamp
+    await session.flush()
+    return notices
 
 
 def _cells_b64(week: UsualWeek | None) -> str | None:

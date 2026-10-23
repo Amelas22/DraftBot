@@ -51,3 +51,24 @@ async def test_board_view_is_persistent():
     assert button.label == "Find a team"
     assert button.style == discord.ButtonStyle.success
     assert view.is_persistent()
+
+
+@pytest.mark.asyncio
+async def test_respond_without_guild_replies_ephemerally():
+    interaction = AsyncMock()
+    interaction.guild_id = None
+    await lfg_cog._respond(interaction)
+    interaction.response.send_message.assert_awaited_once_with(
+        "Use this in a server.", ephemeral=True)
+
+
+@pytest.mark.asyncio
+async def test_board_post_failure_replies_with_permissions_hint():
+    cog = lfg_cog.LfgCog.__new__(lfg_cog.LfgCog)
+    ctx = AsyncMock()
+    ctx.guild_id = 1
+    ctx.channel.send.side_effect = discord.Forbidden(AsyncMock(status=403), "no")
+    with patch.object(lfg_cog, "scheduler_enabled", return_value=True):
+        await lfg_cog.LfgCog.lfg_board.callback(cog, ctx)
+    ctx.respond.assert_awaited_once_with(
+        "I couldn't post here. Check my permissions in this channel.", ephemeral=True)

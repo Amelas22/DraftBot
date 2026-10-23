@@ -3,13 +3,15 @@ from datetime import datetime, timezone
 from typing import Any
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from loguru import logger
+from typing_extensions import override
 
 from config import scheduler_enabled
 from helpers.permissions import has_bot_manager_role
 from helpers.utils import not_none, ui_button
 from services.scheduler_links import issue_link
+from services.team_finder_sync import run_reconcile
 
 NOT_ENABLED = "Find a team isn't turned on in this server."
 LINK_INTRO = ("Find teams that fit your week, or open your own. "
@@ -36,8 +38,15 @@ async def lfg_reply(guild_id: str, user_id: str,
     return LINK_INTRO, view
 
 
+NO_GUILD = "Use this in a server."
+POST_FAILED = "I couldn't post here. Check my permissions in this channel."
+
+
 async def _respond(interaction: discord.Interaction) -> None:
-    guild_id = str(not_none(interaction.guild_id))
+    if interaction.guild_id is None:
+        await interaction.response.send_message(NO_GUILD, ephemeral=True)
+        return
+    guild_id = str(interaction.guild_id)
     user_id = str(not_none(interaction.user).id)
     content, view = await lfg_reply(guild_id, user_id, datetime.now(timezone.utc))
     if view is None:
@@ -60,23 +69,49 @@ class LfgBoardView(discord.ui.View):
 class LfgCog(commands.Cog):
     def __init__(self, bot: discord.Bot) -> None:
         self.bot = bot
+        self.reconcile_loop.start()
 
-    @discord.slash_command(name="lfg", description="Find a team for the next tournament",
-                           guild_only=True)
+    @override
+    def cog_unload(self) -> None:
+        self.reconcile_loop.cancel()
+
+    @tasks.loop(seconds=60)
+    async def reconcile_loop(self) -> None:
+        for guild in list(self.bot.guilds):
+            guild_id = str(guild.id)
+            if not scheduler_enabled(guild_id):
+                continue
+            try:
+                await run_reconcile(self.bot, guild_id)
+            except Exception:
+                logger.exception("lfg: reconcile failed for guild {}", guild_id)
+
+    @reconcile_loop.before_loop
+    async def _before_reconcile(self) -> None:
+        await self.bot.wait_until_ready()
+
+    @discord.slash_command(name="lfg", description="Find a team for the next tournament")
     async def lfg(self, ctx: discord.ApplicationContext) -> None:
         await _respond(not_none(ctx.interaction))
 
     @discord.slash_command(name="lfg_board",
-                           description="Admin: post and pin the Find a team button",
-                           guild_only=True)
+                           description="Admin: post and pin the Find a team button")
     @has_bot_manager_role()
     async def lfg_board(self, ctx: discord.ApplicationContext) -> None:
-        if not scheduler_enabled(not_none(ctx.guild_id)):
+        if ctx.guild_id is None:
+            await ctx.respond(NO_GUILD, ephemeral=True)
+            return
+        if not scheduler_enabled(str(ctx.guild_id)):
             await ctx.respond(NOT_ENABLED, ephemeral=True)
             return
         embed = discord.Embed(title=BOARD_TITLE, description=BOARD_TEXT,
                               color=discord.Color.green())
-        message = await ctx.channel.send(embed=embed, view=LfgBoardView())
+        try:
+            message = await ctx.channel.send(embed=embed, view=LfgBoardView())
+        except (discord.Forbidden, discord.HTTPException):
+            logger.warning("lfg: couldn't post the board in channel {}", ctx.channel_id)
+            await ctx.respond(POST_FAILED, ephemeral=True)
+            return
         try:
             await message.pin()
         except discord.HTTPException:

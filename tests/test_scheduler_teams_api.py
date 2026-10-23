@@ -244,3 +244,18 @@ async def test_captain_kinds_validate_and_run(client):
     assert body["ok"] is True and body["state"]["teams"] == []
     resp = await _act(client, cap, kind="close_team", team_id=team)
     assert (await resp.json())["code"] == "team_closed"
+
+
+@pytest.mark.asyncio
+async def test_leave_team_success_path(client):
+    team = await _open(client, "111")
+    member = await _auth("200")
+    await _act(client, member, kind="request_join", team_id=team)
+    await _act(client, await _auth("111"), kind="accept", team_id=team, requester="200")
+    resp = await _act(client, member, kind="leave_team", team_id=team)
+    body = await resp.json()
+    assert body["ok"] is True and body["code"] is None
+    assert body["state"]["me"]["on_teams"] == []
+    (listed,) = body["state"]["teams"]
+    assert [m["user"] for m in listed["members"]] == ["111"]
+    assert any("left your team" in n.text and n.user_id == "111" for n, _ in client.sent)
