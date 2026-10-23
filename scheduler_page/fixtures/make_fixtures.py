@@ -132,7 +132,7 @@ def build(scen):
         "format": "draftbot.scheduler.match", "version": 1, "seq": 17,
         "generated_at": "2026-10-19T14:02:11Z",
         "match": {"id": "4-3-7", "tournament_id": "4", "tournament_name": "Lotus Open Season 2", "round": 3,
-                  "status": "open", "thread_url": "https://discord.com/channels/1355718878298116096/1563000000000000000"},
+                  "status": "open", "thread_url": "https://discord.com/channels/900000000000000100/900000000000000200"},
         "window": {"start_utc": iso(START_UTC), "cell_minutes": MIN, "cells": CELLS,
                    "display_zone": "America/New_York"},
         "rules": {"team_size": 3, "min_own_players": 2, "max_subs": 2,
@@ -193,7 +193,7 @@ req_sit = {"format": "draftbot.scheduler.request", "version": 1,
 (OUT / "request.book-sitting.json").write_text(json.dumps(req_sit, indent=2) + "\n")
 
 lfg = {"format": "draftbot.scheduler.lfg", "version": 1, "seq": 5, "generated_at": "2026-10-19T14:00:00Z",
-       "guild": "1355718878298116096", "cards": [
+       "guild": "900000000000000100", "cards": [
            {"card_id": "12", "kind": "pair", "note": "Pair, Eastern, need a 3rd", "members": [
                {"user": "900000000000000011", "name": "Rook", "zone": "America/New_York",
                 "cells": b64(local_cells("Mon-Thu 19-23"))},
