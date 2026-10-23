@@ -20,16 +20,16 @@ class SchedulerWebCog(commands.Cog):
         self._start_task = bot.loop.create_task(self._start())
 
     async def _start(self) -> None:
-        if self._runner is not None:
-            return
         port = scheduler_port()
         runner = web.AppRunner(build_app())
         try:
             await runner.setup()
             await web.TCPSite(runner, HOST, port).start()
-        except OSError as exc:
-            logger.error(f"Scheduler web app could not bind {HOST}:{port}: {exc}")
+        except BaseException as exc:
             await runner.cleanup()
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            logger.error(f"Scheduler web app could not start on {HOST}:{port}: {exc!r}")
             return
         self._runner = runner
         logger.info(f"Scheduler web app listening on http://{HOST}:{port}")

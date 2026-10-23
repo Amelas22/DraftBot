@@ -1,3 +1,5 @@
+import asyncio
+import base64
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -8,14 +10,12 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from services.availability import MAX_FILE_BYTES, UsualWeek, cells_to_bytes, load_usual_week, save_usual_week
 from services.scheduler_links import issue_link
-from services.scheduler_web import build_app
+from services.scheduler_web import build_app, client_ip
 
 NOW = datetime(2026, 10, 22, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def _doc(zone: str = "America/New_York", cells: tuple[int, ...] = (1, 2, 3)) -> dict:
-    import base64
-
     return {
         "format": "draftbot.scheduler.usual_week",
         "version": 1,
@@ -148,7 +148,7 @@ async def test_ip_rate_limit_uses_forwarded_for_from_loopback(client):
     for i in range(121):
         resp = await client.get(
             "/api/me",
-            headers={"Authorization": f"Bearer t{i}", "X-Forwarded-For": "9.9.9.9, 127.0.0.1"},
+            headers={"Authorization": f"Bearer t{i}", "X-Forwarded-For": "1.1.1.1, 9.9.9.9"},
         )
         statuses.append(resp.status)
     assert statuses[:120] == [401] * 120
@@ -157,3 +157,65 @@ async def test_ip_rate_limit_uses_forwarded_for_from_loopback(client):
         "/api/me", headers={"Authorization": "Bearer x", "X-Forwarded-For": "8.8.8.8"}
     )
     assert other.status == 401
+
+
+def test_client_ip_trusts_only_last_hop_from_loopback():
+    assert client_ip("127.0.0.1", "6.6.6.6, 1.2.3.4") == "1.2.3.4"
+    assert client_ip("::1", "1.2.3.4") == "1.2.3.4"
+    assert client_ip("127.0.0.1", "") == "127.0.0.1"
+    assert client_ip("10.0.0.5", "6.6.6.6, 1.2.3.4") == "10.0.0.5"
+
+
+@pytest.mark.asyncio
+async def test_forged_leading_xff_does_not_evade_ip_limit(client):
+    for i in range(120):
+        resp = await client.get(
+            "/api/me", headers={"Authorization": "Bearer t", "X-Forwarded-For": f"6.6.6.{i}, 1.2.3.4"}
+        )
+        assert resp.status == 401
+    resp = await client.get(
+        "/api/me", headers={"Authorization": "Bearer t", "X-Forwarded-For": "7.7.7.7, 1.2.3.4"}
+    )
+    assert resp.status == 429
+
+
+@pytest.mark.asyncio
+async def test_put_body_in_two_chunks(client):
+    headers = await _auth()
+    raw = json.dumps(_doc()).encode()
+
+    async def chunks():
+        yield raw[:20]
+        await asyncio.sleep(0.05)
+        yield raw[20:]
+
+    resp = await client.put("/api/usual-week", data=chunks(), headers=headers)
+    assert resp.status == 200
+
+
+@pytest.mark.asyncio
+async def test_oversized_body_in_several_chunks(client):
+    headers = await _auth()
+
+    async def chunks():
+        for _ in range(5):
+            yield b" " * 1000
+            await asyncio.sleep(0.02)
+
+    resp = await client.put("/api/usual-week", data=chunks(), headers=headers)
+    assert resp.status == 413
+
+
+@pytest.mark.asyncio
+async def test_unknown_routes_404_and_static_has_nosniff(client):
+    assert (await client.get("/nothing")).status == 404
+    assert (await client.get("/")).headers["X-Content-Type-Options"] == "nosniff"
+
+
+def test_rate_limiter_is_bounded():
+    from services import scheduler_web as sw
+
+    limiter = sw.RateLimiter()
+    for i in range(sw.MAX_KEYS + 50):
+        limiter.over_limit(f"k{i}", 5, NOW)
+    assert len(limiter._hits) <= sw.MAX_KEYS

@@ -1,5 +1,4 @@
 """The scheduler web app: static page plus the token-authenticated JSON API."""
-import json
 import re
 from collections import deque
 from collections.abc import Awaitable, Callable
@@ -29,7 +28,9 @@ Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
 IDENTITY = "scheduler_identity"  # request key holding the LinkIdentity
 _NOW: web.AppKey[Callable[[], datetime]] = web.AppKey("now")
 _STATIC_DIR: web.AppKey[Path] = web.AppKey("static_dir")
-_HITS: web.AppKey[dict[str, deque[datetime]]] = web.AppKey("hits")
+_LIMITER: web.AppKey["RateLimiter"] = web.AppKey("limiter")
+MAX_KEYS = 10_000
+_REPO_PAGE_DIR = Path(__file__).resolve().parent.parent / "scheduler_page"
 
 
 def utc_now() -> datetime:
@@ -40,49 +41,81 @@ def _error(status: int, code: str) -> web.Response:
     return web.json_response({"error": code}, status=status)
 
 
-def _client_ip(request: web.Request) -> str:
-    peer = request.remote or ""
+def client_ip(peer: str | None, forwarded: str) -> str:
+    """The caller's address. Behind our own proxy (loopback peer) the proxy
+    appends the real peer last, so the last X-Forwarded-For entry is the one
+    a client cannot forge; any other peer is used as-is."""
+    peer = peer or ""
     if peer in _LOOPBACK:
-        forwarded = request.headers.get("X-Forwarded-For", "")
-        first = forwarded.split(",")[0].strip()
-        if first:
-            return first
+        last = forwarded.split(",")[-1].strip()
+        if last:
+            return last
     return peer
 
 
-def _over_limit(hits: dict[str, deque[datetime]], key: str, limit: int, now: datetime) -> bool:
-    """Record a hit; True when this one exceeds ``limit`` per sliding minute."""
-    window = hits.setdefault(key, deque())
-    while window and now - window[0] >= WINDOW:
-        window.popleft()
-    if len(window) >= limit:
-        return True
-    window.append(now)
-    return False
+class RateLimiter:
+    """In-process sliding-window counters with bounded memory."""
+
+    def __init__(self) -> None:
+        self._hits: dict[str, deque[datetime]] = {}
+        self._last_prune: datetime | None = None
+
+    def _prune(self, now: datetime) -> None:
+        self._last_prune = now
+        for key in [k for k, w in self._hits.items() if not w or now - w[-1] >= WINDOW]:
+            del self._hits[key]
+
+    def over_limit(self, key: str, limit: int, now: datetime) -> bool:
+        """Record a hit; True when this one exceeds ``limit`` per sliding minute."""
+        if self._last_prune is None or now - self._last_prune >= WINDOW:
+            self._prune(now)
+        if key not in self._hits and len(self._hits) >= MAX_KEYS:
+            self._prune(now)
+            while len(self._hits) >= MAX_KEYS:
+                # dicts keep insertion order: drop the oldest key
+                del self._hits[next(iter(self._hits))]
+        window = self._hits.setdefault(key, deque())
+        while window and now - window[0] >= WINDOW:
+            window.popleft()
+        if len(window) >= limit:
+            return True
+        window.append(now)
+        return False
 
 
-def _prune(hits: dict[str, deque[datetime]], now: datetime) -> None:
-    for key in [k for k, w in hits.items() if not w or now - w[-1] >= WINDOW]:
-        del hits[key]
+def identity(request: web.Request) -> LinkIdentity:
+    """Who the request's bearer token belongs to (set by auth_middleware)."""
+    found: LinkIdentity = request[IDENTITY]
+    return found
+
+
+_PUBLIC: set[Handler] = set()
+
+
+def public(handler: Handler) -> Handler:
+    """Mark a route handler as not needing a token (the static page)."""
+    _PUBLIC.add(handler)
+    return handler
 
 
 @web.middleware
 async def auth_middleware(request: web.Request, handler: Handler) -> web.StreamResponse:
-    if not request.path.startswith("/api/"):
+    """Every route needs a valid bearer token unless it is marked ``public``."""
+    if request.match_info.http_exception is not None or handler in _PUBLIC:
         return await handler(request)
     now = request.app[_NOW]()
-    hits = request.app[_HITS]
-    if len(hits) > 1000:
-        _prune(hits, now)
-    if _over_limit(hits, "ip:" + _client_ip(request), IP_LIMIT, now):
+    limiter = request.app[_LIMITER]
+    ip = client_ip(request.remote, request.headers.get("X-Forwarded-For", ""))
+    if limiter.over_limit("ip:" + ip, IP_LIMIT, now):
         return _error(429, "rate_limited")
-    scheme, _, token = request.headers.get("Authorization", "").partition(" ")
-    identity = await resolve_token(token.strip(), now) if scheme == "Bearer" and token.strip() else None
-    if identity is None:
+    scheme, _, rest = request.headers.get("Authorization", "").partition(" ")
+    token = rest.strip()
+    found = await resolve_token(token, now) if scheme == "Bearer" and token else None
+    if found is None:
         return _error(401, "expired")
-    if _over_limit(hits, "tok:" + token.strip(), TOKEN_LIMIT, now):
+    if limiter.over_limit("tok:" + token, TOKEN_LIMIT, now):
         return _error(429, "rate_limited")
-    request[IDENTITY] = identity
+    request[IDENTITY] = found
     return await handler(request)
 
 
@@ -95,7 +128,7 @@ def _iso_z(moment: datetime) -> str:
 
 @routes.get("/api/me")
 async def get_me(request: web.Request) -> web.Response:
-    who = request[IDENTITY]
+    who = identity(request)
     return web.json_response(
         {"user": who.user_id, "guild": who.guild_id, "view": who.view, "exp": _iso_z(who.expires_utc)}
     )
@@ -103,7 +136,7 @@ async def get_me(request: web.Request) -> web.Response:
 
 @routes.get("/api/usual-week")
 async def get_usual_week(request: web.Request) -> web.Response:
-    week = await load_usual_week(request[IDENTITY].user_id)
+    week = await load_usual_week(identity(request).user_id)
     if week is None:
         return _error(404, "not_set")
     return web.json_response(usual_week_doc(week))
@@ -113,14 +146,19 @@ async def get_usual_week(request: web.Request) -> web.Response:
 async def put_usual_week(request: web.Request) -> web.Response:
     if (request.content_length or 0) > MAX_FILE_BYTES:
         return _error(413, "too_large")
-    raw = await request.content.read(MAX_FILE_BYTES + 1)
+    raw = b""
+    while len(raw) <= MAX_FILE_BYTES:
+        chunk = await request.content.read(MAX_FILE_BYTES + 1 - len(raw))
+        if not chunk:
+            break
+        raw += chunk
     if len(raw) > MAX_FILE_BYTES:
         return _error(413, "too_large")
     try:
         week = parse_usual_week(raw)
     except InvalidWeek:
         return _error(400, "bad_input")
-    await save_usual_week(request[IDENTITY].user_id, week, request.app[_NOW]())
+    await save_usual_week(identity(request).user_id, week, request.app[_NOW]())
     return web.json_response(usual_week_doc(week))
 
 
@@ -142,7 +180,7 @@ def _static(request: web.Request, relative: str) -> web.StreamResponse:
         body=path.read_bytes(),
         content_type=_STATIC_TYPES[suffix],
         charset="utf-8",
-        headers={"Cache-Control": "no-cache"},
+        headers={"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"},
     )
 
 
@@ -152,16 +190,19 @@ def _safe_name(name: str, suffix: str) -> bool:
 
 @routes.get("/")
 @routes.get("/index.html")
+@public
 async def get_index(request: web.Request) -> web.StreamResponse:
     return _static(request, "index.html")
 
 
 @routes.get("/style.css")
+@public
 async def get_style(request: web.Request) -> web.StreamResponse:
     return _static(request, "style.css")
 
 
 @routes.get("/js/{name}")
+@public
 async def get_script(request: web.Request) -> web.StreamResponse:
     name = request.match_info["name"]
     if not _safe_name(name, ".js"):
@@ -170,6 +211,7 @@ async def get_script(request: web.Request) -> web.StreamResponse:
 
 
 @routes.get("/fixtures/{name}")
+@public
 async def get_fixture(request: web.Request) -> web.StreamResponse:
     name = request.match_info["name"]
     if not _safe_name(name, ".json"):
@@ -184,11 +226,11 @@ def register_routes(app: web.Application, extra: web.RouteTableDef) -> None:
 
 def build_app(
     now: Callable[[], datetime] = utc_now,
-    static_dir: Path = Path("scheduler_page"),
+    static_dir: Path = _REPO_PAGE_DIR,
 ) -> web.Application:
     app = web.Application(middlewares=[auth_middleware])
     app[_NOW] = now
     app[_STATIC_DIR] = static_dir
-    app[_HITS] = {}
+    app[_LIMITER] = RateLimiter()
     register_routes(app, routes)
     return app
