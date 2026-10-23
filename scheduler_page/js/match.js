@@ -20,8 +20,9 @@ function checkHeader(doc, format) {
   if (!doc || doc.format !== format || !(doc.version <= 1)) throw new Error(NEEDS_UPDATE);
 }
 
-export function parseShared(doc) {
-  checkHeader(doc, "draftbot.scheduler.match");
+export function parseShared(raw) {
+  checkHeader(raw, "draftbot.scheduler.match");
+  const doc = structuredClone(raw);
   return {
     ...doc,
     teams: doc.teams.map((t) => ({
@@ -31,9 +32,10 @@ export function parseShared(doc) {
   };
 }
 
-export function parseMe(doc) {
-  checkHeader(doc, "draftbot.scheduler.match_me");
-  const deck = doc.deck ? { ...doc.deck } : doc.deck;
+export function parseMe(raw) {
+  checkHeader(raw, "draftbot.scheduler.match_me");
+  const doc = structuredClone(raw);
+  const deck = doc.deck;
   if (deck && typeof deck.free_starts === "string") deck.free_starts = decodeCells(deck.free_starts);
   return { ...doc, deck };
 }
@@ -76,40 +78,53 @@ export function draftCheck(shared, start, off, nowUtc) {
 }
 
 const labelFormats = new Map();
-function labelOf(date, zone) {
+// "Tue 20 Oct, 7:00 PM" in the given zone.
+export function timeLabel(date, zone) {
   let f = labelFormats.get(zone);
   if (!f) {
-    f = new Intl.DateTimeFormat("en-US", { timeZone: zone, weekday: "short", hour: "numeric", minute: "2-digit", hour12: true });
+    f = new Intl.DateTimeFormat("en-US", {
+      timeZone: zone, weekday: "short", day: "numeric", month: "short", hour: "numeric", minute: "2-digit", hour12: true,
+    });
     labelFormats.set(zone, f);
   }
   const p = {};
   for (const part of f.formatToParts(date)) p[part.type] = part.value;
-  return `${p.weekday} ${p.hour}:${p.minute} ${p.dayPeriod.toUpperCase()}`;
+  return `${p.weekday} ${p.day} ${p.month}, ${p.hour}:${p.minute} ${p.dayPeriod.toUpperCase()}`;
 }
+const labelOf = timeLabel;
+
+// Consecutive-cell runs of the starts in `byStart` (a Map start -> info).
+const runsOf = (byStart) => mergeBlocks(new Set(byStart.keys())).map(([a, b]) => {
+  const starts = [];
+  for (let j = a; j < b; j++) starts.push(j);
+  return starts;
+});
 
 export function bestTimes(shared, off, nowUtc, zone = shared.window.display_zone, limit = 5) {
   const ok = new Map();
   for (let j = 0; j < CELLS; j++) {
     const r = draftCheck(shared, j, off, nowUtc);
-    if (r.ok) ok.set(j, r);
+    if (r.ok) ok.set(j, { start: j, subs: Math.max(...r.subs) });
   }
-  const firsts = mergeBlocks(new Set(ok.keys())).map(([s]) => s);
-  return firsts
-    .map((start) => ({ start, subs: Math.max(...ok.get(start).subs), label: labelOf(instantOf(shared, start), zone) }))
+  // One offer per run: the start needing the fewest subs, earliest on a tie.
+  return runsOf(ok)
+    .map((starts) => starts.map((j) => ok.get(j)).reduce((best, c) => (c.subs < best.subs ? c : best)))
     .sort((a, b) => a.subs - b.subs || a.start - b.start)
-    .slice(0, limit);
+    .slice(0, limit)
+    .map((c) => ({ ...c, label: labelOf(instantOf(shared, c.start), zone) }));
 }
 
+// Why no hour works: starts that fail only on the library come first, then the smallest player shortfalls.
 export function closestMisses(shared, off, nowUtc, zone = shared.window.display_zone) {
   const { draft_cells: dc, min_own_players: minOwn } = shared.rules;
-  const out = [];
+  const found = new Map();
   for (let start = 0; start + dc <= CELLS; start++) {
     if (instantOf(shared, start) < nowUtc) continue;
     let shortfall = 0;
     const missing = [];
-    shared.teams.forEach((t) => {
+    shared.teams.forEach((t, ti) => {
       let least = Infinity;
-      for (let j = start; j < start + dc; j++) least = Math.min(least, freeCount(shared, j, off)[shared.teams.indexOf(t)]);
+      for (let j = start; j < start + dc; j++) least = Math.min(least, freeCount(shared, j, off)[ti]);
       if (least < minOwn) {
         shortfall += minOwn - least;
         for (const p of t.players) {
@@ -118,7 +133,26 @@ export function closestMisses(shared, off, nowUtc, zone = shared.window.display_
         }
       }
     });
-    if (shortfall > 0) out.push({ start, shortfall, missing, label: labelOf(instantOf(shared, start), zone) });
+    const label = labelOf(instantOf(shared, start), zone);
+    if (shortfall > 0) found.set(start, { start, shortfall, missing, reason: "not_bookable", who: [], label });
+    else if (draftCheck(shared, start, off, nowUtc).reason === "no_library") {
+      found.set(start, { start, shortfall: 0, missing: [], reason: "no_library", who: copyNeeded(shared).who, label });
+    }
+  }
+  // One per run of consecutive starts with the same reason, within one local day.
+  const out = [];
+  for (const starts of runsOf(found)) {
+    let run = [];
+    const flush = () => {
+      if (run.length) out.push(run.reduce((b, c) => (c.shortfall < b.shortfall ? c : b)));
+      run = [];
+    };
+    for (const j of starts) {
+      const c = found.get(j);
+      if (run.length && (run[0].reason !== c.reason || run[0].label.split(',')[0] !== c.label.split(',')[0])) flush();
+      run.push(c);
+    }
+    flush();
   }
   return out.sort((a, b) => a.shortfall - b.shortfall || a.start - b.start).slice(0, 3);
 }
@@ -141,7 +175,8 @@ export function draftRequest(shared, start, now, uuid) {
 // What the bot would answer, from the same rules. It ignores the page's filters.
 export function fakeOutcome(shared, request, nowUtc) {
   const refuse = (reason) => ({ status: "refused", reason });
-  if (shared.match.status === "closed") return refuse("window_closed");
+  const windowEnd = startMs(shared) + CELLS * CELL_MS;
+  if (shared.match.status === "closed" || nowUtc.getTime() >= windowEnd) return refuse("window_closed");
   if (shared.booking && shared.booking.draft) return refuse("already_booked");
   const cell = (new Date(request.start_utc).getTime() - startMs(shared)) / CELL_MS;
   if (!Number.isInteger(cell) || cell < 0 || cell >= CELLS) return refuse("bad_time");

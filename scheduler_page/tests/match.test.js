@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import {
   parseShared, parseMe, copyNeeded, freeCount, draftCheck, bestTimes, closestMisses,
-  draftRequest, fakeOutcome, REFUSALS,
+  draftRequest, fakeOutcome, timeLabel, REFUSALS,
 } from "../js/match.js";
 import { CELLS } from "../js/week.js";
 
@@ -37,7 +37,7 @@ test("good: copy needed, at least 3 best times", () => {
   assert.deepEqual(c.who.sort(), ["Ben", "Fay"]);
   const best = bestTimes(shared, NONE, now, ZONE);
   assert.ok(best.length >= 3, JSON.stringify(best));
-  assert.match(best[0].label, /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{1,2}:\d{2} (AM|PM)$/);
+  assert.match(best[0].label, /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{1,2} [A-Z][a-z]{2}, \d{1,2}:\d{2} (AM|PM)$/);
   for (const b of best) assert.equal(draftCheck(shared, b.start, NONE, now).ok, true);
   // Wednesday never offered: copies are out all evening
   assert.ok(!best.some((b) => b.label.startsWith("Wed")));
@@ -72,6 +72,7 @@ test("poor: none bookable, closest misses name who is missing", () => {
   const { shared, now } = load("poor");
   assert.deepEqual(bestTimes(shared, NONE, now, ZONE), []);
   const miss = closestMisses(shared, NONE, now, ZONE);
+  assert.ok(miss.every((m) => m.reason === "not_bookable"));
   assert.ok(miss.length >= 1 && miss.length <= 3);
   assert.ok(miss[0].missing.length >= 1);
   assert.ok(miss[0].shortfall >= 1);
@@ -138,9 +139,7 @@ test("a copy check running off the window end is no_library", () => {
 test("bestTimes offers one start per block of consecutive bookable starts", () => {
   const { shared, now } = load("nolib");
   const best = bestTimes(shared, NONE, now, ZONE, 50);
-  for (let i = 0; i < best.length; i++) for (let k = i + 1; k < best.length; k++) {
-    assert.ok(Math.abs(best[i].start - best[k].start) > 1 || false);
-  }
+  for (let i = 1; i < best.length; i++) assert.ok(best[i].start - best[i - 1].start > 1 || best[i].subs >= best[i - 1].subs);
   assert.ok(bestTimes(shared, NONE, now, ZONE, 2).length === 2);
 });
 
@@ -169,7 +168,7 @@ test("fakeOutcome follows the bot, ignoring page filters", () => {
   assert.equal(fakeOutcome(later.shared, draftRequest(later.shared, startOf(later.shared, "2026-10-21T00:00:00Z"), later.now, "u"), later.now).reason, "bad_time");
 });
 
-test("fakeOutcome refuses an hour only a filter made bookable as not_bookable", () => {
+test("fakeOutcome refuses a poor-scenario miss as not_bookable; draftCheck with everyone filtered out agrees", () => {
   const { shared, now } = load("poor");
   const miss = closestMisses(shared, NONE, now, ZONE)[0];
   // Filter nobody in, but also try the hour with every player off: page-only filters are ignored by the bot.
@@ -180,7 +179,7 @@ test("fakeOutcome refuses an hour only a filter made bookable as not_bookable", 
   assert.equal(out.reason, "not_bookable");
 });
 
-test("a filtered-only-bookable hour is bookable under no filter? the reverse: fakeOutcome ignores off", () => {
+test("an hour the filter makes unbookable is still booked by fakeOutcome (the bot ignores page filters)", () => {
   const { shared, now } = load("good");
   const best = bestTimes(shared, NONE, now, ZONE)[0];
   const off = new Set(shared.teams[0].players.map((p) => p.user));
@@ -192,4 +191,86 @@ test("REFUSALS has a sentence for each code", () => {
   for (const c of ["not_bookable", "no_library", "already_booked", "not_in_match", "window_closed", "bad_time", "stale"]) {
     assert.match(REFUSALS[c], /\.$/);
   }
+});
+
+test("good: exact offered starts, one per run", () => {
+  const { shared, now } = load("good");
+  const best = bestTimes(shared, NONE, now, ZONE, 50);
+  assert.deepEqual(best.map((b) => b.label), ["Tue 20 Oct, 7:00 PM", "Thu 22 Oct, 7:00 PM", "Fri 23 Oct, 8:00 PM"]);
+  assert.deepEqual(best.map((b) => b.start), [86, 182, 232]);
+});
+
+// Everyone free only when set; library off. Team 0 has 4 players, team 1 has 3.
+function synthetic() {
+  const { shared, now } = load("good");
+  shared.library.enabled = false;
+  for (const t of shared.teams) for (const p of t.players) p.cells = new Set();
+  const S = 100;
+  const [a, b] = shared.teams;
+  for (let j = S; j <= S + 3; j++) { a.players[0].cells.add(j); a.players[1].cells.add(j); b.players[0].cells.add(j); b.players[1].cells.add(j); }
+  for (let j = S + 1; j <= S + 3; j++) { a.players[2].cells.add(j); b.players[2].cells.add(j); }
+  return { shared, now, S };
+}
+
+test("within a run the start with the fewest subs is offered, not the earliest", () => {
+  const { shared, now, S } = synthetic();
+  assert.deepEqual(draftCheck(shared, S, NONE, now).subs, [1, 1]);
+  assert.deepEqual(draftCheck(shared, S + 1, NONE, now).subs, [0, 0]);
+  const best = bestTimes(shared, NONE, now, ZONE);
+  assert.equal(best.length, 1);
+  assert.equal(best[0].start, S + 1);
+  assert.equal(best[0].subs, 0);
+});
+
+test("library off: good's Wednesday start becomes bookable", () => {
+  const { shared, now } = load("good");
+  const wed = startOf(shared, "2026-10-22T00:00:00Z");
+  assert.equal(draftCheck(shared, wed, NONE, now).reason, "no_library");
+  shared.library.enabled = false;
+  assert.equal(draftCheck(shared, wed, NONE, now).ok, true);
+});
+
+test("closestMisses lists library-only misses first, naming who needs the copy", () => {
+  const { shared, now } = load("good");
+  const miss = closestMisses(shared, NONE, now, ZONE);
+  assert.ok(miss.length >= 1 && miss.length <= 3);
+  assert.equal(miss[0].reason, "no_library");
+  assert.equal(miss[0].shortfall, 0);
+  assert.deepEqual(miss[0].missing, []);
+  assert.deepEqual(miss[0].who.sort(), ["Ben", "Fay"]);
+  assert.match(miss[0].label, /^Wed 21 Oct/);
+});
+
+test("no future starts left: nothing offered, no misses", () => {
+  const { shared } = load("good");
+  const after = new Date(new Date(shared.window.start_utc).getTime() + CELLS * 1800000 - 1000);
+  assert.deepEqual(bestTimes(shared, NONE, after, ZONE), []);
+  assert.deepEqual(closestMisses(shared, NONE, after, ZONE), []);
+});
+
+test("fakeOutcome: at or after the window's end is window_closed", () => {
+  const { shared } = load("good");
+  const end = new Date(new Date(shared.window.start_utc).getTime() + CELLS * 1800000);
+  assert.equal(fakeOutcome(shared, draftRequest(shared, CELLS, end, "u"), end).reason, "window_closed");
+  assert.equal(fakeOutcome(shared, draftRequest(shared, 5, end, "u"), end).reason, "window_closed");
+});
+
+test("parse deep-copies the raw document", () => {
+  const raw = fx("match-shared.good.json");
+  const s = parseShared(raw);
+  s.library.copies_free[0] = 99;
+  s.teams[0].name = "x";
+  assert.notEqual(raw.library.copies_free[0], 99);
+  assert.notEqual(raw.teams[0].name, "x");
+  const rawMe = fx("match-me.good.json");
+  parseMe(rawMe);
+  assert.equal(typeof rawMe.deck.free_starts, "string");
+});
+
+test("labels carry the local date, in the viewer's zone, across London's 25 Oct change", () => {
+  assert.equal(timeLabel(new Date("2026-10-25T00:30:00Z"), "Europe/London"), "Sun 25 Oct, 1:30 AM");
+  assert.equal(timeLabel(new Date("2026-10-25T01:30:00Z"), "Europe/London"), "Sun 25 Oct, 1:30 AM");
+  assert.equal(timeLabel(new Date("2026-10-25T02:30:00Z"), "Europe/London"), "Sun 25 Oct, 2:30 AM");
+  assert.equal(timeLabel(new Date("2026-10-20T23:00:00Z"), "America/New_York"), "Tue 20 Oct, 7:00 PM");
+  assert.equal(timeLabel(new Date("2026-10-20T23:00:00Z"), "Europe/London"), "Wed 21 Oct, 12:00 AM");
 });
