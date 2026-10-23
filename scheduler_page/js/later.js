@@ -1,7 +1,7 @@
 // The later-game model: when a player can play each pairing after the draft, with or without their
-// library deck reserved, and a stand-in for the bot's answer in fixture mode. Pure (no DOM).
-import { CELLS, CELL_MS, startMs, instantOf, isoSeconds } from "./week.js";
-import { REFUSALS, timeLabel, runsOf } from "./match.js";
+// library deck reserved, and the stand-in for the bot's answer to either request in fixture mode. Pure (no DOM).
+import { CELLS, CELL_MS, startMs, instantOf, cellOfIso, hasRun } from "./week.js";
+import { REFUSALS, timeLabel, runsOf, baseRequest, windowClosed, fakeDraftOutcome } from "./match.js";
 
 // Draft wording, overridden where a later game reads differently.
 export const SITTING_REFUSALS = {
@@ -13,12 +13,10 @@ export const SITTING_REFUSALS = {
 
 // Two player lists naming the same people (a pairing, in either order).
 export const sameSet = (a, b) => a.length === b.length && a.every((x) => b.includes(x));
-const playerOf = (shared, user) => shared.teams.flatMap((t) => t.players).find((p) => p.user === user);
+export const playerOf = (shared, user) => shared.teams.flatMap((t) => t.players).find((p) => p.user === user);
 
-const opponentOf = (shared, me, user) => {
-  const pr = (shared.pairings || []).find((p) => p.players.includes(me.user) && p.players.includes(user) && user !== me.user);
-  return pr ? user : null;
-};
+const isOpponent = (shared, me, user) => user !== me.user &&
+  (shared.pairings || []).some((p) => p.players.includes(me.user) && p.players.includes(user));
 
 export function myOpponents(shared, me) {
   const sittings = (shared.booking && shared.booking.sittings) || [];
@@ -38,14 +36,9 @@ export function deckOk(me, start) {
 
 // Earliest allowed cell: now, and the draft's end once the draft is booked.
 export function earliest(shared, nowUtc) {
-  let from = 0;
   const draft = shared.booking && shared.booking.draft;
-  if (draft) {
-    const end = (new Date(draft.start_utc).getTime() - startMs(shared)) / CELL_MS + shared.rules.draft_cells;
-    from = end;
-  }
-  const nowCell = Math.ceil((nowUtc.getTime() - startMs(shared)) / CELL_MS);
-  return Math.max(from, nowCell, 0);
+  const afterDraft = draft ? cellOfIso(shared, draft.start_utc) + shared.rules.draft_cells : 0;
+  return Math.max(afterDraft, Math.ceil((nowUtc.getTime() - startMs(shared)) / CELL_MS), 0);
 }
 
 function bothFree(shared, me, opponent, start) {
@@ -53,9 +46,7 @@ function bothFree(shared, me, opponent, start) {
   const b = playerOf(shared, opponent);
   if (!a || !b) return false;
   const n = shared.rules.sitting_cells;
-  if (start + n > CELLS) return false;
-  for (let j = start; j < start + n; j++) if (!a.cells.has(j) || !b.cells.has(j)) return false;
-  return true;
+  return start + n <= CELLS && hasRun(a.cells, start, n) && hasRun(b.cells, start, n);
 }
 
 function sittingCheck(shared, me, opponent, start, nowUtc) {
@@ -81,28 +72,20 @@ export function sittingStarts(shared, me, opponent, nowUtc, { reserve = false } 
 }
 
 export function sittingRequest(shared, opponent, start, reserve, now, uuid) {
-  return {
-    format: "draftbot.scheduler.request",
-    version: 1,
-    request_id: uuid,
-    match_id: shared.match.id,
-    kind: "book_sitting",
-    opponent,
-    start_utc: isoSeconds(instantOf(shared, start)),
-    reserve_deck: !!reserve,
-    seen_seq: shared.seq,
-    made_at: isoSeconds(now),
-  };
+  return { ...baseRequest(shared, "book_sitting", start, now, uuid), opponent, reserve_deck: !!reserve };
 }
 
-// What the bot would answer, from the same rules.
-export function fakeSittingOutcome(shared, me, request, nowUtc) {
+function fakeSittingOutcome(shared, me, request, nowUtc) {
   const refuse = (reason) => ({ status: "refused", reason });
-  if (shared.match.status === "closed" || nowUtc.getTime() >= startMs(shared) + CELLS * CELL_MS) return refuse("window_closed");
-  if (!opponentOf(shared, me, request.opponent)) return refuse("not_in_match");
-  const cell = (new Date(request.start_utc).getTime() - startMs(shared)) / CELL_MS;
+  if (windowClosed(shared, nowUtc)) return refuse("window_closed");
+  if (!isOpponent(shared, me, request.opponent)) return refuse("not_in_match");
+  const cell = cellOfIso(shared, request.start_utc);
   const bad = sittingCheck(shared, me, request.opponent, cell, nowUtc);
   if (bad) return refuse(bad);
   if (request.reserve_deck && !deckOk(me, cell)) return refuse("no_library");
   return { status: "booked", reason: null };
 }
+
+// What the bot would answer to either request (file 4), from the same rules. A draft ignores the page's filters.
+export const fakeOutcome = (shared, me, request, nowUtc) =>
+  (request.kind === "book_sitting" ? fakeSittingOutcome(shared, me, request, nowUtc) : fakeDraftOutcome(shared, request, nowUtc));

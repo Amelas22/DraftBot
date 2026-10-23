@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import {
   parseShared, parseMe, copyNeeded, freeCount, draftCheck, bestTimes, closestMisses,
-  draftRequest, fakeOutcome, timeLabel, baseRequest, windowClosed, draftBooked, duration, REFUSALS,
+  draftRequest, fakeDraftOutcome, timeLabel, baseRequest, windowClosed, draftBooked, duration, REFUSALS,
 } from "../js/match.js";
 import { CELLS } from "../js/week.js";
 
@@ -152,39 +152,39 @@ test("draftRequest shape", () => {
   });
 });
 
-test("fakeOutcome follows the bot, ignoring page filters", () => {
+test("fakeDraftOutcome follows the bot, ignoring page filters", () => {
   const { shared, now } = load("good");
   const best = bestTimes(shared, NONE, now, ZONE)[0];
   const req = (s) => draftRequest(shared, s, now, "u");
-  assert.deepEqual(fakeOutcome(shared, req(best.start), now), { status: "booked", reason: null });
+  assert.deepEqual(fakeDraftOutcome(shared, req(best.start), now), { status: "booked", reason: null });
   const wed = startOf(shared, "2026-10-22T00:00:00Z");
-  assert.deepEqual(fakeOutcome(shared, req(wed), now), { status: "refused", reason: "no_library" });
-  assert.equal(fakeOutcome(shared, req(CELLS), now).reason, "bad_time");
-  assert.equal(fakeOutcome(shared, { ...req(5), start_utc: "2026-10-19T04:10:00Z" }, now).reason, "bad_time");
-  assert.equal(fakeOutcome({ ...shared, booking: { ...shared.booking, draft: { start_utc: "x" } } }, req(best.start), now).reason, "already_booked");
-  assert.equal(fakeOutcome({ ...shared, match: { ...shared.match, status: "closed" } }, req(best.start), now).reason, "window_closed");
+  assert.deepEqual(fakeDraftOutcome(shared, req(wed), now), { status: "refused", reason: "no_library" });
+  assert.equal(fakeDraftOutcome(shared, req(CELLS), now).reason, "bad_time");
+  assert.equal(fakeDraftOutcome(shared, { ...req(5), start_utc: "2026-10-19T04:10:00Z" }, now).reason, "bad_time");
+  assert.equal(fakeDraftOutcome({ ...shared, booking: { ...shared.booking, draft: { start_utc: "x" } } }, req(best.start), now).reason, "already_booked");
+  assert.equal(fakeDraftOutcome({ ...shared, match: { ...shared.match, status: "closed" } }, req(best.start), now).reason, "window_closed");
   const later = load("later");
   later.shared.booking = { ...later.shared.booking, draft: null };
-  assert.equal(fakeOutcome(later.shared, draftRequest(later.shared, startOf(later.shared, "2026-10-21T00:00:00Z"), later.now, "u"), later.now).reason, "bad_time");
+  assert.equal(fakeDraftOutcome(later.shared, draftRequest(later.shared, startOf(later.shared, "2026-10-21T00:00:00Z"), later.now, "u"), later.now).reason, "bad_time");
 });
 
-test("fakeOutcome refuses a poor-scenario miss as not_bookable; draftCheck with everyone filtered out agrees", () => {
+test("fakeDraftOutcome refuses a poor-scenario miss as not_bookable; draftCheck with everyone filtered out agrees", () => {
   const { shared, now } = load("poor");
   const miss = closestMisses(shared, NONE, now, ZONE)[0];
   // Filter nobody in, but also try the hour with every player off: page-only filters are ignored by the bot.
   const everyone = new Set(shared.teams.flatMap((t) => t.players.map((p) => p.user)));
   assert.equal(draftCheck(shared, miss.start, everyone, now).reason, "not_bookable");
-  const out = fakeOutcome(shared, draftRequest(shared, miss.start, now, "u"), now);
+  const out = fakeDraftOutcome(shared, draftRequest(shared, miss.start, now, "u"), now);
   assert.equal(out.status, "refused");
   assert.equal(out.reason, "not_bookable");
 });
 
-test("an hour the filter makes unbookable is still booked by fakeOutcome (the bot ignores page filters)", () => {
+test("an hour the filter makes unbookable is still booked by fakeDraftOutcome (the bot ignores page filters)", () => {
   const { shared, now } = load("good");
   const best = bestTimes(shared, NONE, now, ZONE)[0];
   const off = new Set(shared.teams[0].players.map((p) => p.user));
   assert.equal(draftCheck(shared, best.start, off, now).reason, "not_bookable");
-  assert.equal(fakeOutcome(shared, draftRequest(shared, best.start, now, "u"), now).status, "booked");
+  assert.equal(fakeDraftOutcome(shared, draftRequest(shared, best.start, now, "u"), now).status, "booked");
 });
 
 test("REFUSALS has a sentence for each code", () => {
@@ -248,11 +248,11 @@ test("no future starts left: nothing offered, no misses", () => {
   assert.deepEqual(closestMisses(shared, NONE, after, ZONE), []);
 });
 
-test("fakeOutcome: at or after the window's end is window_closed", () => {
+test("fakeDraftOutcome: at or after the window's end is window_closed", () => {
   const { shared } = load("good");
   const end = new Date(new Date(shared.window.start_utc).getTime() + CELLS * 1800000);
-  assert.equal(fakeOutcome(shared, draftRequest(shared, CELLS, end, "u"), end).reason, "window_closed");
-  assert.equal(fakeOutcome(shared, draftRequest(shared, 5, end, "u"), end).reason, "window_closed");
+  assert.equal(fakeDraftOutcome(shared, draftRequest(shared, CELLS, end, "u"), end).reason, "window_closed");
+  assert.equal(fakeDraftOutcome(shared, draftRequest(shared, 5, end, "u"), end).reason, "window_closed");
 });
 
 test("parse deep-copies the raw document", () => {

@@ -1,18 +1,15 @@
 // The later-games view: for each pairing, when you and your opponent are both free after the draft, and
 // the Book request for that game (reserving your library deck or not). The model lives in later.js; the
 // match view owns the tab bar and the one requester the draft and the games share.
-import { timeLabel, nobodyFollows, duration } from "./match.js";
+import { timeLabel, nobodyFollows, draftBooked, duration } from "./match.js";
 import {
-  myOpponents, deckOk, earliest, sittingStarts, sittingRequest, fakeSittingOutcome, sameSet, SITTING_REFUSALS,
+  myOpponents, playerOf, deckOk, earliest, sittingStarts, sittingRequest, fakeOutcome, sameSet, SITTING_REFUSALS,
 } from "./later.js";
-import { CELL_MS } from "./week.js";
-import { mountHeatmap } from "./grid.js";
-import { SLOW_MESSAGE, sendErrorText } from "./request.js";
+import { instantOf, cellOfIso } from "./week.js";
+import { mountHeatmap, formatClock } from "./grid.js";
+import { requestStatus, sendErrorText } from "./request.js";
 import { LinkExpired } from "./api.js";
 import { el } from "./dom.js";
-
-
-export const draftBooked = (shared) => Boolean(shared.booking && shared.booking.draft) || shared.match.status === "booked";
 
 // The Later games tab: the viewer has a pairing, and the draft is booked or nobody plays right after it.
 export function laterTabShown(shared, me) {
@@ -74,23 +71,15 @@ export function mountLater(box, ctx) {
 
   const shared = () => ctx.getShared();
   const me = () => ctx.getMe();
-  const startUtc = () => new Date(shared().window.start_utc);
-  const instant = (j) => new Date(startUtc().getTime() + j * CELL_MS);
-  const cellOfIso = (iso) => (new Date(iso) - startUtc()) / CELL_MS;
+  const instant = (j) => instantOf(shared(), j);
+  const cellOf = (iso) => cellOfIso(shared(), iso);
   const library = () => usesLibrary(shared(), me());
-  const player = (user) => shared().teams.flatMap((t) => t.players).find((p) => p.user === user);
   const opponents = () => myOpponents(shared(), me());
   const current = () => {
     const os = opponents();
     return os.find((o) => o.user === opp) || os[0] || null;
   };
   const sittingCells = () => shared().rules.sitting_cells;
-  const inBooked = (j) => {
-    const o = current();
-    if (!o || !o.booked) return false;
-    const b = cellOfIso(o.booked.start_utc);
-    return j >= b && j < b + (o.booked.cells || sittingCells());
-  };
 
   // ---- frame ----
   const head = el("header");
@@ -116,21 +105,33 @@ export function mountLater(box, ctx) {
     const o = current();
     return o ? `${o.user}|${o.booked ? o.booked.start_utc : ""}|${draftBooked(shared())}` : "";
   }
-  const cellState = (j) => {
+  // What every cell callback needs, looked up once per redraw rather than once per cell.
+  let frame = null;
+  const syncFrame = () => {
     const o = current();
+    const booked = o && o.booked ? cellOf(o.booked.start_utc) : null;
+    frame = {
+      o, from: earliest(shared(), now()), draftIn: draftBooked(shared()), library: library(), deckMe: me(),
+      a: playerOf(shared(), viewer), b: o ? playerOf(shared(), o.user) : null,
+      booked: booked === null ? null : [booked, booked + (o.booked.cells || sittingCells())],
+    };
+  };
+  const inBooked = (j) => Boolean(frame.booked) && j >= frame.booked[0] && j < frame.booked[1];
+  const cellState = (j) => {
+    const { o, from, draftIn, a, b } = frame;
     if (!o) return { cls: "", words: "" };
-    if (j < earliest(shared(), now())) return { cls: "past", words: draftBooked(shared()) ? "past or before the draft ends" : "past" };
-    const a = player(viewer), b = player(o.user);
+    if (j < from) return { cls: "past", words: draftIn ? "past or before the draft ends" : "past" };
     const mine = Boolean(a && a.cells.has(j)), theirs = Boolean(b && b.cells.has(j));
     if (mine && theirs) {
-      if (library() && !deckOk(me(), j)) return { cls: "s1 no-library", words: `you and ${o.name} free, your deck's cards are held` };
+      if (frame.library && !deckOk(frame.deckMe, j)) return { cls: "s1 no-library", words: `you and ${o.name} free, your deck's cards are held` };
       return { cls: "s0", words: `you and ${o.name} free` };
     }
     if (mine || theirs) return { cls: "one", words: mine ? "only you free" : `only ${o.name} free` };
     return { cls: "", words: "neither of you free" };
   };
+  syncFrame();
   const heat = mountHeatmap(heatBox, {
-    startUtc: startUtc(), zone,
+    startUtc: new Date(shared().window.start_utc), zone,
     cellClass: (j) => cellState(j).cls + (inBooked(j) ? " draft" : "") + (j === picked ? " picked" : ""),
     cellLabel: (j) => {
       const w = cellState(j).words;
@@ -173,8 +174,8 @@ export function mountLater(box, ctx) {
   };
   // Can a game vs o start at j? The same rules the bot's stand-in uses.
   const canStart = (o, j) => draftBooked(shared()) &&
-    fakeSittingOutcome(shared(), me(), sittingRequest(shared(), o.user, j, false, now(), "check"), now()).status === "booked";
-  const isBookedStart = (o, j) => Boolean(o.booked) && cellOfIso(o.booked.start_utc) === j;
+    fakeOutcome(shared(), me(), sittingRequest(shared(), o.user, j, false, now(), "check"), now()).status === "booked";
+  const isBookedStart = (o, j) => Boolean(o.booked) && cellOf(o.booked.start_utc) === j;
 
   // ---- drawing ----
   const renderHead = () => {
@@ -209,7 +210,7 @@ export function mountLater(box, ctx) {
     const o = current();
     if (!o || picked === null) { tip.replaceChildren("Tap a cell to check a game starting then."); return; }
     const end = instant(picked + sittingCells());
-    const kids = [el("b", { text: timeLabel(instant(picked), zone) }), ` to ${timeLabel(end, zone).split(", ")[1]}`, el("br")];
+    const kids = [el("b", { text: timeLabel(instant(picked), zone) }), ` to ${formatClock(end, zone)}`, el("br")];
     if (isBookedStart(o, picked)) kids.push(`Your game vs ${o.name} is booked for this time.`);
     else if (!draftBooked(shared())) kids.push("Book the draft first: your games are played after it.");
     else if (picked < earliest(shared(), now())) kids.push("Games start after the draft ends, and never in the past.");
@@ -266,23 +267,17 @@ export function mountLater(box, ctx) {
         }
       }
     }
-    status.className = "status";
-    if (s.pending) {
-      status.textContent = s.slow ? SLOW_MESSAGE
-        : s.request && s.request.kind === "book_sitting" ? "Booking… DraftBot confirms in a few seconds" : "Waiting for DraftBot to answer the draft booking…";
-    } else if (sendError) { status.textContent = sendError; status.className = "status warn"; }
-    else if (s.outcome && s.request && s.request.kind === "book_sitting" && s.outcome.status === "refused") {
-      status.textContent = SITTING_REFUSALS[s.outcome.reason] || "DraftBot refused that request.";
-      status.className = "status warn";
-    } else if (s.outcome && s.request && s.request.kind === "book_sitting" && s.outcome.status === "booked" && o && s.request.opponent === o.user) {
-      status.textContent = "Booked. DraftBot posts it in the match thread.";
-    } else status.textContent = "";
+    const st = requestStatus(s, "book_sitting", SITTING_REFUSALS, sendError);
+    const bookedHere = s.outcome && s.outcome.status === "booked" && s.request && s.request.kind === "book_sitting" && o && s.request.opponent === o.user;
+    status.className = st && st.warn ? "status warn" : "status";
+    status.textContent = st ? st.text : bookedHere ? "Booked. DraftBot posts it in the match thread." : "";
     kids.push(status);
     rail.replaceChildren(...kids);
   };
 
   return {
     render() {
+      syncFrame();
       renderHead();
       renderPosts();
       renderBanner();

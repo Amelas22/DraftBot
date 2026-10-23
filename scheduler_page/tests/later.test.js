@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { parseShared, parseMe } from "../js/match.js";
-import { myOpponents, sittingStarts, sittingRequest, fakeSittingOutcome, sameSet, SITTING_REFUSALS } from "../js/later.js";
+import { myOpponents, sittingStarts, sittingRequest, fakeOutcome, sameSet, SITTING_REFUSALS } from "../js/later.js";
 
 const fx = (name) =>
   JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures", name), "utf8"));
@@ -29,7 +29,7 @@ test("moving an existing sitting is booked", () => {
     { players: [FAY, BEN], start_utc: "2026-10-23T00:00:00Z", cells: 3, by: BEN, decks_reserved: [BEN] }] } };
   assert.equal(myOpponents(s, me)[0].booked.start_utc, "2026-10-23T00:00:00Z");
   const start = cellOf(s, "2026-10-22T23:00:00Z");
-  assert.deepEqual(fakeSittingOutcome(s, me, sittingRequest(s, FAY, start, true, now, "u"), now), { status: "booked", reason: null });
+  assert.deepEqual(fakeOutcome(s, me, sittingRequest(s, FAY, start, true, now, "u"), now), { status: "booked", reason: null });
 });
 
 test("starts: reserve drops Wednesday, no-reserve offers it; Thursday is offered either way", () => {
@@ -45,7 +45,7 @@ test("starts: reserve drops Wednesday, no-reserve offers it; Thursday is offered
 test("a start before the draft's end is excluded", () => {
   const { shared, me, now } = load();
   const early = new Date("2026-10-20T00:00:00Z");
-  const r = fakeSittingOutcome(shared, me, sittingRequest(shared, FAY, cellOf(shared, "2026-10-21T00:30:00Z"), false, early, "u"), early);
+  const r = fakeOutcome(shared, me, sittingRequest(shared, FAY, cellOf(shared, "2026-10-21T00:30:00Z"), false, early, "u"), early);
   assert.deepEqual(r, { status: "refused", reason: "bad_time" });
   const ok = sittingStarts(shared, me, FAY, early, { reserve: false }, ZONE);
   assert.ok(ok.every((s) => s.start >= cellOf(shared, "2026-10-21T00:00:00Z") + 2));
@@ -65,7 +65,7 @@ test("fake outcomes in order", () => {
   const { shared, me, now } = load();
   const wed = cellOf(shared, "2026-10-21T22:00:00Z"); // Wed 6:00 PM NY
   const thu = cellOf(shared, "2026-10-22T23:00:00Z"); // Thu 7:00 PM NY
-  const run = (opp, start, reserve, n = now) => fakeSittingOutcome(shared, me, sittingRequest(shared, opp, start, reserve, n, "u"), n);
+  const run = (opp, start, reserve, n = now) => fakeOutcome(shared, me, sittingRequest(shared, opp, start, reserve, n, "u"), n);
   assert.deepEqual(run(FAY, thu, true), { status: "booked", reason: null });
   assert.deepEqual(run(FAY, wed, false), { status: "booked", reason: null });
   assert.equal(run(FAY, wed, true).reason, "no_library");
@@ -75,7 +75,7 @@ test("fake outcomes in order", () => {
   assert.equal(run(FAY, 5, false).reason, "bad_time");
   assert.equal(run(FAY, thu, true, new Date("2026-10-27T00:00:00Z")).reason, "window_closed");
   const s2 = { ...shared, match: { ...shared.match, status: "closed" } };
-  assert.equal(fakeSittingOutcome(s2, me, sittingRequest(s2, FAY, thu, true, now, "u"), now).reason, "window_closed");
+  assert.equal(fakeOutcome(s2, me, sittingRequest(s2, FAY, thu, true, now, "u"), now).reason, "window_closed");
   assert.equal(SITTING_REFUSALS.no_library, "Some of your deck's cards are held then.");
   assert.ok(SITTING_REFUSALS.stale);
 });
@@ -84,7 +84,7 @@ test("not_bookable when the opponent is busy", () => {
   const { shared, me, now } = load();
   const busy = Array.from({ length: 336 }, (_, i) => i).find((c) =>
     new Date(iso(shared, c)) > now && !shared.teams.flatMap((t) => t.players).find((p) => p.user === FAY).cells.has(c));
-  const r = fakeSittingOutcome(shared, me, sittingRequest(shared, FAY, busy, false, now, "u"), now);
+  const r = fakeOutcome(shared, me, sittingRequest(shared, FAY, busy, false, now, "u"), now);
   assert.equal(r.reason, "not_bookable");
 });
 
@@ -92,4 +92,19 @@ test("sameSet matches a pairing in either order", () => {
   assert.equal(sameSet(["1", "2"], ["2", "1"]), true);
   assert.equal(sameSet(["1", "2"], ["1", "3"]), false);
   assert.equal(sameSet(["1"], ["1", "2"]), false);
+});
+
+test("fakeOutcome answers a draft request with the draft rules", async () => {
+  const { fakeDraftOutcome, draftRequest } = await import("../js/match.js");
+  const { shared, me, now } = load();
+  const req = draftRequest(shared, 40, now, "u");
+  assert.deepEqual(fakeOutcome(shared, me, req, now), fakeDraftOutcome(shared, req, now));
+  assert.equal(fakeOutcome(shared, me, req, now).reason, "already_booked");
+});
+
+test("a sitting request is file 4's base shape plus opponent and reserve_deck", async () => {
+  const { baseRequest } = await import("../js/match.js");
+  const { shared, now } = load();
+  assert.deepEqual(sittingRequest(shared, FAY, 40, 1, now, "u"),
+    { ...baseRequest(shared, "book_sitting", 40, now, "u"), opponent: FAY, reserve_deck: true });
 });

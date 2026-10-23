@@ -170,8 +170,9 @@ export const draftRequest = (shared, start, now, uuid) => baseRequest(shared, "b
 export const windowClosed = (shared, nowUtc) =>
   shared.match.status === "closed" || nowUtc.getTime() >= startMs(shared) + CELLS * CELL_MS;
 
-// What the bot would answer, from the same rules. It ignores the page's filters.
-export function fakeOutcome(shared, request, nowUtc) {
+// What the bot would answer to a draft request, from the same rules. It ignores the page's filters.
+// later.js's fakeOutcome answers either kind.
+export function fakeDraftOutcome(shared, request, nowUtc) {
   const refuse = (reason) => ({ status: "refused", reason });
   if (windowClosed(shared, nowUtc)) return refuse("window_closed");
   if (shared.booking && shared.booking.draft) return refuse("already_booked");

@@ -2,7 +2,7 @@
 // The model lives in match.js and the request flow in request.js; this file only draws and wires them.
 import {
   parseShared, parseMe, copyNeeded, freeCount, draftCheck, bestTimes, closestMisses, timeLabel,
-  draftRequest, fakeOutcome, draftBooked, nobodyFollows, duration, REFUSALS,
+  draftRequest, draftBooked, nobodyFollows, duration, REFUSALS,
 } from "./match.js";
 import { CELL_MS, instantOf, cellOfIso, isoSeconds, hasRun } from "./week.js";
 import { mountHeatmap, formatClock } from "./grid.js";
@@ -11,7 +11,7 @@ import { LinkExpired, NeedsUpdate } from "./api.js";
 import { expiredMessage } from "./messages.js";
 import { el } from "./dom.js";
 import { plural, andList } from "./words.js";
-import { fakeSittingOutcome } from "./later.js";
+import { fakeOutcome } from "./later.js";
 import { mountLater, laterTabShown, defaultTab, pointsToLater } from "./laterview.js";
 
 const MATCH_EXPIRED = expiredMessage("match");
@@ -93,7 +93,7 @@ export async function mountMatch(root, link, deps) {
     put: deps.putJson,
     fixture: link.fixture,
     // The draft and the later games share this one requester: one pending request for the whole page.
-    fake: (req) => (req.kind === "book_sitting" ? fakeSittingOutcome(shared, me, req, now()) : fakeOutcome(shared, req, now())),
+    fake: (req) => fakeOutcome(shared, me, req, now()),
     // The requester polls file 6 alone; a dead link is its to report (it stops polling and the send rejects).
     getMe: async () => { const next = await fetchMe(); if (!disposed) takeMe(next); return next; },
   });
