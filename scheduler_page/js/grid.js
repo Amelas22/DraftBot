@@ -1,5 +1,5 @@
 // The shared heatmap: a 7-day window drawn in a viewer's zone. Pure layoutWindow plus a thin DOM mount.
-import { CELLS, CELL_MINUTES } from "./week.js";
+import { CELLS, CELL_MINUTES, addCells } from "./week.js";
 import { el } from "./dom.js";
 
 const partsFormatters = new Map();
@@ -22,7 +22,7 @@ function partsOf(date, zone) {
 export function layoutWindow(startUtc, zone) {
   const days = [];
   for (let j = 0; j < CELLS; j++) {
-    const p = partsOf(new Date(startUtc.getTime() + j * CELL_MINUTES * 60000), zone);
+    const p = partsOf(addCells(startUtc, j), zone);
     const date = `${p.year}-${p.month}-${p.day}`;
     let day = days[days.length - 1];
     if (!day || day.date !== date) {
@@ -50,9 +50,10 @@ export function formatTime(date, zone) {
 }
 
 // The label of window cell j, in zone.
-export const formatCell = (startUtc, zone, j) => formatTime(new Date(startUtc.getTime() + j * CELL_MINUTES * 60000), zone);
+export const formatCell = (startUtc, zone, j) => formatTime(addCells(startUtc, j), zone);
 
-const hourLabel = (h) => `${h % 12 === 0 ? 12 : h % 12} ${h < 12 ? "AM" : "PM"}`;
+// "7 PM" for hour h (0-23): the hour column of every grid.
+export const hourLabel = (h) => `${h % 12 === 0 ? 12 : h % 12} ${h < 12 ? "AM" : "PM"}`;
 
 // opts: { startUtc, zone, cellClass(j) -> string, cellLabel(j) -> string, onPick?(j) }
 export function mountHeatmap(container, opts) {

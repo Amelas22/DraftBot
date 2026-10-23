@@ -1,6 +1,7 @@
 // Week bitmaps and the usual-week -> window conversion. Plain ES module, no dependencies.
 export const CELLS = 336;
 export const CELL_MINUTES = 30;
+export const CELL_MS = CELL_MINUTES * 60000;
 const BYTES = CELLS / 8;
 const WEEKDAYS = { Mon: 0, Tue: 1, Wed: 2, Thu: 3, Fri: 4, Sat: 5, Sun: 6 };
 
@@ -44,8 +45,7 @@ export function usualCellOf(date, zone) {
 export function windowCells(zone, usual, startUtc) {
   const out = new Set();
   for (let j = 0; j < CELLS; j++) {
-    const t = new Date(startUtc.getTime() + j * CELL_MINUTES * 60000);
-    if (usual.has(usualCellOf(t, zone))) out.add(j);
+    if (usual.has(usualCellOf(addCells(startUtc, j), zone))) out.add(j);
   }
   return out;
 }
@@ -60,3 +60,13 @@ export function mergeBlocks(cells) {
   }
   return blocks;
 }
+
+// The instant j half-hour cells after startUtc.
+export const addCells = (startUtc, j) => new Date(startUtc.getTime() + j * CELL_MS);
+
+// Window times of a match file (5): cell j is the half hour at window.start_utc + 30 min * j.
+export const startMs = (shared) => new Date(shared.window.start_utc).getTime();
+export const instantOf = (shared, j) => new Date(startMs(shared) + j * CELL_MS);
+
+// An ISO instant without milliseconds, as the bot's files carry it.
+export const isoSeconds = (d) => d.toISOString().replace(/\.\d{3}Z$/, "Z");

@@ -1,5 +1,6 @@
 // The usual-week editor: a pure model (applyStroke, toFile, loadWeek) plus a thin DOM view (mountUsual).
-import { CELLS, decodeCells, encodeCells } from "./week.js";
+import { CELLS, decodeCells, encodeCells, isoSeconds } from "./week.js";
+import { hourLabel } from "./grid.js";
 import { NotFound, LinkExpired } from "./api.js";
 import { expiredMessage, brokenMessage } from "./messages.js";
 import { el } from "./dom.js";
@@ -30,7 +31,7 @@ export function toFile(zone, cells, now) {
     version: 1,
     zone,
     cells: encodeCells(cells),
-    saved_at: now.toISOString().replace(/\.\d+Z$/, "Z"),
+    saved_at: isoSeconds(now),
   };
 }
 
@@ -48,10 +49,6 @@ export async function loadWeek(url, getJson) {
   return { cells: decodeCells(body.cells), zone: body.zone || null };
 }
 
-const hourLabel = (h) => {
-  const h12 = h % 12 === 0 ? 12 : h % 12;
-  return `${h12} ${h < 12 ? "AM" : "PM"}`;
-};
 const cellLabel = (i) => {
   const d = Math.floor(i / PER_DAY), h = i % PER_DAY;
   const hh = Math.floor(h / 2), mm = h % 2 ? "30" : "00";

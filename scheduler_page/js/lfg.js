@@ -1,10 +1,11 @@
 // Find a team: compare the viewer's usual week with each live card. Pure model (fitCard, rankCards) plus a thin view.
-import { CELL_MINUTES, decodeCells, windowCells } from "./week.js";
+import { CELL_MINUTES, CELL_MS, decodeCells, windowCells } from "./week.js";
 import { loadWeek, mountUsual } from "./usual.js";
 import { expiredMessage } from "./messages.js";
 import { mountHeatmap, formatCell } from "./grid.js";
 import { LinkExpired } from "./api.js";
 import { el } from "./dom.js";
+import { plural, pluralWord } from "./words.js";
 
 const FORMAT = "draftbot.scheduler.lfg";
 
@@ -31,11 +32,9 @@ export function rankCards(viewer, cards, startUtc) {
 }
 
 export function halfHourFloor(date) {
-  const ms = CELL_MINUTES * 60000;
-  return new Date(Math.floor(date.getTime() / ms) * ms);
+  return new Date(Math.floor(date.getTime() / CELL_MS) * CELL_MS);
 }
 
-const hoursText = (h) => `${h} ${h === 1 ? "hour" : "hours"}`;
 const names = (card) => card.members.map((m) => m.name).join(" & ");
 
 async function loadLfg(url, getJson) {
@@ -117,10 +116,10 @@ export async function mountLfg(root, link, deps) {
 
   const renderSummary = () => {
     const { card, fit } = fits.get(selected);
-    const kids = [el("p", { class: "total" }, el("span", { class: "big", text: String(fit.hours) }), ` ${fit.hours === 1 ? "hour" : "hours"} a week with ${names(card)}`)];
+    const kids = [el("p", { class: "total" }, el("span", { class: "big", text: String(fit.hours) }), ` ${pluralWord(fit.hours, "hour")} a week with ${names(card)}`)];
     const better = ranked.find((r) => r.card.card_id !== selected && r.fit.hours > fit.hours);
     if (better) {
-      const jump = el("button", { type: "button", class: "secondary", text: `See ${names(better.card)} instead (${hoursText(better.fit.hours)})` });
+      const jump = el("button", { type: "button", class: "secondary", text: `See ${names(better.card)} instead (${plural(better.fit.hours, "hour")})` });
       jump.addEventListener("click", () => select(better.card.card_id));
       kids.push(jump);
     }
@@ -139,7 +138,7 @@ export async function mountLfg(root, link, deps) {
     const b = el("button", { type: "button", class: "post", "data-id": card.card_id, "aria-pressed": String(card.card_id === selected) },
       el("span", { class: "pn", text: names(card) }),
       el("span", { class: "pm", text: card.note }),
-      el("span", { class: "fit", text: `${hoursText(fit.hours)} this week` }));
+      el("span", { class: "fit", text: `${plural(fit.hours, "hour")} this week` }));
     b.addEventListener("click", () => select(card.card_id));
     list.append(b);
   }

@@ -52,3 +52,13 @@ test("usualCellOf reads local weekday and half hour", () => {
   assert.equal(usualCellOf(new Date("2026-10-19T04:00:00Z"), "America/New_York"), 0);
   assert.equal(usualCellOf(new Date("2026-10-26T03:59:00Z"), "America/New_York"), CELLS - 1);
 });
+
+test("addCells, instantOf and isoSeconds place a window cell in time", async () => {
+  const { addCells, instantOf, startMs, isoSeconds, CELL_MS } = await import("../js/week.js");
+  const shared = { window: { start_utc: "2026-10-19T04:00:00Z" } };
+  assert.equal(CELL_MS, 30 * 60000);
+  assert.equal(isoSeconds(addCells(new Date("2026-10-19T04:00:00Z"), 3)), "2026-10-19T05:30:00Z");
+  assert.equal(startMs(shared), Date.parse("2026-10-19T04:00:00Z"));
+  assert.equal(isoSeconds(instantOf(shared, 3)), "2026-10-19T05:30:00Z");
+  assert.equal(isoSeconds(new Date("2026-10-19T05:30:00.123Z")), "2026-10-19T05:30:00Z");
+});
