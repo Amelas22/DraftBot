@@ -1,7 +1,7 @@
 import os
 import json
 import logging
-from typing import Dict, Any, Optional, Tuple, List
+from typing import AsyncIterator, Dict, Any, Optional, Tuple, List
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import aiobotocore.session
@@ -63,7 +63,7 @@ class DigitalOceanHelper:
             aws_secret_access_key=self.secret
         )
 
-    async def create_raw_client(self):
+    async def create_raw_client(self, config: Optional[Config] = None):
         """Create and return an S3 client for listing operations (raw endpoint)"""
         if not self.config_valid or not self.raw_endpoint:
             return None
@@ -74,7 +74,8 @@ class DigitalOceanHelper:
             region_name=self.region,
             endpoint_url=self.raw_endpoint,  # Region-only endpoint for listing
             aws_access_key_id=self.key,
-            aws_secret_access_key=self.secret
+            aws_secret_access_key=self.secret,
+            config=config,
         )
     
     async def upload_json(
@@ -198,29 +199,34 @@ class DigitalOceanHelper:
             return UploadResult(success=False)
 
         try:
-            client = await self.create_raw_client()
-            if client is None:
-                self.logger.warning(
-                    "DO_SPACES_RAW_ENDPOINT is not set -- cannot publish a public page")
-                return UploadResult(success=False)
-
             object_path = f'{folder}/{filename}'
-            async with client as s3:
-                await s3.put_object(
-                    Bucket=self.bucket,
-                    Key=object_path,
-                    Body=content.encode("utf-8"),
-                    ContentType='text/html; charset=utf-8',
-                    CacheControl='no-cache',
-                    ACL=PUBLIC,
-                )
-
+            await self._put_public(object_path, content.encode("utf-8"), 'text/html; charset=utf-8')
             self.logger.info(f"Published page to DigitalOcean Space: {object_path}")
             return UploadResult(success=True, object_path=object_path)
 
         except Exception as e:
             self.logger.error(f"Error publishing to DigitalOcean Space: {e}")
             return UploadResult(success=False)
+
+    async def _put_public(self, key: str, body: bytes, content_type: str) -> None:
+        """Write a public-read, no-cache object at the true key. Raises on failure.
+
+        The raw client, for the reason upload_public_html gives: the
+        bucket-specific endpoint would store it one level deeper than the URL
+        get_public_url advertises.
+        """
+        client = await self.create_raw_client()
+        if client is None:
+            raise RuntimeError("DO_SPACES_RAW_ENDPOINT is not set -- cannot publish")
+        async with client as s3:
+            await s3.put_object(
+                Bucket=self.bucket,
+                Key=key,
+                Body=body,
+                ContentType=content_type,
+                CacheControl='no-cache',
+                ACL=PUBLIC,
+            )
 
     async def download_json(self, object_path: str) -> Optional[Dict[str, Any]]:
         """
@@ -280,26 +286,30 @@ class DigitalOceanHelper:
 
             async with client as s3:
                 self.logger.debug(f"Listing objects with bucket={self.bucket}, prefix={prefix}")
-                keys = []
-                continuation_token = None
-                while True:
-                    kwargs = {"Bucket": self.bucket, "Prefix": prefix}
-                    if continuation_token:
-                        kwargs["ContinuationToken"] = continuation_token
-                    response = await s3.list_objects_v2(**kwargs)
-                    keys.extend(obj["Key"] for obj in response.get("Contents", []))
-                    continuation_token = response.get("NextContinuationToken")
-                    if not (response.get("IsTruncated") and continuation_token):
-                        # Stop when the API says we're done, or defensively if it
-                        # claims truncation but omits the token (avoids re-fetching
-                        # the first page forever).
-                        break
+                keys = [obj["Key"] async for obj in self._list_pages(s3, prefix)]
                 self.logger.debug(f"Found {len(keys)} keys for prefix {prefix}")
                 return keys
 
         except Exception as e:
             self.logger.error(f"Error listing objects: {e}", exc_info=True)
             return []
+
+    async def _list_pages(self, s3: Any, prefix: str) -> AsyncIterator[Dict[str, Any]]:
+        """Every object under prefix, across all list_objects_v2 pages."""
+        continuation_token = None
+        while True:
+            kwargs: Dict[str, Any] = {"Bucket": self.bucket, "Prefix": prefix}
+            if continuation_token:
+                kwargs["ContinuationToken"] = continuation_token
+            response = await s3.list_objects_v2(**kwargs)
+            for obj in response.get("Contents", []):
+                yield obj
+            continuation_token = response.get("NextContinuationToken")
+            if not (response.get("IsTruncated") and continuation_token):
+                # Stop when the API says we're done, or defensively if it
+                # claims truncation but omits the token (avoids re-fetching
+                # the first page forever).
+                break
 
     async def create_presign_client(self):
         """Client for presigning URLs the browser will use.
@@ -309,17 +319,8 @@ class DigitalOceanHelper:
         bucket-specific create_client() double-nests the key in presigned URLs;
         never presign with it.
         """
-        if not self.config_valid or not self.raw_endpoint:
-            return None
-
-        session = aiobotocore.session.AioSession()
-        return session.create_client(
-            's3',
-            region_name=self.region,
-            endpoint_url=self.raw_endpoint,
-            aws_access_key_id=self.key,
-            aws_secret_access_key=self.secret,
-            config=Config(s3={"addressing_style": "virtual"}, signature_version="s3v4"),
+        return await self.create_raw_client(
+            Config(s3={"addressing_style": "virtual"}, signature_version="s3v4")
         )
 
     async def list_objects_with_modified(self, prefix: str) -> List[Tuple[str, datetime]]:
@@ -333,26 +334,17 @@ class DigitalOceanHelper:
             raise RuntimeError("Spaces is not configured")
 
         found: List[Tuple[str, datetime]] = []
-        continuation_token = None
+        bucket_prefix = f"{self.bucket}/"
         async with client as s3:
-            while True:
-                kwargs: Dict[str, Any] = {"Bucket": self.bucket, "Prefix": prefix}
-                if continuation_token:
-                    kwargs["ContinuationToken"] = continuation_token
-                response = await s3.list_objects_v2(**kwargs)
-                for obj in response.get("Contents", []):
-                    key = obj["Key"]
-                    # The raw endpoint may hand keys back prefixed with the bucket.
-                    bucket_prefix = f"{self.bucket}/"
-                    if not key.startswith(prefix) and key.startswith(bucket_prefix):
-                        key = key[len(bucket_prefix):]
-                    modified = obj["LastModified"]
-                    if modified.tzinfo is None:
-                        modified = modified.replace(tzinfo=timezone.utc)
-                    found.append((key, modified.astimezone(timezone.utc)))
-                continuation_token = response.get("NextContinuationToken")
-                if not (response.get("IsTruncated") and continuation_token):
-                    break
+            async for obj in self._list_pages(s3, prefix):
+                key = obj["Key"]
+                # The raw endpoint may hand keys back prefixed with the bucket.
+                if not key.startswith(prefix) and key.startswith(bucket_prefix):
+                    key = key[len(bucket_prefix):]
+                modified = obj["LastModified"]
+                if modified.tzinfo is None:
+                    modified = modified.replace(tzinfo=timezone.utc)
+                found.append((key, modified.astimezone(timezone.utc)))
         return found
 
     async def download_bytes(self, key: str, max_bytes: int) -> Optional[bytes]:
@@ -386,47 +378,17 @@ class DigitalOceanHelper:
                 return None
             return buf
 
-    async def put_public_json(self, key: str, body: Dict[str, Any]) -> bool:
-        """Write a public-read JSON object at the true key. Returns False on failure.
+    async def put_public_json(self, key: str, body: Dict[str, Any]) -> None:
+        """Write a public-read JSON object at the true key. Raises on failure."""
+        await self._put_public(key, json.dumps(body).encode("utf-8"), "application/json")
 
-        Uses the RAW client, like upload_public_html: the bucket-specific
-        endpoint would store it at `magic-draft-logs/<key>`, where the page
-        (which addresses the true key) would never find it.
-        """
-        if not self.config_valid:
-            return False
-        try:
-            client = await self.create_raw_client()
-            if not client:
-                return False
-            async with client as s3:
-                await s3.put_object(
-                    Bucket=self.bucket,
-                    Key=key,
-                    Body=json.dumps(body).encode("utf-8"),
-                    ContentType="application/json",
-                    ACL=PUBLIC,
-                    CacheControl="no-cache",
-                )
-            return True
-        except Exception as e:
-            self.logger.error(f"Error publishing {key} to DigitalOcean Space: {e}")
-            return False
-
-    async def delete_object(self, key: str) -> bool:
-        """Delete one object. Returns False on failure."""
-        if not self.config_valid:
-            return False
-        try:
-            client = await self.create_raw_client()
-            if not client:
-                return False
-            async with client as s3:
-                await s3.delete_object(Bucket=self.bucket, Key=key)
-            return True
-        except Exception as e:
-            self.logger.error(f"Error deleting {key} from DigitalOcean Space: {e}")
-            return False
+    async def delete_object(self, key: str) -> None:
+        """Delete one object at the true key. Raises on failure."""
+        client = await self.create_raw_client()
+        if client is None:
+            raise RuntimeError("Spaces is not configured")
+        async with client as s3:
+            await s3.delete_object(Bucket=self.bucket, Key=key)
 
     def get_public_url(self, object_path: str) -> str:
         """

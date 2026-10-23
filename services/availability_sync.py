@@ -1,8 +1,7 @@
 """Poll Spaces for usual weeks the scheduler page saved, and keep our copy."""
-import base64
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from loguru import logger
 from sqlalchemy import select
@@ -13,8 +12,9 @@ from services.availability import (
     MAX_FILE_BYTES,
     InvalidWeek,
     UsualWeek,
-    decode_cells,
-    encode_cells,
+    cells_from_bytes,
+    cells_to_bytes,
+    naive_utc,
     parse_usual_week,
 )
 from services.scheduler_links import LINK_DAYS, link_issued_since
@@ -31,10 +31,6 @@ class SyncResult:
     links_removed: int = 0
 
 
-def _naive_utc(moment: datetime) -> datetime:
-    return moment.astimezone(timezone.utc).replace(tzinfo=None)
-
-
 async def get_usual_week(user_id: str) -> UsualWeek | None:
     """The stored usual week for a player, or None if none was saved."""
     async with db_session() as session:
@@ -43,7 +39,7 @@ async def get_usual_week(user_id: str) -> UsualWeek | None:
             return None
         return UsualWeek(
             zone=str(row.zone),
-            cells=decode_cells(base64.b64encode(bytes(row.cells)).decode("ascii")),
+            cells=cells_from_bytes(bytes(row.cells)),
         )
 
 
@@ -61,12 +57,24 @@ class AvailabilitySync:
         if not await link_issued_since(now_utc - timedelta(days=LINK_DAYS + 1)):
             return result
         listing = await self._spaces.list_modified(f"{PREFIX}availability/")
+        async with db_session() as session:
+            stored: dict[str, datetime] = dict(
+                (
+                    await session.execute(
+                        select(PlayerAvailability.user_id, PlayerAvailability.object_modified_utc)
+                    )
+                ).tuples().all()
+            )
         for key, modified in listing:
             match = _KEY.fullmatch(key)
-            if match is None:
+            if match is None or self._rejected.get(key) == modified:
+                continue
+            user_id = match.group(1)
+            seen = stored.get(user_id)
+            if seen is not None and naive_utc(modified) <= seen:
                 continue
             try:
-                await self._sync_key(match.group(1), key, modified, now_utc, result)
+                await self._sync_key(user_id, key, modified, now_utc, result)
             except SpacesError as e:
                 logger.warning(f"Could not fetch {key}, will retry: {e}")
             except Exception:
@@ -79,7 +87,7 @@ class AvailabilitySync:
             links = (
                 await session.execute(
                     select(SchedulerLink).where(
-                        SchedulerLink.expires_utc < _naive_utc(now_utc),
+                        SchedulerLink.expires_utc < naive_utc(now_utc),
                         SchedulerLink.removed_utc.is_(None),
                     )
                 )
@@ -90,45 +98,39 @@ class AvailabilitySync:
                 except SpacesError as e:
                     logger.warning(f"Could not delete link file for {link.token}: {e}")
                     continue
-                link.removed_utc = _naive_utc(now_utc)
+                link.removed_utc = naive_utc(now_utc)
                 removed += 1
         return removed
+
+    async def _read_week(self, key: str) -> UsualWeek:
+        raw = await self._spaces.fetch(key, MAX_FILE_BYTES)
+        if raw is None:
+            raise InvalidWeek(f"larger than {MAX_FILE_BYTES} bytes")
+        return parse_usual_week(raw)
 
     async def _sync_key(
         self, user_id: str, key: str, modified: datetime, now_utc: datetime, result: SyncResult
     ) -> None:
-        if self._rejected.get(key) == modified:
+        try:
+            week = await self._read_week(key)
+        except InvalidWeek as e:
+            logger.warning(f"Rejected {key}: {e}")
+            self._rejected[key] = modified
+            result.rejected.append(key)
             return
-        object_modified = _naive_utc(modified)
+        object_modified = naive_utc(modified)
         async with db_session() as session:
             row = await session.get(PlayerAvailability, user_id)
             if row is not None and object_modified <= row.object_modified_utc:
                 return
-            raw = await self._spaces.fetch(key, MAX_FILE_BYTES)
-            reason: str | None = None
-            week: UsualWeek | None = None
-            if raw is None:
-                reason = f"larger than {MAX_FILE_BYTES} bytes"
-            else:
-                try:
-                    week = parse_usual_week(raw)
-                except InvalidWeek as e:
-                    reason = str(e)
-            if week is None:
-                logger.warning(f"Rejected {key}: {reason}")
-                self._rejected[key] = modified
-                result.rejected.append(key)
-                return
-            cells = base64.b64decode(encode_cells(week.cells))
             if row is None:
                 row = PlayerAvailability(user_id=user_id)
                 session.add(row)
             row.zone = week.zone
-            row.cells = cells
+            row.cells = cells_to_bytes(week.cells)
             row.version = _STORED_VERSION
             row.object_modified_utc = object_modified
-            row.stored_utc = _naive_utc(now_utc)
+            row.stored_utc = naive_utc(now_utc)
         self._rejected.pop(key, None)
         result.stored.append(user_id)
         logger.info(f"Stored usual week for {user_id}")
-

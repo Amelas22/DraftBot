@@ -51,8 +51,10 @@ class DoSchedulerSpaces:
             raise SpacesError(f"presign {method} {key} failed: {e}") from e
 
     async def put_public_json(self, key: str, body: dict[str, Any]) -> None:
-        if not await self._helper.put_public_json(key, body):
-            raise SpacesError(f"put {key} failed")
+        try:
+            await self._helper.put_public_json(key, body)
+        except Exception as e:
+            raise SpacesError(f"put {key} failed: {e}") from e
 
     async def list_modified(self, prefix: str) -> list[tuple[str, datetime]]:
         try:
@@ -67,5 +69,7 @@ class DoSchedulerSpaces:
             raise SpacesError(f"fetch {key} failed: {e}") from e
 
     async def delete(self, key: str) -> None:
-        if not await self._helper.delete_object(key):
-            raise SpacesError(f"delete {key} failed")
+        try:
+            await self._helper.delete_object(key)
+        except Exception as e:
+            raise SpacesError(f"delete {key} failed: {e}") from e

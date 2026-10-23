@@ -14,9 +14,8 @@ class SchedulerCog(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         helper = DigitalOceanHelper()
-        self.sync: AvailabilitySync | None = None
+        self.sync = AvailabilitySync(DoSchedulerSpaces(helper))
         if helper.config_valid:
-            self.sync = AvailabilitySync(DoSchedulerSpaces(helper))
             self.poll.start()
         else:
             logger.warning("Scheduler poller disabled: Spaces is not configured")
@@ -28,8 +27,6 @@ class SchedulerCog(commands.Cog):
     @tasks.loop(seconds=60)
     async def poll(self) -> None:
         await self.bot.wait_until_ready()
-        if self.sync is None:
-            return
         try:
             await self.sync.poll_once(datetime.now(timezone.utc))
         except Exception:

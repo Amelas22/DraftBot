@@ -10,6 +10,7 @@ import json
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from functools import cache
 from zoneinfo import ZoneInfo, available_timezones
 
 CELLS: int = 336
@@ -30,11 +31,28 @@ class UsualWeek:
     cells: frozenset[int]
 
 
-def encode_cells(cells: Iterable[int]) -> str:
+def naive_utc(moment: datetime) -> datetime:
+    """The naive-UTC form the scheduler's *_utc columns store."""
+    return moment.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+@cache
+def _known_zones() -> frozenset[str]:
+    # available_timezones() walks the tzdata tree; once per process is enough.
+    return frozenset(available_timezones())
+
+
+def cells_to_bytes(cells: Iterable[int]) -> bytes:
     data = bytearray(_BYTES)
     for i in cells:
         data[i // 8] |= 0x80 >> (i % 8)
-    return base64.b64encode(bytes(data)).decode("ascii")
+    return bytes(data)
+
+
+def cells_from_bytes(data: bytes) -> frozenset[int]:
+    if len(data) != _BYTES:
+        raise InvalidWeek(f"expected {_BYTES} bytes, got {len(data)}")
+    return frozenset(i for i in range(CELLS) if data[i // 8] & (0x80 >> (i % 8)))
 
 
 def decode_cells(b64: str) -> frozenset[int]:
@@ -42,9 +60,7 @@ def decode_cells(b64: str) -> frozenset[int]:
         data = base64.b64decode(b64, validate=True)
     except (binascii.Error, ValueError) as exc:
         raise InvalidWeek("cells is not valid base64") from exc
-    if len(data) != _BYTES:
-        raise InvalidWeek(f"expected {_BYTES} bytes, got {len(data)}")
-    return frozenset(i for i in range(CELLS) if data[i // 8] & (0x80 >> (i % 8)))
+    return cells_from_bytes(data)
 
 
 def window_cells(
@@ -87,7 +103,7 @@ def parse_usual_week(raw: bytes) -> UsualWeek:
     if type(version) is not int or version != _VERSION:
         raise InvalidWeek("unsupported version")
     zone = doc.get("zone")
-    if not isinstance(zone, str) or zone not in available_timezones():
+    if not isinstance(zone, str) or zone not in _known_zones():
         raise InvalidWeek("unknown zone")
     cells = doc.get("cells")
     if not isinstance(cells, str):

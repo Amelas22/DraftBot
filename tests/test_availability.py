@@ -10,13 +10,17 @@ from services.availability import (
     CELLS,
     UsualWeek,
     decode_cells,
-    encode_cells,
+    cells_to_bytes,
     next_week_lines,
     parse_usual_week,
     window_cells,
 )
 
 FIXTURES = Path("scheduler_page/fixtures")
+
+
+def _b64(cells: set[int]) -> str:
+    return base64.b64encode(cells_to_bytes(cells)).decode("ascii")
 
 
 def _utc(s: str) -> datetime:
@@ -36,8 +40,8 @@ def test_conversion_fixture_cases() -> None:
 
 
 def test_round_trip_and_bit_order() -> None:
-    assert decode_cells(encode_cells({0, 9, 335})) == {0, 9, 335}
-    assert base64.b64decode(encode_cells({0}))[0] == 0x80
+    assert decode_cells(_b64({0, 9, 335})) == {0, 9, 335}
+    assert cells_to_bytes({0})[0] == 0x80
 
 
 def test_parse_accepts_the_fixture() -> None:
@@ -51,7 +55,7 @@ def _doc(**over: object) -> bytes:
         "format": "draftbot.scheduler.usual_week",
         "version": 1,
         "zone": "UTC",
-        "cells": encode_cells({1}),
+        "cells": _b64({1}),
     }
     d.update(over)
     return json.dumps(d).encode()

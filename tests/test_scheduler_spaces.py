@@ -224,10 +224,12 @@ async def test_public_json_download_and_delete_address_the_true_key(monkeypatch)
     urls = _capture_urls(monkeypatch, helper)
     key = "scheduler/link/tok.json"
 
-    assert await helper.put_public_json(key, {"a": 1}) is False  # aborted by hook
+    with pytest.raises(_Stop):
+        await helper.put_public_json(key, {"a": 1})
     with pytest.raises(_Stop):
         await helper.download_bytes(key, 100)
-    assert await helper.delete_object(key) is False
+    with pytest.raises(_Stop):
+        await helper.delete_object(key)
 
     assert len(urls) == 3
     for url in urls:

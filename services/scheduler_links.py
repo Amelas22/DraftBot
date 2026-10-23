@@ -7,13 +7,10 @@ from sqlalchemy import select
 
 from database.db_session import db_session
 from models.scheduler import SchedulerLink
+from services.availability import naive_utc
 from services.scheduler_spaces import PAGE_URL, PREFIX, SchedulerSpaces
 
 LINK_DAYS = 7
-
-
-def _naive_utc(moment: datetime) -> datetime:
-    return moment.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 async def issue_usual_link(spaces: SchedulerSpaces, user_id: str, now_utc: datetime) -> str:
@@ -46,8 +43,8 @@ async def issue_usual_link(spaces: SchedulerSpaces, user_id: str, now_utc: datet
                     token=token,
                     user_id=user_id,
                     view="usual",
-                    issued_utc=_naive_utc(now_utc),
-                    expires_utc=_naive_utc(expires),
+                    issued_utc=naive_utc(now_utc),
+                    expires_utc=naive_utc(expires),
                 )
             )
     except Exception:
@@ -63,7 +60,7 @@ async def link_issued_since(cutoff_utc: datetime) -> bool:
     async with db_session() as session:
         found = await session.execute(
             select(SchedulerLink.id)
-            .where(SchedulerLink.issued_utc >= _naive_utc(cutoff_utc))
+            .where(SchedulerLink.issued_utc >= naive_utc(cutoff_utc))
             .limit(1)
         )
         return found.first() is not None
