@@ -72,3 +72,25 @@ async def test_board_post_failure_replies_with_permissions_hint():
         await lfg_cog.LfgCog.lfg_board.callback(cog, ctx)
     ctx.respond.assert_awaited_once_with(
         "I couldn't post here. Check my permissions in this channel.", ephemeral=True)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_loop_survives_a_failing_guild():
+    bot = AsyncMock()
+    bot.guilds = [AsyncMock(id=1), AsyncMock(id=2)]
+    cog = lfg_cog.LfgCog.__new__(lfg_cog.LfgCog)
+    cog.bot = bot
+    calls = []
+
+    def enabled(guild_id):
+        if guild_id == "1":
+            raise RuntimeError("config")
+        return True
+
+    async def run(_bot, guild_id):
+        calls.append(guild_id)
+
+    with patch.object(lfg_cog, "scheduler_enabled", side_effect=enabled), \
+            patch.object(lfg_cog, "run_reconcile", new=run):
+        await lfg_cog.LfgCog.reconcile_loop.coro(cog)
+    assert calls == ["2"]

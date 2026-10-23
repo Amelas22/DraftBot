@@ -501,3 +501,28 @@ async def test_reconcile_member_leaves_other_teams(test_db):
                                                             LfgRequest.team_id == int(other)))).scalars().one()
         assert pending.status == "withdrawn"
         assert await reconcile_registered(s, G, NOW) == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_ignores_running_tournament(test_db):
+    async with db_session() as s:
+        tid = await _open(s, "cap", "Rook")
+        await _ask(s, tid, "ben", "Ben")
+        (p,) = await _tournament(s, ("Rooks", "cap"))
+        from models.tournament import Tournament
+        (await s.get(Tournament, p.tournament_id)).status = "active"
+        await s.flush()
+        assert await reconcile_registered(s, G, NOW) == []
+        assert (await _team_row(s, tid)).status == "open"
+        assert (await s.execute(select(LfgRequest))).scalars().one().status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_counts_pending_unpaid_registration(test_db):
+    async with db_session() as s:
+        tid = await _open(s, "cap", "Rook")
+        (p,) = await _tournament(s, ("Rooks", "cap"))
+        p.status = "pending"
+        await s.flush()
+        await reconcile_registered(s, G, NOW)
+        assert (await _team_row(s, tid)).status == "closed"

@@ -445,7 +445,7 @@ async def reconcile_registered(session: AsyncSession, guild_id: str, now: dateti
     Idempotent. The caller holds WRITE_LOCK, commits, then sends the notices.
     """
     tournament = await get_active_tournament(session, guild_id)
-    if tournament is None:
+    if tournament is None or tournament.status != "registration":
         return []
     participants = (
         await session.execute(

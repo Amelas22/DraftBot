@@ -79,9 +79,9 @@ class LfgCog(commands.Cog):
     async def reconcile_loop(self) -> None:
         for guild in list(self.bot.guilds):
             guild_id = str(guild.id)
-            if not scheduler_enabled(guild_id):
-                continue
             try:
+                if not scheduler_enabled(guild_id):
+                    continue
                 await run_reconcile(self.bot, guild_id)
             except Exception:
                 logger.exception("lfg: reconcile failed for guild {}", guild_id)
