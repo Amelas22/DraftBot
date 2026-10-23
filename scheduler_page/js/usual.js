@@ -97,18 +97,19 @@ export async function mountUsual(root, link, deps) {
   const clear = el("button", { type: "button", class: "secondary", text: "Clear" });
 
   // Day tabs: only visible under 480px (CSS), where one day fills the screen.
-  let activeDay = 0;
   const tabs = el("div", { class: "daytabs", role: "tablist", "aria-label": "Day" });
   const tabButtons = DAYS.map((d, i) => {
     const b = el("button", { type: "button", role: "tab", text: d });
-    b.addEventListener("click", () => { activeDay = i; grid.dataset.active = String(i); syncTabs(); });
+    b.addEventListener("click", () => setDay(i));
     tabs.append(b);
     return b;
   });
-  const syncTabs = () => tabButtons.forEach((b, i) => b.setAttribute("aria-selected", String(i === activeDay)));
+  const setDay = (day) => {
+    grid.dataset.active = String(day);
+    tabButtons.forEach((b, i) => b.setAttribute("aria-selected", String(i === day)));
+  };
 
   const grid = el("div", { class: "grid", role: "grid", "aria-label": "Usual week, half-hour cells", "aria-multiselectable": "true" });
-  grid.dataset.active = "0";
   const hours = el("div", { class: "col hours", "aria-hidden": "true" });
   for (let h = 0; h < PER_DAY; h++) hours.append(el("div", { class: "hour", text: h % 2 === 0 ? hourLabel(h / 2) : "" }));
   grid.append(hours);
@@ -181,7 +182,7 @@ export async function mountUsual(root, link, deps) {
       e.preventDefault();
       const j = i + step;
       if (j < 0 || j >= CELLS || (Math.abs(step) === 1 && Math.floor(j / PER_DAY) !== Math.floor(i / PER_DAY))) return;
-      if (Math.floor(j / PER_DAY) !== activeDay) { activeDay = Math.floor(j / PER_DAY); grid.dataset.active = String(activeDay); syncTabs(); }
+      setDay(Math.floor(j / PER_DAY));
       c.tabIndex = -1; nodes[j].tabIndex = 0; nodes[j].focus();
     } else if (e.key === " " || e.key === "Enter") {
       e.preventDefault();
@@ -217,6 +218,6 @@ export async function mountUsual(root, link, deps) {
     el("div", { class: "actions" }, save, clear),
     status,
   );
-  syncTabs();
+  setDay(0);
   paintView(cells);
 }
