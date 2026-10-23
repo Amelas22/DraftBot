@@ -136,7 +136,7 @@ async def test_duplicate_pending_and_rerequest(test_db):
         assert r.ok and len(r.notices) == 1
         await s.flush()
         out = (await teams_state(s, G, "b"))["me"]["outgoing"]
-        assert [o["status"] for o in out].count("pending") == 1
+        assert out == [{"team_id": tid, "status": "pending", "note": "again"}]
 
 
 @pytest.mark.asyncio
@@ -168,3 +168,42 @@ async def test_multiple_teams_and_ordering_and_guild(test_db):
         st = await teams_state(s, G, "cap")
         assert [t["team_id"] for t in st["teams"]] == [a, b]
         assert st["me"]["on_teams"] == [a, b]
+
+
+@pytest.mark.asyncio
+async def test_second_pending_row_violates_unique_index(test_db):
+    from sqlalchemy.exc import IntegrityError
+    from models.team_finder import LfgRequest
+    async with db_session() as s:
+        tid = await _open(s)
+    with pytest.raises(IntegrityError):
+        async with db_session() as s:
+            for _ in range(2):
+                s.add(LfgRequest(team_id=int(tid), user_id="b", display_name="B", note="",
+                                 status="pending", created_utc=datetime(2026, 1, 1)))
+            await s.flush()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_current_member_violates_unique_index(test_db):
+    from sqlalchemy.exc import IntegrityError
+    from models.team_finder import LfgTeamMember
+    async with db_session() as s:
+        tid = await _open(s)
+    with pytest.raises(IntegrityError):
+        async with db_session() as s:
+            s.add(LfgTeamMember(team_id=int(tid), user_id="cap", display_name="x", joined_utc=datetime(2026, 1, 1)))
+            await s.flush()
+
+
+@pytest.mark.asyncio
+async def test_member_without_week_gives_zero_hours(test_db):
+    from models.team_finder import LfgTeamMember
+    async with db_session() as s:
+        await _save_week(s, "cap")
+        await _save_week(s, "ben")
+        tid = await _open(s)
+        s.add(LfgTeamMember(team_id=int(tid), user_id="m2", display_name="M2", joined_utc=datetime(2026, 1, 1)))
+        await s.flush()
+        r = await request_join(s, G, "ben", "Ben", tid, "", NOW)
+        assert "overlap 0 hours a week" in r.notices[0].text

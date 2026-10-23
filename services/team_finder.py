@@ -4,11 +4,13 @@ Every function takes the caller's session and returns data; none commits or
 sends a DM. The caller commits, then sends the returned notices.
 """
 
+import asyncio
 import base64
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.scheduler import PlayerAvailability
@@ -26,6 +28,9 @@ TEAM_SIZES = (3, 4)
 NOTE_MAX = 200
 _FORMAT = "draftbot.scheduler.teams"
 _VERSION = 1
+
+# Every team-finder write path (the API) holds this across check -> service call -> commit, so checks and inserts never interleave in this one process.
+WRITE_LOCK = asyncio.Lock()
 
 
 @dataclass(frozen=True)
@@ -173,17 +178,20 @@ async def request_join(
     if await _pending(session, int(team.id), user_id) is not None:
         return ActionResult(ok=True)
 
-    session.add(
-        LfgRequest(
-            team_id=team.id,
-            user_id=user_id,
-            display_name=name,
-            note=note,
-            status="pending",
-            created_utc=naive_utc(now),
-        )
-    )
-    await session.flush()
+    try:
+        async with session.begin_nested():
+            session.add(
+                LfgRequest(
+                    team_id=team.id,
+                    user_id=user_id,
+                    display_name=name,
+                    note=note,
+                    status="pending",
+                    created_utc=naive_utc(now),
+                )
+            )
+    except IntegrityError:
+        return ActionResult(ok=True)
 
     weeks = await _weeks(session, [user_id] + [str(m.user_id) for m in members])
     hours = overlap_hours(
@@ -281,10 +289,13 @@ async def teams_state(session: AsyncSession, guild_id: str, user_id: str) -> dic
         )
     ).scalars()
     listed = {int(t.id) for t in teams}
+    latest: dict[int, LfgRequest] = {}
+    for r in outgoing_rows:  # ordered oldest first, so the last row per team wins
+        if int(r.team_id) in listed:
+            latest[int(r.team_id)] = r
     outgoing = [
         {"team_id": str(r.team_id), "status": str(r.status), "note": str(r.note)}
-        for r in outgoing_rows
-        if int(r.team_id) in listed
+        for r in latest.values()
     ]
 
     captained = [int(t.id) for t in teams if t.captain_id == user_id]

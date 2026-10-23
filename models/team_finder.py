@@ -1,5 +1,5 @@
 """Find-a-team tables. Timestamps are naive UTC (hence the ``_utc`` suffix)."""
-from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Index, Integer, String, Text
 
 from database.models_base import Base
 
@@ -30,6 +30,11 @@ class LfgTeamMember(Base):
     joined_utc = Column(DateTime, nullable=False)
     left_utc = Column(DateTime, nullable=True)
 
+    __table_args__ = (
+        Index('uq_lfg_member_current', 'team_id', 'user_id', unique=True,
+              sqlite_where=left_utc.is_(None)),
+    )
+
 
 class LfgRequest(Base):
     __tablename__ = 'lfg_request'
@@ -42,6 +47,11 @@ class LfgRequest(Base):
     status = Column(String(16), nullable=False, default='pending')  # pending | accepted | declined | withdrawn | filled
     created_utc = Column(DateTime, nullable=False)
     answered_utc = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index('uq_lfg_request_pending', 'team_id', 'user_id', unique=True,
+              sqlite_where=status == 'pending'),
+    )
 
 
 class LfgAction(Base):

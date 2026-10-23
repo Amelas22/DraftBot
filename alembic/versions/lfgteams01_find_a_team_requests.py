@@ -48,6 +48,8 @@ def upgrade():
         )
         op.create_index('ix_lfg_team_member_team_id', 'lfg_team_member', ['team_id'])
         op.create_index('ix_lfg_team_member_user_id', 'lfg_team_member', ['user_id'])
+        op.create_index('uq_lfg_member_current', 'lfg_team_member', ['team_id', 'user_id'],
+                        unique=True, sqlite_where=sa.text('left_utc IS NULL'))
     if 'lfg_request' not in tables:
         op.create_table(
             'lfg_request',
@@ -62,6 +64,8 @@ def upgrade():
         )
         op.create_index('ix_lfg_request_team_id', 'lfg_request', ['team_id'])
         op.create_index('ix_lfg_request_user_id', 'lfg_request', ['user_id'])
+        op.create_index('uq_lfg_request_pending', 'lfg_request', ['team_id', 'user_id'],
+                        unique=True, sqlite_where=sa.text("status = 'pending'"))
     if 'lfg_action' not in tables:
         op.create_table(
             'lfg_action',
