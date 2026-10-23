@@ -4,7 +4,7 @@ import {
   parseShared, parseMe, copyNeeded, freeCount, draftCheck, bestTimes, closestMisses, timeLabel,
   draftRequest, fakeOutcome, REFUSALS,
 } from "./match.js";
-import { CELL_MINUTES } from "./week.js";
+import { CELL_MINUTES, CELL_MS, isoSeconds } from "./week.js";
 import { mountHeatmap } from "./grid.js";
 import { createRequester, SLOW_MESSAGE } from "./request.js";
 import { LinkExpired } from "./api.js";
@@ -14,7 +14,6 @@ import { el } from "./dom.js";
 const MATCH_EXPIRED = expiredMessage("match");
 const NEEDS_UPDATE = "This page needs updating.";
 const REFRESH_MS = 60000;
-const CELL_MS = CELL_MINUTES * 60000;
 
 const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
 const andList = (xs) => (xs.length < 2 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs.at(-1)}`);
@@ -164,7 +163,7 @@ export async function mountMatch(root, link, deps) {
       if (o.status === "booked" && !draft()) {
         // Show the booking at once; the bot's next file 5 says the same.
         shared.booking = { ...(shared.booking || { sittings: [] }), draft: {
-          start_utc: req.start_utc, by: viewer, booked_at: now().toISOString().replace(/\.\d{3}Z$/, "Z"),
+          start_utc: req.start_utc, by: viewer, booked_at: isoSeconds(now()),
           library_copy: copyNeeded(shared).needed,
         } };
       }

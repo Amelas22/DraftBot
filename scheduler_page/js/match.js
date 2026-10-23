@@ -1,9 +1,12 @@
 // The match model: who is free, which draft hours are bookable, whether a library copy is needed, and a
 // stand-in for the bot's answer in fixture mode. Pure (no DOM). Cell j is the half hour at
 // window.start_utc + 30 min * j.
-import { decodeCells, CELLS, CELL_MINUTES, mergeBlocks } from "./week.js";
+import { decodeCells, CELLS, CELL_MS, mergeBlocks, startMs, instantOf, isoSeconds } from "./week.js";
+import { formatTime } from "./grid.js";
 
-const CELL_MS = CELL_MINUTES * 60000;
+// "Tue 20 Oct, 7:00 PM" in the given zone: the heatmap's own label, so every view reads alike.
+export { formatTime as timeLabel };
+
 const NEEDS_UPDATE = "This page needs updating.";
 
 export const REFUSALS = {
@@ -40,9 +43,6 @@ export function parseMe(raw) {
   return { ...doc, deck };
 }
 
-const startMs = (shared) => new Date(shared.window.start_utc).getTime();
-const instantOf = (shared, j) => new Date(startMs(shared) + j * CELL_MS);
-
 export function copyNeeded(shared) {
   if (!shared.library || !shared.library.enabled) return { needed: false, who: [] };
   const who = shared.teams.flatMap((t) =>
@@ -77,22 +77,6 @@ export function draftCheck(shared, start, off, nowUtc) {
   return { ok: true, reason: null, subs };
 }
 
-const labelFormats = new Map();
-// "Tue 20 Oct, 7:00 PM" in the given zone.
-export function timeLabel(date, zone) {
-  let f = labelFormats.get(zone);
-  if (!f) {
-    f = new Intl.DateTimeFormat("en-US", {
-      timeZone: zone, weekday: "short", day: "numeric", month: "short", hour: "numeric", minute: "2-digit", hour12: true,
-    });
-    labelFormats.set(zone, f);
-  }
-  const p = {};
-  for (const part of f.formatToParts(date)) p[part.type] = part.value;
-  return `${p.weekday} ${p.day} ${p.month}, ${p.hour}:${p.minute} ${p.dayPeriod.toUpperCase()}`;
-}
-const labelOf = timeLabel;
-
 // Consecutive-cell runs of the starts in `byStart` (a Map start -> info).
 const runsOf = (byStart) => mergeBlocks(new Set(byStart.keys())).map(([a, b]) => {
   const starts = [];
@@ -111,7 +95,7 @@ export function bestTimes(shared, off, nowUtc, zone = shared.window.display_zone
     .map((starts) => starts.map((j) => ok.get(j)).reduce((best, c) => (c.subs < best.subs ? c : best)))
     .sort((a, b) => a.subs - b.subs || a.start - b.start)
     .slice(0, limit)
-    .map((c) => ({ ...c, label: labelOf(instantOf(shared, c.start), zone) }));
+    .map((c) => ({ ...c, label: formatTime(instantOf(shared, c.start), zone) }));
 }
 
 // Why no hour works: starts that fail only on the library come first, then the smallest player shortfalls.
@@ -133,7 +117,7 @@ export function closestMisses(shared, off, nowUtc, zone = shared.window.display_
         }
       }
     });
-    const label = labelOf(instantOf(shared, start), zone);
+    const label = formatTime(instantOf(shared, start), zone);
     if (shortfall > 0) found.set(start, { start, shortfall, missing, reason: "not_bookable", who: [], label });
     else if (draftCheck(shared, start, off, nowUtc).reason === "no_library") {
       found.set(start, { start, shortfall: 0, missing: [], reason: "no_library", who: copyNeeded(shared).who, label });
@@ -156,8 +140,6 @@ export function closestMisses(shared, off, nowUtc, zone = shared.window.display_
   }
   return out.sort((a, b) => a.shortfall - b.shortfall || a.start - b.start).slice(0, 3);
 }
-
-const isoSeconds = (d) => d.toISOString().replace(/\.\d{3}Z$/, "Z");
 
 export function draftRequest(shared, start, now, uuid) {
   return {
