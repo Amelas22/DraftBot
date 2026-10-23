@@ -184,3 +184,24 @@ async def test_non_object_and_garbage_bodies(client):
         assert resp.status == 400
     resp = await client.post("/api/teams/actions", data="x" * 5000, headers=headers)
     assert resp.status == 413
+
+
+@pytest.mark.asyncio
+async def test_third_open_team_is_refused(client):
+    await _open(client, "111")
+    await _open(client, "111")
+    resp = await _act(client, await _auth("111"), kind="open_team", size=3)
+    body = await resp.json()
+    assert body["ok"] is False and body["code"] == "too_many_teams"
+
+
+@pytest.mark.asyncio
+async def test_actions_on_another_guilds_team_are_refused(client):
+    team = await _open(client, "333")
+    elsewhere = await _auth("333", guild="other")
+    resp = await _act(client, elsewhere, kind="set_taking_requests", team_id=team, on=False)
+    assert (await resp.json())["code"] == "team_closed"
+    resp = await _act(client, await _auth("111", guild="other"), kind="withdraw_request", team_id=team)
+    assert (await resp.json())["code"] == "team_closed"
+    async with db_session() as session:
+        assert (await session.get(LfgTeam, int(team))).taking_requests is True

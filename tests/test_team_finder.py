@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -111,11 +111,12 @@ async def test_refusals(test_db):
         assert (await request_join(s, G, "cap", "Rook", tid, "", NOW)).code == "already_member"
         assert (await request_join(s, G, "b", "B", "999", "", NOW)).code == "team_closed"
         assert (await request_join(s, G, "b", "B", tid, "x" * 201, NOW)).code == "bad_input"
-        assert (await set_taking_requests(s, "b", tid, False, NOW)).code == "not_captain"
-        assert (await set_taking_requests(s, "cap", tid, False, NOW)).ok
+        assert (await set_taking_requests(s, G, "b", tid, False, NOW)).code == "not_captain"
+        assert (await set_taking_requests(s, G, "cap", tid, False, NOW)).ok
         assert (await request_join(s, G, "b", "B", tid, "", NOW)).code == "not_taking_requests"
-        assert (await set_taking_requests(s, "cap", tid, True, NOW)).ok
-        assert (await withdraw_request(s, "b", tid, NOW)).code == "request_gone"
+        assert (await set_taking_requests(s, G, "cap", tid, True, NOW)).ok
+        assert (await withdraw_request(s, G, "b", tid, NOW)).code == "request_gone"
+        assert (await set_taking_requests(s, G, "cap", "999", True, NOW)).code == "team_closed"
 
 
 @pytest.mark.asyncio
@@ -129,14 +130,82 @@ async def test_duplicate_pending_and_rerequest(test_db):
         await s.flush()
         st = await teams_state(s, G, "b")
         assert st["me"]["outgoing"] == [{"team_id": tid, "status": "pending", "note": "one"}]
-        assert (await withdraw_request(s, "b", tid, NOW)).ok
+        assert (await withdraw_request(s, G, "b", tid, NOW)).ok
         await s.flush()
         assert (await teams_state(s, G, "b"))["me"]["outgoing"][0]["status"] == "withdrawn"
-        r = await request_join(s, G, "b", "B", tid, "again", NOW)
+        later = NOW + timedelta(minutes=11)
+        r = await request_join(s, G, "b", "B", tid, "again", later)
         assert r.ok and len(r.notices) == 1
         await s.flush()
         out = (await teams_state(s, G, "b"))["me"]["outgoing"]
         assert out == [{"team_id": tid, "status": "pending", "note": "again"}]
+
+
+@pytest.mark.asyncio
+async def test_rerequest_within_ten_minutes_does_not_dm_the_captain(test_db):
+    async with db_session() as s:
+        tid = await _open(s)
+        assert len((await request_join(s, G, "b", "B", tid, "", NOW)).notices) == 1
+        await s.flush()
+        for minutes in (1, 5, 9):
+            assert (await withdraw_request(s, G, "b", tid, NOW + timedelta(minutes=minutes))).ok
+            await s.flush()
+            r = await request_join(s, G, "b", "B", tid, "", NOW + timedelta(minutes=minutes))
+            assert r.ok and r.notices == [], minutes
+            await s.flush()
+        # A different player is not throttled by b's requests.
+        assert len((await request_join(s, G, "c", "C", tid, "", NOW)).notices) == 1
+        await s.flush()
+        # Ten minutes after b's latest request, the captain hears about it again.
+        assert (await withdraw_request(s, G, "b", tid, NOW + timedelta(minutes=12))).ok
+        await s.flush()
+        r = await request_join(s, G, "b", "B", tid, "", NOW + timedelta(minutes=19, seconds=1))
+        assert len(r.notices) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_captain_runs_at_most_two_live_teams_per_guild(test_db):
+    from models.team_finder import LfgTeam
+    from sqlalchemy import select
+    async with db_session() as s:
+        await _open(s, "cap")
+        await _open(s, "cap")
+        assert (await open_team(s, G, "cap", "Rook", 3, "", NOW)).code == "too_many_teams"
+        # Another guild has its own count.
+        assert (await open_team(s, "other", "cap", "Rook", 3, "", NOW)).ok
+        # A full team still counts; a closed one does not.
+        first, second = (await s.execute(
+            select(LfgTeam).where(LfgTeam.guild_id == G).order_by(LfgTeam.id))).scalars().all()
+        first.status = "full"
+        await s.flush()
+        assert (await open_team(s, G, "cap", "Rook", 3, "", NOW)).code == "too_many_teams"
+        second.status = "closed"
+        await s.flush()
+        assert (await open_team(s, G, "cap", "Rook", 3, "", NOW)).ok
+
+
+@pytest.mark.asyncio
+async def test_player_actions_only_reach_teams_in_the_callers_guild(test_db):
+    async with db_session() as s:
+        tid = await _open(s)
+        assert (await request_join(s, G, "b", "B", tid, "", NOW)).ok
+        await s.flush()
+        assert (await withdraw_request(s, "other", "b", tid, NOW)).code == "team_closed"
+        assert (await set_taking_requests(s, "other", "cap", tid, False, NOW)).code == "team_closed"
+        st = await teams_state(s, G, "cap")
+        assert st["teams"][0]["taking_requests"] is True
+        assert st["me"]["incoming"][tid][0]["user"] == "b"
+
+
+@pytest.mark.asyncio
+async def test_set_taking_requests_on_a_closed_team(test_db):
+    from models.team_finder import LfgTeam
+    from sqlalchemy import select
+    async with db_session() as s:
+        tid = await _open(s)
+        (await s.execute(select(LfgTeam))).scalar_one().status = "closed"
+        await s.flush()
+        assert (await set_taking_requests(s, G, "cap", tid, True, NOW)).code == "team_closed"
 
 
 @pytest.mark.asyncio

@@ -97,6 +97,7 @@ test("refusal codes read as sentences", () => {
   assert.equal(refusalText("request_gone"), "That request was already answered.");
   assert.equal(refusalText("bad_input"), "Something about that request wasn't valid. Reload and try again.");
   assert.equal(refusalText("not_captain"), "Only the captain can do that.");
+  assert.equal(refusalText("too_many_teams"), "You already captain two teams. Close one to open another.");
   assert.equal(typeof refusalText("something_new"), "string");
 });
 

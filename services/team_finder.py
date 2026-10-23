@@ -7,7 +7,7 @@ sends a DM. The caller commits, then sends the returned notices.
 import asyncio
 import base64
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -27,6 +27,8 @@ from services.availability import (
 
 TEAM_SIZES = (3, 4)
 NOTE_MAX = 200
+MAX_CAPTAINED = 2  # open or full teams one player may captain in a guild
+REQUEST_DM_GAP = timedelta(minutes=10)  # no second captain DM for the same player and team within this
 _FORMAT = "draftbot.scheduler.teams"
 _VERSION = 1
 
@@ -108,6 +110,29 @@ def _team_id(raw: str) -> int | None:
     return int(raw) if raw.isascii() and raw.isdigit() else None
 
 
+async def _guild_team(session: AsyncSession, guild_id: str, team_id: str) -> LfgTeam | None:
+    """The team, or None when it does not exist or belongs to another guild."""
+    tid = _team_id(team_id)
+    team = await session.get(LfgTeam, tid) if tid is not None else None
+    if team is None or team.guild_id != guild_id:
+        return None
+    return team
+
+
+async def _captain_team(
+    session: AsyncSession, guild_id: str, user_id: str, team_id: str
+) -> LfgTeam | ActionResult:
+    """The caller's own live team in this guild, or the refusal to return instead."""
+    team = await _guild_team(session, guild_id, team_id)
+    if team is None:
+        return _refuse("team_closed")
+    if team.captain_id != user_id:
+        return _refuse("not_captain")
+    if team.status == "closed":
+        return _refuse("team_closed")
+    return team
+
+
 async def _pending(session: AsyncSession, team_id: int, user_id: str) -> LfgRequest | None:
     return (
         await session.execute(
@@ -131,6 +156,17 @@ async def open_team(
 ) -> ActionResult:
     if size not in TEAM_SIZES or len(note) > NOTE_MAX:
         return _refuse("bad_input")
+    captained = (
+        await session.execute(
+            select(LfgTeam.id).where(
+                LfgTeam.guild_id == guild_id,
+                LfgTeam.captain_id == user_id,
+                LfgTeam.status.in_(("open", "full")),
+            )
+        )
+    ).all()
+    if len(captained) >= MAX_CAPTAINED:
+        return _refuse("too_many_teams")
     stamp = naive_utc(now)
     team = LfgTeam(
         guild_id=guild_id,
@@ -161,9 +197,8 @@ async def request_join(
 ) -> ActionResult:
     if len(note) > NOTE_MAX:
         return _refuse("bad_input")
-    tid = _team_id(team_id)
-    team = await session.get(LfgTeam, tid) if tid is not None else None
-    if team is None or team.guild_id != guild_id or team.status == "closed":
+    team = await _guild_team(session, guild_id, team_id)
+    if team is None or team.status == "closed":
         return _refuse("team_closed")
     members = await _current_members(session, int(team.id))
     if any(m.user_id == user_id for m in members):
@@ -174,6 +209,16 @@ async def request_join(
         return _refuse("not_taking_requests")
     if await _pending(session, int(team.id), user_id) is not None:
         return ActionResult(ok=True)
+    stamp = naive_utc(now)
+    recent = (
+        await session.execute(
+            select(LfgRequest.id).where(
+                LfgRequest.team_id == team.id,
+                LfgRequest.user_id == user_id,
+                LfgRequest.created_utc > stamp - REQUEST_DM_GAP,
+            )
+        )
+    ).first()
 
     try:
         async with session.begin_nested():
@@ -184,10 +229,12 @@ async def request_join(
                     display_name=name,
                     note=note,
                     status="pending",
-                    created_utc=naive_utc(now),
+                    created_utc=stamp,
                 )
             )
     except IntegrityError:
+        return ActionResult(ok=True)
+    if recent is not None:
         return ActionResult(ok=True)
 
     weeks = await _weeks(session, [user_id] + [str(m.user_id) for m in members])
@@ -202,10 +249,12 @@ async def request_join(
 
 
 async def withdraw_request(
-    session: AsyncSession, user_id: str, team_id: str, now: datetime
+    session: AsyncSession, guild_id: str, user_id: str, team_id: str, now: datetime
 ) -> ActionResult:
-    tid = _team_id(team_id)
-    request = await _pending(session, tid, user_id) if tid is not None else None
+    team = await _guild_team(session, guild_id, team_id)
+    if team is None:
+        return _refuse("team_closed")
+    request = await _pending(session, int(team.id), user_id)
     if request is None:
         return _refuse("request_gone")
     request.status = "withdrawn"
@@ -215,12 +264,11 @@ async def withdraw_request(
 
 
 async def set_taking_requests(
-    session: AsyncSession, user_id: str, team_id: str, on: bool, now: datetime
+    session: AsyncSession, guild_id: str, user_id: str, team_id: str, on: bool, now: datetime
 ) -> ActionResult:
-    tid = _team_id(team_id)
-    team = await session.get(LfgTeam, tid) if tid is not None else None
-    if team is None or team.captain_id != user_id:
-        return _refuse("not_captain")
+    team = await _captain_team(session, guild_id, user_id, team_id)
+    if not isinstance(team, LfgTeam):
+        return team
     team.taking_requests = on
     await session.flush()
     return ActionResult(ok=True)

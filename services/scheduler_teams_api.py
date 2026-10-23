@@ -160,5 +160,7 @@ async def _run(
             session, guild_id, user_id, name, args["team_id"], args["note"], now
         )
     if kind == "withdraw_request":
-        return await team_finder.withdraw_request(session, user_id, args["team_id"], now)
-    return await team_finder.set_taking_requests(session, user_id, args["team_id"], args["on"], now)
+        return await team_finder.withdraw_request(session, guild_id, user_id, args["team_id"], now)
+    return await team_finder.set_taking_requests(
+        session, guild_id, user_id, args["team_id"], args["on"], now
+    )

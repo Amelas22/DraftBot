@@ -62,6 +62,7 @@ const REFUSALS = {
   request_gone: "That request was already answered.",
   bad_input: "Something about that request wasn't valid. Reload and try again.",
   not_captain: "Only the captain can do that.",
+  too_many_teams: "You already captain two teams. Close one to open another.",
 };
 export const refusalText = (code) => (Object.hasOwn(REFUSALS, code) ? REFUSALS[code] : SERVER_FAILED);
 
