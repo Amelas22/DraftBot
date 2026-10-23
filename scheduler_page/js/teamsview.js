@@ -9,7 +9,7 @@ import { el } from "./dom.js";
 import { expiredMessage } from "./messages.js";
 import { plural, pluralWord } from "./words.js";
 import {
-  FORMAT, MULTI_TEAM_WARNING, NOTE_MAX, actionErrorText, cellText, halfHourFloor, joinState, noteError,
+  FORMAT, MULTI_TEAM_WARNING, NOTE_MAX, actionErrorText, cellText, declinedText, halfHourFloor, joinState, noteError,
   onOtherTeam, rankTeams, refusalText, shadeLevel, teamName,
 } from "./teams.js";
 
@@ -174,7 +174,7 @@ async function showList(root, api, usualDoc, now, cleanups, notice, firstStatus)
     if (!r) { join.replaceChildren(); joinKey = ""; return; }
     const { team } = r;
     const js = joinState(state, team);
-    const key = `${team.team_id}|${js.kind}|${onOtherTeam(state)}`;
+    const key = `${team.team_id}|${js.kind}|${Boolean(js.declined)}|${onOtherTeam(state)}`;
     if (key === joinKey) return;
     joinKey = key;
     const kids = [];
@@ -188,6 +188,7 @@ async function showList(root, api, usualDoc, now, cleanups, notice, firstStatus)
           status.textContent = `Sent. You'll get a DM when ${team.captain_name} answers.`;
         });
       });
+      if (js.declined) kids.push(el("p", { class: "meta", text: declinedText(team) }));
       kids.push(el("label", { class: "field stack", for: "note" }, `Note to the captain (optional, up to ${NOTE_MAX} characters)`, noteBox));
       if (onOtherTeam(state)) kids.push(el("p", { class: "warn", text: MULTI_TEAM_WARNING }));
       kids.push(el("div", { class: "actions" }, ask, el("span", { class: "meta", text: `${team.captain_name} gets a DM and sees your request in their list.` })));

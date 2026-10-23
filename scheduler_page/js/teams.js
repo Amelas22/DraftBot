@@ -43,14 +43,18 @@ export function rankTeams(viewer, teams, startUtc) {
 
 export const onOtherTeam = (state) => state.me.on_teams.length > 0;
 
-// What the viewer can do about one team: member (captain or not), requested, full, paused or open.
+// What the viewer can do about one team: member (captain or not), requested, full, paused or open. An open team
+// whose captain declined the viewer's latest request says so (declined: true); the viewer may ask again.
 export function joinState(state, team) {
   if (team.members.some((m) => m.user === state.me.user)) return { kind: "member", captain: team.captain === state.me.user };
-  if (state.me.outgoing.some((r) => r.team_id === team.team_id && r.status === "pending")) return { kind: "requested" };
+  const latest = state.me.outgoing.find((r) => r.team_id === team.team_id);
+  if (latest?.status === "pending") return { kind: "requested" };
   if (team.status === "full" || team.members.length >= team.size) return { kind: "full" };
   if (!team.taking_requests) return { kind: "paused" };
-  return { kind: "open" };
+  return latest?.status === "declined" ? { kind: "open", declined: true } : { kind: "open" };
 }
+
+export const declinedText = (team) => `${teamName(team)} declined your request.`;
 
 export const noteError = (note) => (note.length > NOTE_MAX ? `Keep the note to ${NOTE_MAX} characters or fewer.` : null);
 

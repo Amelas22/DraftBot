@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   fitTeam, rankTeams, halfHourFloor, onOtherTeam, joinState, noteError, refusalText, actionErrorText,
-  cellText, shadeLevel, teamName, MULTI_TEAM_WARNING, NETWORK_FAILED,
+  cellText, declinedText, shadeLevel, teamName, MULTI_TEAM_WARNING, NETWORK_FAILED,
 } from "../js/teams.js";
 import { decodeCells, usualCellOf, CELLS } from "../js/week.js";
 import { LinkExpired } from "../js/api.js";
@@ -81,6 +81,15 @@ test("joinState covers member, captain, requested, full, paused and open", () =>
   assert.deepEqual(joinState(state, { ...team("101"), size: 2 }), { kind: "full" });
   assert.deepEqual(joinState(state, { ...team("101"), status: "full" }), { kind: "full" });
   assert.deepEqual(joinState(state, { ...team("101"), taking_requests: false }), { kind: "paused" });
+});
+
+test("a declined request leaves the team open to ask again, and says so", () => {
+  const me = (status) => ({ ...state, me: { ...state.me, outgoing: [{ team_id: "101", status, note: "" }] } });
+  assert.deepEqual(joinState(me("declined"), team("101")), { kind: "open", declined: true });
+  assert.deepEqual(joinState(me("withdrawn"), team("101")), { kind: "open" });
+  assert.deepEqual(joinState(me("declined"), team("102")), { kind: "open" });
+  assert.deepEqual(joinState(me("declined"), { ...team("101"), status: "full" }), { kind: "full" });
+  assert.equal(declinedText(team("101")), "Rook's team declined your request.");
 });
 
 test("a note over 200 characters is refused before sending", () => {
