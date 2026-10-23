@@ -41,15 +41,13 @@ test("fitCard for the London solo card converts through the member's zone", () =
   assert.equal(fit.hours, want.size / 2);
 });
 
-test("rankCards puts the better fit first, ties by card_id", () => {
+test("rankCards puts the better fit first", () => {
+  const hours = (id) => expectedOverlap([viewer, ...card(id).members.map(asPerson)]).size / 2;
+  assert.ok(hours("12") > hours("13"));
   const ranked = rankCards(viewer, lfg.cards, start);
-  assert.equal(ranked.length, 2);
-  assert.ok(ranked[0].fit.hours >= ranked[1].fit.hours);
-  const hours = Object.fromEntries(ranked.map((r) => [r.card.card_id, r.fit.hours]));
-  const best = hours["12"] >= hours["13"] ? "12" : "13";
-  assert.equal(ranked[0].card.card_id, hours["12"] === hours["13"] ? "12" : best);
+  assert.deepEqual(ranked.map((r) => [r.card.card_id, r.fit.hours]), [["12", hours("12")], ["13", hours("13")]]);
   const flipped = rankCards(viewer, [...lfg.cards].reverse(), start);
-  assert.deepEqual(flipped.map((r) => r.card.card_id), ranked.map((r) => r.card.card_id));
+  assert.deepEqual(flipped.map((r) => r.card.card_id), ["12", "13"]);
 });
 
 test("rankCards breaks ties by card_id", () => {

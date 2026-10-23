@@ -1,6 +1,7 @@
 // The usual-week editor: a pure model (applyStroke, toFile, loadWeek) plus a thin DOM view (mountUsual).
 import { CELLS, decodeCells, encodeCells } from "./week.js";
 import { NotFound, LinkExpired } from "./api.js";
+import { el } from "./dom.js";
 
 const FORMAT = "draftbot.scheduler.usual_week";
 const PER_DAY = 48;
@@ -57,17 +58,6 @@ const cellLabel = (i) => {
   const hh = Math.floor(h / 2), mm = h % 2 ? "30" : "00";
   return `${DAYS[d]} ${hourLabel(hh).replace(" ", ":" + mm + " ")}`;
 };
-
-function el(tag, props = {}, ...kids) {
-  const n = document.createElement(tag);
-  for (const [k, v] of Object.entries(props)) {
-    if (k === "class") n.className = v;
-    else if (k === "text") n.textContent = v;
-    else n.setAttribute(k, v);
-  }
-  n.append(...kids);
-  return n;
-}
 
 // deps: { getJson, putJson, now?: () => Date, zones?: string[], defaultZone?: string }
 export async function mountUsual(root, link, deps) {

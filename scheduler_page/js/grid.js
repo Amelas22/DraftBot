@@ -1,5 +1,6 @@
 // The shared heatmap: a 7-day window drawn in a viewer's zone. Pure layoutWindow plus a thin DOM mount.
 import { CELLS, CELL_MINUTES } from "./week.js";
+import { el } from "./dom.js";
 
 const partsFormatters = new Map();
 function partsOf(date, zone) {
@@ -45,17 +46,6 @@ export function formatCell(startUtc, zone, j) {
 }
 
 const hourLabel = (h) => `${h % 12 === 0 ? 12 : h % 12} ${h < 12 ? "AM" : "PM"}`;
-
-function el(tag, props = {}, ...kids) {
-  const n = document.createElement(tag);
-  for (const [k, v] of Object.entries(props)) {
-    if (k === "class") n.className = v;
-    else if (k === "text") n.textContent = v;
-    else n.setAttribute(k, v);
-  }
-  n.append(...kids);
-  return n;
-}
 
 // opts: { startUtc, zone, cellClass(j) -> string, cellLabel(j) -> string, onPick?(j) }
 export function mountHeatmap(container, opts) {

@@ -3,6 +3,7 @@ import { CELL_MINUTES, decodeCells, windowCells } from "./week.js";
 import { loadWeek, mountUsual, EXPIRED_MESSAGE } from "./usual.js";
 import { mountHeatmap, formatCell } from "./grid.js";
 import { LinkExpired } from "./api.js";
+import { el } from "./dom.js";
 
 const FORMAT = "draftbot.scheduler.lfg";
 
@@ -36,17 +37,6 @@ export function halfHourFloor(date) {
 const hoursText = (h) => `${h} ${h === 1 ? "hour" : "hours"}`;
 const names = (card) => card.members.map((m) => m.name).join(" & ");
 
-function el(tag, props = {}, ...kids) {
-  const n = document.createElement(tag);
-  for (const [k, v] of Object.entries(props)) {
-    if (k === "class") n.className = v;
-    else if (k === "text") n.textContent = v;
-    else n.setAttribute(k, v);
-  }
-  n.append(...kids);
-  return n;
-}
-
 async function loadLfg(url, getJson) {
   const body = await getJson(url);
   if (!body || body.format !== FORMAT) throw new Error("unknown lfg format");
@@ -63,7 +53,9 @@ export async function mountLfg(root, link, deps) {
   const edit = () => {
     mountUsual(root, link, deps).then(() => {
       const back = el("button", { type: "button", class: "secondary back", text: "Back" });
-      back.addEventListener("click", () => mountLfg(root, link, deps));
+      back.addEventListener("click", () => {
+        mountLfg(root, link, deps).catch((e) => { console.error(e); notice("Something went wrong loading this page. Try the link again."); });
+      });
       root.prepend(back);
     }).catch((e) => { console.error(e); notice("Something went wrong loading this page. Try the link again."); });
   };
