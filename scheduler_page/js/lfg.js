@@ -1,6 +1,7 @@
 // Find a team: compare the viewer's usual week with each live card. Pure model (fitCard, rankCards) plus a thin view.
 import { CELL_MINUTES, decodeCells, windowCells } from "./week.js";
-import { loadWeek, mountUsual, EXPIRED_MESSAGE } from "./usual.js";
+import { loadWeek, mountUsual } from "./usual.js";
+import { expiredMessage } from "./messages.js";
 import { mountHeatmap, formatCell } from "./grid.js";
 import { LinkExpired } from "./api.js";
 import { el } from "./dom.js";
@@ -70,7 +71,7 @@ export async function mountLfg(root, link, deps) {
   try {
     [cards, week] = await Promise.all([loadLfg(link.urls.lfg_get, deps.getJson), loadWeek(link.urls.usual_get, deps.getJson)]);
   } catch (e) {
-    if (e instanceof LinkExpired) return notice(EXPIRED_MESSAGE);
+    if (e instanceof LinkExpired) return notice(expiredMessage("lfg"));
     throw e;
   }
 

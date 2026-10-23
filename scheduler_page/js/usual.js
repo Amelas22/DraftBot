@@ -1,13 +1,12 @@
 // The usual-week editor: a pure model (applyStroke, toFile, loadWeek) plus a thin DOM view (mountUsual).
 import { CELLS, decodeCells, encodeCells } from "./week.js";
 import { NotFound, LinkExpired } from "./api.js";
+import { expiredMessage, brokenMessage } from "./messages.js";
 import { el } from "./dom.js";
 
 const FORMAT = "draftbot.scheduler.usual_week";
 const PER_DAY = 48;
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-export const BROKEN_MESSAGE = "This link is broken. Press My usual week in /settings for a new one.";
-export const EXPIRED_MESSAGE = "This link has expired. Press My usual week in /settings for a new one.";
 
 // Fill the rectangle between two grid positions (same days range x same half-hour range).
 export function applyStroke(cells, from, to, paint) {
@@ -70,7 +69,7 @@ export async function mountUsual(root, link, deps) {
   try {
     loaded = await loadWeek(link.urls.usual_get, deps.getJson);
   } catch (e) {
-    if (e instanceof LinkExpired) { root.replaceChildren(el("p", { class: "notice", text: EXPIRED_MESSAGE })); return; }
+    if (e instanceof LinkExpired) { root.replaceChildren(el("p", { class: "notice", text: expiredMessage(link.view) })); return; }
     throw e;
   }
 
@@ -186,14 +185,14 @@ export async function mountUsual(root, link, deps) {
   clear.addEventListener("click", () => { cells = new Set(); paintView(cells); touched(); });
   save.addEventListener("click", async () => {
     if (link.fixture) { status.textContent = "Saved (fixture mode: nothing was sent)."; return; }
-    if (!link.urls.usual_put) { status.textContent = BROKEN_MESSAGE; return; }
+    if (!link.urls.usual_put) { status.textContent = brokenMessage(link.view); return; }
     save.disabled = true;
     status.textContent = "Saving…";
     try {
       await deps.putJson(link.urls.usual_put, toFile(zone, cells, now()));
       status.textContent = "Saved. Discord shows it within a minute.";
     } catch (e) {
-      status.textContent = e instanceof LinkExpired ? EXPIRED_MESSAGE : "Could not save. Check your connection and press Save again.";
+      status.textContent = e instanceof LinkExpired ? expiredMessage(link.view) : "Could not save. Check your connection and press Save again.";
     } finally {
       save.disabled = false;
     }
