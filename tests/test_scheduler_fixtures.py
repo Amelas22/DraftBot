@@ -72,9 +72,7 @@ def test_later_scenario():
     assert shared["match"]["status"] == "booked" and shared["booking"]["draft"]
     assert me["needs_library"] is True and me["plays_after_draft"] is False
     assert me["deck"]["assigned"] is True and me["deck"]["short_reason"]
-    assert me["requests"][0]["kind"] == "book_sitting" and me["requests"][0]["status"] == "booked"
-    sit = shared["booking"]["sittings"][0]
-    assert sit["decks_reserved"] == [me["user"]]
+    assert me["requests"] == [] and shared["booking"]["sittings"] == []
     bits = base64.b64decode(me["deck"]["free_starts"])
     free = [bool(bits[i // 8] & (0x80 >> i % 8)) for i in range(336)]
     assert not all(free) and any(free)

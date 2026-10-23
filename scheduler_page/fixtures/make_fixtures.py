@@ -72,6 +72,12 @@ WEEKS = {
         "Cy": ("Wed-Sat 20-24",), "Dee": ("Tue 19-22", "Thu 19-22"),
         "Eve": ("Tue-Fri 19-24",), "Fay": ("Mon-Wed 18-22", "Fri 20-24"), "Gus": ("Thu-Sun 19-24",),
     },
+    # good, with Fay also free Thursday and Friday evenings (so a reserved later game has somewhere to go).
+    "later": {
+        "Ali": ("Tue-Fri 19-23",), "Ben": ("Mon-Thu 18-23", "Sat 18-24"),
+        "Cy": ("Wed-Sat 20-24",), "Dee": ("Tue 19-22", "Thu 19-22"),
+        "Eve": ("Tue-Fri 19-24",), "Fay": ("Mon-Wed 18-22", "Thu 19-23", "Fri 19-23"), "Gus": ("Thu-Sun 19-24",),
+    },
     "poor": {
         "Ali": ("Mon-Fri 18-21",), "Ben": ("Mon-Thu 18-21",), "Cy": ("Tue-Thu 18-20",),
         "Dee": ("Mon 18-21", "Wed 18-21"),
@@ -90,8 +96,8 @@ SCENARIOS = {
     "nolib": dict(weeks="good", holds="good", after=("Ali", "Ben", "Fay"), lib=()),
     # nobody plays right after: no copy is needed even though Ben and Fay need the library later.
     "nofollow": dict(weeks="good", holds="good", after=(), lib=("Ben", "Fay")),
-    # the draft was booked and run; Ben's later game is booked.
-    "later": dict(weeks="good", holds="later", after=(), lib=("Ben", "Fay"), booked=True),
+    # the draft was booked and run; no later game is booked yet.
+    "later": dict(weeks="later", holds="later", after=(), lib=("Ben", "Fay"), booked=True),
 }
 SIGNED_OUT = ("Dee",)  # not signed up for the match: both answers are null
 
@@ -108,8 +114,7 @@ def holds_for(kind):
                        ("Pine Barrens vs Night Shift", "copy", "Wed 19", 4),
                        ("Moxen Club vs Lotus Eaters", "copy", "Wed 20", 3)]
     if kind == "later":
-        return base + [("Another match's deck", "deck", "Wed 19", 4, IDS["Cy"]),
-                       ("Ben vs Fay (Ben's deck)", "deck", "Thu 20", 1.5, IDS["Ben"])]
+        return base + [("Another match's deck", "deck", "Wed 19", 4, IDS["Cy"])]
     return holds_for("good") + [("Ash & Oak vs Crown Court", "copy", "Thu 20", 4)]
 
 
@@ -150,12 +155,10 @@ def build(scen):
 
     now = "2026-10-21T14:00:00Z" if sc.get("booked") else "2026-10-18T22:00:00Z"
     saved = "2026-10-19T13:40:00Z" if sc.get("booked") else "2026-10-18T20:40:00Z"
-    thu20 = window_index("Thu", 20)
     if sc.get("booked"):
         draft = {"start_utc": iso(cell_time(window_index("Tue", 20))), "by": IDS["Ali"],
                  "booked_at": "2026-10-19T14:10:00Z", "library_copy": False}
-        sittings = [{"players": [IDS["Ben"], IDS["Fay"]], "start_utc": iso(cell_time(thu20)),
-                     "cells": 3, "by": IDS["Ben"], "decks_reserved": [IDS["Ben"]]}]
+        sittings = []
     else:
         draft = None
         sittings = [{"players": [IDS["Cy"], IDS["Gus"]], "start_utc": iso(cell_time(window_index("Fri", 20))),
@@ -197,8 +200,7 @@ for scen in SCENARIOS:
         w0 = window_index("Wed", 19)
         deck_ok = {i for i in range(CELLS - 2) if i + 3 <= w0 or i >= w0 + 8}
         reason = "Some of your deck's cards are held Wednesday evening"
-        reqs = [{"request_id": "2d8e5b7c-6a14-4c93-b0e7-5f3a9c1d2e84", "status": "booked",
-                 "kind": "book_sitting", "at": "2026-10-19T14:20:00Z", "reason": None}]
+        reqs = []
     else:
         deck_ok = {i for i in range(CELLS - 2) if all(free_ben[j] >= 1 for j in range(i, i + 3))}
         reason = "all 3 league copies are held" if scen == "poor" else None
