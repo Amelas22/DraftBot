@@ -26,23 +26,27 @@ const zoneAbbrev = (date, zone) =>
     .find((p) => p.type === "timeZoneName")?.value || zone;
 const discordTime = (date) => `<t:${Math.floor(date.getTime() / 1000)}:f>`;
 
-// The one sentence explaining what booking does to the library, or null when it has nothing to say.
+// The one sentence under the header about what follows the draft, or null when there is nothing to say.
+// Nobody following is said whether or not the server has a library; the copy sentences need one.
 export function libraryLine(shared) {
-  if (!shared.library || !shared.library.enabled) return null;
-  const { copy_offset_cells: off, copy_cells: n } = shared.rules;
-  const copy = copyNeeded(shared);
-  if (copy.needed) {
-    return `Booking holds one league copy from ${duration(off)} after the draft for ${duration(n)}, for ${andList(copy.who)} (they play right after and need the library).`;
-  }
   const follows = shared.teams.some((t) => t.players.some((p) => p.plays_after_draft === true));
-  if (follows) return "No library copy is needed: nobody playing right after the draft needs one.";
-  return "Nobody plays right after the draft. Once it's booked, each of you books your games under Later games.";
+  if (!follows) return "Nobody plays right after the draft. Once it's booked, each of you books your games under Later games.";
+  if (!shared.library || !shared.library.enabled) return null;
+  const copy = copyNeeded(shared);
+  if (!copy.needed) return "No library copy is needed: nobody playing right after the draft needs one.";
+  // copy_offset_cells counts from the draft's start, so the gap after the draft is what's left past draft_cells.
+  const { copy_offset_cells: offset, copy_cells: n, draft_cells: dc } = shared.rules;
+  const gap = offset - dc;
+  const when = gap > 0 ? `${duration(gap)} after the draft ends, for ${duration(n)}` : `for ${duration(n)} from the end of the draft`;
+  return `Booking holds one league copy ${when}, for ${andList(copy.who)} (they play right after and need the library).`;
 }
 
-// deps: { getJson, putJson, now?: () => Date, zone?: string }
+// deps: { getJson, putJson, now?: () => Date, zone?: string }. Resolves to { dispose() }, which stops every
+// timer and listener; the view calls it itself before showing an error notice.
 export async function mountMatch(root, link, deps) {
   const zone = deps.zone || Intl.DateTimeFormat().resolvedOptions().timeZone;
   const notice = (text) => root.replaceChildren(el("p", { class: "notice", text }));
+  const noop = { dispose() {} };
 
   const fetchBoth = async () => {
     const [s, m] = await Promise.all([deps.getJson(link.urls.shared_get), deps.getJson(link.urls.me_get)]);
@@ -54,8 +58,8 @@ export async function mountMatch(root, link, deps) {
   try {
     ({ shared, me } = await fetchBoth());
   } catch (e) {
-    if (e instanceof LinkExpired) return notice(MATCH_EXPIRED);
-    if (e && e.message === NEEDS_UPDATE) return notice(NEEDS_UPDATE);
+    if (e instanceof LinkExpired) { notice(MATCH_EXPIRED); return noop; }
+    if (e && e.message === NEEDS_UPDATE) { notice(NEEDS_UPDATE); return noop; }
     throw e;
   }
 
@@ -70,10 +74,12 @@ export async function mountMatch(root, link, deps) {
   let picked = null;
   let sendError = null;
   let copyBox = null; // text shown for manual copy when the clipboard refuses
+  let copyBoxNew = false; // focus and select the box only when it first appears
   let copied = false;
+  let disposed = false;
+  const cleanups = [];
 
   const players = () => shared.teams.flatMap((t, ti) => t.players.map((p) => ({ ...p, team: ti })));
-  const nameOf = (user) => players().find((p) => p.user === user)?.name || "someone";
   const viewerTeam = shared.teams.findIndex((t) => t.players.some((p) => p.user === viewer));
   const otherTeam = shared.teams[viewerTeam === 0 ? 1 : viewerTeam === 1 ? 0 : 1];
 
@@ -83,11 +89,19 @@ export async function mountMatch(root, link, deps) {
 
   const requester = createRequester({
     putUrl: link.urls.request_put,
+    put: deps.putJson,
     fixture: link.fixture,
     fake: (req) => fakeOutcome(shared, req, now()),
-    getMe: async () => { await refresh(); return me; },
+    getMe: async () => { await refresh(true); return me; },
   });
-  requester.onChange(() => render());
+  requester.onChange(() => { if (!disposed) render(); });
+
+  const dispose = () => {
+    disposed = true;
+    requester.stop();
+    for (const undo of cleanups.splice(0)) undo();
+  };
+  const fail = (text) => { dispose(); notice(text); };
 
   // ---- static frame ----
   const head = el("header");
@@ -102,24 +116,33 @@ export async function mountMatch(root, link, deps) {
     el("section", { class: "work" }, el("div", { class: "workmain" }, heatBox, tip, legend), rail));
 
   // ---- heatmap ----
-  const booked = () => shared.booking && shared.booking.draft;
-  const bookedStart = () => (booked() ? (new Date(booked().start_utc) - startUtc) / CELL_MS : null);
+  const draft = () => (shared.booking && shared.booking.draft) || null;
+  // Booked by file 5's booking, its match status, or our own confirmed request.
+  const isBooked = () => Boolean(draft()) || shared.match.status === "booked";
+  const bookedStart = () => (draft() ? (new Date(draft().start_utc) - startUtc) / CELL_MS : null);
   const inDraft = (j) => { const b = bookedStart(); return b !== null && j >= b && j < b + shared.rules.draft_cells; };
-  const shade = (subs) => `s${Math.min(2, subs[0] + subs[1])}`;
+  const totalSubs = (subs) => subs[0] + subs[1];
 
-  const cellClass = (j) => {
-    const extra = (inDraft(j) ? " draft" : "") + (j === picked ? " picked" : "");
-    if (instant(j) < now()) return `past${extra}`;
-    const r = draftCheck(shared, j, off, now());
-    if (r.ok) return `bookable ${shade(r.subs)}${extra}`;
-    if (r.reason === "no_library") return `no-library ${shade(r.subs)}${extra}`;
+  // A cell judged as a draft starting there: its classes and the words for its label.
+  const cellState = (j) => {
+    if (instant(j) < now()) return { cls: "past", words: "past" };
     const n = freeCount(shared, j, off);
-    return (n[0] + n[1] > 0 ? "short" : "empty") + extra;
+    const some = n[0] + n[1] > 0 ? "short" : "empty";
+    if (isBooked()) return inDraft(j) ? { cls: some, words: "the booked draft" } : { cls: some, words: "" };
+    const r = draftCheck(shared, j, off, now());
+    if (r.ok) {
+      const t = totalSubs(r.subs);
+      return { cls: `bookable s${Math.min(2, t)}`, words: `bookable, ${t ? plural(t, "sub") : "no subs"}` };
+    }
+    if (r.reason === "no_library") return { cls: `no-library s${Math.min(2, totalSubs(r.subs))}`, words: "no library copy free" };
+    return { cls: some, words: "not bookable" };
   };
+  const cellClass = (j) => cellState(j).cls + (inDraft(j) ? " draft" : "") + (j === picked ? " picked" : "");
   const countText = (j) => freeCount(shared, j, off).join("·");
   const cellLabel = (j) => {
     const n = freeCount(shared, j, off);
-    return `${timeLabel(instant(j), zone)}: ${shared.teams[0].name} ${n[0]} · ${shared.teams[1].name} ${n[1]} free`;
+    const words = cellState(j).words;
+    return `${timeLabel(instant(j), zone)}: ${shared.teams[0].name} ${n[0]} · ${shared.teams[1].name} ${n[1]} free${words ? `, ${words}` : ""}`;
   };
   const cellText = (j) => {
     if (instant(j) < now()) return "";
@@ -137,7 +160,7 @@ export async function mountMatch(root, link, deps) {
     copied = false;
     const req = draftRequest(shared, start, now(), crypto.randomUUID());
     requester.send(req).then((o) => {
-      if (o.status === "booked" && !booked()) {
+      if (o.status === "booked" && !draft()) {
         // Show the booking at once; the bot's next file 5 says the same.
         shared.booking = { ...(shared.booking || { sittings: [] }), draft: {
           start_utc: req.start_utc, by: viewer, booked_at: now().toISOString().replace(/\.\d{3}Z$/, "Z"),
@@ -146,7 +169,7 @@ export async function mountMatch(root, link, deps) {
       }
       render();
     }, (e) => {
-      if (e instanceof LinkExpired) return notice(MATCH_EXPIRED);
+      if (e instanceof LinkExpired) return fail(MATCH_EXPIRED);
       console.error(e);
       sendError = /pending/.test(e.message) ? "One request is already waiting for DraftBot." : "Couldn't send the request. Try again.";
       render();
@@ -166,7 +189,7 @@ export async function mountMatch(root, link, deps) {
     copied = false;
     let p;
     try { p = navigator.clipboard.writeText(text); } catch (e) { p = Promise.reject(e); }
-    p.then(() => { copied = true; render(); }, () => { copyBox = text; render(); });
+    p.then(() => { copied = true; render(); }, () => { copyBox = text; copyBoxNew = true; render(); });
   };
   const missLine = (m) => {
     if (m.reason === "no_library") return `Players are free, but no library copy is free for ${andList(m.who)}'s games after it`;
@@ -190,11 +213,11 @@ export async function mountMatch(root, link, deps) {
     const kids = [
       el("p", { class: "eyebrow", text: `${shared.match.tournament_name} · Round ${shared.match.round} · times in your zone (${zoneAbbrev(startUtc, zone)})` }),
       el("h1", {}, shared.teams[0].name, el("span", { class: "vs", text: " vs " }), shared.teams[1].name),
-      el("p", { class: "lede", text: `Pick the draft time. A time is bookable when each team has at least ${shared.rules.min_own_players} of its own players free for the whole draft (${duration(shared.rules.draft_cells)}); subs fill the rest. Tap a player to leave them out of the count.` }),
+      el("p", { class: "lede", text: isBooked() ? "The draft is booked. Tap a cell to see who's free then; tap a player to leave them out of the count." : `Pick the draft time. A time is bookable when each team has at least ${shared.rules.min_own_players} of its own players free for the whole draft (${duration(shared.rules.draft_cells)}); subs fill the rest. Tap a player to leave them out of the count.` }),
     ];
     const lib = libraryLine(shared);
     if (lib) kids.push(el("p", { class: "libline", text: lib }));
-    if (shared.match.thread_url) {
+    if (typeof shared.match.thread_url === "string" && shared.match.thread_url.startsWith("https://")) {
       kids.push(el("p", { class: "threadlink" }, el("a", { href: shared.match.thread_url, target: "_blank", rel: "noopener", text: "Open the match thread" })));
     }
     head.replaceChildren(...kids);
@@ -219,7 +242,9 @@ export async function mountMatch(root, link, deps) {
     filters.replaceChildren(el("div", { class: "teams" }, ...shared.teams.map(teamBlock), el("div", { class: "quick" }, everyone, justMe)));
   };
 
+  const bookedLabel = () => (draft() ? timeLabel(new Date(draft().start_utc), zone) : null);
   const checkSentence = (j) => {
+    if (isBooked()) return bookedLabel() ? `The draft is booked for ${bookedLabel()}.` : "The draft is booked.";
     if (j + shared.rules.draft_cells > shared.window.cells) return "A draft starting here would run past the end of this match's week.";
     const r = draftCheck(shared, j, off, now());
     if (r.reason === "past") return "That time has passed.";
@@ -240,27 +265,34 @@ export async function mountMatch(root, link, deps) {
       ...shared.teams.flatMap((t, ti) => [ti ? " · " : "", el("span", { class: `tn t${ti}`, text: `${t.name}:` }), ` ${free[ti].join(", ") || "nobody"}`]),
       el("br"), checkSentence(picked),
     ];
-    if (!booked() && draftCheck(shared, picked, off, now()).ok) kids.push(" ", bookButton(picked, "Book this time"));
+    if (!isBooked() && draftCheck(shared, picked, off, now()).ok) kids.push(" ", bookButton(picked, "Book this time"));
     tip.replaceChildren(...kids);
   };
 
   const renderLegend = () => {
     const sw = (cls, text) => el("span", {}, el("i", { class: `sw ${cls}` }), text);
+    const count = `numbers read ${shared.teams[0].name}·${shared.teams[1].name} free`;
+    if (isBooked()) {
+      const items = draft() ? [sw("draftsw", "the booked draft")] : [];
+      legend.replaceChildren(...items, sw("pastsw", "past"), el("span", { text: `The draft is booked; ${count}` }));
+      return;
+    }
     const items = [sw("s0", "no subs"), sw("s1", "1 sub"), sw("s2", "2 subs"), sw("", "not bookable")];
     if (copyNeeded(shared).needed) items.push(sw("nolib", "no library copy free"));
     items.push(sw("pastsw", "past"));
-    items.push(el("span", { text: `A draft starts in the cell; numbers read ${shared.teams[0].name}·${shared.teams[1].name} free` }));
+    items.push(el("span", { text: `A draft starts in the cell; ${count}` }));
     legend.replaceChildren(...items);
   };
 
   const renderRail = () => {
     const s = requester.state();
     const out = players().filter((p) => off.has(p.user)).map((p) => p.name);
-    const kids = [el("h2", { text: "Best times" }), el("div", { class: "who", text: out.length ? `Counting without ${andList(out)}` : "Counting everyone" })];
-    if (booked()) {
-      kids.push(el("div", { class: "booked", role: "status" }, el("b", { text: "Draft booked: " }),
-        `${timeLabel(new Date(booked().start_utc), zone)}. Posted in the match thread.`));
+    const kids = [];
+    if (isBooked()) {
+      kids.push(el("h2", { text: "Booked" }), el("div", { class: "booked", role: "status" },
+        el("b", { text: "Draft booked" }), bookedLabel() ? `: ${bookedLabel()}. Posted in the match thread.` : ". See the match thread."));
     } else {
+      kids.push(el("h2", { text: "Best times" }), el("div", { class: "who", text: out.length ? `Counting without ${andList(out)}` : "Counting everyone" }));
       const best = bestTimes(shared, off, now(), zone);
       if (best.length) {
         kids.push(el("div", { class: "stack" }, ...best.map((b) => {
@@ -285,7 +317,10 @@ export async function mountMatch(root, link, deps) {
           const box = el("textarea", { class: "copybox", readonly: "", rows: "5", "aria-label": "Message to copy" });
           box.value = copyBox;
           kids.push(el("p", { class: "status", text: "Copy this and paste it in the match thread:" }), box);
-          queueMicrotask(() => { box.focus(); box.select(); });
+          if (copyBoxNew) {
+            copyBoxNew = false;
+            queueMicrotask(() => { box.focus(); box.select(); });
+          }
         }
       }
     }
@@ -311,21 +346,33 @@ export async function mountMatch(root, link, deps) {
   }
 
   // ---- live updates (real links only): files 5 and 6 every 60 s and on focus; the requester polls at 5 s ----
-  async function refresh() {
-    if (link.fixture) return;
+  // fromRequester: a dead link is the requester's to report (it stops polling and the send rejects).
+  async function refresh(fromRequester = false) {
+    if (link.fixture || disposed) return;
     try {
       const next = await fetchBoth();
+      if (disposed) return;
       me = next.me;
       if (next.shared.seq > shared.seq) { shared = next.shared; render(); }
     } catch (e) {
-      if (e instanceof LinkExpired) return notice(MATCH_EXPIRED);
+      if (e instanceof LinkExpired) {
+        if (fromRequester) throw e;
+        return fail(MATCH_EXPIRED);
+      }
       console.warn("refreshing the match failed", e);
     }
   }
   if (!link.fixture) {
-    setInterval(() => { if (!requester.state().pending) refresh(); }, REFRESH_MS);
-    document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") refresh(); });
+    const id = setInterval(() => { if (!requester.state().pending) refresh(); }, REFRESH_MS);
+    const onVisible = () => { if (document.visibilityState === "visible") refresh(); };
+    const onFocus = () => refresh();
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onFocus);
+    cleanups.push(() => clearInterval(id),
+      () => document.removeEventListener("visibilitychange", onVisible),
+      () => window.removeEventListener("focus", onFocus));
   }
 
   render();
+  return { dispose };
 }

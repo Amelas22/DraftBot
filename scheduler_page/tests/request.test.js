@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createRequester, POLL_MS, SLOW_MS, FAKE_MS } from "../js/request.js";
+import { LinkExpired } from "../js/api.js";
 
 // A hand-cranked clock: timers fire only when advance() passes their due time.
 function fakeClock(start = 0) {
@@ -177,4 +178,33 @@ test("onChange returns an unsubscribe", async () => {
   off();
   await Promise.all([r.send(REQ), clock.advance(FAKE_MS)]);
   assert.equal(n, 0);
+});
+
+test("an expired link while polling stops the polling and rejects with LinkExpired", async () => {
+  const { r, clock, getMeCalls } = realSetup([meWith(), new LinkExpired()]);
+  const seen = [];
+  r.onChange((s) => seen.push(s));
+  const done = r.send(REQ);
+  done.catch(() => {});
+  await clock.advance(POLL_MS * 2);
+  await assert.rejects(done, LinkExpired);
+  const s = r.state();
+  assert.equal(s.pending, false);
+  assert.ok(s.error instanceof LinkExpired);
+  assert.equal(s.outcome, null);
+  assert.ok(seen.at(-1).error instanceof LinkExpired, "listeners hear about it");
+  const calls = getMeCalls();
+  await clock.advance(POLL_MS * 5 + SLOW_MS);
+  assert.equal(getMeCalls(), calls, "no more polls");
+  assert.equal(clock.pending(), 0);
+});
+
+test("stop() cancels a pending poll", async () => {
+  const { r, clock, getMeCalls } = realSetup([meWith()]);
+  r.send(REQ).catch(() => {});
+  await flush();
+  r.stop();
+  await clock.advance(POLL_MS * 3);
+  assert.equal(getMeCalls(), 0);
+  assert.equal(clock.pending(), 0);
 });

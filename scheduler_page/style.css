@@ -126,7 +126,7 @@ button.hcell { cursor: pointer; }
 .hcell.past { opacity: .35; cursor: default; }
 .sw.s0 { background: var(--s0); } .sw.s1 { background: var(--s1); } .sw.s2 { background: var(--s2); }
 .sw.pastsw { opacity: .35; }
-.hcell.draft { box-shadow: inset 0 0 0 2px var(--fg); }
+.hcell.draft, .sw.draftsw { box-shadow: inset 0 0 0 2px var(--fg); }
 .hcell.picked { outline: 2px solid var(--fg); outline-offset: 0; position: relative; z-index: 1; }
 .tip { min-height: 44px; font-size: 13px; margin-top: 8px; }
 .tip b { font-weight: 600; }

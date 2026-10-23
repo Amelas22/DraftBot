@@ -72,19 +72,19 @@ export function mountHeatmap(container, opts) {
     tabButtons.forEach((b, i) => b.setAttribute("aria-selected", String(i === day)));
   };
 
-  const grid = el("div", { class: "grid heat", role: "grid", "aria-label": `Next 7 days, half-hour cells, times in ${zone.replaceAll("_", " ")}` });
+  const grid = el("div", { class: "grid heat", role: "group", "aria-label": `Next 7 days, half-hour cells, times in ${zone.replaceAll("_", " ")}` });
   const hours = el("div", { class: "col hours", "aria-hidden": "true" });
   for (let h = 0; h < 48; h++) hours.append(el("div", { class: "hour", text: h % 2 === 0 ? hourLabel(h / 2) : "" }));
   grid.append(hours);
 
   const nodes = new Map();
   days.forEach((d, i) => {
-    const col = el("div", { class: "col day", "data-day": String(i), role: "row" });
+    const col = el("div", { class: "col day", "data-day": String(i), role: "group", "aria-label": d.label });
     col.append(el("div", { class: "dayname", text: d.label, "aria-hidden": "true" }));
     // A partial first day starts part-way down: pad to its local time.
     for (let g = 0; g < Math.floor(d.cells[0].minutes / CELL_MINUTES); g++) col.append(el("div", { class: "hcell gap", "aria-hidden": "true" }));
     for (const c of d.cells) {
-      const n = el(onPick ? "button" : "div", { class: "hcell", role: "gridcell" });
+      const n = onPick ? el("button", { class: "hcell" }) : el("div", { class: "hcell", role: "img" });
       if (onPick) { n.type = "button"; n.addEventListener("click", () => onPick(c.j)); }
       nodes.set(c.j, n);
       col.append(n);

@@ -1,6 +1,6 @@
 // One request at a time: PUT file 4, then poll file 6 until the bot answers that request_id.
 // Fixture mode never writes; it answers with fake(request) after FAKE_MS. Timers and getMe are injectable.
-import { putJson } from "./api.js";
+import { LinkExpired } from "./api.js";
 
 export const POLL_MS = 5000;
 export const SLOW_MS = 120000;
@@ -12,19 +12,20 @@ const defaultTimer = (fn, ms) => {
   return () => clearTimeout(id);
 };
 
-// opts: { putUrl, getMe() -> me file (parsed), fixture, fake(request) -> {status, reason}, now() -> Date,
-//         setTimer(fn, ms) -> cancel(), put?(url, body) }
+// opts: { putUrl, put(url, body), getMe() -> me file (parsed), fixture, fake(request) -> {status, reason},
+//         now() -> Date, setTimer(fn, ms) -> cancel() }
+// A LinkExpired from getMe ends the request: polling stops, state().error holds it and send() rejects with it.
 export function createRequester(opts) {
   const { putUrl, getMe, fixture, fake } = opts;
   const now = opts.now || (() => new Date());
   const setTimer = opts.setTimer || defaultTimer;
-  const put = opts.put || putJson;
+  const put = opts.put;
 
-  let pending = false, request = null, outcome = null, since = 0, slowFlag = false;
+  let pending = false, request = null, outcome = null, error = null, since = 0, slowFlag = false;
   const cancels = new Set();
   const listeners = new Set();
 
-  const state = () => ({ pending, request, outcome, slow: pending && (slowFlag || now().getTime() - since >= SLOW_MS) });
+  const state = () => ({ pending, request, outcome, error, slow: pending && (slowFlag || now().getTime() - since >= SLOW_MS) });
   const emit = () => { const s = state(); for (const cb of listeners) cb(s); };
   const later = (fn, ms) => {
     const cancel = setTimer(() => { cancels.delete(cancel); return fn(); }, ms);
@@ -37,6 +38,7 @@ export function createRequester(opts) {
     pending = true;
     request = req;
     outcome = null;
+    error = null;
     slowFlag = false;
     since = now().getTime();
     emit();
@@ -48,6 +50,13 @@ export function createRequester(opts) {
         outcome = { status: o.status, reason: o.reason ?? null };
         emit();
         resolve(outcome);
+      };
+      const fail = (e) => {
+        stopTimers();
+        pending = false;
+        error = e;
+        emit();
+        reject(e);
       };
 
       if (fixture) {
@@ -61,6 +70,7 @@ export function createRequester(opts) {
           const answer = (me && me.requests || []).find((x) => x.request_id === req.request_id);
           if (answer && (answer.status === "booked" || answer.status === "refused")) return finish(answer);
         } catch (e) {
+          if (e instanceof LinkExpired) return fail(e);
           console.warn("polling the match file failed; trying again", e);
         }
         if (pending) later(poll, POLL_MS);
@@ -70,10 +80,8 @@ export function createRequester(opts) {
         later(() => { slowFlag = true; emit(); }, SLOW_MS);
         later(poll, POLL_MS);
       }, (e) => {
-        pending = false;
         request = null;
-        emit();
-        reject(e);
+        fail(e);
       });
     });
   }
@@ -81,6 +89,8 @@ export function createRequester(opts) {
   return {
     send,
     state,
+    // Drop every timer (the view is going away); a pending send never settles.
+    stop: stopTimers,
     onChange(cb) { listeners.add(cb); return () => listeners.delete(cb); },
   };
 }
