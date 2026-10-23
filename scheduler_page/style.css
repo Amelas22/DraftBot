@@ -15,6 +15,7 @@
   }
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 var(--font); }
 main { max-width: 760px; margin: 0 auto; padding: 0 16px 40px; }
 h1 { font-size: 26px; font-weight: 800; line-height: 1.15; margin: 18px 0 6px; text-wrap: balance; }
@@ -61,6 +62,49 @@ button:disabled { opacity: .6; cursor: default; }
 .legend { display: flex; gap: 3px; align-items: center; margin-top: 8px; font-size: 11px; color: var(--muted); }
 .legend i { width: 16px; height: 9px; border-radius: 2px; display: inline-block; }
 
+/* Find a team: wide two-column layout (rail of teams, one grid pane) */
+main.wide { max-width: 1080px; }
+.appbar.withaction .context { margin-right: auto; }
+.appbar.withaction .context::before { content: "· "; }
+.small { min-height: 36px; padding: 0 14px; border-radius: 9px; font-weight: 800; cursor: pointer; }
+.cols { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 12px; align-items: start; }
+.rail, .pane, .openform { background: var(--surface); border-radius: 12px; padding: 12px; min-width: 0; display: grid; gap: 10px; align-content: start; }
+.openform { margin-top: 14px; border: 2px solid var(--line); }
+.rail h2, .pane h2, .openform h2 { margin: 0; font-size: 15px; font-weight: 800; }
+.card { border: 2px solid var(--line); border-radius: 10px; padding: 10px; display: grid; gap: 4px; cursor: pointer; background: transparent; color: inherit; font: inherit; text-align: left; }
+.card[aria-pressed="true"] { border-color: var(--accent); }
+.card .row { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+.card .note { font-size: 13px; overflow-wrap: anywhere; }
+.fit { font-weight: 800; color: var(--accent); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.meta { color: var(--muted); font-size: 13px; }
+.tag { font-weight: 700; color: var(--fg); }
+.slots { display: inline-flex; gap: 3px; vertical-align: middle; }
+.slots i { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); display: inline-block; }
+.slots i.open { background: transparent; border: 2px solid var(--accent); }
+.pane .seg { justify-self: start; }
+.empty { color: var(--muted); }
+.field { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-weight: 700; font-size: 13px; }
+.field.stack { display: grid; gap: 6px; color: var(--muted); }
+textarea { font: inherit; width: 100%; border: 2px solid var(--line); border-radius: 9px; padding: 8px; background: var(--bg); color: var(--fg); resize: vertical; min-height: 54px; }
+.warn { margin: 0; border-left: 4px solid var(--warn); background: var(--warnbg); padding: 8px 10px; border-radius: 6px; font-size: 14px; }
+.join .actions, .openform .actions { margin-top: 0; align-items: center; flex-wrap: wrap; }
+.join { display: grid; gap: 10px; }
+.join p { margin: 0; }
+.pane .status, .openform .status { margin: 0; }
+.readout { margin: 0; min-height: 20px; font-size: 13px; font-variant-numeric: tabular-nums; }
+
+/* Heatmap cells: the --h ramp, s0 nobody free to s6 everyone free */
+.heat { touch-action: auto; padding: 8px; }
+.hcell { height: 13px; padding: 0; border: 0; border-radius: 2px; background: var(--empty); }
+button.hcell { cursor: pointer; }
+.hcell.gap { background: transparent; }
+.hcell:focus-visible { outline-offset: 0; z-index: 1; }
+.s0 { background: var(--empty); } .s1 { background: var(--h1); } .s2 { background: var(--h2); } .s3 { background: var(--h3); }
+.s4 { background: var(--h4); } .s5 { background: var(--h5); } .s6 { background: var(--h6); }
+.legend span { padding: 0 3px; }
+
+@media (max-width: 760px) { .cols { grid-template-columns: 1fr; } }
+
 @media (max-width: 479px) {
   main { padding: 0 16px 32px; }
   h1 { font-size: 24px; }
@@ -71,7 +115,7 @@ button:disabled { opacity: .6; cursor: default; }
   .grid[data-active="2"] .day[data-day="2"], .grid[data-active="3"] .day[data-day="3"],
   .grid[data-active="4"] .day[data-day="4"], .grid[data-active="5"] .day[data-day="5"],
   .grid[data-active="6"] .day[data-day="6"] { display: flex; }
-  .cell, .hour { height: 24px; line-height: 24px; }
+  .cell, .hour, .hcell { height: 24px; line-height: 24px; }
   .dayname { display: none; }
   .hours::before { display: none; }
 }

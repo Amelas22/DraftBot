@@ -4,11 +4,10 @@ import { LinkExpired, checkDoc } from "./api.js";
 import { expiredMessage, NOT_ENABLED } from "./messages.js";
 import { el } from "./dom.js";
 import { appBar } from "./appbar.js";
+import { hourLabel } from "./grid.js";
 
 const FORMAT = "draftbot.scheduler.usual_week";
 const PER_DAY = 48;
-// "7 PM" for hour h (0-23): the hour column of the grid.
-export const hourLabel = (h) => `${h % 12 === 0 ? 12 : h % 12} ${h < 12 ? "AM" : "PM"}`;
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 // Fill the rectangle between two grid positions (same days range x same half-hour range).
@@ -59,8 +58,10 @@ const cellLabel = (i) => {
   return `${DAYS[d]} ${hourLabel(hh).replace(" ", ":" + mm + " ")}`;
 };
 
-// deps: { now?: () => Date, zones?: string[], defaultZone?: string }
+// deps: { now?: () => Date, zones?: string[], defaultZone?: string, intro?: string, onSaved?: (doc) => void }
+// With onSaved the editor is a step in another flow: a save says "Saved." and hands the saved file on.
 export async function mountUsual(root, api, deps = {}) {
+  const onSaved = deps.onSaved;
   const now = deps.now || (() => new Date());
   const browserZone = deps.defaultZone || Intl.DateTimeFormat().resolvedOptions().timeZone;
   const zoneList = deps.zones || (typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [browserZone]);
@@ -185,12 +186,14 @@ export async function mountUsual(root, api, deps = {}) {
   select.addEventListener("change", () => { zone = select.value; touched(); });
   clear.addEventListener("click", () => { cells = new Set(); paintView(cells); touched(); });
   save.addEventListener("click", async () => {
-    if (api.fixture) { status.textContent = "Saved (fixture mode: nothing was sent)."; return; }
+    if (api.fixture && !onSaved) { status.textContent = "Saved (fixture mode: nothing was sent)."; return; }
     save.disabled = true;
     status.textContent = "Saving…";
     try {
-      await api.putUsual(toFile(zone, cells, now()));
-      status.textContent = "Saved. It shows in /settings straight away.";
+      const doc = toFile(zone, cells, now());
+      await api.putUsual(doc);
+      status.textContent = onSaved ? "Saved." : "Saved. It shows in /settings straight away.";
+      if (onSaved) onSaved(doc);
     } catch (e) {
       status.textContent = e instanceof LinkExpired ? expiredMessage() : saveFailedMessage(e);
     } finally {
@@ -200,6 +203,7 @@ export async function mountUsual(root, api, deps = {}) {
 
   root.replaceChildren(
     appBar("Your usual week"),
+    ...(deps.intro ? [el("p", { class: "notice intro", text: deps.intro })] : []),
     el("h1", { text: "When are you usually free?" }),
     el("p", { class: "lede", text: "Drag or tap to paint the half-hours you can usually draft. Times are local to the zone below. Drag again over painted cells to erase." }),
     el("label", { class: "zonerow", for: "zone" }, "Time zone ", select),

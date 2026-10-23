@@ -112,3 +112,62 @@ test("checkDoc passes a known version-1 file and refuses anything else as NeedsU
     assert.throws(() => checkDoc(bad, "f"), (e) => e instanceof NeedsUpdate && e.message === NEEDS_UPDATE);
   }
 });
+
+// Serves the real fixture files from disk, and records what was asked for.
+import { readFileSync } from "node:fs";
+const diskFetch = () => {
+  const calls = [];
+  const fn = async (url) => {
+    calls.push(url);
+    return reply(200, JSON.parse(readFileSync(new URL(`../${url}`, import.meta.url))));
+  };
+  fn.calls = calls;
+  return fn;
+};
+const uuid = () => crypto.randomUUID();
+
+test("the teams fixture is an lfg link with a saved week and the teams list", async () => {
+  const fake = diskFetch();
+  const api = createFixtureApi("teams", fake);
+  const me = await api.me();
+  assert.equal(me.view, "lfg");
+  assert.equal(me.user, "900000000000000002");
+  assert.equal((await api.getUsual()).format, "draftbot.scheduler.usual_week");
+  const state = await api.get("/api/teams");
+  assert.equal(state.format, "draftbot.scheduler.teams");
+  assert.equal(state.teams.length, 3);
+  assert.deepEqual(fake.calls, ["fixtures/usual-week.json", "fixtures/teams.json"]);
+});
+
+test("the teams fixture fakes actions in memory and never fetches for them", async () => {
+  const fake = diskFetch();
+  const api = createFixtureApi("teams", fake);
+  await api.get("/api/teams");
+  const before = fake.calls.length;
+
+  let r = await api.post("/api/teams/actions", { action_id: uuid(), kind: "request_join", team_id: "101", note: "hi" });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.state.me.outgoing, [{ team_id: "101", status: "pending", note: "hi" }]);
+
+  r = await api.post("/api/teams/actions", { action_id: uuid(), kind: "withdraw_request", team_id: "101" });
+  assert.equal(r.ok, true);
+  assert.equal(r.state.me.outgoing[0].status, "withdrawn");
+
+  r = await api.post("/api/teams/actions", { action_id: uuid(), kind: "withdraw_request", team_id: "101" });
+  assert.deepEqual([r.ok, r.code], [false, "request_gone"]);
+
+  r = await api.post("/api/teams/actions", { action_id: uuid(), kind: "open_team", size: 4, note: "new" });
+  assert.equal(r.ok, true);
+  const mine = r.state.teams.at(-1);
+  assert.equal(mine.captain, "900000000000000002");
+  assert.equal(mine.size, 4);
+  assert.equal(mine.members[0].user, "900000000000000002");
+  assert.ok(mine.members[0].cells);
+  assert.deepEqual(r.state.me.on_teams, [mine.team_id]);
+
+  r = await api.post("/api/teams/actions", { action_id: uuid(), kind: "request_join", team_id: mine.team_id, note: "" });
+  assert.deepEqual([r.ok, r.code], [false, "already_member"]);
+
+  assert.equal(fake.calls.length, before);
+  assert.deepEqual((await api.get("/api/teams")).me.on_teams, [mine.team_id]);
+});
