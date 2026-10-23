@@ -1,9 +1,9 @@
 // Find a team: compare the viewer's usual week with each live card. Pure model (fitCard, rankCards) plus a thin view.
 import { CELL_MINUTES, CELL_MS, decodeCells, windowCells } from "./week.js";
 import { loadWeek, mountUsual } from "./usual.js";
-import { expiredMessage } from "./messages.js";
+import { expiredMessage, loadFailedMessage } from "./messages.js";
 import { mountHeatmap, formatCell } from "./grid.js";
-import { LinkExpired } from "./api.js";
+import { LinkExpired, checkDoc } from "./api.js";
 import { el } from "./dom.js";
 import { plural, pluralWord } from "./words.js";
 
@@ -38,10 +38,7 @@ export function halfHourFloor(date) {
 const names = (card) => card.members.map((m) => m.name).join(" & ");
 
 async function loadLfg(url, getJson) {
-  const body = await getJson(url);
-  if (!body || body.format !== FORMAT) throw new Error("unknown lfg format");
-  if (!Number.isInteger(body.version) || body.version > 1) throw new Error("lfg is newer than this page");
-  return body.cards || [];
+  return checkDoc(await getJson(url), FORMAT).cards || [];
 }
 
 // deps: { getJson, putJson, now?: () => Date }
@@ -54,10 +51,10 @@ export async function mountLfg(root, link, deps) {
     mountUsual(root, link, deps).then(() => {
       const back = el("button", { type: "button", class: "secondary back", text: "Back" });
       back.addEventListener("click", () => {
-        mountLfg(root, link, deps).catch((e) => { console.error(e); notice("Something went wrong loading this page. Try the link again."); });
+        mountLfg(root, link, deps).catch((e) => { console.error(e); notice(loadFailedMessage(e)); });
       });
       root.prepend(back);
-    }).catch((e) => { console.error(e); notice("Something went wrong loading this page. Try the link again."); });
+    }).catch((e) => { console.error(e); notice(loadFailedMessage(e)); });
   };
   const editButton = () => {
     const b = el("button", { type: "button", class: "secondary", text: "Edit my usual week" });
@@ -71,7 +68,8 @@ export async function mountLfg(root, link, deps) {
     [cards, week] = await Promise.all([loadLfg(link.urls.lfg_get, deps.getJson), loadWeek(link.urls.usual_get, deps.getJson)]);
   } catch (e) {
     if (e instanceof LinkExpired) return notice(expiredMessage("lfg"));
-    throw e;
+    console.error(e);
+    return notice(loadFailedMessage(e));
   }
 
   const head = [el("p", { class: "eyebrow", text: "#find-a-team" }), el("h1", { text: "How well do we fit?" })];

@@ -1,7 +1,7 @@
 // The usual-week editor: a pure model (applyStroke, toFile, loadWeek) plus a thin DOM view (mountUsual).
 import { CELLS, decodeCells, encodeCells, isoSeconds } from "./week.js";
 import { hourLabel } from "./grid.js";
-import { NotFound, LinkExpired } from "./api.js";
+import { NotFound, LinkExpired, checkDoc } from "./api.js";
 import { expiredMessage, brokenMessage } from "./messages.js";
 import { el } from "./dom.js";
 
@@ -44,8 +44,7 @@ export async function loadWeek(url, getJson) {
     if (e instanceof NotFound) return { cells: new Set(), zone: null };
     throw e;
   }
-  if (!body || body.format !== FORMAT) throw new Error("unknown usual-week format");
-  if (!Number.isInteger(body.version) || body.version > 1) throw new Error("usual week is newer than this page");
+  checkDoc(body, FORMAT);
   return { cells: decodeCells(body.cells), zone: body.zone || null };
 }
 

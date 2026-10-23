@@ -18,3 +18,10 @@ test("the lfg view points at a card in #find-a-team", () => {
   assert.equal(expiredMessage("lfg"), "This link has expired. Press How well do we fit? on a card in #find-a-team for a new one.");
   assert.equal(brokenMessage("lfg"), "This link is broken. Press How well do we fit? on a card in #find-a-team for a new one.");
 });
+
+test("a failed load says the page needs updating only for NeedsUpdate", async () => {
+  const { loadFailedMessage, LOAD_FAILED } = await import("../js/messages.js");
+  const { NeedsUpdate } = await import("../js/api.js");
+  assert.equal(loadFailedMessage(new NeedsUpdate()), "This page needs updating.");
+  assert.equal(loadFailedMessage(new Error("boom")), LOAD_FAILED);
+});

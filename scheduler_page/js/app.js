@@ -1,7 +1,7 @@
-import { loadLink, getJson, putJson, LinkExpired, BrokenLink } from "./api.js";
+import { loadLink, getJson, putJson, LinkExpired, BrokenLink, NEEDS_UPDATE } from "./api.js";
 import { mountLfg } from "./lfg.js";
 import { mountUsual } from "./usual.js";
-import { expiredMessage, brokenMessage } from "./messages.js";
+import { expiredMessage, brokenMessage, loadFailedMessage } from "./messages.js";
 
 const root = document.getElementById("app");
 const say = (text) => { root.replaceChildren(Object.assign(document.createElement("p"), { className: "notice", textContent: text })); };
@@ -18,11 +18,11 @@ async function main() {
     if (link.view === "usual") return await mountUsual(root, link, { getJson, putJson });
     if (link.view === "lfg") return mountLfg(root, link, { getJson, putJson });
     if (link.view === "match") return mountMatch(root, link, { getJson, putJson });
-    say("This page needs updating.");
+    say(NEEDS_UPDATE);
   } catch (e) {
     if (e instanceof LinkExpired) say(expiredMessage(linkView));
     else if (e instanceof BrokenLink) say(brokenMessage(linkView));
-    else { console.error(e); say("Something went wrong loading this page. Try the link again."); }
+    else { console.error(e); say(loadFailedMessage(e)); }
   }
 }
 

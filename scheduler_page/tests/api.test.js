@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { loadLink, getJson, putJson, LinkExpired, NotFound, BrokenLink } from "../js/api.js";
+import { loadLink, getJson, putJson, checkDoc, LinkExpired, NotFound, BrokenLink, NeedsUpdate, NEEDS_UPDATE } from "../js/api.js";
 
 const LINK = {
   format: "draftbot.scheduler.link", version: 1, view: "usual", user: "42",
@@ -24,12 +24,20 @@ test("loadLink reads file 8", async () => {
 
 test("loadLink refuses unknown format", async () => {
   const fake = async () => reply(200, { ...LINK, format: "something.else" });
-  await assert.rejects(loadLink("#abc", fake));
+  await assert.rejects(loadLink("#abc", fake), NeedsUpdate);
 });
 
 test("loadLink refuses a higher version", async () => {
   const fake = async () => reply(200, { ...LINK, version: 2 });
-  await assert.rejects(loadLink("#abc", fake));
+  await assert.rejects(loadLink("#abc", fake), NeedsUpdate);
+});
+
+test("checkDoc passes a known version-1 file and refuses anything else as NeedsUpdate", () => {
+  const doc = { format: "f", version: 1 };
+  assert.equal(checkDoc(doc, "f"), doc);
+  for (const bad of [null, { format: "g", version: 1 }, { format: "f", version: 2 }, { format: "f" }, { format: "f", version: "1" }]) {
+    assert.throws(() => checkDoc(bad, "f"), (e) => e instanceof NeedsUpdate && e.message === NEEDS_UPDATE);
+  }
 });
 
 test("loadLink turns an unknown token (404) into LinkExpired", async () => {

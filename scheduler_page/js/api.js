@@ -5,11 +5,22 @@ export class LinkExpired extends Error {
 export class BrokenLink extends Error {
   constructor(message = "link file is incomplete") { super(message); this.name = "BrokenLink"; }
 }
+export const NEEDS_UPDATE = "This page needs updating.";
+// A file in a format or version this page doesn't know: the page itself is out of date.
+export class NeedsUpdate extends Error {
+  constructor(message = NEEDS_UPDATE) { super(message); this.name = "NeedsUpdate"; }
+}
 export class NotFound extends Error {
   constructor(message = "not found") { super(message); this.name = "NotFound"; }
 }
 
 const LINK_FORMAT = "draftbot.scheduler.link";
+
+// Every file the page reads names its format and a version; this page reads version 1.
+export function checkDoc(body, format) {
+  if (!body || body.format !== format || !Number.isInteger(body.version) || body.version > 1) throw new NeedsUpdate();
+  return body;
+}
 const FIXTURE_RE = /^[A-Za-z0-9._-]+$/;
 
 const FIXTURE_VIEWER = "900000000000000002"; // Ben, the viewer in every lfg and match fixture
@@ -52,8 +63,7 @@ export async function loadLink(hash, fetchFn = fetch) {
   if (res.status === 403 || res.status === 404) throw new LinkExpired();
   if (!res.ok) throw new Error(`link file: HTTP ${res.status}`);
   const body = await res.json();
-  if (!body || body.format !== LINK_FORMAT) throw new Error("unknown link format");
-  if (!Number.isInteger(body.version) || body.version > 1) throw new Error("link file is newer than this page");
+  checkDoc(body, LINK_FORMAT);
   const urls = body.urls || {};
   for (const key of REQUIRED_URLS[body.view] || []) {
     if (typeof urls[key] !== "string" || !urls[key]) throw new BrokenLink(`link file has no ${key}`);
