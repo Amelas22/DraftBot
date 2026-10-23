@@ -1,7 +1,7 @@
 // The match model: who is free, which draft hours are bookable, whether a library copy is needed, and a
 // stand-in for the bot's answer in fixture mode. Pure (no DOM). Cell j is the half hour at
 // window.start_utc + 30 min * j.
-import { decodeCells, CELLS, CELL_MS, mergeBlocks, startMs, instantOf, cellOfIso, isoSeconds, hasRun } from "./week.js";
+import { decodeCells, CELLS, CELL_MINUTES, CELL_MS, mergeBlocks, startMs, instantOf, cellOfIso, isoSeconds, hasRun } from "./week.js";
 import { formatTime } from "./grid.js";
 import { checkDoc } from "./api.js";
 
@@ -43,6 +43,14 @@ export const draftBooked = (shared) => Boolean(shared.booking && shared.booking.
 
 // Nobody on either team plays right after the draft.
 export const nobodyFollows = (shared) => !shared.teams.some((t) => t.players.some((p) => p.plays_after_draft === true));
+
+// A run of half-hour cells in words: "30 minutes", "1 hour", "1½ hours", "4 hours".
+export function duration(cells) {
+  const min = cells * CELL_MINUTES;
+  if (min < 60) return `${min} minutes`;
+  const h = Math.floor(min / 60), half = min % 60 === 30 ? "½" : "";
+  return `${h}${half} hour${h === 1 && !half ? "" : "s"}`;
+}
 
 export function copyNeeded(shared) {
   if (!shared.library || !shared.library.enabled) return { needed: false, who: [] };

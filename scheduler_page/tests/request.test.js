@@ -223,3 +223,9 @@ test("requestStatus: pending (mine, the other view's, slow), send error, my refu
   assert.equal(requestStatus(refused, "book_sitting", R), null);
   assert.equal(requestStatus({ pending: false, request: draft, outcome: { status: "booked" } }, "book_draft", R), null);
 });
+
+test("sendErrorText names a waiting request, else asks to try again", async () => {
+  const { sendErrorText } = await import("../js/request.js");
+  assert.equal(sendErrorText(new Error("a request is pending")), "One request is already waiting for DraftBot.");
+  assert.equal(sendErrorText(new Error("PUT failed: HTTP 500")), "Couldn't send the request. Try again.");
+});

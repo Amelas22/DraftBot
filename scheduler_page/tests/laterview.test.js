@@ -3,9 +3,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { parseShared, parseMe } from "../js/match.js";
+import { parseShared, parseMe, nobodyFollows } from "../js/match.js";
 import { sittingRequest } from "../js/later.js";
-import { laterTabShown, defaultTab, usesLibrary, sittingButtons, bookedLine, applySitting, nobodyFollows, pointsToLater } from "../js/laterview.js";
+import { laterTabShown, defaultTab, usesLibrary, sittingButtons, bookedLine, applySitting, pointsToLater } from "../js/laterview.js";
 
 const fx = (name) =>
   JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures", name), "utf8"));

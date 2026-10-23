@@ -1,9 +1,7 @@
 // The later-game model: when a player can play each pairing after the draft, with or without their
 // library deck reserved, and a stand-in for the bot's answer in fixture mode. Pure (no DOM).
-import { CELLS, CELL_MINUTES } from "./week.js";
+import { CELLS, CELL_MS, startMs, instantOf, isoSeconds } from "./week.js";
 import { REFUSALS, timeLabel, runsOf } from "./match.js";
-
-const CELL_MS = CELL_MINUTES * 60000;
 
 // Draft wording, overridden where a later game reads differently.
 export const SITTING_REFUSALS = {
@@ -13,10 +11,8 @@ export const SITTING_REFUSALS = {
   not_in_match: "DraftBot doesn't have that opponent as your pairing in this match.",
 };
 
-const startMs = (shared) => new Date(shared.window.start_utc).getTime();
-const instantOf = (shared, j) => new Date(startMs(shared) + j * CELL_MS);
-const isoSeconds = (d) => d.toISOString().replace(/\.\d{3}Z$/, "Z");
-const sameSet = (a, b) => a.length === b.length && a.every((x) => b.includes(x));
+// Two player lists naming the same people (a pairing, in either order).
+export const sameSet = (a, b) => a.length === b.length && a.every((x) => b.includes(x));
 const playerOf = (shared, user) => shared.teams.flatMap((t) => t.players).find((p) => p.user === user);
 
 const opponentOf = (shared, me, user) => {

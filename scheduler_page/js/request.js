@@ -23,6 +23,10 @@ export function requestStatus(s, kind, refusals, sendError = null) {
   return null;
 }
 
+// What a failed send says (an expired link is the caller's to handle: it ends the page).
+export const sendErrorText = (e) =>
+  (/pending/.test(e.message) ? "One request is already waiting for DraftBot." : "Couldn't send the request. Try again.");
+
 const defaultTimer = (fn, ms) => {
   const id = setTimeout(fn, ms);
   return () => clearTimeout(id);

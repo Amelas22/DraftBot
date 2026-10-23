@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { parseShared, parseMe } from "../js/match.js";
-import { myOpponents, sittingStarts, sittingRequest, fakeSittingOutcome, SITTING_REFUSALS } from "../js/later.js";
+import { myOpponents, sittingStarts, sittingRequest, fakeSittingOutcome, sameSet, SITTING_REFUSALS } from "../js/later.js";
 
 const fx = (name) =>
   JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures", name), "utf8"));
@@ -86,4 +86,10 @@ test("not_bookable when the opponent is busy", () => {
     new Date(iso(shared, c)) > now && !shared.teams.flatMap((t) => t.players).find((p) => p.user === FAY).cells.has(c));
   const r = fakeSittingOutcome(shared, me, sittingRequest(shared, FAY, busy, false, now, "u"), now);
   assert.equal(r.reason, "not_bookable");
+});
+
+test("sameSet matches a pairing in either order", () => {
+  assert.equal(sameSet(["1", "2"], ["2", "1"]), true);
+  assert.equal(sameSet(["1", "2"], ["1", "3"]), false);
+  assert.equal(sameSet(["1"], ["1", "2"]), false);
 });

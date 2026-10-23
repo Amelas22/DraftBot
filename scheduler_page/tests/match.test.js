@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import {
   parseShared, parseMe, copyNeeded, freeCount, draftCheck, bestTimes, closestMisses,
-  draftRequest, fakeOutcome, timeLabel, baseRequest, windowClosed, draftBooked, REFUSALS,
+  draftRequest, fakeOutcome, timeLabel, baseRequest, windowClosed, draftBooked, duration, REFUSALS,
 } from "../js/match.js";
 import { CELLS } from "../js/week.js";
 
@@ -299,4 +299,12 @@ test("draftBooked: a booking in file 5 or a booked match", () => {
   assert.equal(draftBooked({ ...shared, booking: null, match: { ...shared.match, status: "open" } }), false);
   assert.equal(draftBooked({ ...shared, booking: { draft: { start_utc: "x" } } }), true);
   assert.equal(draftBooked({ ...shared, booking: null, match: { ...shared.match, status: "booked" } }), true);
+});
+
+test("duration says half-hour runs in words", () => {
+  assert.equal(duration(1), "30 minutes");
+  assert.equal(duration(2), "1 hour");
+  assert.equal(duration(3), "1½ hours");
+  assert.equal(duration(5), "2½ hours");
+  assert.equal(duration(8), "4 hours");
 });

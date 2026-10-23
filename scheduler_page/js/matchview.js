@@ -2,11 +2,11 @@
 // The model lives in match.js and the request flow in request.js; this file only draws and wires them.
 import {
   parseShared, parseMe, copyNeeded, freeCount, draftCheck, bestTimes, closestMisses, timeLabel,
-  draftRequest, fakeOutcome, draftBooked, nobodyFollows, REFUSALS,
+  draftRequest, fakeOutcome, draftBooked, nobodyFollows, duration, REFUSALS,
 } from "./match.js";
-import { CELL_MINUTES, CELL_MS, instantOf, cellOfIso, isoSeconds, hasRun } from "./week.js";
+import { CELL_MS, instantOf, cellOfIso, isoSeconds, hasRun } from "./week.js";
 import { mountHeatmap, formatClock } from "./grid.js";
-import { createRequester, requestStatus } from "./request.js";
+import { createRequester, requestStatus, sendErrorText } from "./request.js";
 import { LinkExpired, NeedsUpdate } from "./api.js";
 import { expiredMessage } from "./messages.js";
 import { el } from "./dom.js";
@@ -17,10 +17,6 @@ import { mountLater, laterTabShown, defaultTab, pointsToLater } from "./latervie
 const MATCH_EXPIRED = expiredMessage("match");
 const REFRESH_MS = 60000;
 
-const duration = (cells) => {
-  const min = cells * CELL_MINUTES;
-  return min % 60 === 0 ? plural(min / 60, "hour") : `${min} minutes`;
-};
 const zoneAbbrev = (date, zone) =>
   new Intl.DateTimeFormat("en-US", { timeZone: zone, timeZoneName: "short" }).formatToParts(date)
     .find((p) => p.type === "timeZoneName")?.value || zone;
@@ -220,7 +216,7 @@ export async function mountMatch(root, link, deps) {
       if (disposed) return;
       if (e instanceof LinkExpired) return fail(MATCH_EXPIRED);
       console.error(e);
-      sendError = /pending/.test(e.message) ? "One request is already waiting for DraftBot." : "Couldn't send the request. Try again.";
+      sendError = sendErrorText(e);
       render();
     });
   };

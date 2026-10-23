@@ -1,21 +1,18 @@
 // The later-games view: for each pairing, when you and your opponent are both free after the draft, and
 // the Book request for that game (reserving your library deck or not). The model lives in later.js; the
 // match view owns the tab bar and the one requester the draft and the games share.
-import { timeLabel } from "./match.js";
+import { timeLabel, nobodyFollows, duration } from "./match.js";
 import {
-  myOpponents, deckOk, earliest, sittingStarts, sittingRequest, fakeSittingOutcome, SITTING_REFUSALS,
+  myOpponents, deckOk, earliest, sittingStarts, sittingRequest, fakeSittingOutcome, sameSet, SITTING_REFUSALS,
 } from "./later.js";
-import { CELL_MINUTES } from "./week.js";
+import { CELL_MS } from "./week.js";
 import { mountHeatmap } from "./grid.js";
-import { SLOW_MESSAGE } from "./request.js";
+import { SLOW_MESSAGE, sendErrorText } from "./request.js";
 import { LinkExpired } from "./api.js";
 import { el } from "./dom.js";
 
-const CELL_MS = CELL_MINUTES * 60000;
-const sameSet = (a, b) => a.length === b.length && a.every((x) => b.includes(x));
 
 export const draftBooked = (shared) => Boolean(shared.booking && shared.booking.draft) || shared.match.status === "booked";
-export const nobodyFollows = (shared) => !shared.teams.some((t) => t.players.some((p) => p.plays_after_draft === true));
 
 // The Later games tab: the viewer has a pairing, and the draft is booked or nobody plays right after it.
 export function laterTabShown(shared, me) {
@@ -66,12 +63,6 @@ export function applySitting(shared, me, request) {
   });
   return { ...shared, booking: { ...booking, sittings } };
 }
-
-const gameLength = (cells) => {
-  const h = (cells * CELL_MINUTES) / 60;
-  if (Number.isInteger(h)) return `${h} hour${h === 1 ? "" : "s"}`;
-  return h % 1 === 0.5 ? `${Math.floor(h) || ""}½ hours` : `${cells * CELL_MINUTES} minutes`;
-};
 
 // ctx: { getShared(), setShared(next), getMe(), viewer, zone, now(), requester, render() (the whole page),
 //        fail(text), isDisposed(), expiredText }
@@ -165,7 +156,7 @@ export function mountLater(box, ctx) {
       if (ctx.isDisposed()) return;
       if (e instanceof LinkExpired) return ctx.fail(ctx.expiredText);
       console.error(e);
-      sendError = /pending/.test(e.message) ? "One request is already waiting for DraftBot." : "Couldn't send the request. Try again.";
+      sendError = sendErrorText(e);
       ctx.render();
     });
   };
@@ -188,7 +179,7 @@ export function mountLater(box, ctx) {
   // ---- drawing ----
   const renderHead = () => {
     const sh = shared();
-    const lede = [`Each of your games after the draft gets its own time, from your week and your opponent's. A game takes about ${gameLength(sittingCells())}.`];
+    const lede = [`Each of your games after the draft gets its own time, from your week and your opponent's. A game takes about ${duration(sittingCells())}.`];
     if (library()) lede.push(`Reserving your library deck holds its ${me().deck.cards} cards for that game.`);
     head.replaceChildren(
       el("p", { class: "eyebrow", text: `${sh.match.tournament_name} · Round ${sh.match.round} · later games` }),
@@ -262,8 +253,8 @@ export function mountLater(box, ctx) {
           kids.push(el("div", { class: "stack" }, ...starts.map((st) => {
             const here = isBookedStart(o, st.start);
             const sub = here ? "your game is booked here"
-              : library() ? (st.deckOk ? `your deck is free · ${gameLength(sittingCells())}` : "some of your deck's cards are held then")
-                : gameLength(sittingCells());
+              : library() ? (st.deckOk ? `your deck is free · ${duration(sittingCells())}` : "some of your deck's cards are held then")
+                : duration(sittingCells());
             const btns = here ? [] : buttonsFor(o, st.start);
             return el("div", { class: `slot later${library() && !st.deckOk && !here ? " miss" : ""}` },
               el("span", {}, el("span", { class: "when", text: (o.booked && !here ? "Move to " : "") + st.label }), el("br"), el("span", { class: "subs", text: sub })),
