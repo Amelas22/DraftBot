@@ -78,7 +78,7 @@ export function createFixtureApi(name, fetchFn = fetch) {
     if (!res.ok) throw await failure(res);
     return res.json();
   };
-  if (name === "teams") return teamsFixtureApi(read);
+  if (Object.hasOwn(TEAMS_FIXTURES, name)) return teamsFixtureApi(read, TEAMS_FIXTURES[name]);
   const refuse = () => { throw new Error("fixtures are read only"); };
   return {
     fixture: true,
@@ -90,36 +90,65 @@ export function createFixtureApi(name, fetchFn = fetch) {
   };
 }
 
-// `#fixture=teams`: Ben (who has a usual week) on a find-a-team link. Actions change an in-memory copy of
-// fixtures/teams.json and answer like the server, so the whole flow can be clicked through without a bot.
-const FIXTURE_VIEWER = { user: "900000000000000002", name: "Ben" };
+// `#fixture=teams`: Ben (who has a usual week) on a find-a-team link. `#fixture=teams-captain`: Rook, captain of
+// a team with two requests, whose usual week is his own member row. Actions change an in-memory copy of the
+// file and answer like the server, so the whole flow can be clicked through without a bot. The viewer is the
+// file's `me.user`.
+const TEAMS_FIXTURES = {
+  teams: { file: "fixtures/teams.json", usualFile: "fixtures/usual-week.json", name: "Ben" },
+  "teams-captain": { file: "fixtures/teams-captain.json", usualFile: null, name: "Rook" },
+};
 
-function teamsFixtureApi(read) {
+function teamsFixtureApi(read, { file, usualFile, name }) {
   let state = null;
   let week = null;
-  const usual = () => (week ??= read("fixtures/usual-week.json"));
-  // Both files are read before any action, so an action never fetches.
-  const load = async () => { await usual(); return (state ??= await read("fixtures/teams.json")); };
+  // The member row of the viewer, as a usual-week document.
+  const ownWeek = () => {
+    const row = state.teams.flatMap((t) => t.members).find((m) => m.user === state.me.user);
+    return row?.cells ? { format: "draftbot.scheduler.usual_week", version: 1, zone: row.zone, cells: row.cells, saved_at: "2026-10-18T22:14:09Z" } : null;
+  };
+  // Every file is read before any action, so an action never fetches.
+  const load = async () => {
+    if (usualFile) week ??= read(usualFile);
+    await week;
+    state ??= await read(file);
+    week ??= Promise.resolve(ownWeek());
+    return state;
+  };
   const refused = (code) => ({ ok: false, code, state });
   const me = () => state.me;
+  const user = () => state.me.user;
+  const incoming = (teamId) => me().incoming[teamId] ?? [];
+  const dropIncoming = (teamId, who) => {
+    const left = incoming(teamId).filter((r) => r.user !== who);
+    if (left.length) me().incoming[teamId] = left;
+    else delete me().incoming[teamId];
+  };
+  const dropTeam = (team) => {
+    state.teams = state.teams.filter((t) => t !== team);
+    delete me().incoming[team.team_id];
+    me().on_teams = me().on_teams.filter((id) => id !== team.team_id);
+  };
 
   async function act(body) {
     await load();
     const team = state.teams.find((t) => t.team_id === body.team_id);
+    const captains = team && team.captain === user();
     const pending = () => me().outgoing.find((r) => r.team_id === body.team_id && r.status === "pending");
+    const full = () => team.status === "full" || team.members.length >= team.size;
     if (body.kind === "open_team") {
       const doc = await week;
       const id = String(Math.max(0, ...state.teams.map((t) => Number(t.team_id))) + 1);
       state.teams.push({
-        team_id: id, captain: FIXTURE_VIEWER.user, captain_name: FIXTURE_VIEWER.name, size: body.size,
+        team_id: id, captain: user(), captain_name: name, size: body.size,
         note: body.note || "", taking_requests: true, status: "open",
-        members: [{ user: FIXTURE_VIEWER.user, name: FIXTURE_VIEWER.name, zone: doc?.zone ?? null, cells: doc?.cells ?? null }],
+        members: [{ user: user(), name, zone: doc?.zone ?? null, cells: doc?.cells ?? null }],
       });
       me().on_teams.push(id);
     } else if (body.kind === "request_join") {
       if (!team) return refused("team_closed");
-      if (team.members.some((m) => m.user === FIXTURE_VIEWER.user)) return refused("already_member");
-      if (team.status === "full" || team.members.length >= team.size) return refused("team_full");
+      if (team.members.some((m) => m.user === user())) return refused("already_member");
+      if (full()) return refused("team_full");
       if (!team.taking_requests) return refused("not_taking_requests");
       if (!pending()) {
         me().outgoing = me().outgoing.filter((r) => r.team_id !== body.team_id);
@@ -130,8 +159,29 @@ function teamsFixtureApi(read) {
       if (!r) return refused("request_gone");
       r.status = "withdrawn";
     } else if (body.kind === "set_taking_requests") {
-      if (!team || team.captain !== FIXTURE_VIEWER.user) return refused("not_captain");
+      if (!captains) return refused("not_captain");
       team.taking_requests = body.on;
+    } else if (body.kind === "accept" || body.kind === "decline") {
+      if (!captains) return refused("not_captain");
+      if (body.kind === "accept" && full()) return refused("team_full");
+      const r = incoming(body.team_id).find((x) => x.user === body.requester);
+      if (!r) return refused("request_gone");
+      dropIncoming(body.team_id, r.user);
+      if (body.kind === "accept") {
+        team.members.push({ user: r.user, name: r.name, zone: r.zone, cells: r.cells });
+        if (full()) { team.status = "full"; delete me().incoming[team.team_id]; }
+      }
+    } else if (body.kind === "close_team" || body.kind === "leave_team") {
+      if (!team) return refused(body.kind === "close_team" ? "team_closed" : "bad_input");
+      if (body.kind === "close_team" && !captains) return refused("not_captain");
+      if (captains) {
+        dropTeam(team);
+      } else {
+        if (!team.members.some((m) => m.user === user())) return refused("bad_input");
+        team.members = team.members.filter((m) => m.user !== user());
+        if (team.status === "full") { team.status = "open"; team.taking_requests = true; }
+        me().on_teams = me().on_teams.filter((id) => id !== team.team_id);
+      }
     } else {
       return refused("bad_input");
     }
@@ -140,8 +190,8 @@ function teamsFixtureApi(read) {
 
   return {
     fixture: true,
-    me: async () => ({ user: FIXTURE_VIEWER.user, guild: "fixture", view: "lfg", exp: null }),
-    getUsual: usual,
+    me: async () => { await load(); return { user: user(), guild: "fixture", view: "lfg", exp: null }; },
+    getUsual: async () => { await load(); return structuredClone(await week); },
     putUsual: async (doc) => doc,
     get: async (path) => {
       if (path !== "/api/teams") throw new Error(`no fixture for ${path}`);

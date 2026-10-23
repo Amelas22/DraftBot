@@ -4,9 +4,11 @@ import { readFileSync } from "node:fs";
 import {
   fitTeam, rankTeams, halfHourFloor, onOtherTeam, joinState, noteError, refusalText, actionErrorText,
   cellText, declinedText, shadeLevel, teamName, MULTI_TEAM_WARNING, NETWORK_FAILED,
+  isFull, requestsFor, myTeams, requestHeading, slotsText, createSync, windowStart, noteDrafts,
+  CLOSE_CONFIRM, leaveConfirm,
 } from "../js/teams.js";
 import { decodeCells, usualCellOf, CELLS } from "../js/week.js";
-import { LinkExpired } from "../js/api.js";
+import { LinkExpired, NeedsUpdate, NEEDS_UPDATE } from "../js/api.js";
 import { EXPIRED } from "../js/messages.js";
 
 const fx = (n) => JSON.parse(readFileSync(new URL(`../fixtures/${n}`, import.meta.url)));
@@ -139,4 +141,99 @@ test("shadeLevel: 0 for nobody, 6 for everyone, rising in between", () => {
 
 test("teamName", () => {
   assert.equal(teamName(team("101")), "Rook's team");
+});
+
+const captain = fx("teams-captain.json");
+
+test("isFull: full status or no open slot", () => {
+  assert.equal(isFull(team("101")), false);
+  assert.equal(isFull({ ...team("101"), status: "full" }), true);
+  assert.equal(isFull({ ...team("101"), size: 2 }), true);
+});
+
+test("requestsFor: most shared hours with the team first, then the earliest request", () => {
+  const reqs = requestsFor(captain, "101", start);
+  assert.deepEqual(reqs.map((r) => [r.request.name, r.hours]), [["Ben", 12], ["Kit", 5]]);
+  const t = captain.teams.find((x) => x.team_id === "101");
+  for (const r of reqs) {
+    const want = expectedOverlap([...t.members.map(asPerson), asPerson(r.request)]);
+    assert.deepEqual(r.fit.overlap, want);
+  }
+  // A tie on hours falls back to who asked first.
+  const ben = captain.me.incoming["101"].find((r) => r.name === "Ben");
+  const tie = { ...captain, me: { ...captain.me, incoming: { "101": [
+    { ...ben, user: "1", name: "Late", requested_at: "2026-10-22T23:59:00Z" },
+    { ...ben, user: "2", name: "Early", requested_at: "2026-10-22T01:00:00Z" },
+  ] } } };
+  assert.deepEqual(requestsFor(tie, "101", start).map((r) => r.request.name), ["Early", "Late"]);
+  assert.deepEqual(requestsFor(captain, "102", start), []);
+  assert.deepEqual(requestsFor({ ...captain, me: { ...captain.me, incoming: undefined } }, "101", start), []);
+});
+
+test("selecting a request draws the team plus the requester, the viewer first as You", () => {
+  const [ben] = requestsFor(captain, "101", start);
+  assert.deepEqual(ben.fit.people.map((p) => p.name), ["You", "Wren", "Ben"]);
+  assert.equal(requestHeading(ben.request, ben.hours), "Ben with your team: 12 hours a week");
+  assert.equal(requestHeading({ name: "Kit" }, 1), "Kit with your team: 1 hour a week");
+});
+
+test("a requester without a saved week fits for 0 hours", () => {
+  const nobody = { ...captain, me: { ...captain.me, incoming: { "101": [{ user: "3", name: "Nox", note: "", zone: null, cells: null, requested_at: "2026-10-22T01:00:00Z" }] } } };
+  const [r] = requestsFor(nobody, "101", start);
+  assert.equal(r.hours, 0);
+});
+
+test("myTeams lists the teams the viewer is on, captained or not", () => {
+  assert.deepEqual(myTeams(captain).map((t) => t.team_id), ["101"]);
+  assert.deepEqual(myTeams(state), []);
+  assert.equal(slotsText(team("101")), "2 of 3");
+});
+
+test("confirm texts", () => {
+  assert.equal(CLOSE_CONFIRM, "Close your team? Everyone on it and everyone who asked to join gets a DM.");
+  assert.equal(leaveConfirm(team("101")), "Leave Rook's team? Rook gets a DM.");
+});
+
+test("a refresh is skipped while an action is in flight", () => {
+  const sync = createSync();
+  const done = sync.startAction();
+  assert.equal(sync.startRefresh(), null);
+  done();
+  assert.notEqual(sync.startRefresh(), null);
+});
+
+test("a refresh that began before an action finished is stale", () => {
+  const sync = createSync();
+  const ticket = sync.startRefresh();
+  const done = sync.startAction();
+  assert.equal(sync.isCurrent(ticket), false, "an action still in flight will bring newer state");
+  done();
+  assert.equal(sync.isCurrent(ticket), false, "the action's state is newer than this GET");
+  const fresh = sync.startRefresh();
+  assert.equal(sync.isCurrent(fresh), true);
+  done(); // a second call is harmless
+  assert.equal(sync.isCurrent(fresh), true);
+});
+
+test("windowStart keeps the same instant and moves with the clock", () => {
+  const a = windowStart(null, new Date("2026-10-23T10:44:12Z"));
+  assert.equal(a.toISOString(), "2026-10-23T10:30:00.000Z");
+  assert.equal(windowStart(a, new Date("2026-10-23T10:59:59Z")), a);
+  assert.equal(windowStart(a, new Date("2026-10-30T11:01:00Z")).toISOString(), "2026-10-30T11:00:00.000Z");
+});
+
+test("note drafts are kept per team", () => {
+  const d = noteDrafts();
+  d.set("101", "hi Rook");
+  assert.equal(d.get("102"), "");
+  d.set("102", "hi Moss");
+  assert.equal(d.get("101"), "hi Rook");
+  d.clear("101");
+  assert.equal(d.get("101"), "");
+  assert.equal(d.get("102"), "hi Moss");
+});
+
+test("an action answer this page can't read says the page needs updating", () => {
+  assert.equal(actionErrorText(new NeedsUpdate()), NEEDS_UPDATE);
+  assert.equal(NEEDS_UPDATE, "This page needs updating.");
 });

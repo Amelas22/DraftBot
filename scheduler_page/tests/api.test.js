@@ -171,3 +171,84 @@ test("the teams fixture fakes actions in memory and never fetches for them", asy
   assert.equal(fake.calls.length, before);
   assert.deepEqual((await api.get("/api/teams")).me.on_teams, [mine.team_id]);
 });
+
+const ROOK = "900000000000000011";
+const BEN = "900000000000000002";
+const KIT = "900000000000000016";
+const act = (api, body) => api.post("/api/teams/actions", { action_id: uuid(), ...body });
+
+test("the teams-captain fixture is Rook, captain of a team with two requests, and Rook's week", async () => {
+  const fake = diskFetch();
+  const api = createFixtureApi("teams-captain", fake);
+  const me = await api.me();
+  assert.deepEqual([me.view, me.user], ["lfg", ROOK]);
+  const usual = await api.getUsual();
+  const state = await api.get("/api/teams");
+  const rook = state.teams.find((t) => t.team_id === "101").members.find((m) => m.user === ROOK);
+  assert.deepEqual([usual.format, usual.version, usual.zone, usual.cells], ["draftbot.scheduler.usual_week", 1, rook.zone, rook.cells]);
+  assert.deepEqual(state.me.on_teams, ["101"]);
+  assert.deepEqual(state.me.incoming["101"].map((r) => r.name).sort(), ["Ben", "Kit"]);
+  assert.deepEqual(fake.calls, ["fixtures/teams-captain.json"]);
+});
+
+test("the captain fixture accepts to full, and the other requests are filled", async () => {
+  const api = createFixtureApi("teams-captain", diskFetch());
+  await api.get("/api/teams");
+  let r = await act(api, { kind: "accept", team_id: "102", requester: BEN });
+  assert.deepEqual([r.ok, r.code], [false, "not_captain"]);
+  r = await act(api, { kind: "accept", team_id: "101", requester: "nobody" });
+  assert.deepEqual([r.ok, r.code], [false, "request_gone"]);
+  r = await act(api, { kind: "accept", team_id: "101", requester: BEN });
+  assert.equal(r.ok, true);
+  const t = r.state.teams.find((x) => x.team_id === "101");
+  assert.deepEqual(t.members.map((m) => m.name), ["Rook", "Wren", "Ben"]);
+  assert.ok(t.members[2].cells);
+  assert.equal(t.status, "full");
+  assert.equal(r.state.me.incoming["101"], undefined);
+  r = await act(api, { kind: "accept", team_id: "101", requester: KIT });
+  assert.deepEqual([r.ok, r.code], [false, "team_full"]);
+});
+
+test("the captain fixture declines, pauses and closes", async () => {
+  const api = createFixtureApi("teams-captain", diskFetch());
+  let r = await act(api, { kind: "decline", team_id: "101", requester: KIT });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.state.me.incoming["101"].map((x) => x.name), ["Ben"]);
+  r = await act(api, { kind: "decline", team_id: "101", requester: KIT });
+  assert.deepEqual([r.ok, r.code], [false, "request_gone"]);
+  r = await act(api, { kind: "set_taking_requests", team_id: "101", on: false });
+  assert.equal(r.state.teams.find((x) => x.team_id === "101").taking_requests, false);
+  r = await act(api, { kind: "close_team", team_id: "102" });
+  assert.deepEqual([r.ok, r.code], [false, "not_captain"]);
+  r = await act(api, { kind: "close_team", team_id: "101" });
+  assert.equal(r.ok, true);
+  assert.equal(r.state.teams.some((x) => x.team_id === "101"), false);
+  assert.deepEqual(r.state.me.on_teams, []);
+  assert.equal(r.state.me.incoming["101"], undefined);
+  r = await act(api, { kind: "close_team", team_id: "101" });
+  assert.deepEqual([r.ok, r.code], [false, "team_closed"]);
+});
+
+test("leaving a team: a member leaves and a full team reopens; the captain leaving closes it", async () => {
+  // The same file seen by Wren, a plain member of Rook's team, after it filled.
+  const asWren = async (url) => {
+    const doc = JSON.parse(readFileSync(new URL(`../${url}`, import.meta.url)));
+    doc.me = { user: "900000000000000012", on_teams: ["101"], outgoing: [], incoming: {} };
+    doc.teams[0].status = "full";
+    return reply(200, doc);
+  };
+  const wren = createFixtureApi("teams-captain", asWren);
+  assert.equal((await wren.me()).user, "900000000000000012");
+  let r = await act(wren, { kind: "leave_team", team_id: "102" });
+  assert.deepEqual([r.ok, r.code], [false, "bad_input"]);
+  r = await act(wren, { kind: "leave_team", team_id: "101" });
+  assert.equal(r.ok, true);
+  const t = r.state.teams.find((x) => x.team_id === "101");
+  assert.deepEqual([t.members.map((m) => m.name), t.status, t.taking_requests], [["Rook"], "open", true]);
+  assert.deepEqual(r.state.me.on_teams, []);
+
+  const rook = createFixtureApi("teams-captain", diskFetch());
+  r = await act(rook, { kind: "leave_team", team_id: "101" });
+  assert.equal(r.ok, true);
+  assert.equal(r.state.teams.some((x) => x.team_id === "101"), false);
+});
