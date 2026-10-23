@@ -87,9 +87,9 @@ SCENARIOS = {
     "good": dict(weeks="good", holds="good", after=("Ali", "Ben", "Fay"), lib=("Ben", "Fay")),
     "poor": dict(weeks="poor", holds="poor", after=("Ali", "Ben", "Fay"), lib=("Ben", "Fay")),
     # Ben plays after with his own cards: no copy is needed, so poor's Wednesday holds don't matter.
-    "nolib": dict(weeks="good", holds="poor", after=("Ali", "Ben", "Fay"), lib=()),
+    "nolib": dict(weeks="good", holds="good", after=("Ali", "Ben", "Fay"), lib=()),
     # nobody plays right after: no copy is needed even though Ben and Fay need the library later.
-    "nofollow": dict(weeks="good", holds="poor", after=(), lib=("Ben", "Fay")),
+    "nofollow": dict(weeks="good", holds="good", after=(), lib=("Ben", "Fay")),
     # the draft was booked and run; Ben's later game is booked.
     "later": dict(weeks="good", holds="later", after=(), lib=("Ben", "Fay"), booked=True),
 }
@@ -102,14 +102,15 @@ def holds_for(kind):
             ("Moxen Club vs Night Shift", "copy", "Thu 19", 4),
             ("Gypsy Caravan vs Elm Street", "copy", "Thu 21", 4)]
     if kind == "good":
-        return base + [("Cy vs Gus (Cy's deck)", "deck", "Fri 20", 1.5, IDS["Cy"])]
+        # Wednesday evening's league copies are all held: a draft that needs a copy can't start then.
+        return base + [("Cy vs Gus (Cy's deck)", "deck", "Fri 20", 1.5, IDS["Cy"]),
+                       ("Ash & Oak vs Crown Court", "copy", "Wed 20", 4),
+                       ("Pine Barrens vs Night Shift", "copy", "Wed 19", 4),
+                       ("Moxen Club vs Lotus Eaters", "copy", "Wed 20", 3)]
     if kind == "later":
         return base + [("Another match's deck", "deck", "Wed 19", 4, IDS["Cy"]),
                        ("Ben vs Fay (Ben's deck)", "deck", "Thu 20", 1.5, IDS["Ben"])]
-    return holds_for("good") + [("Ash & Oak vs Crown Court", "copy", "Wed 20", 4),
-                   ("Pine Barrens vs Night Shift", "copy", "Wed 19", 4),
-                   ("Moxen Club vs Lotus Eaters", "copy", "Wed 20", 3),
-                   ("Ash & Oak vs Crown Court", "copy", "Thu 20", 4)]
+    return holds_for("good") + [("Ash & Oak vs Crown Court", "copy", "Thu 20", 4)]
 
 
 def window_index(day, hour):
@@ -147,6 +148,8 @@ def build(scen):
             return None, None
         return n in sc["after"], n in sc["lib"]
 
+    now = "2026-10-21T14:00:00Z" if sc.get("booked") else "2026-10-18T22:00:00Z"
+    saved = "2026-10-19T13:40:00Z" if sc.get("booked") else "2026-10-18T20:40:00Z"
     thu20 = window_index("Thu", 20)
     if sc.get("booked"):
         draft = {"start_utc": iso(cell_time(window_index("Tue", 20))), "by": IDS["Ali"],
@@ -160,7 +163,7 @@ def build(scen):
 
     shared = {
         "format": "draftbot.scheduler.match", "version": 1, "seq": 17,
-        "generated_at": "2026-10-19T14:02:11Z",
+        "generated_at": now,
         "match": {"id": "4-3-7", "tournament_id": "4", "tournament_name": "Lotus Open Season 2", "round": 3,
                   "status": "booked" if sc.get("booked") else "open",
                   "thread_url": "https://discord.com/channels/900000000000000100/900000000000000200"},
@@ -171,7 +174,7 @@ def build(scen):
         "teams": [{"id": str(tid), "name": name, "players": [
             {"user": IDS[n], "name": n, "captain": k == 0,
              "source": "match" if n in ("Ali", "Eve") else "usual",
-             "saved_at": "2026-10-19T13:40:00Z" if n in ("Ali", "Eve") else None,
+             "saved_at": saved if n in ("Ali", "Eve") else None,
              "plays_after_draft": flags(n)[0], "needs_library": flags(n)[1],
              "cells": b64(weeks[n])} for k, n in enumerate(members)]}
             for name, tid, members in TEAMS],
@@ -203,7 +206,7 @@ for scen in SCENARIOS:
     ben = next(p for t in shared["teams"] for p in t["players"] if p["user"] == IDS["Ben"])
     me = {
         "format": "draftbot.scheduler.match_me", "version": 1, "seq": 17,
-        "generated_at": "2026-10-19T14:02:11Z",
+        "generated_at": shared["generated_at"],
         "match_id": "4-3-7", "user": IDS["Ben"], "name": "Ben",
         "plays_after_draft": ben["plays_after_draft"], "needs_library": ben["needs_library"],
         "deck": {"assigned": True, "cards": 45, "free_starts": b64(deck_ok), "short_reason": reason},

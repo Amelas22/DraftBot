@@ -2,7 +2,7 @@
   "format": "draftbot.scheduler.match",
   "version": 1,
   "seq": 17,
-  "generated_at": "2026-10-19T14:02:11Z",
+  "generated_at": "2026-10-18T22:00:00Z",
   "match": {
     "id": "4-3-7",
     "tournament_id": "4",
@@ -36,7 +36,7 @@
           "name": "Ali",
           "captain": true,
           "source": "match",
-          "saved_at": "2026-10-19T13:40:00Z",
+          "saved_at": "2026-10-18T20:40:00Z",
           "plays_after_draft": true,
           "needs_library": false,
           "cells": "AAAAAAAAAAAAAAP8AAAAAAP8AAAAAAP8AAAAAAP8AAAAAAAAAAAAAAAA"
@@ -82,7 +82,7 @@
           "name": "Eve",
           "captain": true,
           "source": "match",
-          "saved_at": "2026-10-19T13:40:00Z",
+          "saved_at": "2026-10-18T20:40:00Z",
           "plays_after_draft": false,
           "needs_library": false,
           "cells": "AAAAAAAAAAAAAAP/AAAAAAP/AAAAAAP/AAAAAAP/AAAAAAAAAAAAAAAA"
@@ -318,14 +318,14 @@
       3,
       2,
       2,
+      2,
+      2,
       1,
       1,
-      0,
-      0,
-      0,
-      0,
       1,
       1,
+      2,
+      2,
       2,
       2,
       3,
@@ -520,13 +520,6 @@
         "user": null,
         "start_utc": "2026-10-22T00:00:00Z",
         "end_utc": "2026-10-22T03:00:00Z"
-      },
-      {
-        "label": "Ash & Oak vs Crown Court",
-        "kind": "copy",
-        "user": null,
-        "start_utc": "2026-10-23T00:00:00Z",
-        "end_utc": "2026-10-23T04:00:00Z"
       }
     ]
   },

@@ -78,3 +78,16 @@ def test_later_scenario():
     bits = base64.b64decode(me["deck"]["free_starts"])
     free = [bool(bits[i // 8] & (0x80 >> i % 8)) for i in range(336)]
     assert not all(free) and any(free)
+
+
+@pytest.mark.parametrize("path", SHARED, ids=lambda p: p.name)
+def test_generated_at_dates_the_scenario(path):
+    f = load(path)
+    me = load(path.with_name(path.name.replace("match-shared", "match-me")))
+    assert me["generated_at"] == f["generated_at"]
+    # Thursday 19:00 New York (EDT, UTC-4) of the window: something is still bookable in principle.
+    assert f["generated_at"] < "2026-10-22T23:00:00Z"
+    if f["booking"]["draft"]:
+        assert f["generated_at"] > f["booking"]["draft"]["start_utc"]
+    else:
+        assert f["generated_at"] < f["window"]["start_utc"]
