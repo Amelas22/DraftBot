@@ -92,12 +92,13 @@ export function mountHeatmap(container, opts) {
     grid.append(col);
   });
 
+  // Touch the DOM only for cells whose look or words changed: 336 cells redraw on every tap.
   const update = () => {
     for (const [j, n] of nodes) {
-      n.className = `hcell ${cellClass(j)}`.trim();
+      const cls = `hcell ${cellClass(j)}`.trim();
+      if (n.className !== cls) n.className = cls;
       const label = cellLabel(j);
-      n.setAttribute("aria-label", label);
-      n.title = label;
+      if (n.title !== label) { n.title = label; n.setAttribute("aria-label", label); }
     }
   };
 
