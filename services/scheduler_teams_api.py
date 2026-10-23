@@ -170,11 +170,11 @@ async def _run(
         return await team_finder.withdraw_request(session, guild_id, user_id, args["team_id"], now)
     if kind in ("accept", "decline"):
         fn = team_finder.accept if kind == "accept" else team_finder.decline
-        return await fn(session, user_id, args["team_id"], args["requester"], now)
+        return await fn(session, guild_id, user_id, args["team_id"], args["requester"], now)
     if kind == "leave_team":
-        return await team_finder.leave_team(session, user_id, args["team_id"], now)
+        return await team_finder.leave_team(session, guild_id, user_id, args["team_id"], now)
     if kind == "close_team":
-        return await team_finder.close_team(session, user_id, args["team_id"], now)
+        return await team_finder.close_team(session, guild_id, user_id, args["team_id"], now)
     return await team_finder.set_taking_requests(
         session, guild_id, user_id, args["team_id"], args["on"], now
     )

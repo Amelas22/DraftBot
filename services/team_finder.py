@@ -296,14 +296,6 @@ def _name_of(members: list[LfgTeamMember], user_id: str) -> str:
     return str(member.display_name) if member else user_id
 
 
-async def _own_team(session: AsyncSession, user_id: str, team_id: str) -> LfgTeam | None:
-    tid = _team_id(team_id)
-    team = await session.get(LfgTeam, tid) if tid is not None else None
-    if team is None or team.captain_id != user_id:
-        return None
-    return team
-
-
 async def _live_memberships(session: AsyncSession, user_id: str, guild_id: str) -> int:
     """Current memberships in one guild on teams that are still open or full."""
     rows = (
@@ -322,13 +314,16 @@ async def _live_memberships(session: AsyncSession, user_id: str, guild_id: str) 
 
 
 async def accept(
-    session: AsyncSession, captain_id: str, team_id: str, requester: str, now: datetime
+    session: AsyncSession,
+    guild_id: str,
+    captain_id: str,
+    team_id: str,
+    requester: str,
+    now: datetime,
 ) -> ActionResult:
-    team = await _own_team(session, captain_id, team_id)
-    if team is None:
-        return _refuse("not_captain")
-    if team.status == "closed":
-        return _refuse("team_closed")
+    team = await _captain_team(session, guild_id, captain_id, team_id)
+    if not isinstance(team, LfgTeam):
+        return team
     members = await _current_members(session, int(team.id))
     if team.status == "full" or len(members) >= int(team.size):
         return _refuse("team_full")
@@ -348,7 +343,7 @@ async def accept(
 
     captain_name = _name_of(members, captain_id)
     text = f"You're on {captain_name}'s team."
-    if await _live_memberships(session, requester, str(team.guild_id)) > 1:
+    if await _live_memberships(session, requester, guild_id) > 1:
         text += f"\n{MULTI_TEAM_WARNING}"
     notices = [Notice(requester, text, "lfg")]
 
@@ -372,11 +367,16 @@ async def accept(
 
 
 async def decline(
-    session: AsyncSession, captain_id: str, team_id: str, requester: str, now: datetime
+    session: AsyncSession,
+    guild_id: str,
+    captain_id: str,
+    team_id: str,
+    requester: str,
+    now: datetime,
 ) -> ActionResult:
-    team = await _own_team(session, captain_id, team_id)
-    if team is None:
-        return _refuse("not_captain")
+    team = await _captain_team(session, guild_id, captain_id, team_id)
+    if not isinstance(team, LfgTeam):
+        return team
     request = await _pending(session, int(team.id), requester)
     if request is None:
         return _refuse("request_gone")
@@ -390,13 +390,11 @@ async def decline(
 
 
 async def close_team(
-    session: AsyncSession, captain_id: str, team_id: str, now: datetime
+    session: AsyncSession, guild_id: str, captain_id: str, team_id: str, now: datetime
 ) -> ActionResult:
-    team = await _own_team(session, captain_id, team_id)
-    if team is None:
-        return _refuse("not_captain")
-    if team.status == "closed":
-        return _refuse("team_closed")
+    team = await _captain_team(session, guild_id, captain_id, team_id)
+    if not isinstance(team, LfgTeam):
+        return team
     stamp = naive_utc(now)
     members = await _current_members(session, int(team.id))
     pending = await _pending_requests(session, int(team.id))
@@ -414,14 +412,13 @@ async def close_team(
 
 
 async def leave_team(
-    session: AsyncSession, user_id: str, team_id: str, now: datetime
+    session: AsyncSession, guild_id: str, user_id: str, team_id: str, now: datetime
 ) -> ActionResult:
-    tid = _team_id(team_id)
-    team = await session.get(LfgTeam, tid) if tid is not None else None
+    team = await _guild_team(session, guild_id, team_id)
     if team is None:
-        return _refuse("bad_input")
+        return _refuse("team_closed")
     if team.captain_id == user_id:
-        return await close_team(session, user_id, team_id, now)
+        return await close_team(session, guild_id, user_id, team_id, now)
     if team.status == "closed":
         return _refuse("team_closed")
     members = await _current_members(session, int(team.id))

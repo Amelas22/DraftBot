@@ -259,3 +259,21 @@ async def test_leave_team_success_path(client):
     (listed,) = body["state"]["teams"]
     assert [m["user"] for m in listed["members"]] == ["111"]
     assert any("left your team" in n.text and n.user_id == "111" for n, _ in client.sent)
+
+
+@pytest.mark.asyncio
+async def test_captain_actions_from_another_guilds_link_are_refused(client):
+    team = await _open(client, "111")
+    await _act(client, await _auth("200"), kind="request_join", team_id=team)
+    elsewhere = await _auth("111", guild="other")
+    for body in (
+        {"kind": "accept", "team_id": team, "requester": "200"},
+        {"kind": "decline", "team_id": team, "requester": "200"},
+        {"kind": "close_team", "team_id": team},
+        {"kind": "leave_team", "team_id": team},
+    ):
+        resp = await _act(client, elsewhere, **body)
+        assert (await resp.json())["code"] == "team_closed", body
+    state = await (await client.get("/api/teams", headers=await _auth("111"))).json()
+    assert state["teams"][0]["status"] == "open"
+    assert [r["user"] for r in state["me"]["incoming"][team]] == ["200"]

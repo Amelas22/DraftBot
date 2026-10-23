@@ -306,15 +306,15 @@ async def test_accept_decline_notices_and_refusals(test_db):
         tid = await _open(s, "cap", "Rook", 4)
         await _ask(s, tid, "ben", "Ben")
         await _ask(s, tid, "amy", "Amy")
-        assert (await accept(s, "ben", tid, "ben", NOW)).code == "not_captain"
-        assert (await decline(s, "ben", tid, "ben", NOW)).code == "not_captain"
-        assert (await accept(s, "cap", tid, "zed", NOW)).code == "request_gone"
-        r = await accept(s, "cap", tid, "ben", NOW)
+        assert (await accept(s, G, "ben", tid, "ben", NOW)).code == "not_captain"
+        assert (await decline(s, G, "ben", tid, "ben", NOW)).code == "not_captain"
+        assert (await accept(s, G, "cap", tid, "zed", NOW)).code == "request_gone"
+        r = await accept(s, G, "cap", tid, "ben", NOW)
         assert r.ok and r.notices == [Notice("ben", "You're on Rook's team.", "lfg")]
-        assert (await accept(s, "cap", tid, "ben", NOW)).code == "request_gone"
-        r = await decline(s, "cap", tid, "amy", NOW)
+        assert (await accept(s, G, "cap", tid, "ben", NOW)).code == "request_gone"
+        r = await decline(s, G, "cap", tid, "amy", NOW)
         assert r.ok and r.notices == [Notice("amy", "Rook's team declined your request.", None)]
-        assert (await decline(s, "cap", tid, "amy", NOW)).code == "request_gone"
+        assert (await decline(s, G, "cap", tid, "amy", NOW)).code == "request_gone"
         st = await teams_state(s, G, "ben")
         assert [m["name"] for m in st["teams"][0]["members"]] == ["Rook", "Ben"]
         assert st["me"]["on_teams"] == [tid]
@@ -325,8 +325,8 @@ async def test_accept_to_closed_team(test_db):
     async with db_session() as s:
         tid = await _open(s, "cap", "Rook")
         await _ask(s, tid, "ben")
-        await close_team(s, "cap", tid, NOW)
-        assert (await accept(s, "cap", tid, "ben", NOW)).code == "team_closed"
+        await close_team(s, G, "cap", tid, NOW)
+        assert (await accept(s, G, "cap", tid, "ben", NOW)).code == "team_closed"
 
 
 @pytest.mark.asyncio
@@ -335,8 +335,8 @@ async def test_team_fills_and_sequential_accept_refused(test_db):
         tid = await _open(s, "cap", "Rook", 3)
         for u in ("ben", "amy", "cat"):
             await _ask(s, tid, u, u.title())
-        assert (await accept(s, "cap", tid, "ben", NOW)).ok
-        r = await accept(s, "cap", tid, "amy", NOW)
+        assert (await accept(s, G, "cap", tid, "ben", NOW)).ok
+        r = await accept(s, G, "cap", tid, "amy", NOW)
         assert r.ok
         assert r.notices == [
             Notice("amy", "You're on Rook's team.", "lfg"),
@@ -348,7 +348,7 @@ async def test_team_fills_and_sequential_accept_refused(test_db):
         assert team["taking_requests"] is False
         out = (await teams_state(s, G, "cat"))["me"]["outgoing"]
         assert out[0]["status"] == "filled"
-        assert (await accept(s, "cap", tid, "cat", NOW)).code == "team_full"
+        assert (await accept(s, G, "cap", tid, "cat", NOW)).code == "team_full"
 
 
 @pytest.mark.asyncio
@@ -358,9 +358,9 @@ async def test_multi_team_warning(test_db):
         t2 = await _open(s, "cap2", "Bishop")
         await _ask(s, t1, "ben", "Ben")
         await _ask(s, t2, "ben", "Ben")
-        r1 = await accept(s, "cap", t1, "ben", NOW)
+        r1 = await accept(s, G, "cap", t1, "ben", NOW)
         assert r1.notices[0].text == "You're on Rook's team."
-        r2 = await accept(s, "cap2", t2, "ben", NOW)
+        r2 = await accept(s, G, "cap2", t2, "ben", NOW)
         assert r2.notices[0] == Notice("ben", "You're on Bishop's team.\n" + MULTI, "lfg")
 
 
@@ -370,23 +370,23 @@ async def test_leave_team(test_db):
         tid = await _open(s, "cap", "Rook", 3)
         for u in ("ben", "amy"):
             await _ask(s, tid, u, u.title())
-            await accept(s, "cap", tid, u, NOW)
+            await accept(s, G, "cap", tid, u, NOW)
         assert await _status(s, tid) == "full"
-        assert (await leave_team(s, "zed", tid, NOW)).code == "bad_input"
-        r = await leave_team(s, "ben", tid, NOW)
+        assert (await leave_team(s, G, "zed", tid, NOW)).code == "bad_input"
+        r = await leave_team(s, G, "ben", tid, NOW)
         assert r.ok and r.notices == [Notice("cap", "Ben left your team.", None)]
         assert await _status(s, tid) == "open"
         team = (await teams_state(s, G, "cap"))["teams"][0]
         assert team["taking_requests"] is True
         assert [m["user"] for m in team["members"]] == ["cap", "amy"]
-        assert (await leave_team(s, "ben", tid, NOW)).code == "bad_input"
+        assert (await leave_team(s, G, "ben", tid, NOW)).code == "bad_input"
 
 
 @pytest.mark.asyncio
 async def test_captain_leave_closes(test_db):
     async with db_session() as s:
         tid = await _open(s, "cap", "Rook")
-        r = await leave_team(s, "cap", tid, NOW)
+        r = await leave_team(s, G, "cap", tid, NOW)
         assert r.ok and await _status(s, tid) == "closed"
 
 
@@ -395,10 +395,10 @@ async def test_close_team(test_db):
     async with db_session() as s:
         tid = await _open(s, "cap", "Rook", 4)
         await _ask(s, tid, "ben", "Ben")
-        await accept(s, "cap", tid, "ben", NOW)
+        await accept(s, G, "cap", tid, "ben", NOW)
         await _ask(s, tid, "amy", "Amy")
-        assert (await close_team(s, "ben", tid, NOW)).code == "not_captain"
-        r = await close_team(s, "cap", tid, NOW)
+        assert (await close_team(s, G, "ben", tid, NOW)).code == "not_captain"
+        r = await close_team(s, G, "cap", tid, NOW)
         assert r.ok
         assert sorted(r.notices, key=lambda n: n.user_id) == [
             Notice("amy", "Rook closed their team.", None),
@@ -410,7 +410,7 @@ async def test_close_team(test_db):
         assert all(m.left_utc is None for m in members)
         reqs = (await s.execute(select(LfgRequest))).scalars().all()
         assert {r.status for r in reqs} == {"accepted", "declined"}
-        assert (await close_team(s, "cap", tid, NOW)).code == "team_closed"
+        assert (await close_team(s, G, "cap", tid, NOW)).code == "team_closed"
 
 
 @pytest.mark.asyncio
@@ -423,17 +423,17 @@ async def test_multi_team_warning_ignores_other_guilds_and_closed_teams(test_db)
         s.add(LfgRequest(team_id=other.id, user_id="ben", display_name="Ben", note="",
                          status="pending", created_utc=NOW.replace(tzinfo=None)))
         await s.flush()
-        assert (await accept(s, "cap2", str(other.id), "ben", NOW)).notices[0].text == "You're on Bishop's team."
-        r = await accept(s, "cap", t1, "ben", NOW)
+        assert (await accept(s, "g2", "cap2", str(other.id), "ben", NOW)).notices[0].text == "You're on Bishop's team."
+        r = await accept(s, G, "cap", t1, "ben", NOW)
         assert r.notices[0].text == "You're on Rook's team."
 
         t3 = await _open(s, "cap3", "Knight")
         await _ask(s, t3, "amy", "Amy")
-        await accept(s, "cap3", t3, "amy", NOW)
-        await close_team(s, "cap3", t3, NOW)
+        await accept(s, G, "cap3", t3, "amy", NOW)
+        await close_team(s, G, "cap3", t3, NOW)
         t4 = await _open(s, "cap4", "Pawn")
         await _ask(s, t4, "amy", "Amy")
-        r = await accept(s, "cap4", t4, "amy", NOW)
+        r = await accept(s, G, "cap4", t4, "amy", NOW)
         assert r.notices[0].text == "You're on Pawn's team."
 
 
@@ -465,7 +465,7 @@ async def test_reconcile_closes_team_of_registered_captain(test_db):
         tid = await _open(s, "cap", "Rook")
         for u in ("ben", "amy"):
             await _ask(s, tid, u, u.title())
-        await accept(s, "cap", tid, "ben", NOW)
+        await accept(s, G, "cap", tid, "ben", NOW)
         await _ask(s, tid, "zed", "Zed")
         await _tournament(s, ("Rooks", "cap"))
         notices = await reconcile_registered(s, G, NOW)
@@ -484,7 +484,7 @@ async def test_reconcile_member_leaves_other_teams(test_db):
         tid = await _open(s, "cap", "Rook", 3)
         for u in ("ben", "amy"):
             await _ask(s, tid, u, u.title())
-            await accept(s, "cap", tid, u, NOW)
+            await accept(s, G, "cap", tid, u, NOW)
         assert (await _team_row(s, tid)).status == "full"
         other = await _open(s, "cap2", "Bishop")
         await _ask(s, other, "amy", "Amy")
@@ -526,3 +526,25 @@ async def test_reconcile_counts_pending_unpaid_registration(test_db):
         await s.flush()
         await reconcile_registered(s, G, NOW)
         assert (await _team_row(s, tid)).status == "closed"
+
+
+@pytest.mark.asyncio
+async def test_captain_actions_only_reach_teams_in_the_callers_guild(test_db):
+    async with db_session() as s:
+        tid = await _open(s, "cap", "Rook")
+        await _ask(s, tid, "ben", "Ben")
+        await _ask(s, tid, "amy", "Amy")
+        assert (await accept(s, G, "cap", tid, "ben", NOW)).ok
+        for refused in (
+            await accept(s, "other", "cap", tid, "amy", NOW),
+            await decline(s, "other", "cap", tid, "amy", NOW),
+            await close_team(s, "other", "cap", tid, NOW),
+            await leave_team(s, "other", "ben", tid, NOW),
+            await leave_team(s, "other", "cap", tid, NOW),
+        ):
+            assert refused.code == "team_closed" and refused.notices == []
+        team = await _team_row(s, tid)
+        assert team.status == "open"
+        st = await teams_state(s, G, "cap")
+        assert [m["user"] for m in st["teams"][0]["members"]] == ["cap", "ben"]
+        assert [r["user"] for r in st["me"]["incoming"][tid]] == ["amy"]
