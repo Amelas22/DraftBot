@@ -80,6 +80,7 @@ project-includes = [
     "player_settings.py",
     "player_settings_view.py",
     "cogs/settings_commands.py",
+    "cogs/lfg_cog.py",
 ]
 
 # SQLAlchemy 1.x-style Column() declarations type column attributes as Column[T]

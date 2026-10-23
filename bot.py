@@ -138,6 +138,8 @@ async def main():
         await sweep_brackets(bot)
         from tournament_nudge import re_register_premade_nudges
         await re_register_premade_nudges(bot)
+        from cogs.lfg_cog import LfgBoardView
+        bot.add_view(LfgBoardView())
         from livedrafts import re_register_live_drafts
         await re_register_live_drafts(bot)
         # As a task, not awaited: this one fetches a Discord message per recent
