@@ -8,9 +8,10 @@ import { CELL_MINUTES } from "./week.js";
 import { mountHeatmap } from "./grid.js";
 import { createRequester, SLOW_MESSAGE } from "./request.js";
 import { LinkExpired } from "./api.js";
+import { expiredMessage } from "./messages.js";
 import { el } from "./dom.js";
 
-export const MATCH_EXPIRED = "This link has expired: press Schedule in the match thread for a new one";
+const MATCH_EXPIRED = expiredMessage("match");
 const NEEDS_UPDATE = "This page needs updating.";
 const REFRESH_MS = 60000;
 const CELL_MS = CELL_MINUTES * 60000;

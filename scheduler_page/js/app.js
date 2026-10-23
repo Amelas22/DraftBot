@@ -2,7 +2,7 @@ import { loadLink, getJson, putJson, LinkExpired, BrokenLink, NEEDS_UPDATE } fro
 import { mountLfg } from "./lfg.js";
 import { mountUsual } from "./usual.js";
 import { expiredMessage, brokenMessage, loadFailedMessage } from "./messages.js";
-import { mountMatch, MATCH_EXPIRED } from "./matchview.js";
+import { mountMatch } from "./matchview.js";
 
 const root = document.getElementById("app");
 const say = (text) => { root.replaceChildren(Object.assign(document.createElement("p"), { className: "notice", textContent: text })); };
@@ -12,7 +12,7 @@ async function main() {
   try {
     const link = await loadLink(location.hash);
     linkView = link.view;
-    if (!link.fixture && link.exp && Date.parse(link.exp) < Date.now()) return say(linkView === "match" ? MATCH_EXPIRED : expiredMessage(linkView));
+    if (!link.fixture && link.exp && Date.parse(link.exp) < Date.now()) return say(expiredMessage(linkView));
     if (link.view === "usual") return await mountUsual(root, link, { getJson, putJson });
     if (link.view === "lfg") return mountLfg(root, link, { getJson, putJson });
     if (link.view === "match") return await mountMatch(root, link, { getJson, putJson });

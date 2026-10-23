@@ -25,3 +25,8 @@ test("a failed load says the page needs updating only for NeedsUpdate", async ()
   assert.equal(loadFailedMessage(new NeedsUpdate()), "This page needs updating.");
   assert.equal(loadFailedMessage(new Error("boom")), LOAD_FAILED);
 });
+
+test("the match view says the contract's sentence", () => {
+  assert.equal(expiredMessage("match"), "This link has expired: press Schedule in the match thread for a new one");
+  assert.equal(brokenMessage("match"), "This link is broken: press Schedule in the match thread for a new one");
+});

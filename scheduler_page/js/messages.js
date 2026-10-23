@@ -14,5 +14,10 @@ const NEUTRAL = "Press the button in Discord again for a new one.";
 
 const again = (view) => (Object.hasOwn(AGAIN, view) ? AGAIN[view] : NEUTRAL);
 
-export const expiredMessage = (view) => `This link has expired. ${again(view)}`;
-export const brokenMessage = (view) => `This link is broken. ${again(view)}`;
+// A match link says the contract's sentence (spec §Links) word for word.
+const MATCH_AGAIN = "press Schedule in the match thread for a new one";
+
+export const expiredMessage = (view) =>
+  (view === "match" ? `This link has expired: ${MATCH_AGAIN}` : `This link has expired. ${again(view)}`);
+export const brokenMessage = (view) =>
+  (view === "match" ? `This link is broken: ${MATCH_AGAIN}` : `This link is broken. ${again(view)}`);

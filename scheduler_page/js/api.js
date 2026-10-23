@@ -45,7 +45,7 @@ function fixtureLink(name) {
     urls: { usual_get: `fixtures/${name}.json`, usual_put: null } };
 }
 
-const REQUIRED_URLS = { usual: ["usual_get"], lfg: ["lfg_get"], match: ["shared_get", "me_get"] };
+const REQUIRED_URLS = { usual: ["usual_get"], lfg: ["lfg_get"], match: ["shared_get", "me_get", "request_put"] };
 
 // Page-relative on purpose: the page lives at .../scheduler/index.html, so "link/x.json" resolves beside it.
 export async function loadLink(hash, fetchFn = fetch) {

@@ -130,9 +130,12 @@ test("a real lfg link needs lfg_get", async () => {
   assert.equal(link.view, "lfg");
 });
 
-test("a real match link needs shared_get and me_get", async () => {
-  await assert.rejects(loadLink("#abc", real("match", { shared_get: "https://x/s" })), BrokenLink);
-  await assert.rejects(loadLink("#abc", real("match", { me_get: "https://x/m" })), BrokenLink);
-  const link = await loadLink("#abc", real("match", { shared_get: "https://x/s", me_get: "https://x/m" }));
+test("a real match link needs shared_get, me_get and request_put", async () => {
+  const all = { shared_get: "https://x/s", me_get: "https://x/m", request_put: "https://x/r" };
+  for (const key of Object.keys(all)) {
+    const { [key]: _, ...rest } = all;
+    await assert.rejects(loadLink("#abc", real("match", rest)), BrokenLink, `without ${key}`);
+  }
+  const link = await loadLink("#abc", real("match", all));
   assert.equal(link.view, "match");
 });
