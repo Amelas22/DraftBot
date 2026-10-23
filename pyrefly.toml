@@ -14,6 +14,7 @@ project-includes = [
     "services/availability.py",
     "services/scheduler_links.py",
     "services/scheduler_web.py",
+    "services/scheduler_http.py",
     "cogs/scheduler_web_cog.py",
     "models/scheduler.py",
     "models/team_finder.py",

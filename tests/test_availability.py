@@ -11,6 +11,7 @@ from services.availability import (
     UsualWeek,
     decode_cells,
     cells_to_bytes,
+    iso_z,
     load_usual_week,
     save_usual_week,
     usual_week_doc,
@@ -135,3 +136,11 @@ def test_usual_week_doc_matches_parse() -> None:
     assert (doc["format"], doc["version"], doc["zone"]) == (
         "draftbot.scheduler.usual_week", 1, "Europe/Paris")
     assert parse_usual_week(json.dumps(usual_week_doc(w)).encode()) == w
+
+
+def test_iso_z_reads_naive_as_utc_and_converts_aware():
+    from zoneinfo import ZoneInfo
+
+    assert iso_z(datetime(2026, 10, 22, 12, 0, 5, 123456)) == "2026-10-22T12:00:05Z"
+    assert iso_z(datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)) == "2026-10-22T12:00:00Z"
+    assert iso_z(datetime(2026, 10, 22, 8, 0, tzinfo=ZoneInfo("America/New_York"))) == "2026-10-22T12:00:00Z"

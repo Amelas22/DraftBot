@@ -1,7 +1,6 @@
 """The find-a-team JSON API: team list and idempotent player actions."""
 import json
 import uuid
-from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any
 
@@ -12,14 +11,7 @@ from database.db_session import db_session
 from models.team_finder import LfgAction
 from services import team_finder
 from services.availability import naive_utc
-from services.scheduler_web import (
-    _NOW,
-    DISPLAY_NAME,
-    NOTIFY,
-    _error,
-    identity,
-    read_body,
-)
+from services.scheduler_http import DISPLAY_NAME, NOTIFY, NOW, error, identity, read_body
 from services.team_finder import ActionResult, teams_state
 
 MAX_ACTION_BYTES = 4096
@@ -27,9 +19,6 @@ VIEW = "lfg"
 ID_MAX = 32
 
 routes = web.RouteTableDef()
-
-Run = Callable[..., Awaitable[ActionResult]]
-
 
 class _BadInput(Exception):
     pass
@@ -79,7 +68,7 @@ async def _state(guild_id: str, user_id: str) -> dict[str, object]:
 
 def _view_refused(request: web.Request) -> web.Response | None:
     if identity(request).view != VIEW:
-        return _error(403, "wrong_view")
+        return error(403, "wrong_view")
     return None
 
 
@@ -103,7 +92,7 @@ async def post_action(request: web.Request) -> web.Response:
         return refused
     raw = await read_body(request, MAX_ACTION_BYTES)
     if raw is None:
-        return _error(413, "too_large")
+        return error(413, "too_large")
     try:
         body = json.loads(raw)
         if not isinstance(body, dict):
@@ -114,10 +103,10 @@ async def post_action(request: web.Request) -> web.Response:
         action_id = str(uuid.UUID(action_id))
         kind, args = _parse(body)
     except (ValueError, _BadInput):  # json and uuid errors are ValueErrors
-        return _error(400, "bad_input")
+        return error(400, "bad_input")
 
     who = identity(request)
-    now: datetime = request.app[_NOW]()
+    now: datetime = request.app[NOW]()
     name = ""
     if kind in ("open_team", "request_join"):
         name = await request.app[DISPLAY_NAME](who.guild_id, who.user_id)
@@ -127,7 +116,7 @@ async def post_action(request: web.Request) -> web.Response:
             seen = await session.get(LfgAction, action_id)
             if seen is not None:
                 if seen.user_id != who.user_id:
-                    return _error(400, "bad_input")
+                    return error(400, "bad_input")
                 stored = json.loads(str(seen.result_json))
                 return await _reply(bool(stored["ok"]), stored["code"], who.guild_id, who.user_id)
             result = await _run(session, kind, args, who.guild_id, who.user_id, name, now)

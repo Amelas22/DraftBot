@@ -2,7 +2,7 @@
 import re
 from collections import deque
 from collections.abc import Awaitable, Callable, Collection
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from aiohttp import web
@@ -14,9 +14,21 @@ from services.availability import (
     load_usual_week,
     parse_usual_week,
     save_usual_week,
+    iso_z,
     usual_week_doc,
 )
-from services.scheduler_links import LinkIdentity, resolve_token
+from services.scheduler_http import (
+    DISPLAY_NAME,
+    IDENTITY,
+    NOTIFY,
+    NOW,
+    error,
+    identity,
+    read_body,
+    utc_now,
+)
+from services.scheduler_links import resolve_token
+from services.scheduler_teams_api import routes as teams_routes
 from services.team_finder import Notice
 
 TOKEN_LIMIT = 60
@@ -26,24 +38,12 @@ _NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 
 Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
 
-IDENTITY = "scheduler_identity"  # request key holding the LinkIdentity
-_NOW: web.AppKey[Callable[[], datetime]] = web.AppKey("now")
 _STATIC_DIR: web.AppKey[Path] = web.AppKey("static_dir")
 _LIMITER: web.AppKey["RateLimiter"] = web.AppKey("limiter")
 _ENABLED: web.AppKey[Callable[[str], bool]] = web.AppKey("enabled")
 _TRUSTED: web.AppKey[frozenset[str]] = web.AppKey("trusted_proxies")
-NOTIFY: web.AppKey[Callable[[Notice, str], Awaitable[bool]]] = web.AppKey("notify")
-DISPLAY_NAME: web.AppKey[Callable[[str, str], Awaitable[str]]] = web.AppKey("display_name")
 MAX_KEYS = 10_000
 _REPO_PAGE_DIR = Path(__file__).resolve().parent.parent / "scheduler_page"
-
-
-def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _error(status: int, code: str) -> web.Response:
-    return web.json_response({"error": code}, status=status)
 
 
 def client_ip(peer: str | None, forwarded: str, trusted: Collection[str]) -> str:
@@ -88,12 +88,6 @@ class RateLimiter:
         return False
 
 
-def identity(request: web.Request) -> LinkIdentity:
-    """Who the request's bearer token belongs to (set by auth_middleware)."""
-    found: LinkIdentity = request[IDENTITY]
-    return found
-
-
 _PUBLIC: set[Handler] = set()
 
 
@@ -108,22 +102,22 @@ async def auth_middleware(request: web.Request, handler: Handler) -> web.StreamR
     """Every route needs a valid bearer token unless it is marked ``public``."""
     if request.match_info.http_exception is not None or handler in _PUBLIC:
         return await handler(request)
-    now = request.app[_NOW]()
+    now = request.app[NOW]()
     limiter = request.app[_LIMITER]
     ip = client_ip(
         request.remote, request.headers.get("X-Forwarded-For", ""), request.app[_TRUSTED]
     )
     if limiter.over_limit("ip:" + ip, IP_LIMIT, now):
-        return _error(429, "rate_limited")
+        return error(429, "rate_limited")
     scheme, _, rest = request.headers.get("Authorization", "").partition(" ")
     token = rest.strip()
     found = await resolve_token(token, now) if scheme == "Bearer" and token else None
     if found is None:
-        return _error(401, "expired")
+        return error(401, "expired")
     if not request.app[_ENABLED](found.guild_id):
-        return _error(403, "not_enabled")
+        return error(403, "not_enabled")
     if limiter.over_limit("tok:" + token, TOKEN_LIMIT, now):
-        return _error(429, "rate_limited")
+        return error(429, "rate_limited")
     request[IDENTITY] = found
     return await handler(request)
 
@@ -131,15 +125,11 @@ async def auth_middleware(request: web.Request, handler: Handler) -> web.StreamR
 routes = web.RouteTableDef()
 
 
-def _iso_z(moment: datetime) -> str:
-    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
 @routes.get("/api/me")
 async def get_me(request: web.Request) -> web.Response:
     who = identity(request)
     return web.json_response(
-        {"user": who.user_id, "guild": who.guild_id, "view": who.view, "exp": _iso_z(who.expires_utc)}
+        {"user": who.user_id, "guild": who.guild_id, "view": who.view, "exp": iso_z(who.expires_utc)}
     )
 
 
@@ -147,33 +137,20 @@ async def get_me(request: web.Request) -> web.Response:
 async def get_usual_week(request: web.Request) -> web.Response:
     week = await load_usual_week(identity(request).user_id)
     if week is None:
-        return _error(404, "not_set")
+        return error(404, "not_set")
     return web.json_response(usual_week_doc(week))
-
-
-async def read_body(request: web.Request, limit: int) -> bytes | None:
-    """The request body, or None when it is larger than ``limit`` bytes."""
-    if (request.content_length or 0) > limit:
-        return None
-    raw = b""
-    while len(raw) <= limit:
-        chunk = await request.content.read(limit + 1 - len(raw))
-        if not chunk:
-            break
-        raw += chunk
-    return raw if len(raw) <= limit else None
 
 
 @routes.put("/api/usual-week")
 async def put_usual_week(request: web.Request) -> web.Response:
     raw = await read_body(request, MAX_FILE_BYTES)
     if raw is None:
-        return _error(413, "too_large")
+        return error(413, "too_large")
     try:
         week = parse_usual_week(raw)
     except InvalidWeek:
-        return _error(400, "bad_input")
-    await save_usual_week(identity(request).user_id, week, request.app[_NOW]())
+        return error(400, "bad_input")
+    await save_usual_week(identity(request).user_id, week, request.app[NOW]())
     return web.json_response(usual_week_doc(week))
 
 
@@ -239,11 +216,6 @@ async def get_fixture(request: web.Request) -> web.StreamResponse:
     return _static(request, f"fixtures/{name}")
 
 
-def register_routes(app: web.Application, extra: web.RouteTableDef) -> None:
-    """Add another module's routes to the same app."""
-    app.add_routes(extra)
-
-
 async def _no_notify(notice: Notice, guild_id: str) -> bool:
     return False
 
@@ -260,11 +232,8 @@ def build_app(
     notify: Callable[[Notice, str], Awaitable[bool]] = _no_notify,
     display_name: Callable[[str, str], Awaitable[str]] = _id_as_name,
 ) -> web.Application:
-    from services.scheduler_teams_api import routes as teams_routes  # imports this module
-
-
     app = web.Application(middlewares=[auth_middleware])
-    app[_NOW] = now
+    app[NOW] = now
     app[_STATIC_DIR] = static_dir
     app[_ENABLED] = enabled
     app[_TRUSTED] = frozenset(
@@ -273,6 +242,6 @@ def build_app(
     app[_LIMITER] = RateLimiter()
     app[NOTIFY] = notify
     app[DISPLAY_NAME] = display_name
-    register_routes(app, routes)
-    register_routes(app, teams_routes)
+    app.add_routes(routes)
+    app.add_routes(teams_routes)
     return app

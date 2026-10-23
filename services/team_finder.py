@@ -20,6 +20,7 @@ from services.availability import (
     UsualWeek,
     cells_from_bytes,
     cells_to_bytes,
+    iso_z,
     naive_utc,
     window_cells,
 )
@@ -75,10 +76,6 @@ def _hours_text(hours: float) -> str:
     rounded = round(hours * 2) / 2
     number = str(int(rounded)) if rounded == int(rounded) else f"{rounded:.1f}"
     return f"{number} hour" if rounded == 1 else f"{number} hours"
-
-
-def _iso(moment: datetime) -> str:
-    return moment.replace(tzinfo=None).isoformat(timespec="seconds") + "Z"
 
 
 async def _weeks(session: AsyncSession, users: list[str]) -> dict[str, UsualWeek]:
@@ -319,7 +316,7 @@ async def teams_state(session: AsyncSession, guild_id: str, user_id: str) -> dic
                     "note": str(r.note),
                     "zone": w.zone if (w := req_weeks.get(str(r.user_id))) else None,
                     "cells": _cells_b64(req_weeks.get(str(r.user_id))),
-                    "requested_at": _iso(r.created_utc),
+                    "requested_at": iso_z(r.created_utc),
                 }
                 for r in pending
                 if int(r.team_id) == tid

@@ -10,7 +10,8 @@ from typing_extensions import override
 from config import scheduler_host, scheduler_port
 from notification_service import send_dm
 from services.scheduler_links import issue_link
-from services.scheduler_web import build_app, utc_now
+from services.scheduler_http import utc_now
+from services.scheduler_web import build_app
 from services.team_finder import Notice
 
 

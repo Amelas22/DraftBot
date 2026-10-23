@@ -39,6 +39,13 @@ def naive_utc(moment: datetime) -> datetime:
     return moment.astimezone(timezone.utc).replace(tzinfo=None)
 
 
+def iso_z(moment: datetime) -> str:
+    """UTC ISO-8601 to the second with a ``Z``; a naive moment is taken as UTC (the *_utc columns)."""
+    if moment.tzinfo is not None:
+        moment = naive_utc(moment)
+    return moment.isoformat(timespec="seconds") + "Z"
+
+
 @cache
 def _known_zones() -> frozenset[str]:
     # available_timezones() walks the tzdata tree; once per process is enough.
