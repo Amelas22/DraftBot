@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { layoutWindow, formatCell, formatTime } from "../js/grid.js";
+import { layoutWindow, formatCell, formatTime, formatClock } from "../js/grid.js";
 import { CELLS } from "../js/week.js";
 
 const start = new Date("2026-10-21T04:00:00Z");
@@ -40,4 +40,9 @@ test("formatCell reads weekday, day, short month and 12-hour time", () => {
   assert.equal(formatCell(start, "America/New_York", 1), "Wed 21 Oct, 12:30 AM");
   assert.equal(formatCell(start, "Europe/London", 0), "Wed 21 Oct, 5:00 AM");
   assert.equal(formatTime(new Date("2026-10-25T23:30:00Z"), "Europe/London"), "Sun 25 Oct, 11:30 PM");
+});
+
+test("formatClock is formatTime's time of day", () => {
+  assert.equal(formatClock(new Date("2026-10-25T23:30:00Z"), "Europe/London"), "11:30 PM");
+  assert.equal(formatClock(new Date("2026-10-21T04:00:00Z"), "America/New_York"), "12:00 AM");
 });

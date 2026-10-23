@@ -35,8 +35,7 @@ export function layoutWindow(startUtc, zone) {
 }
 
 const labelFormatters = new Map();
-// "Wed 21 Oct, 7:00 PM" for an instant, in zone. Every view labels a time with this.
-export function formatTime(date, zone) {
+function timeParts(date, zone) {
   let f = labelFormatters.get(zone);
   if (!f) {
     f = new Intl.DateTimeFormat("en-US", {
@@ -46,8 +45,18 @@ export function formatTime(date, zone) {
   }
   const p = {};
   for (const part of f.formatToParts(date)) p[part.type] = part.value;
-  return `${p.weekday} ${p.day} ${p.month}, ${p.hour}:${p.minute} ${p.dayPeriod.toUpperCase()}`;
+  return p;
 }
+const clockOf = (p) => `${p.hour}:${p.minute} ${p.dayPeriod.toUpperCase()}`;
+
+// "Wed 21 Oct, 7:00 PM" for an instant, in zone. Every view labels a time with this.
+export function formatTime(date, zone) {
+  const p = timeParts(date, zone);
+  return `${p.weekday} ${p.day} ${p.month}, ${clockOf(p)}`;
+}
+
+// "7:00 PM": the time of day alone, for the end of a range whose start formatTime gave.
+export const formatClock = (date, zone) => clockOf(timeParts(date, zone));
 
 // The label of window cell j, in zone.
 export const formatCell = (startUtc, zone, j) => formatTime(addCells(startUtc, j), zone);

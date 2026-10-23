@@ -5,7 +5,7 @@ import {
   draftRequest, fakeOutcome, draftBooked, nobodyFollows, REFUSALS,
 } from "./match.js";
 import { CELL_MINUTES, CELL_MS, instantOf, cellOfIso, isoSeconds, hasRun } from "./week.js";
-import { mountHeatmap } from "./grid.js";
+import { mountHeatmap, formatClock } from "./grid.js";
 import { createRequester, requestStatus } from "./request.js";
 import { LinkExpired, NeedsUpdate } from "./api.js";
 import { expiredMessage } from "./messages.js";
@@ -282,7 +282,7 @@ export async function mountMatch(root, link, deps) {
     const free = freeFor(picked);
     const end = instant(picked + shared.rules.draft_cells);
     const kids = [
-      el("b", { text: timeLabel(instant(picked), zone) }), ` to ${timeLabel(end, zone).split(", ")[1]}`, el("br"),
+      el("b", { text: timeLabel(instant(picked), zone) }), ` to ${formatClock(end, zone)}`, el("br"),
       ...shared.teams.flatMap((t, ti) => [ti ? " · " : "", el("span", { class: `tn t${ti}`, text: `${t.name}:` }), ` ${free[ti].join(", ") || "nobody"}`]),
       el("br"), checkSentence(picked),
     ];
