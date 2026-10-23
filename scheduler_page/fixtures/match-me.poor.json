@@ -6,7 +6,7 @@
   "match_id": "4-3-7",
   "user": "900000000000000002",
   "name": "Ben",
-  "plays_after_draft": false,
+  "plays_after_draft": true,
   "needs_library": true,
   "deck": {
     "assigned": true,
@@ -14,13 +14,5 @@
     "free_starts": "//////////////////////wD//////8D///////////////////////8",
     "short_reason": "all 3 league copies are held"
   },
-  "requests": [
-    {
-      "request_id": "7f3c2a9e-4d1b-4b8e-9f0a-1c2d3e4f5a6b",
-      "status": "booked",
-      "kind": "book_sitting",
-      "at": "2026-10-19T13:55:02Z",
-      "reason": null
-    }
-  ]
+  "requests": []
 }

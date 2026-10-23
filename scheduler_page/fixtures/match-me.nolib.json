@@ -1,0 +1,18 @@
+{
+  "format": "draftbot.scheduler.match_me",
+  "version": 1,
+  "seq": 17,
+  "generated_at": "2026-10-19T14:02:11Z",
+  "match_id": "4-3-7",
+  "user": "900000000000000002",
+  "name": "Ben",
+  "plays_after_draft": true,
+  "needs_library": false,
+  "deck": {
+    "assigned": true,
+    "cards": 45,
+    "free_starts": "//////////////////////wD//////8D///////////////////////8",
+    "short_reason": null
+  },
+  "requests": []
+}

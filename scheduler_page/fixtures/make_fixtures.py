@@ -82,16 +82,31 @@ IDS = {n: str(900000000000000000 + k) for k, n in enumerate(["Ali", "Ben", "Cy",
 TEAMS = [("Gypsy Caravan", 41, ["Ali", "Ben", "Cy", "Dee"]), ("Elm Street", 42, ["Eve", "Fay", "Gus"])]
 
 
-def holds_for(scen):
-    """(label, kind, local start 'Day HH:MM', hours)"""
+SCENARIOS = {
+    # weeks, holds, who plays right after the draft, who needs the library, state
+    "good": dict(weeks="good", holds="good", after=("Ali", "Ben", "Fay"), lib=("Ben", "Fay")),
+    "poor": dict(weeks="poor", holds="poor", after=("Ali", "Ben", "Fay"), lib=("Ben", "Fay")),
+    # Ben plays after with his own cards: no copy is needed, so poor's Wednesday holds don't matter.
+    "nolib": dict(weeks="good", holds="poor", after=("Ali", "Ben", "Fay"), lib=()),
+    # nobody plays right after: no copy is needed even though Ben and Fay need the library later.
+    "nofollow": dict(weeks="good", holds="poor", after=(), lib=("Ben", "Fay")),
+    # the draft was booked and run; Ben's later game is booked.
+    "later": dict(weeks="good", holds="later", after=(), lib=("Ben", "Fay"), booked=True),
+}
+SIGNED_OUT = ("Dee",)  # not signed up for the match: both answers are null
+
+
+def holds_for(kind):
+    """(label, kind, local start 'Day HH', hours[, deck holder])"""
     base = [("Pine Barrens vs Lotus Eaters", "copy", "Tue 20", 4),
             ("Moxen Club vs Night Shift", "copy", "Thu 19", 4),
             ("Gypsy Caravan vs Elm Street", "copy", "Thu 21", 4)]
-    sittings = [("Ben vs Fay (Ben's deck)", "deck", "Wed 19", 1.5, IDS["Ben"]),
-                ("Ben vs Eve (Ben's deck)", "deck", "Tue 19", 1.5, IDS["Ben"])]
-    if scen == "good":
-        return base + sittings
-    return base + sittings + [("Ash & Oak vs Crown Court", "copy", "Wed 20", 4),
+    if kind == "good":
+        return base + [("Cy vs Gus (Cy's deck)", "deck", "Fri 20", 1.5, IDS["Cy"])]
+    if kind == "later":
+        return base + [("Another match's deck", "deck", "Wed 19", 4, IDS["Cy"]),
+                       ("Ben vs Fay (Ben's deck)", "deck", "Thu 20", 1.5, IDS["Ben"])]
+    return holds_for("good") + [("Ash & Oak vs Crown Court", "copy", "Wed 20", 4),
                    ("Pine Barrens vs Night Shift", "copy", "Wed 19", 4),
                    ("Moxen Club vs Lotus Eaters", "copy", "Wed 20", 3),
                    ("Ash & Oak vs Crown Court", "copy", "Thu 20", 4)]
@@ -102,15 +117,14 @@ def window_index(day, hour):
 
 
 def build(scen):
-    weeks = {n: to_window(local_cells(*s)) for n, s in WEEKS[scen].items()}
+    sc = SCENARIOS[scen]
+    weeks = {n: to_window(local_cells(*sp)) for n, sp in WEEKS[sc["weeks"]].items()}
     holds = []
-    used = [0.0] * CELLS
-    # copies_free = whole league copies that could still be assembled = min over the
-    # cube's cards of that card's free count. In these examples no two held decks
-    # share a card, so any deck holds in a cell cost exactly one whole copy.
+    # copies_free per cell: 3 copies, less one whole copy per copy hold, less one copy per
+    # deck hold over the cell (the held decks in these examples share cards), never below 0.
     copy_n = [0] * CELLS
     decks = [[] for _ in range(CELLS)]
-    for item in holds_for(scen):
+    for item in holds_for(sc["holds"]):
         label, kind, start, hrs = item[:4]
         owner = item[4] if len(item) > 4 else None
         d, h = start.split()
@@ -123,16 +137,33 @@ def build(scen):
                 copy_n[i] += 1
             else:
                 decks[i].append(owner)
-    copies_free = [max(0, 3 - copy_n[i] - (1 if decks[i] else 0)) for i in range(CELLS)]
+    copies_free = [max(0, 3 - copy_n[i] - len(decks[i])) for i in range(CELLS)]
     # Ben's own deck holds don't block his own new sitting (the cards are his).
-    free_wo_ben = [max(0, 3 - copy_n[i] - (1 if [u for u in decks[i] if u != IDS["Ben"]] else 0))
+    free_wo_ben = [max(0, 3 - copy_n[i] - len([u for u in decks[i] if u != IDS["Ben"]]))
                    for i in range(CELLS)]
+
+    def flags(n):
+        if n in SIGNED_OUT:
+            return None, None
+        return n in sc["after"], n in sc["lib"]
+
+    thu20 = window_index("Thu", 20)
+    if sc.get("booked"):
+        draft = {"start_utc": iso(cell_time(window_index("Tue", 20))), "by": IDS["Ali"],
+                 "booked_at": "2026-10-19T14:10:00Z", "library_copy": False}
+        sittings = [{"players": [IDS["Ben"], IDS["Fay"]], "start_utc": iso(cell_time(thu20)),
+                     "cells": 3, "by": IDS["Ben"], "decks_reserved": [IDS["Ben"]]}]
+    else:
+        draft = None
+        sittings = [{"players": [IDS["Cy"], IDS["Gus"]], "start_utc": iso(cell_time(window_index("Fri", 20))),
+                     "cells": 3, "by": IDS["Cy"], "decks_reserved": [IDS["Cy"]]}] if sc["holds"] != "later" else []
 
     shared = {
         "format": "draftbot.scheduler.match", "version": 1, "seq": 17,
         "generated_at": "2026-10-19T14:02:11Z",
         "match": {"id": "4-3-7", "tournament_id": "4", "tournament_name": "Lotus Open Season 2", "round": 3,
-                  "status": "open", "thread_url": "https://discord.com/channels/900000000000000100/900000000000000200"},
+                  "status": "booked" if sc.get("booked") else "open",
+                  "thread_url": "https://discord.com/channels/900000000000000100/900000000000000200"},
         "window": {"start_utc": iso(START_UTC), "cell_minutes": MIN, "cells": CELLS,
                    "display_zone": "America/New_York"},
         "rules": {"team_size": 3, "min_own_players": 2, "max_subs": 2,
@@ -141,32 +172,42 @@ def build(scen):
             {"user": IDS[n], "name": n, "captain": k == 0,
              "source": "match" if n in ("Ali", "Eve") else "usual",
              "saved_at": "2026-10-19T13:40:00Z" if n in ("Ali", "Eve") else None,
+             "plays_after_draft": flags(n)[0], "needs_library": flags(n)[1],
              "cells": b64(weeks[n])} for k, n in enumerate(members)]}
             for name, tid, members in TEAMS],
+        "pairings": [{"players": [IDS[a], IDS[b]]} for a, b in PAIRINGS],
         "library": {"enabled": True, "copies_total": 3, "copies_free": copies_free, "holds": holds},
-        "booking": {"draft": None, "sittings": [
-            {"players": [IDS["Ben"], IDS["Fay"]], "start_utc": iso(cell_time(window_index("Wed", 19))),
-             "cells": 3, "by": IDS["Fay"], "decks_reserved": [IDS["Ben"]]},
-            {"players": [IDS["Ben"], IDS["Eve"]], "start_utc": iso(cell_time(window_index("Tue", 19))),
-             "cells": 3, "by": IDS["Ben"], "decks_reserved": [IDS["Ben"]]}]},
+        "booking": {"draft": draft, "sittings": sittings},
     }
     return shared, weeks, copies_free, free_wo_ben
 
 
-for scen in ("good", "poor"):
+PAIRINGS = [("Ali", "Eve"), ("Ben", "Fay"), ("Cy", "Gus")]
+
+for scen in SCENARIOS:
     shared, weeks, free, free_ben = build(scen)
     (OUT / f"match-shared.{scen}.json").write_text(json.dumps(shared, indent=2) + "\n")
     # Ben's personal file: his deck check, and what happened to his requests.
-    deck_ok = {i for i in range(CELLS - 2) if all(free_ben[j] >= 1 for j in range(i, i + 3))}
+    if scen == "later":
+        # Cards of Ben's deck are held by another match Wed 19:00-23:00 local (8 cells); a sitting
+        # starting in any cell whose 3-cell span touches that hold finds them taken.
+        w0 = window_index("Wed", 19)
+        deck_ok = {i for i in range(CELLS - 2) if i + 3 <= w0 or i >= w0 + 8}
+        reason = "Some of your deck's cards are held Wednesday evening"
+        reqs = [{"request_id": "2d8e5b7c-6a14-4c93-b0e7-5f3a9c1d2e84", "status": "booked",
+                 "kind": "book_sitting", "at": "2026-10-19T14:20:00Z", "reason": None}]
+    else:
+        deck_ok = {i for i in range(CELLS - 2) if all(free_ben[j] >= 1 for j in range(i, i + 3))}
+        reason = "all 3 league copies are held" if scen == "poor" else None
+        reqs = []
+    ben = next(p for t in shared["teams"] for p in t["players"] if p["user"] == IDS["Ben"])
     me = {
         "format": "draftbot.scheduler.match_me", "version": 1, "seq": 17,
         "generated_at": "2026-10-19T14:02:11Z",
         "match_id": "4-3-7", "user": IDS["Ben"], "name": "Ben",
-        "plays_after_draft": False, "needs_library": True,
-        "deck": {"assigned": True, "cards": 45, "free_starts": b64(deck_ok),
-                 "short_reason": "all 3 league copies are held" if scen == "poor" else None},
-        "requests": [{"request_id": "7f3c2a9e-4d1b-4b8e-9f0a-1c2d3e4f5a6b", "status": "booked",
-                      "kind": "book_sitting", "at": "2026-10-19T13:55:02Z", "reason": None}],
+        "plays_after_draft": ben["plays_after_draft"], "needs_library": ben["needs_library"],
+        "deck": {"assigned": True, "cards": 45, "free_starts": b64(deck_ok), "short_reason": reason},
+        "requests": reqs,
     }
     (OUT / f"match-me.{scen}.json").write_text(json.dumps(me, indent=2) + "\n")
 

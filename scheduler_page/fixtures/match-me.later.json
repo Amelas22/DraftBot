@@ -1,0 +1,26 @@
+{
+  "format": "draftbot.scheduler.match_me",
+  "version": 1,
+  "seq": 17,
+  "generated_at": "2026-10-19T14:02:11Z",
+  "match_id": "4-3-7",
+  "user": "900000000000000002",
+  "name": "Ben",
+  "plays_after_draft": false,
+  "needs_library": true,
+  "deck": {
+    "assigned": true,
+    "cards": 45,
+    "free_starts": "//////////////////////AD///////////////////////////////8",
+    "short_reason": "Some of your deck's cards are held Wednesday evening"
+  },
+  "requests": [
+    {
+      "request_id": "2d8e5b7c-6a14-4c93-b0e7-5f3a9c1d2e84",
+      "status": "booked",
+      "kind": "book_sitting",
+      "at": "2026-10-19T14:20:00Z",
+      "reason": null
+    }
+  ]
+}
