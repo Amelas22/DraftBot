@@ -202,7 +202,8 @@ export async function mountMatch(root, link, deps) {
   const missText = (misses) => misses.map((m) => `- ${discordTime(instant(m.start))}: ${missLine(m)}`).join("\n");
   const nudgeText = (misses) => {
     const names = andList(otherTeam.players.map((p) => p.name));
-    return `${names}: no draft time works for ${matchName()} this week. Could you add more times on the Schedule page?` +
+    return `${names}: could you add more evenings to your usual week (My usual week in /settings)? ` +
+      `We can't find a draft time for ${matchName()} with enough of us free.` +
       (misses.length ? `\nClosest misses:\n${missText(misses)}` : "");
   };
   const adminText = (misses) =>
