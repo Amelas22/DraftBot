@@ -1,11 +1,11 @@
 import { loadLink, getJson, putJson, LinkExpired, BrokenLink } from "./api.js";
+import { mountLfg } from "./lfg.js";
 import { mountUsual, EXPIRED_MESSAGE, BROKEN_MESSAGE } from "./usual.js";
 
 const root = document.getElementById("app");
 const say = (text) => { root.replaceChildren(Object.assign(document.createElement("p"), { className: "notice", textContent: text })); };
 
-// Stubs until the find-a-team and league-match views land.
-const mountLfg = (root) => say("Coming soon.");
+// Stub until the league-match view lands.
 const mountMatch = (root) => say("Coming soon.");
 
 async function main() {
