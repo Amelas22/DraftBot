@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { layoutWindow } from "../js/grid.js";
+import { layoutWindow, formatCell, formatTime } from "../js/grid.js";
 import { CELLS } from "../js/week.js";
 
 const start = new Date("2026-10-21T04:00:00Z");
@@ -32,4 +32,12 @@ test("layoutWindow in a fixed zone is whole 48-cell days", () => {
 test("layoutWindow spring-forward day has 46 cells", () => {
   const days = layoutWindow(new Date("2026-03-25T00:00:00Z"), "Europe/London");
   assert.equal(days.find((d) => d.date === "2026-03-29").cells.length, 46);
+});
+
+test("formatCell reads weekday, day, short month and 12-hour time", () => {
+  // 04:00Z is midnight in New York; cell 38 is 7:00 PM that Wednesday.
+  assert.equal(formatCell(start, "America/New_York", 38), "Wed 21 Oct, 7:00 PM");
+  assert.equal(formatCell(start, "America/New_York", 1), "Wed 21 Oct, 12:30 AM");
+  assert.equal(formatCell(start, "Europe/London", 0), "Wed 21 Oct, 5:00 AM");
+  assert.equal(formatTime(new Date("2026-10-25T23:30:00Z"), "Europe/London"), "Sun 25 Oct, 11:30 PM");
 });

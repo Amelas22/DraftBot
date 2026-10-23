@@ -35,15 +35,22 @@ export function layoutWindow(startUtc, zone) {
 }
 
 const labelFormatters = new Map();
-// "Wed, Oct 21, 7:00 PM" for window cell j, in zone.
-export function formatCell(startUtc, zone, j) {
+// "Wed 21 Oct, 7:00 PM" for an instant, in zone. Every view labels a time with this.
+export function formatTime(date, zone) {
   let f = labelFormatters.get(zone);
   if (!f) {
-    f = new Intl.DateTimeFormat("en-US", { timeZone: zone, weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    f = new Intl.DateTimeFormat("en-US", {
+      timeZone: zone, weekday: "short", day: "numeric", month: "short", hour: "numeric", minute: "2-digit", hour12: true,
+    });
     labelFormatters.set(zone, f);
   }
-  return f.format(new Date(startUtc.getTime() + j * CELL_MINUTES * 60000));
+  const p = {};
+  for (const part of f.formatToParts(date)) p[part.type] = part.value;
+  return `${p.weekday} ${p.day} ${p.month}, ${p.hour}:${p.minute} ${p.dayPeriod.toUpperCase()}`;
 }
+
+// The label of window cell j, in zone.
+export const formatCell = (startUtc, zone, j) => formatTime(new Date(startUtc.getTime() + j * CELL_MINUTES * 60000), zone);
 
 const hourLabel = (h) => `${h % 12 === 0 ? 12 : h % 12} ${h < 12 ? "AM" : "PM"}`;
 
