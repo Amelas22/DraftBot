@@ -12,6 +12,30 @@ export class NotFound extends Error {
 const LINK_FORMAT = "draftbot.scheduler.link";
 const FIXTURE_RE = /^[A-Za-z0-9._-]+$/;
 
+const FIXTURE_VIEWER = "900000000000000002"; // Ben, the viewer in every lfg and match fixture
+const FIXTURE_USUAL = "fixtures/usual-week.json";
+
+function fixtureLink(name) {
+  const base = { exp: null, fixture: true };
+  if (name === "lfg") {
+    return { ...base, view: "lfg", user: FIXTURE_VIEWER,
+      urls: { lfg_get: "fixtures/lfg.json", usual_get: FIXTURE_USUAL, usual_put: null } };
+  }
+  if (name === "match" || name.startsWith("match.")) {
+    const scenario = name.slice("match.".length);
+    if (!scenario) throw new Error("match fixture needs a scenario");
+    return { ...base, view: "match", user: FIXTURE_VIEWER,
+      urls: {
+        shared_get: `fixtures/match-shared.${scenario}.json`, me_get: `fixtures/match-me.${scenario}.json`,
+        week_put: null, request_put: null, usual_get: FIXTURE_USUAL, usual_put: null,
+      } };
+  }
+  return { ...base, view: "usual", user: "fixture",
+    urls: { usual_get: `fixtures/${name}.json`, usual_put: null } };
+}
+
+const REQUIRED_URLS = { usual: ["usual_get"], lfg: ["lfg_get"], match: ["shared_get", "me_get"] };
+
 // Page-relative on purpose: the page lives at .../scheduler/index.html, so "link/x.json" resolves beside it.
 export async function loadLink(hash, fetchFn = fetch) {
   const raw = String(hash || "").replace(/^#/, "");
@@ -20,10 +44,7 @@ export async function loadLink(hash, fetchFn = fetch) {
   if (raw.startsWith("fixture=")) {
     const name = raw.slice("fixture=".length);
     if (!FIXTURE_RE.test(name)) throw new Error("bad fixture name");
-    return {
-      view: "usual", user: "fixture", exp: null, fixture: true,
-      urls: { usual_get: `fixtures/${name}.json`, usual_put: null },
-    };
+    return fixtureLink(name);
   }
 
   if (!/^[A-Za-z0-9_-]+$/.test(raw)) throw new Error("bad link token");
@@ -34,7 +55,9 @@ export async function loadLink(hash, fetchFn = fetch) {
   if (!body || body.format !== LINK_FORMAT) throw new Error("unknown link format");
   if (!Number.isInteger(body.version) || body.version > 1) throw new Error("link file is newer than this page");
   const urls = body.urls || {};
-  if (body.view === "usual" && (typeof urls.usual_get !== "string" || !urls.usual_get)) throw new BrokenLink("link file has no usual_get");
+  for (const key of REQUIRED_URLS[body.view] || []) {
+    if (typeof urls[key] !== "string" || !urls[key]) throw new BrokenLink(`link file has no ${key}`);
+  }
   return { view: body.view, user: body.user, exp: body.exp, urls, fixture: false };
 }
 

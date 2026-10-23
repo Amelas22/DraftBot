@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { loadLink, getJson, putJson, LinkExpired, NotFound } from "../js/api.js";
+import { loadLink, getJson, putJson, LinkExpired, NotFound, BrokenLink } from "../js/api.js";
 
 const LINK = {
   format: "draftbot.scheduler.link", version: 1, view: "usual", user: "42",
@@ -79,4 +79,52 @@ test("loadLink: a usual link without usual_get is broken", async () => {
   const { BrokenLink } = await import("../js/api.js");
   const bad = { ...LINK, urls: { usual_put: "https://x/put" } };
   await assert.rejects(loadLink("#abc", async () => reply(200, bad)), BrokenLink);
+});
+
+test("fixture=usual-week stays the usual view", async () => {
+  const link = await loadLink("#fixture=usual-week");
+  assert.equal(link.view, "usual");
+  assert.deepEqual(link.urls, { usual_get: "fixtures/usual-week.json", usual_put: null });
+});
+
+test("fixture=lfg routes to the find-a-team view as Ben", async () => {
+  const link = await loadLink("#fixture=lfg");
+  assert.equal(link.view, "lfg");
+  assert.equal(link.fixture, true);
+  assert.equal(link.user, "900000000000000002");
+  assert.deepEqual(link.urls, {
+    lfg_get: "fixtures/lfg.json", usual_get: "fixtures/usual-week.json", usual_put: null,
+  });
+});
+
+test("fixture=match.good routes to the match view with no uploads", async () => {
+  const link = await loadLink("#fixture=match.good");
+  assert.equal(link.view, "match");
+  assert.equal(link.fixture, true);
+  assert.equal(link.user, "900000000000000002");
+  assert.deepEqual(link.urls, {
+    shared_get: "fixtures/match-shared.good.json", me_get: "fixtures/match-me.good.json",
+    week_put: null, request_put: null,
+    usual_get: "fixtures/usual-week.json", usual_put: null,
+  });
+});
+
+test("fixture=match. with no scenario is an error", async () => {
+  await assert.rejects(loadLink("#fixture=match."));
+  await assert.rejects(loadLink("#fixture=match"));
+});
+
+const real = (view, urls) => async () => reply(200, { ...LINK, view, urls });
+
+test("a real lfg link needs lfg_get", async () => {
+  await assert.rejects(loadLink("#abc", real("lfg", { usual_get: "https://x/g" })), BrokenLink);
+  const link = await loadLink("#abc", real("lfg", { lfg_get: "https://x/l", usual_get: "https://x/g" }));
+  assert.equal(link.view, "lfg");
+});
+
+test("a real match link needs shared_get and me_get", async () => {
+  await assert.rejects(loadLink("#abc", real("match", { shared_get: "https://x/s" })), BrokenLink);
+  await assert.rejects(loadLink("#abc", real("match", { me_get: "https://x/m" })), BrokenLink);
+  const link = await loadLink("#abc", real("match", { shared_get: "https://x/s", me_get: "https://x/m" }));
+  assert.equal(link.view, "match");
 });
