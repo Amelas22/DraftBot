@@ -1,7 +1,7 @@
 // The usual-week editor: a pure model (applyStroke, toFile, loadWeek) plus a thin DOM view (mountUsual).
 import { CELLS, decodeCells, encodeCells, isoSeconds } from "./week.js";
 import { LinkExpired, checkDoc } from "./api.js";
-import { expiredMessage } from "./messages.js";
+import { expiredMessage, NOT_ENABLED } from "./messages.js";
 import { el } from "./dom.js";
 import { appBar } from "./appbar.js";
 
@@ -49,6 +49,7 @@ const SAVE_FAILED = "Could not save. Check your connection and press Save again.
 const SAVE_MESSAGES = {
   too_large: "That week is too big to save.",
   rate_limited: "Too many saves just now. Wait a minute and press Save again.",
+  not_enabled: NOT_ENABLED,
 };
 export const saveFailedMessage = (e) => (e && Object.hasOwn(SAVE_MESSAGES, e.code) ? SAVE_MESSAGES[e.code] : SAVE_FAILED);
 

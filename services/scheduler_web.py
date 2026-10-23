@@ -1,12 +1,13 @@
 """The scheduler web app: static page plus the token-authenticated JSON API."""
 import re
 from collections import deque
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from aiohttp import web
 
+from config import scheduler_enabled, scheduler_trusted_proxies
 from services.availability import (
     MAX_FILE_BYTES,
     InvalidWeek,
@@ -20,7 +21,6 @@ from services.scheduler_links import LinkIdentity, resolve_token
 TOKEN_LIMIT = 60
 IP_LIMIT = 120
 WINDOW = timedelta(minutes=1)
-_LOOPBACK = frozenset({"127.0.0.1", "::1"})
 _NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 
 Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
@@ -29,6 +29,8 @@ IDENTITY = "scheduler_identity"  # request key holding the LinkIdentity
 _NOW: web.AppKey[Callable[[], datetime]] = web.AppKey("now")
 _STATIC_DIR: web.AppKey[Path] = web.AppKey("static_dir")
 _LIMITER: web.AppKey["RateLimiter"] = web.AppKey("limiter")
+_ENABLED: web.AppKey[Callable[[str], bool]] = web.AppKey("enabled")
+_TRUSTED: web.AppKey[frozenset[str]] = web.AppKey("trusted_proxies")
 MAX_KEYS = 10_000
 _REPO_PAGE_DIR = Path(__file__).resolve().parent.parent / "scheduler_page"
 
@@ -41,12 +43,12 @@ def _error(status: int, code: str) -> web.Response:
     return web.json_response({"error": code}, status=status)
 
 
-def client_ip(peer: str | None, forwarded: str) -> str:
-    """The caller's address. Behind our own proxy (loopback peer) the proxy
-    appends the real peer last, so the last X-Forwarded-For entry is the one
-    a client cannot forge; any other peer is used as-is."""
+def client_ip(peer: str | None, forwarded: str, trusted: Collection[str]) -> str:
+    """The caller's address. A trusted proxy appends the real peer last, so
+    behind one the last X-Forwarded-For entry is the one a client cannot
+    forge; any other peer is used as-is."""
     peer = peer or ""
-    if peer in _LOOPBACK:
+    if peer in trusted:
         last = forwarded.split(",")[-1].strip()
         if last:
             return last
@@ -105,7 +107,9 @@ async def auth_middleware(request: web.Request, handler: Handler) -> web.StreamR
         return await handler(request)
     now = request.app[_NOW]()
     limiter = request.app[_LIMITER]
-    ip = client_ip(request.remote, request.headers.get("X-Forwarded-For", ""))
+    ip = client_ip(
+        request.remote, request.headers.get("X-Forwarded-For", ""), request.app[_TRUSTED]
+    )
     if limiter.over_limit("ip:" + ip, IP_LIMIT, now):
         return _error(429, "rate_limited")
     scheme, _, rest = request.headers.get("Authorization", "").partition(" ")
@@ -113,6 +117,8 @@ async def auth_middleware(request: web.Request, handler: Handler) -> web.StreamR
     found = await resolve_token(token, now) if scheme == "Bearer" and token else None
     if found is None:
         return _error(401, "expired")
+    if not request.app[_ENABLED](found.guild_id):
+        return _error(403, "not_enabled")
     if limiter.over_limit("tok:" + token, TOKEN_LIMIT, now):
         return _error(429, "rate_limited")
     request[IDENTITY] = found
@@ -180,7 +186,12 @@ def _static(request: web.Request, relative: str) -> web.StreamResponse:
         body=path.read_bytes(),
         content_type=_STATIC_TYPES[suffix],
         charset="utf-8",
-        headers={"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"},
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
+            "X-Frame-Options": "DENY",
+        },
     )
 
 
@@ -227,10 +238,16 @@ def register_routes(app: web.Application, extra: web.RouteTableDef) -> None:
 def build_app(
     now: Callable[[], datetime] = utc_now,
     static_dir: Path = _REPO_PAGE_DIR,
+    enabled: Callable[[str], bool] = scheduler_enabled,
+    trusted_proxies: Collection[str] | None = None,
 ) -> web.Application:
     app = web.Application(middlewares=[auth_middleware])
     app[_NOW] = now
     app[_STATIC_DIR] = static_dir
+    app[_ENABLED] = enabled
+    app[_TRUSTED] = frozenset(
+        scheduler_trusted_proxies() if trusted_proxies is None else trusted_proxies
+    )
     app[_LIMITER] = RateLimiter()
     register_routes(app, routes)
     return app

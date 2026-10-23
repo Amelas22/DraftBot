@@ -3,6 +3,10 @@
 export class LinkExpired extends Error {
   constructor(message = "link expired") { super(message); this.name = "LinkExpired"; }
 }
+// The server's scheduler feature flag is off for the link's guild.
+export class NotEnabled extends Error {
+  constructor(message = "not enabled") { super(message); this.name = "NotEnabled"; this.code = "not_enabled"; this.status = 403; }
+}
 export const NEEDS_UPDATE = "This page needs updating.";
 // A document in a format or version this page doesn't know: the page itself is out of date.
 export class NeedsUpdate extends Error {
@@ -39,6 +43,10 @@ export function createApi(token, fetchFn = fetch) {
     }
     const res = await fetchFn(path, opts);
     if (res.status === 401) throw new LinkExpired();
+    if (res.status === 403) {
+      const err = await failure(res);
+      throw err.code === "not_enabled" ? new NotEnabled() : err;
+    }
     return res;
   }
   async function json(method, path, body) {

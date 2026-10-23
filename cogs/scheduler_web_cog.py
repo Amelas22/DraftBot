@@ -6,10 +6,8 @@ from discord.ext import commands
 from loguru import logger
 from typing_extensions import override
 
-from config import scheduler_port
+from config import scheduler_host, scheduler_port
 from services.scheduler_web import build_app
-
-HOST = "127.0.0.1"
 
 
 class SchedulerWebCog(commands.Cog):
@@ -20,19 +18,19 @@ class SchedulerWebCog(commands.Cog):
         self._start_task = bot.loop.create_task(self._start())
 
     async def _start(self) -> None:
-        port = scheduler_port()
+        host, port = scheduler_host(), scheduler_port()
         runner = web.AppRunner(build_app())
         try:
             await runner.setup()
-            await web.TCPSite(runner, HOST, port).start()
+            await web.TCPSite(runner, host, port).start()
         except BaseException as exc:
             await runner.cleanup()
             if isinstance(exc, asyncio.CancelledError):
                 raise
-            logger.error(f"Scheduler web app could not start on {HOST}:{port}: {exc!r}")
+            logger.error(f"Scheduler web app could not start on {host}:{port}: {exc!r}")
             return
         self._runner = runner
-        logger.info(f"Scheduler web app listening on http://{HOST}:{port}")
+        logger.info(f"Scheduler web app listening on http://{host}:{port}")
 
     @override
     def cog_unload(self) -> None:

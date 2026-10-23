@@ -53,6 +53,7 @@ test("save failures say what went wrong", () => {
   const err = (code) => Object.assign(new Error(code), { code });
   assert.equal(saveFailedMessage(err("too_large")), "That week is too big to save.");
   assert.equal(saveFailedMessage(err("rate_limited")), "Too many saves just now. Wait a minute and press Save again.");
+  assert.equal(saveFailedMessage(err("not_enabled")), "Find a team is turned off in this server right now.");
   assert.equal(saveFailedMessage(err("bad_input")), "Could not save. Check your connection and press Save again.");
   assert.equal(saveFailedMessage(new TypeError("fetch failed")), "Could not save. Check your connection and press Save again.");
 });

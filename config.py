@@ -354,14 +354,26 @@ def scheduler_enabled(guild_id):
     config = get_config(guild_id)
     return config.get("features", {}).get("scheduler", False)
 
+
 def scheduler_base_url() -> str:
     """Public base URL of the scheduler web app, without a trailing slash."""
     return os.getenv("SCHEDULER_BASE_URL", "http://localhost:8787").rstrip("/")
 
 
+def scheduler_host() -> str:
+    """Address the scheduler web app binds (loopback unless told otherwise)."""
+    return os.getenv("SCHEDULER_HOST", "127.0.0.1")
+
+
 def scheduler_port() -> int:
-    """Port the scheduler web app listens on (127.0.0.1 only)."""
+    """Port the scheduler web app listens on."""
     return int(os.getenv("SCHEDULER_PORT", "8787"))
+
+
+def scheduler_trusted_proxies() -> frozenset[str]:
+    """Peer addresses whose X-Forwarded-For the scheduler web app believes."""
+    raw = os.getenv("SCHEDULER_TRUSTED_PROXIES", "127.0.0.1,::1")
+    return frozenset(part.strip() for part in raw.split(",") if part.strip())
 
 
 def get_draftmancer_base_url():

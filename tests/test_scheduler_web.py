@@ -38,9 +38,11 @@ async def client(test_db, tmp_path):
     (static / "fixtures" / "a.json").write_text("{}")
     (static / "fixtures" / "make_fixtures.py").write_text("secret")
     clock = {"now": NOW}
-    app = build_app(now=lambda: clock["now"], static_dir=static)
+    enabled = {"222"}
+    app = build_app(now=lambda: clock["now"], static_dir=static, enabled=lambda g: g in enabled)
     async with TestClient(TestServer(app)) as c:
         c.clock = clock  # type: ignore[attr-defined]
+        c.enabled = enabled  # type: ignore[attr-defined]
         yield c
 
 
@@ -160,10 +162,64 @@ async def test_ip_rate_limit_uses_forwarded_for_from_loopback(client):
 
 
 def test_client_ip_trusts_only_last_hop_from_loopback():
-    assert client_ip("127.0.0.1", "6.6.6.6, 1.2.3.4") == "1.2.3.4"
-    assert client_ip("::1", "1.2.3.4") == "1.2.3.4"
-    assert client_ip("127.0.0.1", "") == "127.0.0.1"
-    assert client_ip("10.0.0.5", "6.6.6.6, 1.2.3.4") == "10.0.0.5"
+    loopback = {"127.0.0.1", "::1"}
+    assert client_ip("127.0.0.1", "6.6.6.6, 1.2.3.4", loopback) == "1.2.3.4"
+    assert client_ip("::1", "1.2.3.4", loopback) == "1.2.3.4"
+    assert client_ip("127.0.0.1", "", loopback) == "127.0.0.1"
+    assert client_ip("10.0.0.5", "6.6.6.6, 1.2.3.4", loopback) == "10.0.0.5"
+
+
+def test_client_ip_trusts_a_configured_proxy_only():
+    docker = {"172.17.0.1"}
+    assert client_ip("172.17.0.1", "6.6.6.6, 1.2.3.4", docker) == "1.2.3.4"
+    assert client_ip("127.0.0.1", "6.6.6.6, 1.2.3.4", docker) == "127.0.0.1"
+    assert client_ip("172.17.0.1", "", docker) == "172.17.0.1"
+
+
+def test_trusted_proxies_come_from_the_environment(monkeypatch):
+    from config import scheduler_trusted_proxies
+
+    assert scheduler_trusted_proxies() == frozenset({"127.0.0.1", "::1"})
+    monkeypatch.setenv("SCHEDULER_TRUSTED_PROXIES", " 172.17.0.1 , ,10.0.0.2")
+    assert scheduler_trusted_proxies() == frozenset({"172.17.0.1", "10.0.0.2"})
+
+
+def test_host_comes_from_the_environment(monkeypatch):
+    from config import scheduler_host
+
+    assert scheduler_host() == "127.0.0.1"
+    monkeypatch.setenv("SCHEDULER_HOST", "0.0.0.0")
+    assert scheduler_host() == "0.0.0.0"
+
+
+@pytest.mark.asyncio
+async def test_untrusted_peer_forwarded_for_is_ignored(test_db, tmp_path):
+    app = build_app(now=lambda: NOW, static_dir=tmp_path, trusted_proxies={"10.9.9.9"})
+    async with TestClient(TestServer(app)) as c:
+        statuses = []
+        for i in range(121):
+            resp = await c.get(
+                "/api/me", headers={"Authorization": "Bearer t", "X-Forwarded-For": f"5.5.5.{i}"}
+            )
+            statuses.append(resp.status)
+    # The loopback test client is not a trusted proxy here, so every request counts against one IP.
+    assert statuses[120] == 429
+
+
+@pytest.mark.asyncio
+async def test_flag_off_refuses_the_api(client):
+    headers = await _auth()
+    client.enabled.clear()
+    for path in ("/api/me", "/api/usual-week"):
+        resp = await client.get(path, headers=headers)
+        assert resp.status == 403, path
+        assert await resp.json() == {"error": "not_enabled"}
+    resp = await client.put("/api/usual-week", data=json.dumps(_doc()), headers=headers)
+    assert resp.status == 403
+    assert await load_usual_week("111") is None
+    # A bad token is still a 401, and the static page still loads.
+    assert (await client.get("/api/me", headers={"Authorization": "Bearer nope"})).status == 401
+    assert (await client.get("/")).status == 200
 
 
 @pytest.mark.asyncio
@@ -209,7 +265,10 @@ async def test_oversized_body_in_several_chunks(client):
 @pytest.mark.asyncio
 async def test_unknown_routes_404_and_static_has_nosniff(client):
     assert (await client.get("/nothing")).status == 404
-    assert (await client.get("/")).headers["X-Content-Type-Options"] == "nosniff"
+    headers = (await client.get("/")).headers
+    assert headers["X-Content-Type-Options"] == "nosniff"
+    assert headers["Referrer-Policy"] == "no-referrer"
+    assert headers["X-Frame-Options"] == "DENY"
 
 
 def test_rate_limiter_is_bounded():

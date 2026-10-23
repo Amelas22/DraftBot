@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createApi, createFixtureApi, apiFromHash, checkDoc, LinkExpired, NeedsUpdate, NEEDS_UPDATE } from "../js/api.js";
+import { createApi, createFixtureApi, apiFromHash, checkDoc, LinkExpired, NeedsUpdate, NotEnabled, NEEDS_UPDATE } from "../js/api.js";
 
 const TOKEN = "abcdefghijklmnopqrstuv"; // 22 chars, like a real link token
 const reply = (status, body) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
@@ -37,6 +37,15 @@ test("a 401 is LinkExpired on every call", async () => {
   for (const call of [() => api.me(), () => api.getUsual(), () => api.putUsual({}), () => api.get("/a"), () => api.post("/a", {})]) {
     await assert.rejects(call(), LinkExpired);
   }
+});
+
+test("a 403 not_enabled is NotEnabled on every call; another 403 keeps its code", async () => {
+  const api = createApi(TOKEN, recorder(403, { error: "not_enabled" }));
+  for (const call of [() => api.me(), () => api.getUsual(), () => api.putUsual({}), () => api.get("/a"), () => api.post("/a", {})]) {
+    await assert.rejects(call(), NotEnabled);
+  }
+  const other = createApi(TOKEN, recorder(403, { error: "wrong_view" }));
+  await assert.rejects(other.get("/a"), (e) => !(e instanceof NotEnabled) && e.code === "wrong_view" && e.status === 403);
 });
 
 test("getUsual turns 404 into null", async () => {
