@@ -3,6 +3,7 @@ import { CELLS, decodeCells, encodeCells, isoSeconds } from "./week.js";
 import { LinkExpired, checkDoc } from "./api.js";
 import { expiredMessage } from "./messages.js";
 import { el } from "./dom.js";
+import { appBar } from "./appbar.js";
 
 const FORMAT = "draftbot.scheduler.usual_week";
 const PER_DAY = 48;
@@ -197,7 +198,7 @@ export async function mountUsual(root, api, deps = {}) {
   });
 
   root.replaceChildren(
-    el("p", { class: "eyebrow", text: "Your usual week" }),
+    appBar("Your usual week"),
     el("h1", { text: "When are you usually free?" }),
     el("p", { class: "lede", text: "Drag or tap to paint the half-hours you can usually draft. Times are local to the zone below. Drag again over painted cells to erase." }),
     el("label", { class: "zonerow", for: "zone" }, "Time zone ", select),
