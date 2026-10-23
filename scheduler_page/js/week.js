@@ -50,17 +50,6 @@ export function windowCells(zone, usual, startUtc) {
   return out;
 }
 
-// Half-open [start, end) runs of consecutive cells, sorted.
-export function mergeBlocks(cells) {
-  const blocks = [];
-  for (const i of [...cells].sort((a, b) => a - b)) {
-    const last = blocks[blocks.length - 1];
-    if (last && last[1] === i) last[1] = i + 1;
-    else blocks.push([i, i + 1]);
-  }
-  return blocks;
-}
-
 // The instant j half-hour cells after startUtc.
 export const addCells = (startUtc, j) => new Date(startUtc.getTime() + j * CELL_MS);
 

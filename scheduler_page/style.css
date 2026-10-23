@@ -1,6 +1,6 @@
 :root {
   color-scheme: light dark;
-  --bg: #f3f8f4; --surface: #ffffff; --fg: #173b2a; --muted: #5d7c68;
+  --bg: #f3f8f4; --surface: #ffffff; --fg: #173b2a; --muted: #4f6e5b;
   --accent: #2f8a4f; --accent-fg: #ffffff; --chip: #e1eee5; --empty: #e9f0eb;
   --h1: #cfe8d6; --h2: #a3d6b1; --h3: #70bf88; --h4: #44a465; --h5: #2f8a4f; --h6: #1c6838;
   --line: #d5e3d9; --warn: #b5651d; --warnbg: #fbf0e1;

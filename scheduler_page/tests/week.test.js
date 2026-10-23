@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import {
-  decodeCells, encodeCells, windowCells, mergeBlocks, usualCellOf, CELLS,
+  decodeCells, encodeCells, windowCells, usualCellOf, CELLS,
 } from "../js/week.js";
 
 const fx = (name) =>
@@ -42,10 +42,6 @@ test("bit order is MSB first", () => {
 
 test("bad length throws", () => {
   assert.throws(() => decodeCells(btoa("x")));
-});
-
-test("mergeBlocks", () => {
-  assert.deepEqual(mergeBlocks(new Set([3, 4, 5, 9])), [[3, 6], [9, 10]]);
 });
 
 test("usualCellOf reads local weekday and half hour", () => {
