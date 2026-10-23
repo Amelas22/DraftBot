@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createRequester, POLL_MS, SLOW_MS, FAKE_MS } from "../js/request.js";
+import { createRequester, requestStatus, POLL_MS, SLOW_MS, FAKE_MS, SLOW_MESSAGE } from "../js/request.js";
 import { LinkExpired } from "../js/api.js";
 
 // A hand-cranked clock: timers fire only when advance() passes their due time.
@@ -207,4 +207,19 @@ test("stop() cancels a pending poll", async () => {
   await clock.advance(POLL_MS * 3);
   assert.equal(getMeCalls(), 0);
   assert.equal(clock.pending(), 0);
+});
+
+test("requestStatus: pending (mine, the other view's, slow), send error, my refusal, else nothing", () => {
+  const draft = { kind: "book_draft" }, sitting = { kind: "book_sitting" };
+  const R = { no_library: "No copy." };
+  assert.deepEqual(requestStatus({ pending: true, request: draft }, "book_draft", R), { text: "Booking… DraftBot confirms in a few seconds", warn: false });
+  assert.deepEqual(requestStatus({ pending: true, request: sitting }, "book_draft", R), { text: "Waiting for DraftBot to answer your later-game booking…", warn: false });
+  assert.deepEqual(requestStatus({ pending: true, request: draft }, "book_sitting", R), { text: "Waiting for DraftBot to answer the draft booking…", warn: false });
+  assert.deepEqual(requestStatus({ pending: true, slow: true, request: draft }, "book_draft", R), { text: SLOW_MESSAGE, warn: false });
+  assert.deepEqual(requestStatus({ pending: false, request: null }, "book_draft", R, "Couldn't send"), { text: "Couldn't send", warn: true });
+  const refused = { pending: false, request: draft, outcome: { status: "refused", reason: "no_library" } };
+  assert.deepEqual(requestStatus(refused, "book_draft", R), { text: "No copy.", warn: true });
+  assert.deepEqual(requestStatus({ ...refused, outcome: { status: "refused", reason: "odd" } }, "book_draft", R), { text: "DraftBot refused that request.", warn: true });
+  assert.equal(requestStatus(refused, "book_sitting", R), null);
+  assert.equal(requestStatus({ pending: false, request: draft, outcome: { status: "booked" } }, "book_draft", R), null);
 });

@@ -67,6 +67,14 @@ export const addCells = (startUtc, j) => new Date(startUtc.getTime() + j * CELL_
 // Window times of a match file (5): cell j is the half hour at window.start_utc + 30 min * j.
 export const startMs = (shared) => new Date(shared.window.start_utc).getTime();
 export const instantOf = (shared, j) => new Date(startMs(shared) + j * CELL_MS);
+// The (possibly fractional) window cell an ISO instant falls on.
+export const cellOfIso = (shared, iso) => (Date.parse(iso) - startMs(shared)) / CELL_MS;
+
+// Whether every cell in [start, start + n) is in the set.
+export function hasRun(cells, start, n) {
+  for (let k = 0; k < n; k++) if (!cells.has(start + k)) return false;
+  return true;
+}
 
 // An ISO instant without milliseconds, as the bot's files carry it.
 export const isoSeconds = (d) => d.toISOString().replace(/\.\d{3}Z$/, "Z");

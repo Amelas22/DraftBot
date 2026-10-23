@@ -9,3 +9,11 @@ test("plural counts in words", () => {
   assert.equal(pluralWord(1, "sub"), "sub");
   assert.equal(pluralWord(3, "sub"), "subs");
 });
+
+test("andList joins names", async () => {
+  const { andList } = await import("../js/words.js");
+  assert.equal(andList([]), "");
+  assert.equal(andList(["A"]), "A");
+  assert.equal(andList(["A", "B"]), "A and B");
+  assert.equal(andList(["A", "B", "C"]), "A, B and C");
+});

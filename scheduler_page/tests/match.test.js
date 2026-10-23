@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import {
   parseShared, parseMe, copyNeeded, freeCount, draftCheck, bestTimes, closestMisses,
-  draftRequest, fakeOutcome, timeLabel, REFUSALS,
+  draftRequest, fakeOutcome, timeLabel, baseRequest, windowClosed, draftBooked, REFUSALS,
 } from "../js/match.js";
 import { CELLS } from "../js/week.js";
 
@@ -273,4 +273,30 @@ test("labels carry the local date, in the viewer's zone, across London's 25 Oct 
   assert.equal(timeLabel(new Date("2026-10-25T02:30:00Z"), "Europe/London"), "Sun 25 Oct, 2:30 AM");
   assert.equal(timeLabel(new Date("2026-10-20T23:00:00Z"), "America/New_York"), "Tue 20 Oct, 7:00 PM");
   assert.equal(timeLabel(new Date("2026-10-20T23:00:00Z"), "Europe/London"), "Wed 21 Oct, 12:00 AM");
+});
+
+test("bestTimes carries each team's subs, the same as draftCheck", () => {
+  const { shared, now } = load("good");
+  for (const b of bestTimes(shared, NONE, now, ZONE, 50)) {
+    assert.deepEqual(b.teamSubs, draftCheck(shared, b.start, NONE, now).subs);
+    assert.equal(b.subs, Math.max(...b.teamSubs));
+  }
+});
+
+test("baseRequest is file 4's common shape; windowClosed ends at the window or a closed match", () => {
+  const { shared } = load("good");
+  const r = baseRequest(shared, "book_sitting", 4, new Date("2026-10-19T14:03:30.123Z"), "u-2");
+  assert.equal(r.kind, "book_sitting");
+  assert.deepEqual(r, { ...draftRequest(shared, 4, new Date("2026-10-19T14:03:30.123Z"), "u-2"), kind: "book_sitting" });
+  const end = new Date(Date.parse(shared.window.start_utc) + CELLS * 30 * 60000);
+  assert.equal(windowClosed(shared, new Date(end - 1)), false);
+  assert.equal(windowClosed(shared, end), true);
+  assert.equal(windowClosed({ ...shared, match: { ...shared.match, status: "closed" } }, new Date(end - 1)), true);
+});
+
+test("draftBooked: a booking in file 5 or a booked match", () => {
+  const { shared } = load("good");
+  assert.equal(draftBooked({ ...shared, booking: null, match: { ...shared.match, status: "open" } }), false);
+  assert.equal(draftBooked({ ...shared, booking: { draft: { start_utc: "x" } } }), true);
+  assert.equal(draftBooked({ ...shared, booking: null, match: { ...shared.match, status: "booked" } }), true);
 });

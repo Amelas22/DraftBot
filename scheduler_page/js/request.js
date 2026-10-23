@@ -6,6 +6,22 @@ export const POLL_MS = 5000;
 export const SLOW_MS = 120000;
 export const FAKE_MS = 1500;
 export const SLOW_MESSAGE = "DraftBot hasn't answered yet; it will, or check the match thread";
+const CONFIRMING = "Booking… DraftBot confirms in a few seconds";
+// While the other view's request waits, by the pending request's kind.
+const WAITING_FOR = {
+  book_draft: "Waiting for DraftBot to answer the draft booking…",
+  book_sitting: "Waiting for DraftBot to answer your later-game booking…",
+};
+
+// The status line of a view that books `kind`: a pending request (this view's or the other's), a send error,
+// or the bot's refusal of this view's request (refusals: reason -> sentence). null when there is nothing to say.
+export function requestStatus(s, kind, refusals, sendError = null) {
+  const mine = Boolean(s.request && s.request.kind === kind);
+  if (s.pending) return { text: s.slow ? SLOW_MESSAGE : mine ? CONFIRMING : WAITING_FOR[s.request.kind] || CONFIRMING, warn: false };
+  if (sendError) return { text: sendError, warn: true };
+  if (mine && s.outcome && s.outcome.status === "refused") return { text: refusals[s.outcome.reason] || "DraftBot refused that request.", warn: true };
+  return null;
+}
 
 const defaultTimer = (fn, ms) => {
   const id = setTimeout(fn, ms);

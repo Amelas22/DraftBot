@@ -62,3 +62,14 @@ test("addCells, instantOf and isoSeconds place a window cell in time", async () 
   assert.equal(isoSeconds(instantOf(shared, 3)), "2026-10-19T05:30:00Z");
   assert.equal(isoSeconds(new Date("2026-10-19T05:30:00.123Z")), "2026-10-19T05:30:00Z");
 });
+
+test("hasRun and cellOfIso", async () => {
+  const { hasRun, cellOfIso } = await import("../js/week.js");
+  const cells = new Set([3, 4, 5]);
+  assert.equal(hasRun(cells, 3, 3), true);
+  assert.equal(hasRun(cells, 4, 3), false);
+  assert.equal(hasRun(cells, 9, 0), true);
+  const shared = { window: { start_utc: "2026-10-19T04:00:00Z" } };
+  assert.equal(cellOfIso(shared, "2026-10-19T05:30:00Z"), 3);
+  assert.equal(cellOfIso(shared, "2026-10-19T05:45:00Z"), 3.5);
+});

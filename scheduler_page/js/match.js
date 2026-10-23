@@ -1,13 +1,12 @@
 // The match model: who is free, which draft hours are bookable, whether a library copy is needed, and a
 // stand-in for the bot's answer in fixture mode. Pure (no DOM). Cell j is the half hour at
 // window.start_utc + 30 min * j.
-import { decodeCells, CELLS, CELL_MS, mergeBlocks, startMs, instantOf, isoSeconds } from "./week.js";
+import { decodeCells, CELLS, CELL_MS, mergeBlocks, startMs, instantOf, cellOfIso, isoSeconds, hasRun } from "./week.js";
 import { formatTime } from "./grid.js";
+import { checkDoc } from "./api.js";
 
 // "Tue 20 Oct, 7:00 PM" in the given zone: the heatmap's own label, so every view reads alike.
 export { formatTime as timeLabel };
-
-const NEEDS_UPDATE = "This page needs updating.";
 
 export const REFUSALS = {
   not_bookable: "DraftBot's count says a team doesn't have two of its own players free then.",
@@ -19,12 +18,8 @@ export const REFUSALS = {
   stale: "That request was too old when DraftBot saw it. Try again.",
 };
 
-function checkHeader(doc, format) {
-  if (!doc || doc.format !== format || !(doc.version <= 1)) throw new Error(NEEDS_UPDATE);
-}
-
 export function parseShared(raw) {
-  checkHeader(raw, "draftbot.scheduler.match");
+  checkDoc(raw, "draftbot.scheduler.match");
   const doc = structuredClone(raw);
   return {
     ...doc,
@@ -36,12 +31,18 @@ export function parseShared(raw) {
 }
 
 export function parseMe(raw) {
-  checkHeader(raw, "draftbot.scheduler.match_me");
+  checkDoc(raw, "draftbot.scheduler.match_me");
   const doc = structuredClone(raw);
   const deck = doc.deck;
   if (deck && typeof deck.free_starts === "string") deck.free_starts = decodeCells(deck.free_starts);
   return { ...doc, deck };
 }
+
+// The draft is booked: file 5 carries the booking, or says the match is booked.
+export const draftBooked = (shared) => Boolean(shared.booking && shared.booking.draft) || shared.match.status === "booked";
+
+// Nobody on either team plays right after the draft.
+export const nobodyFollows = (shared) => !shared.teams.some((t) => t.players.some((p) => p.plays_after_draft === true));
 
 export function copyNeeded(shared) {
   if (!shared.library || !shared.library.enabled) return { needed: false, who: [] };
@@ -88,7 +89,7 @@ export function bestTimes(shared, off, nowUtc, zone = shared.window.display_zone
   const ok = new Map();
   for (let j = 0; j < CELLS; j++) {
     const r = draftCheck(shared, j, off, nowUtc);
-    if (r.ok) ok.set(j, { start: j, subs: Math.max(...r.subs) });
+    if (r.ok) ok.set(j, { start: j, subs: Math.max(...r.subs), teamSubs: r.subs });
   }
   // One offer per run: the start needing the fewest subs, earliest on a tie.
   return runsOf(ok)
@@ -112,7 +113,7 @@ export function closestMisses(shared, off, nowUtc, zone = shared.window.display_
       if (least < minOwn) {
         shortfall += minOwn - least;
         for (const p of t.players) {
-          const free = !off.has(p.user) && [...Array(dc).keys()].every((k) => p.cells.has(start + k));
+          const free = !off.has(p.user) && hasRun(p.cells, start, dc);
           if (!free) missing.push(p.name);
         }
       }
@@ -141,26 +142,32 @@ export function closestMisses(shared, off, nowUtc, zone = shared.window.display_
   return out.sort((a, b) => a.shortfall - b.shortfall || a.start - b.start).slice(0, 3);
 }
 
-export function draftRequest(shared, start, now, uuid) {
+// File 4 for a request of this kind starting at window cell `start`; a kind adds its own fields.
+export function baseRequest(shared, kind, start, now, uuid) {
   return {
     format: "draftbot.scheduler.request",
     version: 1,
     request_id: uuid,
     match_id: shared.match.id,
-    kind: "book_draft",
+    kind,
     start_utc: isoSeconds(instantOf(shared, start)),
     seen_seq: shared.seq,
     made_at: isoSeconds(now),
   };
 }
 
+export const draftRequest = (shared, start, now, uuid) => baseRequest(shared, "book_draft", start, now, uuid);
+
+// The match takes no more bookings: it is closed or its week is over.
+export const windowClosed = (shared, nowUtc) =>
+  shared.match.status === "closed" || nowUtc.getTime() >= startMs(shared) + CELLS * CELL_MS;
+
 // What the bot would answer, from the same rules. It ignores the page's filters.
 export function fakeOutcome(shared, request, nowUtc) {
   const refuse = (reason) => ({ status: "refused", reason });
-  const windowEnd = startMs(shared) + CELLS * CELL_MS;
-  if (shared.match.status === "closed" || nowUtc.getTime() >= windowEnd) return refuse("window_closed");
+  if (windowClosed(shared, nowUtc)) return refuse("window_closed");
   if (shared.booking && shared.booking.draft) return refuse("already_booked");
-  const cell = (new Date(request.start_utc).getTime() - startMs(shared)) / CELL_MS;
+  const cell = cellOfIso(shared, request.start_utc);
   if (!Number.isInteger(cell) || cell < 0 || cell >= CELLS) return refuse("bad_time");
   const r = draftCheck(shared, cell, new Set(), nowUtc);
   if (r.ok) return { status: "booked", reason: null };
