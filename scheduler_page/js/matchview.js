@@ -11,6 +11,8 @@ import { LinkExpired, NeedsUpdate } from "./api.js";
 import { expiredMessage } from "./messages.js";
 import { el } from "./dom.js";
 import { plural, andList } from "./words.js";
+import { fakeSittingOutcome } from "./later.js";
+import { mountLater, laterTabShown, defaultTab } from "./laterview.js";
 
 const MATCH_EXPIRED = expiredMessage("match");
 const REFRESH_MS = 60000;
@@ -27,7 +29,11 @@ const discordTime = (date) => `<t:${Math.floor(date.getTime() / 1000)}:f>`;
 // The one sentence under the header about what follows the draft, or null when there is nothing to say.
 // Nobody following is said whether or not the server has a library; the copy sentences need one.
 export function libraryLine(shared) {
-  if (nobodyFollows(shared)) return "Nobody plays right after the draft. Once it's booked, each of you books your games under Later games.";
+  if (nobodyFollows(shared)) {
+    return draftBooked(shared)
+      ? "Nobody plays right after the draft: each of you books your games under Later games."
+      : "Nobody plays right after the draft. Once it's booked, each of you books your games under Later games.";
+  }
   if (!shared.library || !shared.library.enabled) return null;
   const copy = copyNeeded(shared);
   if (!copy.needed) return "No library copy is needed: nobody playing right after the draft needs one.";
@@ -90,7 +96,8 @@ export async function mountMatch(root, link, deps) {
     putUrl: link.urls.request_put,
     put: deps.putJson,
     fixture: link.fixture,
-    fake: (req) => fakeOutcome(shared, req, now()),
+    // The draft and the later games share this one requester: one pending request for the whole page.
+    fake: (req) => (req.kind === "book_sitting" ? fakeSittingOutcome(shared, me, req, now()) : fakeOutcome(shared, req, now())),
     // The requester polls file 6 alone; a dead link is its to report (it stops polling and the send rejects).
     getMe: async () => { const next = await fetchMe(); if (!disposed) takeMe(next); return next; },
   });
@@ -111,9 +118,20 @@ export async function mountMatch(root, link, deps) {
   const legend = el("div", { class: "legend" });
   const rail = el("aside", { class: "rail" });
   const status = el("div", { class: "status", role: "status" });
-  root.classList.add("wide");
-  root.replaceChildren(head, filters,
+  const tabBar = el("div", { class: "viewtabs", role: "group", "aria-label": "View" });
+  const leaguePanel = el("div", {}, head, filters,
     el("section", { class: "work" }, el("div", { class: "workmain" }, heatBox, tip, legend), rail));
+  const laterPanel = el("div");
+  let tab = defaultTab(shared, me); // remembered in memory only
+  const tabButton = (id, text) => {
+    const b = el("button", { type: "button", text });
+    b.addEventListener("click", () => { tab = id; render(); });
+    return [id, b];
+  };
+  const tabButtons = [tabButton("league", "League match"), tabButton("later", "Later games")];
+  tabBar.append(...tabButtons.map(([, b]) => b));
+  root.classList.add("wide");
+  root.replaceChildren(tabBar, leaguePanel, laterPanel);
 
   // ---- heatmap ----
   const draft = () => (shared.booking && shared.booking.draft) || null;
@@ -178,6 +196,7 @@ export async function mountMatch(root, link, deps) {
     copied = false;
     const req = draftRequest(shared, start, now(), crypto.randomUUID());
     requester.send(req).then((o) => {
+      if (disposed) return;
       if (o.status === "booked" && !draft()) {
         // Show the booking at once; the bot's next file 5 says the same.
         shared.booking = { ...(shared.booking || { sittings: [] }), draft: {
@@ -189,6 +208,7 @@ export async function mountMatch(root, link, deps) {
       // A refusal may mean file 5 moved on (someone booked first): fetch it now rather than in a minute.
       if (o.status === "refused") refresh();
     }, (e) => {
+      if (disposed) return;
       if (e instanceof LinkExpired) return fail(MATCH_EXPIRED);
       console.error(e);
       sendError = /pending/.test(e.message) ? "One request is already waiting for DraftBot." : "Couldn't send the request. Try again.";
@@ -197,7 +217,7 @@ export async function mountMatch(root, link, deps) {
   };
   const bookButton = (start, text = "Book") => {
     const s = requester.state();
-    const mine = s.pending && s.request && Date.parse(s.request.start_utc) === instant(start).getTime();
+    const mine = s.pending && s.request && s.request.kind === "book_draft" && Date.parse(s.request.start_utc) === instant(start).getTime();
     const b = el("button", { type: "button", class: "act", text: mine ? "Booking…" : text });
     b.disabled = s.pending;
     b.addEventListener("click", () => book(start));
@@ -352,8 +372,25 @@ export async function mountMatch(root, link, deps) {
     rail.replaceChildren(...kids);
   };
 
+  // ---- later games ----
+  const later = mountLater(laterPanel, {
+    getShared: () => shared, setShared: (next) => { shared = next; }, getMe: () => me,
+    viewer, zone, now, requester, render: () => render(), fail, isDisposed: () => disposed, expiredText: MATCH_EXPIRED,
+  });
+
+  const renderTabs = () => {
+    const shown = laterTabShown(shared, me);
+    const active = shown ? tab : "league";
+    tabBar.hidden = !shown;
+    for (const [id, b] of tabButtons) b.setAttribute("aria-pressed", String(id === active));
+    leaguePanel.hidden = active !== "league";
+    laterPanel.hidden = active !== "later";
+    return active;
+  };
+
   function render() {
     syncMemo();
+    if (renderTabs() === "later") { later.render(); return; }
     renderHead();
     renderFilters();
     renderTip();

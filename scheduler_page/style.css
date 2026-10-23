@@ -154,3 +154,15 @@ button.hcell { cursor: pointer; }
   .hcell { line-height: 24px; font-size: 12px; }
   .quick { padding-top: 0; }
 }
+
+/* Later games */
+.viewtabs { display: inline-flex; gap: 2px; padding: 3px; margin-bottom: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); max-width: 100%; }
+.viewtabs[hidden] { display: none; }
+.viewtabs button { min-height: 40px; padding: 0 16px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); font-weight: 500; cursor: pointer; }
+.viewtabs button[aria-pressed="true"] { background: var(--fg); color: var(--bg); }
+.booked.sitting { margin-bottom: 14px; }
+.rail .who.warn { color: var(--warn); }
+.slot.later { flex-direction: column; align-items: stretch; }
+.slot .btns { display: flex; flex-wrap: wrap; gap: 6px; }
+.slot .btns:empty { display: none; }
+.tip .act + .act { margin-left: 6px; }

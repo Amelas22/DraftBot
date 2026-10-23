@@ -7,6 +7,8 @@ import { mountMatch } from "./matchview.js";
 const root = document.getElementById("app");
 const say = (text) => { root.replaceChildren(Object.assign(document.createElement("p"), { className: "notice", textContent: text })); };
 
+let view = null; // a mounted view's { dispose } handle, when it returns one
+
 async function main() {
   let linkView; // unknown until file 8 is read: a link that fails before then gets the neutral wording
   try {
@@ -15,7 +17,7 @@ async function main() {
     if (!link.fixture && link.exp && Date.parse(link.exp) < Date.now()) return say(expiredMessage(linkView));
     if (link.view === "usual") return await mountUsual(root, link, { getJson, putJson });
     if (link.view === "lfg") return mountLfg(root, link, { getJson, putJson });
-    if (link.view === "match") return await mountMatch(root, link, { getJson, putJson });
+    if (link.view === "match") { view = await mountMatch(root, link, { getJson, putJson }); return; }
     say(NEEDS_UPDATE);
   } catch (e) {
     if (e instanceof LinkExpired) say(expiredMessage(linkView));
@@ -24,5 +26,8 @@ async function main() {
   }
 }
 
-addEventListener("hashchange", () => location.reload());
+addEventListener("hashchange", () => {
+  if (view && typeof view.dispose === "function") view.dispose();
+  location.reload();
+});
 main();

@@ -9,6 +9,7 @@ import { libraryLine } from "../js/matchview.js";
 const shared = (s) => parseShared(JSON.parse(readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures", `match-shared.${s}.json`), "utf8")));
 const libraryOff = (sh) => ({ ...sh, library: { ...sh.library, enabled: false } });
+const BOOKED_NOBODY = "Nobody plays right after the draft: each of you books your games under Later games.";
 const NOBODY = "Nobody plays right after the draft. Once it's booked, each of you books your games under Later games.";
 
 test("libraryLine: a copy is needed, held from the end of the draft", () => {
@@ -30,6 +31,14 @@ test("libraryLine: library on, nobody following needs a copy", () => {
 test("libraryLine: nobody follows, library on or off", () => {
   assert.equal(libraryLine(shared("nofollow")), NOBODY);
   assert.equal(libraryLine(libraryOff(shared("nofollow"))), NOBODY);
+});
+
+test("libraryLine: nobody follows and the draft is already booked", () => {
+  const sh = shared("nofollow");
+  const booked = { ...sh, booking: { ...sh.booking, draft: { start_utc: "2026-10-21T00:00:00Z", by: "900000000000000002" } } };
+  assert.equal(libraryLine(booked), BOOKED_NOBODY);
+  assert.equal(libraryLine(libraryOff(booked)), BOOKED_NOBODY);
+  assert.equal(libraryLine({ ...sh, match: { ...sh.match, status: "booked" } }), BOOKED_NOBODY);
 });
 
 test("libraryLine: library off hides the copy sentences", () => {

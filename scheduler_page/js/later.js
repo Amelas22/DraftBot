@@ -41,7 +41,7 @@ export function deckOk(me, start) {
 }
 
 // Earliest allowed cell: now, and the draft's end once the draft is booked.
-function earliest(shared, nowUtc) {
+export function earliest(shared, nowUtc) {
   let from = 0;
   const draft = shared.booking && shared.booking.draft;
   if (draft) {
