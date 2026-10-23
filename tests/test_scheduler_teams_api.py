@@ -1,3 +1,4 @@
+import asyncio
 import json
 import uuid
 from datetime import datetime, timezone
@@ -205,3 +206,41 @@ async def test_actions_on_another_guilds_team_are_refused(client):
     assert (await resp.json())["code"] == "team_closed"
     async with db_session() as session:
         assert (await session.get(LfgTeam, int(team))).taking_requests is True
+
+
+@pytest.mark.asyncio
+async def test_concurrent_accepts_never_overfill(client):
+    team = await _open(client, "111")
+    await _act(client, await _auth("200"), kind="request_join", team_id=team)
+    await _act(client, await _auth("111"), kind="accept", team_id=team, requester="200")
+    for user in ("300", "400"):
+        await _act(client, await _auth(user), kind="request_join", team_id=team)
+    captain = await _auth("111")
+    resps = await asyncio.gather(
+        _act(client, captain, kind="accept", team_id=team, requester="300"),
+        _act(client, captain, kind="accept", team_id=team, requester="400"),
+    )
+    bodies = [await r.json() for r in resps]
+    assert sorted(b["ok"] for b in bodies) == [False, True]
+    assert [b["code"] for b in bodies if not b["ok"]] == ["team_full"]
+    state = (await (await client.get("/api/teams", headers=captain)).json())["teams"][0]
+    assert len(state["members"]) == 3 and state["status"] == "full"
+
+
+@pytest.mark.asyncio
+async def test_captain_kinds_validate_and_run(client):
+    team = await _open(client, "111")
+    cap = await _auth("111")
+    for bad in ({"requester": 5}, {"requester": "abc"}, {}):
+        resp = await _act(client, cap, kind="accept", team_id=team, **bad)
+        assert resp.status == 400
+    await _act(client, await _auth("200"), kind="request_join", team_id=team)
+    resp = await _act(client, cap, kind="decline", team_id=team, requester="200")
+    assert (await resp.json())["ok"] is True
+    resp = await _act(client, await _auth("200"), kind="leave_team", team_id=team)
+    assert (await resp.json())["code"] == "bad_input"
+    resp = await _act(client, cap, kind="close_team", team_id=team)
+    body = await resp.json()
+    assert body["ok"] is True and body["state"]["teams"] == []
+    resp = await _act(client, cap, kind="close_team", team_id=team)
+    assert (await resp.json())["code"] == "team_closed"

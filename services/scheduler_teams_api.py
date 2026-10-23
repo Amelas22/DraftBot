@@ -58,6 +58,13 @@ def _parse(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         if not isinstance(on, bool):
             raise _BadInput
         return kind, {"team_id": _team(body), "on": on}
+    if kind in ("accept", "decline"):
+        requester = _text(body, "requester", ID_MAX)
+        if not requester.isascii() or not requester.isdigit():
+            raise _BadInput
+        return kind, {"team_id": _team(body), "requester": requester}
+    if kind in ("leave_team", "close_team"):
+        return kind, {"team_id": _team(body)}
     raise _BadInput
 
 
@@ -161,6 +168,13 @@ async def _run(
         )
     if kind == "withdraw_request":
         return await team_finder.withdraw_request(session, guild_id, user_id, args["team_id"], now)
+    if kind in ("accept", "decline"):
+        fn = team_finder.accept if kind == "accept" else team_finder.decline
+        return await fn(session, user_id, args["team_id"], args["requester"], now)
+    if kind == "leave_team":
+        return await team_finder.leave_team(session, user_id, args["team_id"], now)
+    if kind == "close_team":
+        return await team_finder.close_team(session, user_id, args["team_id"], now)
     return await team_finder.set_taking_requests(
         session, guild_id, user_id, args["team_id"], args["on"], now
     )

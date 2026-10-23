@@ -274,6 +274,173 @@ async def set_taking_requests(
     return ActionResult(ok=True)
 
 
+MULTI_TEAM_WARNING = "Being on more than one team needs a mod's permission. DM a mod first."
+
+
+def _name_of(members: list[LfgTeamMember], user_id: str) -> str:
+    member = next((m for m in members if m.user_id == user_id), None)
+    return str(member.display_name) if member else user_id
+
+
+async def _own_team(session: AsyncSession, user_id: str, team_id: str) -> LfgTeam | None:
+    tid = _team_id(team_id)
+    team = await session.get(LfgTeam, tid) if tid is not None else None
+    if team is None or team.captain_id != user_id:
+        return None
+    return team
+
+
+async def _live_memberships(session: AsyncSession, user_id: str) -> int:
+    """Current memberships on teams that are still open or full."""
+    rows = (
+        await session.execute(
+            select(LfgTeamMember.id)
+            .join(LfgTeam, LfgTeam.id == LfgTeamMember.team_id)
+            .where(
+                LfgTeamMember.user_id == user_id,
+                LfgTeamMember.left_utc.is_(None),
+                LfgTeam.status.in_(("open", "full")),
+            )
+        )
+    ).all()
+    return len(rows)
+
+
+async def accept(
+    session: AsyncSession, captain_id: str, team_id: str, requester: str, now: datetime
+) -> ActionResult:
+    team = await _own_team(session, captain_id, team_id)
+    if team is None:
+        return _refuse("not_captain")
+    if team.status == "closed":
+        return _refuse("team_closed")
+    members = await _current_members(session, int(team.id))
+    if team.status == "full" or len(members) >= int(team.size):
+        return _refuse("team_full")
+    request = await _pending(session, int(team.id), requester)
+    if request is None:
+        return _refuse("request_gone")
+
+    stamp = naive_utc(now)
+    request.status = "accepted"
+    request.answered_utc = stamp
+    session.add(
+        LfgTeamMember(
+            team_id=team.id, user_id=requester, display_name=request.display_name, joined_utc=stamp
+        )
+    )
+    await session.flush()
+
+    captain_name = _name_of(members, captain_id)
+    text = f"You're on {captain_name}'s team."
+    if await _live_memberships(session, requester) > 1:
+        text += f"\n{MULTI_TEAM_WARNING}"
+    notices = [Notice(requester, text, "lfg")]
+
+    if len(members) + 1 >= int(team.size):
+        team.status = "full"
+        team.taking_requests = False
+        others = list(
+            (
+                await session.execute(
+                    select(LfgRequest)
+                    .where(LfgRequest.team_id == team.id, LfgRequest.status == "pending")
+                    .order_by(LfgRequest.id)
+                )
+            ).scalars()
+        )
+        for other in others:
+            other.status = "filled"
+            other.answered_utc = stamp
+            notices.append(Notice(str(other.user_id), f"{captain_name}'s team filled up."))
+        names = ", ".join([str(m.display_name) for m in members] + [str(request.display_name)])
+        notices.append(
+            Notice(
+                captain_id,
+                f"Your team is full: {names}. Register it with `/tournament register`.",
+                "lfg",
+            )
+        )
+    await session.flush()
+    return ActionResult(ok=True, notices=notices)
+
+
+async def decline(
+    session: AsyncSession, captain_id: str, team_id: str, requester: str, now: datetime
+) -> ActionResult:
+    team = await _own_team(session, captain_id, team_id)
+    if team is None:
+        return _refuse("not_captain")
+    request = await _pending(session, int(team.id), requester)
+    if request is None:
+        return _refuse("request_gone")
+    request.status = "declined"
+    request.answered_utc = naive_utc(now)
+    await session.flush()
+    captain_name = _name_of(await _current_members(session, int(team.id)), captain_id)
+    return ActionResult(
+        ok=True, notices=[Notice(requester, f"{captain_name}'s team declined your request.")]
+    )
+
+
+async def close_team(
+    session: AsyncSession, captain_id: str, team_id: str, now: datetime
+) -> ActionResult:
+    team = await _own_team(session, captain_id, team_id)
+    if team is None:
+        return _refuse("not_captain")
+    if team.status == "closed":
+        return _refuse("team_closed")
+    stamp = naive_utc(now)
+    members = await _current_members(session, int(team.id))
+    pending = list(
+        (
+            await session.execute(
+                select(LfgRequest)
+                .where(LfgRequest.team_id == team.id, LfgRequest.status == "pending")
+                .order_by(LfgRequest.id)
+            )
+        ).scalars()
+    )
+    team.status = "closed"
+    team.closed_utc = stamp
+    team.taking_requests = False
+    for request in pending:
+        request.status = "declined"
+        request.answered_utc = stamp
+    await session.flush()
+    text = f"{_name_of(members, captain_id)} closed their team."
+    readers = [str(m.user_id) for m in members if m.user_id != captain_id]
+    readers += [str(r.user_id) for r in pending]
+    return ActionResult(ok=True, notices=[Notice(uid, text) for uid in readers])
+
+
+async def leave_team(
+    session: AsyncSession, user_id: str, team_id: str, now: datetime
+) -> ActionResult:
+    tid = _team_id(team_id)
+    team = await session.get(LfgTeam, tid) if tid is not None else None
+    if team is None:
+        return _refuse("bad_input")
+    if team.captain_id == user_id:
+        return await close_team(session, user_id, team_id, now)
+    if team.status == "closed":
+        return _refuse("team_closed")
+    members = await _current_members(session, int(team.id))
+    me = next((m for m in members if m.user_id == user_id), None)
+    if me is None:
+        return _refuse("bad_input")
+    me.left_utc = naive_utc(now)
+    if team.status == "full":
+        team.status = "open"
+        team.taking_requests = True
+    await session.flush()
+    return ActionResult(
+        ok=True,
+        notices=[Notice(str(team.captain_id), f"{me.display_name} left your team.")],
+    )
+
+
 def _cells_b64(week: UsualWeek | None) -> str | None:
     if week is None:
         return None

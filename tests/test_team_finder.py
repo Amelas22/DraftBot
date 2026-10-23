@@ -1,11 +1,17 @@
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy import select
 
 from database.db_session import db_session
 from models.scheduler import PlayerAvailability
+from models.team_finder import LfgRequest, LfgTeam, LfgTeamMember
 from services.availability import UsualWeek, cells_to_bytes
 from services.team_finder import (
+    accept,
+    close_team,
+    decline,
+    leave_team,
     Notice,
     open_team,
     overlap_hours,
@@ -276,3 +282,129 @@ async def test_member_without_week_gives_zero_hours(test_db):
         await s.flush()
         r = await request_join(s, G, "ben", "Ben", tid, "", NOW)
         assert "overlap 0 hours a week" in r.notices[0].text
+
+
+MULTI = "Being on more than one team needs a mod's permission. DM a mod first."
+
+
+async def _ask(session, tid, user, name=None):
+    r = await request_join(session, G, user, name or user.title(), tid, "", NOW)
+    assert r.ok, r.code
+    await session.flush()
+
+
+async def _status(session, tid):
+    return (await session.get(LfgTeam, int(tid))).status
+
+
+@pytest.mark.asyncio
+async def test_accept_decline_notices_and_refusals(test_db):
+    async with db_session() as s:
+        tid = await _open(s, "cap", "Rook", 4)
+        await _ask(s, tid, "ben", "Ben")
+        await _ask(s, tid, "amy", "Amy")
+        assert (await accept(s, "ben", tid, "ben", NOW)).code == "not_captain"
+        assert (await decline(s, "ben", tid, "ben", NOW)).code == "not_captain"
+        assert (await accept(s, "cap", tid, "zed", NOW)).code == "request_gone"
+        r = await accept(s, "cap", tid, "ben", NOW)
+        assert r.ok and r.notices == [Notice("ben", "You're on Rook's team.", "lfg")]
+        assert (await accept(s, "cap", tid, "ben", NOW)).code == "request_gone"
+        r = await decline(s, "cap", tid, "amy", NOW)
+        assert r.ok and r.notices == [Notice("amy", "Rook's team declined your request.", None)]
+        assert (await decline(s, "cap", tid, "amy", NOW)).code == "request_gone"
+        st = await teams_state(s, G, "ben")
+        assert [m["name"] for m in st["teams"][0]["members"]] == ["Rook", "Ben"]
+        assert st["me"]["on_teams"] == [tid]
+
+
+@pytest.mark.asyncio
+async def test_accept_to_closed_team(test_db):
+    async with db_session() as s:
+        tid = await _open(s, "cap", "Rook")
+        await _ask(s, tid, "ben")
+        await close_team(s, "cap", tid, NOW)
+        assert (await accept(s, "cap", tid, "ben", NOW)).code == "team_closed"
+
+
+@pytest.mark.asyncio
+async def test_team_fills_and_sequential_accept_refused(test_db):
+    async with db_session() as s:
+        tid = await _open(s, "cap", "Rook", 3)
+        for u in ("ben", "amy", "cat"):
+            await _ask(s, tid, u, u.title())
+        assert (await accept(s, "cap", tid, "ben", NOW)).ok
+        r = await accept(s, "cap", tid, "amy", NOW)
+        assert r.ok
+        assert r.notices == [
+            Notice("amy", "You're on Rook's team.", "lfg"),
+            Notice("cat", "Rook's team filled up.", None),
+            Notice("cap", "Your team is full: Rook, Ben, Amy. Register it with `/tournament register`.", "lfg"),
+        ]
+        assert await _status(s, tid) == "full"
+        team = (await teams_state(s, G, "cap"))["teams"][0]
+        assert team["taking_requests"] is False
+        out = (await teams_state(s, G, "cat"))["me"]["outgoing"]
+        assert out[0]["status"] == "filled"
+        assert (await accept(s, "cap", tid, "cat", NOW)).code == "team_full"
+
+
+@pytest.mark.asyncio
+async def test_multi_team_warning(test_db):
+    async with db_session() as s:
+        t1 = await _open(s, "cap", "Rook")
+        t2 = await _open(s, "cap2", "Bishop")
+        await _ask(s, t1, "ben", "Ben")
+        await _ask(s, t2, "ben", "Ben")
+        r1 = await accept(s, "cap", t1, "ben", NOW)
+        assert r1.notices[0].text == "You're on Rook's team."
+        r2 = await accept(s, "cap2", t2, "ben", NOW)
+        assert r2.notices[0] == Notice("ben", "You're on Bishop's team.\n" + MULTI, "lfg")
+
+
+@pytest.mark.asyncio
+async def test_leave_team(test_db):
+    async with db_session() as s:
+        tid = await _open(s, "cap", "Rook", 3)
+        for u in ("ben", "amy"):
+            await _ask(s, tid, u, u.title())
+            await accept(s, "cap", tid, u, NOW)
+        assert await _status(s, tid) == "full"
+        assert (await leave_team(s, "zed", tid, NOW)).code == "bad_input"
+        r = await leave_team(s, "ben", tid, NOW)
+        assert r.ok and r.notices == [Notice("cap", "Ben left your team.", None)]
+        assert await _status(s, tid) == "open"
+        team = (await teams_state(s, G, "cap"))["teams"][0]
+        assert team["taking_requests"] is True
+        assert [m["user"] for m in team["members"]] == ["cap", "amy"]
+        assert (await leave_team(s, "ben", tid, NOW)).code == "bad_input"
+
+
+@pytest.mark.asyncio
+async def test_captain_leave_closes(test_db):
+    async with db_session() as s:
+        tid = await _open(s, "cap", "Rook")
+        r = await leave_team(s, "cap", tid, NOW)
+        assert r.ok and await _status(s, tid) == "closed"
+
+
+@pytest.mark.asyncio
+async def test_close_team(test_db):
+    async with db_session() as s:
+        tid = await _open(s, "cap", "Rook", 4)
+        await _ask(s, tid, "ben", "Ben")
+        await accept(s, "cap", tid, "ben", NOW)
+        await _ask(s, tid, "amy", "Amy")
+        assert (await close_team(s, "ben", tid, NOW)).code == "not_captain"
+        r = await close_team(s, "cap", tid, NOW)
+        assert r.ok
+        assert sorted(r.notices, key=lambda n: n.user_id) == [
+            Notice("amy", "Rook closed their team.", None),
+            Notice("ben", "Rook closed their team.", None),
+        ]
+        team = await s.get(LfgTeam, int(tid))
+        assert team.status == "closed" and team.closed_utc is not None
+        members = (await s.execute(select(LfgTeamMember))).scalars().all()
+        assert all(m.left_utc is None for m in members)
+        reqs = (await s.execute(select(LfgRequest))).scalars().all()
+        assert {r.status for r in reqs} == {"accepted", "declined"}
+        assert (await close_team(s, "cap", tid, NOW)).code == "team_closed"
