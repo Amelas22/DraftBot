@@ -467,9 +467,16 @@ async def test_reconcile_closes_team_of_registered_captain(test_db):
             await _ask(s, tid, u, u.title())
         await accept(s, G, "cap", tid, "ben", NOW)
         await _ask(s, tid, "zed", "Zed")
-        await _tournament(s, ("Rooks", "cap"))
+        (p,) = await _tournament(s, ("Rooks", "cap"))
+        s.add(TournamentTeamMember(participant_id=p.id, user_id="ben", display_name="Ben"))
+        await s.flush()
         notices = await reconcile_registered(s, G, NOW)
-        assert notices == [Notice("ben", "Rook registered their team for the tournament.")]
+        closed = "Rook's team registered for the tournament, so your request was closed."
+        assert sorted(notices, key=lambda n: n.user_id) == [
+            Notice("amy", closed),
+            Notice("ben", "Rook registered your team for the tournament."),
+            Notice("zed", closed),
+        ]
         team = await _team_row(s, tid)
         assert team.status == "closed" and team.taking_requests is False
         assert team.closed_utc is not None
@@ -548,3 +555,37 @@ async def test_captain_actions_only_reach_teams_in_the_callers_guild(test_db):
         st = await teams_state(s, G, "cap")
         assert [m["user"] for m in st["teams"][0]["members"]] == ["cap", "ben"]
         assert [r["user"] for r in st["me"]["incoming"][tid]] == ["amy"]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_tells_members_left_off_the_registered_roster(test_db):
+    async with db_session() as s:
+        tid = await _open(s, "cap", "Rook")
+        await _ask(s, tid, "ben", "Ben")
+        await accept(s, G, "cap", tid, "ben", NOW)
+        # Rook registers a different roster: ben is not on it.
+        (p,) = await _tournament(s, ("Rooks", "cap"))
+        s.add(TournamentTeamMember(participant_id=p.id, user_id="amy", display_name="Amy"))
+        await s.flush()
+        notices = await reconcile_registered(s, G, NOW)
+        assert notices == [
+            Notice("ben", "Rook closed their team: they registered a different team for the tournament.")
+        ]
+        assert (await _team_row(s, tid)).status == "closed"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_roster_is_the_captains_own_participant(test_db):
+    async with db_session() as s:
+        tid = await _open(s, "cap", "Rook")
+        await _ask(s, tid, "ben", "Ben")
+        await accept(s, G, "cap", tid, "ben", NOW)
+        # The forming captain joined someone else's registered team; ben is on a third one.
+        zoe, yan = await _tournament(s, ("Zoes", "zoe"), ("Yans", "yan"))
+        s.add(TournamentTeamMember(participant_id=zoe.id, user_id="cap", display_name="Rook"))
+        s.add(TournamentTeamMember(participant_id=yan.id, user_id="ben", display_name="Ben"))
+        await s.flush()
+        notices = await reconcile_registered(s, G, NOW)
+        assert notices == [
+            Notice("ben", "Rook closed their team: they registered a different team for the tournament.")
+        ]

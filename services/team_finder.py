@@ -449,18 +449,17 @@ async def reconcile_registered(session: AsyncSession, guild_id: str, now: dateti
             select(TournamentParticipant).where(TournamentParticipant.tournament_id == tournament.id)
         )
     ).scalars().all()
-    registered = {str(p.captain_user_id) for p in participants}
+    rosters: dict[int, set[str]] = {int(p.id): {str(p.captain_user_id)} for p in participants}
     if participants:
-        registered |= {
-            str(uid)
-            for uid in (
-                await session.execute(
-                    select(TournamentTeamMember.user_id).where(
-                        TournamentTeamMember.participant_id.in_([p.id for p in participants])
-                    )
+        for participant_id, uid in (
+            await session.execute(
+                select(TournamentTeamMember.participant_id, TournamentTeamMember.user_id).where(
+                    TournamentTeamMember.participant_id.in_(list(rosters))
                 )
-            ).scalars()
-        }
+            )
+        ).all():
+            rosters[int(participant_id)].add(str(uid))
+    registered = {uid for roster in rosters.values() for uid in roster}
     if not registered:
         return []
 
@@ -473,17 +472,31 @@ async def reconcile_registered(session: AsyncSession, guild_id: str, now: dateti
     ).scalars().all()
     for team in teams:
         members = await _current_members(session, int(team.id))
-        if str(team.captain_id) in registered:
+        captain_id = str(team.captain_id)
+        if captain_id in registered:
+            captain = _name_of(members, captain_id)
+            roster = next(r for r in rosters.values() if captain_id in r)
             for request in await _pending_requests(session, int(team.id)):
                 request.status = "withdrawn"
                 request.answered_utc = stamp
+                notices.append(
+                    Notice(
+                        str(request.user_id),
+                        f"{captain}'s team registered for the tournament, so your request was closed.",
+                    )
+                )
             team.status = "closed"
             team.closed_utc = stamp
             team.taking_requests = False
-            text = f"{_name_of(members, str(team.captain_id))} registered their team for the tournament."
-            notices += [
-                Notice(str(m.user_id), text) for m in members if m.user_id != team.captain_id
-            ]
+            for member in members:
+                if member.user_id == captain_id:
+                    continue
+                text = (
+                    f"{captain} registered your team for the tournament."
+                    if str(member.user_id) in roster
+                    else f"{captain} closed their team: they registered a different team for the tournament."
+                )
+                notices.append(Notice(str(member.user_id), text))
             continue
         for member in members:
             if str(member.user_id) not in registered:
