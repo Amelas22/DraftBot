@@ -11,7 +11,7 @@ import { expiredMessage } from "./messages.js";
 import { plural, pluralWord } from "./words.js";
 import {
   CLOSE_CONFIRM, FORMAT, MULTI_TEAM_WARNING, NOTE_MAX, actionErrorText, cellText, createSync, declinedText, isFull,
-  joinState, leaveConfirm, myTeams, noteDrafts, noteError, onOtherTeam, rankTeams, refusalText, requestHeading,
+  joinNote, joinState, leaveConfirm, modeAfterSelect, myTeams, noteDrafts, noteError, onOtherTeam, rankTeams, refusalText, requestHeading,
   requestsFor, shadeLevel, slotsText, teamName, windowStart,
 } from "./teams.js";
 
@@ -288,7 +288,7 @@ async function showList(root, api, usualDoc, now, cleanups, notice, firstStatus)
     if (!r) { join.replaceChildren(); joinKey = ""; noteTeam = null; return; }
     const { team } = r;
     const js = joinState(state, team);
-    const key = `${selected}|${js.kind}|${Boolean(js.declined)}|${onOtherTeam(state)}`;
+    const key = `${selected}|${js.kind}|${Boolean(js.declined)}|${isFull(team)}|${onOtherTeam(state)}`;
     if (key === joinKey) return;
     joinKey = key;
     noteTeam = null;
@@ -320,9 +320,8 @@ async function showList(root, api, usualDoc, now, cleanups, notice, firstStatus)
       }));
       kids.push(el("div", { class: "actions" }, el("button", { type: "button", class: "primary", text: "Requested", disabled: "" }), withdraw));
     } else {
-      const text = js.kind === "member" ? (js.captain ? "This is your team. You get a DM when someone asks to join." : "You're on this team.")
-        : js.kind === "full" ? "This team is full." : "This team isn't taking requests right now.";
-      kids.push(el("p", { class: "meta", text }));
+      const text = joinNote(js, team);
+      if (text) kids.push(el("p", { class: "meta", text }));
     }
     join.replaceChildren(...kids);
   };
@@ -344,6 +343,7 @@ async function showList(root, api, usualDoc, now, cleanups, notice, firstStatus)
   const select = (key) => {
     if (key !== selected) { status.textContent = ""; readout.textContent = HOVER_HINT; }
     selected = key;
+    mode = modeAfterSelect(key, mode);
     for (const b of rail.querySelectorAll("[data-sel]")) b.setAttribute("aria-pressed", String(b.dataset.sel === key));
     renderPane();
   };

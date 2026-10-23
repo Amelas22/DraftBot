@@ -123,6 +123,19 @@ export function joinState(state, team) {
 
 export const declinedText = (team) => `${teamName(team)} declined your request.`;
 
+// The line under the grid when there is no join button, or null for none: a full team's captain already sees
+// the full banner in their list.
+export function joinNote(js, team) {
+  if (js.kind === "member") {
+    if (!js.captain) return "You're on this team.";
+    return isFull(team) ? null : "This is your team. You get a DM when someone asks to join.";
+  }
+  return js.kind === "full" ? "This team is full." : "This team isn't taking requests right now.";
+}
+
+// Picking a request shows the grid with that player added, so it always shows everyone.
+export const modeAfterSelect = (key, mode) => (key.startsWith("r:") ? "everyone" : mode);
+
 export const noteError = (note) => (note.length > NOTE_MAX ? `Keep the note to ${NOTE_MAX} characters or fewer.` : null);
 
 const REFUSALS = {

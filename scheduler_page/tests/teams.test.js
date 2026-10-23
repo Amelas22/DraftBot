@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   fitTeam, rankTeams, halfHourFloor, onOtherTeam, joinState, noteError, refusalText, actionErrorText,
-  cellText, declinedText, shadeLevel, teamName, MULTI_TEAM_WARNING, NETWORK_FAILED,
+  cellText, declinedText, joinNote, modeAfterSelect, shadeLevel, teamName, MULTI_TEAM_WARNING, NETWORK_FAILED,
   isFull, requestsFor, myTeams, requestHeading, slotsText, createSync, windowStart, noteDrafts,
   CLOSE_CONFIRM, leaveConfirm,
 } from "../js/teams.js";
@@ -236,4 +236,22 @@ test("note drafts are kept per team", () => {
 test("an action answer this page can't read says the page needs updating", () => {
   assert.equal(actionErrorText(new NeedsUpdate()), NEEDS_UPDATE);
   assert.equal(NEEDS_UPDATE, "This page needs updating.");
+});
+
+test("joinNote: nothing under a full team's grid for its captain", () => {
+  const t = team("101");
+  const full = { ...t, status: "full" };
+  assert.equal(joinNote({ kind: "member", captain: true }, t), "This is your team. You get a DM when someone asks to join.");
+  assert.equal(joinNote({ kind: "member", captain: true }, full), null);
+  assert.equal(joinNote({ kind: "member", captain: true }, { ...t, size: t.members.length }), null);
+  assert.equal(joinNote({ kind: "member", captain: false }, full), "You're on this team.");
+  assert.equal(joinNote({ kind: "full" }, full), "This team is full.");
+  assert.equal(joinNote({ kind: "paused" }, t), "This team isn't taking requests right now.");
+});
+
+test("picking a request switches the grid to everyone; picking a team keeps the mode", () => {
+  assert.equal(modeAfterSelect("r:101:55", "mine"), "everyone");
+  assert.equal(modeAfterSelect("r:101:55", "everyone"), "everyone");
+  assert.equal(modeAfterSelect("t:101", "mine"), "mine");
+  assert.equal(modeAfterSelect("t:101", "everyone"), "everyone");
 });
