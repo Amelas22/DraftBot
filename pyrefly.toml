@@ -11,6 +11,16 @@ preset = "strict"
 project-includes = [
     "helpers/background_tasks.py",
     "services/entry_notices.py",
+    "services/availability.py",
+    "services/scheduler_links.py",
+    "services/scheduler_web.py",
+    "services/scheduler_http.py",
+    "cogs/scheduler_web_cog.py",
+    "models/scheduler.py",
+    "models/team_finder.py",
+    "services/team_finder.py",
+    "services/team_finder_sync.py",
+    "services/scheduler_teams_api.py",
     "helpers/signup_board.py",
     "services/library_reminders.py",
     "cogs/server_draft_stats.py",
@@ -72,6 +82,7 @@ project-includes = [
     "player_settings.py",
     "player_settings_view.py",
     "cogs/settings_commands.py",
+    "cogs/lfg_cog.py",
 ]
 
 # SQLAlchemy 1.x-style Column() declarations type column attributes as Column[T]

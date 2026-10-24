@@ -1,0 +1,75 @@
+{
+  "format": "draftbot.scheduler.teams",
+  "version": 1,
+  "teams": [
+    {
+      "team_id": "101",
+      "captain": "900000000000000011",
+      "captain_name": "Rook",
+      "size": 3,
+      "note": "Eastern evenings, any seat.",
+      "taking_requests": true,
+      "status": "open",
+      "members": [
+        {
+          "user": "900000000000000011",
+          "name": "Rook",
+          "zone": "America/New_York",
+          "cells": "AAAAAAP8AAAAAAP8AAAAAAP8AAAAAAP8AAAAAAP8AAAAAAAAAAAAAAAA"
+        },
+        {
+          "user": "900000000000000012",
+          "name": "Wren",
+          "zone": "America/Chicago",
+          "cells": "AAAAAD/AAAAAAD/AAAAAAD/AAAAAAD/AAAAAAAAAAAAAAD/AAAAAAAAA"
+        }
+      ]
+    },
+    {
+      "team_id": "102",
+      "captain": "900000000000000013",
+      "captain_name": "Moss",
+      "size": 3,
+      "note": "Weekends, Pacific.",
+      "taking_requests": true,
+      "status": "open",
+      "members": [
+        {
+          "user": "900000000000000013",
+          "name": "Moss",
+          "zone": "America/Los_Angeles",
+          "cells": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/8AAAAAD/8A"
+        }
+      ]
+    },
+    {
+      "team_id": "103",
+      "captain": "900000000000000014",
+      "captain_name": "Thistle",
+      "size": 4,
+      "note": "UK evenings. Fern hasn't painted a week yet.",
+      "taking_requests": true,
+      "status": "open",
+      "members": [
+        {
+          "user": "900000000000000014",
+          "name": "Thistle",
+          "zone": "Europe/London",
+          "cells": "AAAAAAP8AAAAAAP8AAAAAAP8AAAAAAP8AAAAAAP8AAAAAAAAAAAAAAAA"
+        },
+        {
+          "user": "900000000000000015",
+          "name": "Fern",
+          "zone": null,
+          "cells": null
+        }
+      ]
+    }
+  ],
+  "me": {
+    "user": "900000000000000002",
+    "on_teams": [],
+    "outgoing": [],
+    "incoming": {}
+  }
+}

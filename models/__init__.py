@@ -37,6 +37,8 @@ from .trophy_quiz_submission import TrophyQuizSubmission
 from .mtgo_account import MtgoAccount
 from .mtgo_job import MtgoJob
 from .wallet_tx import WalletTx
+from .scheduler import PlayerAvailability, SchedulerLink
+from .team_finder import LfgAction, LfgRequest, LfgTeam, LfgTeamMember
 
 # Export all models
 __all__ = [
@@ -88,4 +90,10 @@ __all__ = [
     'RENTAL',
     'CardLoan',
     'ACTIVE_STATES',
+    'PlayerAvailability',
+    'SchedulerLink',
+    'LfgTeam',
+    'LfgTeamMember',
+    'LfgRequest',
+    'LfgAction',
 ]

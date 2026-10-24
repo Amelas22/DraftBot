@@ -20,6 +20,8 @@ from helpers.permissions import bot_manager_button, has_bot_manager_role, is_bot
 from helpers.pin_helpers import safe_pin
 from helpers.utils import not_none, ui_button
 from notification_service import send_dm
+from services.team_finder_sync import reconcile_after_command
+from cogs.lfg_cog import ensure_lfg_board
 from match_control_view import (
     MatchControlView,
     create_match_room,
@@ -904,6 +906,10 @@ class TournamentCog(commands.Cog):
             await post_registration_board(self.bot, ctx.channel, tournament.id)
         except Exception as e:
             logger.warning(f"Could not post registration board: {e}")
+        try:
+            await ensure_lfg_board(self.bot, ctx.guild, getattr(ctx.channel, "category", None))
+        except Exception as e:
+            logger.warning(f"Could not post the Find a team board: {e}")
 
     @tournament.command(name="register", description="Register your team for the open tournament")
     async def register(
@@ -962,6 +968,7 @@ class TournamentCog(commands.Cog):
                 await ctx.followup.send(
                     f"**{p_name}** is already registered for **{t_name}** "
                     f"(captain: <@{participant.captain_user_id}>).", ephemeral=True)
+            await reconcile_after_command(self.bot, guild_id)
             return
 
         # Paid tournament.
@@ -985,6 +992,7 @@ class TournamentCog(commands.Cog):
                 f"✅ **{p_name}** is registered for **{t_name}** — **{fee} "
                 f"{EVENT_TICKET}(s)** paid into the prize pool. You're in.\n"
                 f"{ROSTER_PROMPT}", ephemeral=True)
+            await reconcile_after_command(self.bot, guild_id)
             return
         if not res.get("ok"):
             # register_team already committed a pending participant above, so the board
@@ -995,6 +1003,7 @@ class TournamentCog(commands.Cog):
             await ctx.followup.send(
                 f"⚠️ **{p_name}** is registered but I couldn't hold the escrow: {res.get('error')}. "
                 f"Try `/tournament register` again.", ephemeral=True)
+            await reconcile_after_command(self.bot, guild_id)
             return
 
         # Wallet short: hold the spot and let the captain top up on their own schedule.
@@ -1008,6 +1017,7 @@ class TournamentCog(commands.Cog):
             f"To finish, run `/wallet deposit {deficit}` whenever you're ready (you have "
             f"{have} tix; the fee is {fee}). Registration completes automatically once the "
             f"tix land — no need to re-register.", ephemeral=True)
+        await reconcile_after_command(self.bot, guild_id)
 
     async def _roster_target(self, ctx, session, tournament, team):
         """The participant whose roster this command edits, or None if it can't.
@@ -1118,6 +1128,7 @@ class TournamentCog(commands.Cog):
             await ctx.followup.send(
                 f"{player.mention} is already on **{p_name}**'s roster.{shared}{warning}",
                 ephemeral=True)
+        await reconcile_after_command(self.bot, ctx.guild.id)
 
     @tournament.command(name="remove_teammate",
                         description="Take a player off your team's roster")
@@ -1211,6 +1222,7 @@ class TournamentCog(commands.Cog):
             f"✅ **{participant.team_name}** {verb} with {captain.mention} as captain{note}.",
             ephemeral=True,
         )
+        await reconcile_after_command(self.bot, ctx.guild.id)
 
     @tournament.command(name="remove_team", description="Admin: remove a team during registration")
     @has_bot_manager_role()
