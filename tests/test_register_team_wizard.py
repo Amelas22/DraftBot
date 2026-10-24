@@ -4,6 +4,7 @@ from contextlib import ExitStack
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import discord
 import pytest
 from sqlalchemy import select
 
@@ -368,3 +369,82 @@ async def test_cancel_registers_nothing(test_db, quiet):  # noqa: F811
     async with db_session() as session:
         assert (await session.execute(select(TournamentParticipant).where(
             TournamentParticipant.tournament_id == t_id))).scalars().all() == []
+
+
+# --- Pressing again with a team -----------------------------------------------------
+
+async def _existing(t_id, name="Rook's Rookies", status=None):
+    async with db_session() as session:
+        p, _ = await register_team(session, t_id, name, str(ROOK))
+        if status:
+            p.status = status
+        return p.id
+
+
+async def _pick_and_add(view, *users):
+    picker = next(item for item in view.children if isinstance(item, wiz.PrefilledUserSelect))
+    i = _interaction()
+    with patch.object(type(picker), "values", new=list(users)):
+        await picker.callback(i)
+    _content, view = _sent(i)
+    add = _interaction()
+    await _button(view, "Add").callback(add)
+    return _sent(add)[0]
+
+
+@pytest.mark.asyncio
+async def test_a_registered_captain_is_asked_to_add_a_teammate(test_db, quiet):  # noqa: F811
+    t_id = await _tournament()
+    p_id = await _existing(t_id)
+    i = _interaction()
+    await wiz.start(i)
+
+    i.response.send_modal.assert_not_awaited()
+    content, view = _sent(i)
+    assert "You captain **Rook's Rookies**" in content and "Add a teammate?" in content
+    reply = await _pick_and_add(view, MEMBERS[WREN])
+
+    assert "Added to **Rook's Rookies**" in reply
+    async with db_session() as session:
+        roster = (await session.execute(select(TournamentTeamMember.user_id).where(
+            TournamentTeamMember.participant_id == p_id))).scalars().all()
+    assert roster == [str(WREN)]
+    assert quiet.await_args.args[1] == str(WREN)
+
+
+@pytest.mark.asyncio
+async def test_a_pending_team_is_told_what_is_left_to_deposit(test_db, quiet):  # noqa: F811
+    t_id = await _tournament(fee=20)
+    await _existing(t_id, status="pending")
+    await wallet_service.adjust(GUILD, str(ROOK), 12, "seed", "test")
+    i = _interaction()
+    await wiz.start(i)
+
+    assert "Payment pending: deposit 8 tix with `/wallet deposit 8`" in _sent(i)[0]
+
+
+@pytest.mark.asyncio
+async def test_a_paid_team_has_no_payment_line(test_db, quiet):  # noqa: F811
+    t_id = await _tournament(fee=20)
+    await _existing(t_id, status="paid")
+    i = _interaction()
+    await wiz.start(i)
+
+    assert "Payment pending" not in _sent(i)[0]
+
+
+@pytest.mark.asyncio
+async def test_a_captain_of_two_teams_picks_one_first(test_db, quiet):  # noqa: F811
+    t_id = await _tournament()
+    await _existing(t_id, "Alpha")
+    bravo = await _existing(t_id, "Bravo")
+    i = _interaction()
+    await wiz.start(i)
+
+    content, view = _sent(i)
+    assert "Which one?" in content
+    which = next(item for item in view.children if isinstance(item, discord.ui.Select))
+    pick = _interaction()
+    with patch.object(type(which), "values", new=[str(bravo)]):
+        await which.callback(pick)
+    assert "You captain **Bravo**" in _sent(pick)[0]
