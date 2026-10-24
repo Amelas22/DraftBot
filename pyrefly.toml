@@ -51,6 +51,7 @@ project-includes = [
     "database/retry.py",
     "services/stake_funding.py",
     "services/tournament_roles.py",
+    "services/tournament_registration.py",
     "services/wallet_history.py",
     "wallet_history_view.py",
     "services/library_service.py",

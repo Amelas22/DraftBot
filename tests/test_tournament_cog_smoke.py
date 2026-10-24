@@ -297,9 +297,15 @@ async def test_finish_button_surfaces_a_value_error_instead_of_dying_silently():
 
 
 class _NullSession:
-    """Stands in for db_session(): an async context manager yielding a mock."""
+    """Stands in for db_session(): an async context manager yielding a mock,
+    whose ``get`` returns ``found`` (the roster commands load their team by id)."""
+    def __init__(self, found=None):
+        self.found = found
+
     async def __aenter__(self):
-        return MagicMock()
+        session = MagicMock()
+        session.get = AsyncMock(return_value=self.found)
+        return session
 
     async def __aexit__(self, *_exc):
         return False
@@ -331,7 +337,7 @@ def _player(user_id=4242):
 def _roster_command_open(participant):
     """Patch everything the roster commands touch before the role sync.
 
-    Without this they read the real drafts.db. `_refresh_board` and
+    Without this they read the real drafts.db. `refresh_boards` and
     `other_teams_for_user` are patched because both run with the mock session
     and would otherwise await a MagicMock.
     """
@@ -347,8 +353,12 @@ def _roster_command_open(participant):
     stack.enter_context(patch.object(TournamentCog, "_roster_target",
                                      AsyncMock(return_value=participant)))
     stack.enter_context(patch.object(TournamentCog, "_refresh_board", AsyncMock()))
-    stack.enter_context(patch("cogs.tournament_commands.other_teams_for_user",
+    # add_teammate's work lives in the shared registration service.
+    stack.enter_context(patch("services.tournament_registration.db_session",
+                              lambda: _NullSession(participant)))
+    stack.enter_context(patch("services.tournament_registration.other_teams_for_user",
                               AsyncMock(return_value=[])))
+    stack.enter_context(patch("services.tournament_registration.refresh_boards", AsyncMock()))
     return stack
 
 
@@ -1004,9 +1014,9 @@ async def test_adding_a_teammate_gives_them_the_team_role():
     player = _player(4242)
 
     with _roster_command_open(participant), \
-         patch("cogs.tournament_commands.add_teammate",
+         patch("services.tournament_registration.add_teammate",
                AsyncMock(return_value=(MagicMock(), True))), \
-         patch("cogs.tournament_commands.sync_member", AsyncMock()) as sync:
+         patch("services.tournament_registration.sync_member", AsyncMock()) as sync:
         await TournamentCog.add_teammate_cmd.callback(cog, ctx, player=player, team=None)
 
     sync.assert_awaited_once()
@@ -1037,9 +1047,9 @@ async def test_re_adding_an_existing_teammate_still_repairs_their_role():
     player = _player(4242)
 
     with _roster_command_open(participant), \
-         patch("cogs.tournament_commands.add_teammate",
+         patch("services.tournament_registration.add_teammate",
                AsyncMock(return_value=(MagicMock(), False))), \
-         patch("cogs.tournament_commands.sync_member", AsyncMock()) as sync:
+         patch("services.tournament_registration.sync_member", AsyncMock()) as sync:
         await TournamentCog.add_teammate_cmd.callback(cog, ctx, player=player, team=None)
 
     sync.assert_awaited_once()
@@ -1070,7 +1080,7 @@ async def test_add_teammate_on_a_not_yet_started_tournament_gets_no_warning():
     player = _player(4242)
 
     with _roster_command_open(participant), \
-         patch("cogs.tournament_commands.add_teammate",
+         patch("services.tournament_registration.add_teammate",
                AsyncMock(return_value=(MagicMock(), True))):
         await TournamentCog.add_teammate_cmd.callback(cog, ctx, player=player, team=None)
 
@@ -1095,9 +1105,9 @@ async def test_add_teammate_warns_when_the_role_could_not_be_given():
     player = _player(4242)
 
     with _roster_command_open(participant), \
-         patch("cogs.tournament_commands.add_teammate",
+         patch("services.tournament_registration.add_teammate",
                AsyncMock(return_value=(MagicMock(), True))), \
-         patch("cogs.tournament_commands.sync_member", AsyncMock(return_value=False)):
+         patch("services.tournament_registration.sync_member", AsyncMock(return_value=False)):
         await TournamentCog.add_teammate_cmd.callback(cog, ctx, player=player, team=None)
 
     reply = ctx.followup.send.call_args.args[0]

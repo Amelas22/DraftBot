@@ -15,12 +15,12 @@ from helpers.tournament_channels import (
 )
 from database.db_session import db_session
 from helpers.money_gate import gate_serve, linked_username
-from helpers.display_names import get_display_name
 from helpers.permissions import bot_manager_button, has_bot_manager_role, is_bot_manager
 from helpers.pin_helpers import safe_pin
 from helpers.utils import not_none, ui_button
 from notification_service import send_dm
 from services.team_finder_sync import reconcile_after_command
+from services.tournament_registration import add_roster_members, register_captain
 from cogs.lfg_cog import ensure_lfg_board
 from match_control_view import (
     MatchControlView,
@@ -57,7 +57,6 @@ from services.tournament_service import (
     advance_round,
     add_match,
     drop_team as drop_team_service,
-    add_teammate,
     count_unreported_matches,
     create_tournament,
     current_round_stage,
@@ -82,7 +81,6 @@ from services.tournament_service import (
     record_result,
     roomless_posted_bracket_matches,
     reportable_match_choices,
-    other_teams_for_user,
     register_team,
     remove_teammate,
     set_result,
@@ -946,78 +944,45 @@ class TournamentCog(commands.Cog):
                     ephemeral=True)
                 return
 
-        # Create (or find) the participant.
-        try:
-            async with db_session() as session:
-                participant, created = await register_team(session, t_id, team, ctx.author.id)
-        except ValueError as e:
-            await ctx.followup.send(f"❌ {e}", ephemeral=True)
-            return
-        p_id, p_name = participant.id, participant.team_name
-
-        # Free tournament: registration is complete on creation (existing behavior).
-        if fee == 0:
-            if created:
-                logger.info(f"Team '{p_name}' registered for tournament {t_id} by {ctx.author.id}")
-                await self._refresh_board(t_id)
-                await ctx.followup.send(
-                    f"✅ **{p_name}** is registered for **{t_name}** with "
-                    f"{ctx.author.mention} as captain.\n"
-                    f"{ROSTER_PROMPT}", ephemeral=True)
-            else:
-                await ctx.followup.send(
-                    f"**{p_name}** is already registered for **{t_name}** "
-                    f"(captain: <@{participant.captain_user_id}>).", ephemeral=True)
-            await reconcile_after_command(self.bot, guild_id)
-            return
-
-        # Paid tournament.
-        if participant.status == "paid":
+        out = await register_captain(self.bot, guild_id, t_id, captain_id, team)
+        p_name = out.team_name
+        if out.kind == "refused":
+            await ctx.followup.send(f"❌ {out.error}", ephemeral=True)
+        elif out.kind == "free_registered":
+            await ctx.followup.send(
+                f"✅ **{p_name}** is registered for **{t_name}** with "
+                f"{ctx.author.mention} as captain.\n"
+                f"{ROSTER_PROMPT}", ephemeral=True)
+        elif out.kind == "free_exists":
+            await ctx.followup.send(
+                f"**{p_name}** is already registered for **{t_name}** "
+                f"(captain: <@{out.captain_id}>).", ephemeral=True)
+        elif out.kind == "already_paid":
             await ctx.followup.send(
                 f"**{p_name}** is already registered and paid for **{t_name}**.", ephemeral=True)
-            return
-        # Escrow is paid from the captain's wallet, so only the captain can complete it.
-        if captain_id != participant.captain_user_id:
+        elif out.kind == "not_captain":
             await ctx.followup.send(
                 f"**{p_name}** is registered (pending). Only its captain "
-                f"<@{participant.captain_user_id}> can complete the **{fee}-tix** escrow.",
+                f"<@{out.captain_id}> can complete the **{fee}-tix** escrow.",
                 ephemeral=True)
-            return
-
-        # Try to hold the fee from the captain's wallet right away.
-        res = await escrow.secure_from_wallet(guild_id, captain_id, p_id, t_id, fee, p_name)
-        if res.get("done"):
-            await self._refresh_board(t_id)
+        elif out.kind == "paid":
             await ctx.followup.send(
                 f"✅ **{p_name}** is registered for **{t_name}** — **{fee} "
                 f"{EVENT_TICKET}(s)** paid into the prize pool. You're in.\n"
                 f"{ROSTER_PROMPT}", ephemeral=True)
-            await reconcile_after_command(self.bot, guild_id)
-            return
-        if not res.get("ok"):
-            # register_team already committed a pending participant above, so the board
-            # must still reflect it even though the escrow hold itself failed — otherwise
-            # this stuck-pending team never appears (the watchdog only refreshes boards
-            # for entries it COMPLETES).
-            await self._refresh_board(t_id)
+        elif out.kind == "hold_failed":
             await ctx.followup.send(
-                f"⚠️ **{p_name}** is registered but I couldn't hold the escrow: {res.get('error')}. "
+                f"⚠️ **{p_name}** is registered but I couldn't hold the escrow: {out.error}. "
                 f"Try `/tournament register` again.", ephemeral=True)
-            await reconcile_after_command(self.bot, guild_id)
-            return
-
-        # Wallet short: hold the spot and let the captain top up on their own schedule.
-        # No trade is opened here — /wallet deposit does that whenever they're ready, and
-        # the escrow sweep completes this registration the moment the funds cover the fee.
-        deficit = res["deficit"]
-        have = res.get("available", 0)
-        await self._refresh_board(t_id)
-        await ctx.followup.send(
-            f"**{p_name}** is registered (pending) for **{t_name}** — your spot is held.\n"
-            f"To finish, run `/wallet deposit {deficit}` whenever you're ready (you have "
-            f"{have} tix; the fee is {fee}). Registration completes automatically once the "
-            f"tix land — no need to re-register.", ephemeral=True)
-        await reconcile_after_command(self.bot, guild_id)
+        else:
+            # Wallet short: the spot is held and the captain tops up on their own
+            # schedule. No trade is opened here -- /wallet deposit does that, and the
+            # escrow sweep completes this registration once the funds cover the fee.
+            await ctx.followup.send(
+                f"**{p_name}** is registered (pending) for **{t_name}** — your spot is held.\n"
+                f"To finish, run `/wallet deposit {out.deficit}` whenever you're ready (you have "
+                f"{out.available} tix; the fee is {fee}). Registration completes automatically once the "
+                f"tix land — no need to re-register.", ephemeral=True)
 
     async def _roster_target(self, ctx, session, tournament, team):
         """The participant whose roster this command edits, or None if it can't.
@@ -1087,39 +1052,21 @@ class TournamentCog(commands.Cog):
             participant = await self._roster_target(ctx, session, tournament, team)
             if participant is None:
                 return
-            try:
-                _, created = await add_teammate(
-                    session, participant, player.id,
-                    get_display_name(player, ctx.guild))
-            except ValueError as e:
-                await ctx.followup.send(f"❌ {e}", ephemeral=True)
-                return
-            p_name = participant.team_name
-            role_id = participant.role_id
-            # Sharing a player between teams is allowed, but it should never happen
-            # unnoticed — say so on the reply instead of blocking the add.
-            others = await other_teams_for_user(
-                session, t_id, player.id, participant.id)
-            also_on = ", ".join(f"**{p.team_name}**" for p in others)
+            p_id, p_name = participant.id, participant.team_name
 
-        # Outside the session: the board reads the roster back in its own session,
-        # so refreshing before this one commits would render the pre-change state.
-        await self._refresh_board(t_id)
-        # Also outside the session, and load-bearing, not just tidy: a Discord
-        # round-trip here would otherwise hold this write session's SQLite
-        # connection open for its whole duration. Safe only because
-        # AsyncSessionLocal sets expire_on_commit=False, so the role_id
-        # captured above survives past the commit.
-        # Unconditional: add_roles is idempotent, so re-syncing a player who was
-        # already on the roster repairs a role they somehow lack.
-        synced = await sync_member(ctx.guild, role_id, str(player.id), add=True)
-        warning = ("" if synced else
+        try:
+            [added] = await add_roster_members(self.bot, ctx.guild, p_id, [player])
+        except ValueError as e:
+            await ctx.followup.send(f"❌ {e}", ephemeral=True)
+            return
+        # Sharing a player between teams is allowed, but it should never happen
+        # unnoticed — say so on the reply instead of blocking the add.
+        also_on = ", ".join(f"**{name}**" for name in added.also_on)
+        warning = ("" if added.role_synced else
                    f"\n⚠️ Couldn't give them the **{p_name}** role — check that "
                    f"the bot's own role sits above it.")
         shared = f"\nAlso on {also_on} in this tournament." if also_on else ""
-        if created:
-            logger.info(f"{player.id} added to team '{p_name}' in tournament {t_id} "
-                        f"by {ctx.author.id}")
+        if added.created:
             await ctx.followup.send(
                 f"✅ {player.mention} is on **{p_name}**'s roster for **{t_name}**."
                 f"{shared}{warning}",
