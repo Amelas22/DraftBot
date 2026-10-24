@@ -85,7 +85,7 @@ def test_closed_board_drops_deficits_and_says_closed():
 
 
 def test_empty_board_invites_registration():
-    assert "/tournament register" in _text(create_registration_embed(_tournament(), []))
+    assert "Register a team" in _text(create_registration_embed(_tournament(), []))
 
 
 def test_join_instructions_stay_visible_once_teams_have_registered():
@@ -95,23 +95,32 @@ def test_join_instructions_stay_visible_once_teams_have_registered():
     text = _text(create_registration_embed(_tournament(), teams, pot=1))
 
     assert "How to join" in text
-    assert "/tournament register" in text
+    assert "Register a team" in text
 
 
-def test_paid_join_instructions_name_the_link_and_deposit_steps():
-    """Paying an entry isn't one step: the fee comes from the captain's wallet, so a
-    newcomer needs the MTGO link and the deposit amount, not just the register command."""
-    text = _text(create_registration_embed(_tournament(fee=3), [], pot=0))
-
-    assert "/link_mtgo" in text
-    assert "/wallet deposit 3" in text
+def _how_to_join(embed):
+    return next(f.value for f in embed.fields if f.name == "How to join")
 
 
-def test_free_join_instructions_are_just_the_one_command():
-    text = _text(create_registration_embed(_tournament(fee=0), []))
+def test_join_instructions_point_at_the_button_not_the_commands():
+    """The four typed steps confused captains; the button's wizard walks them through
+    linking, paying and teammates, so the board names only the button."""
+    for fee in (0, 3):
+        text = _how_to_join(create_registration_embed(_tournament(fee=fee), [], pot=0))
 
-    assert "/tournament register" in text
-    assert "/link_mtgo" not in text and "/wallet deposit" not in text
+        assert "Register a team" in text
+        assert "\n" not in text
+        assert "/tournament register" not in text and "/link_mtgo" not in text
+
+
+def test_join_instructions_send_players_without_a_team_to_find_a_team():
+    embed = create_registration_embed(_tournament(), [], find_a_team="<#555>")
+
+    assert "<#555>" in _how_to_join(embed)
+
+
+def test_join_instructions_skip_find_a_team_where_there_is_none():
+    assert "#" not in _how_to_join(create_registration_embed(_tournament(), []))
 
 
 def test_a_closed_board_drops_the_join_instructions():
@@ -247,13 +256,6 @@ def test_board_keeps_each_teams_members_on_its_own_line():
     assert "<@11>" in alpha_line and "<@21>" not in alpha_line
 
 
-def test_join_instructions_name_the_add_teammate_step():
-    """Registering only records the captain, so the roster step has to be told."""
-    text = _text(create_registration_embed(_tournament(fee=0), []))
-
-    assert "/tournament add_teammate" in text
-
-
 def test_large_roster_with_members_still_splits_under_the_cap():
     """Members make each line ~3x longer, so the field-splitting has to hold."""
     teams = []
@@ -274,7 +276,7 @@ def test_large_roster_with_members_still_splits_under_the_cap():
 
 # ---- the board's phase follows the tournament, not the caller ------------------
 
-async def _refresh_and_capture(status):
+async def _refresh_and_capture_edit(status):
     """Run update_registration_board against a tournament in `status`, return the embed."""
     from unittest.mock import AsyncMock, MagicMock
 
@@ -300,7 +302,11 @@ async def _refresh_and_capture(status):
     bot.get_channel = MagicMock(return_value=channel)
 
     await update_registration_board(bot, t_id)
-    return message.edit.call_args.kwargs["embed"]
+    return message.edit.call_args.kwargs
+
+
+async def _refresh_and_capture(status):
+    return (await _refresh_and_capture_edit(status))["embed"]
 
 
 @pytest.mark.asyncio
@@ -426,3 +432,20 @@ def test_names_without_a_guild_use_the_roster_snapshot_only():
     rosters = {1: [_member("11", "Bob")]}
 
     assert board_names(None, teams, rosters) == {"11": "Bob"}
+
+
+@pytest.mark.asyncio
+async def test_an_open_board_carries_the_register_button(test_db):  # noqa: F811
+    """Also how a board posted before the button existed gets it: its next edit."""
+    from register_team_wizard import RegisterTeamView
+
+    edit = await _refresh_and_capture_edit("registration")
+
+    assert isinstance(edit["view"], RegisterTeamView)
+
+
+@pytest.mark.asyncio
+async def test_a_closed_board_loses_the_register_button(test_db):  # noqa: F811
+    edit = await _refresh_and_capture_edit("active")
+
+    assert "view" in edit and edit["view"] is None

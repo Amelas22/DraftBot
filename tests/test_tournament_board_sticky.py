@@ -213,3 +213,31 @@ async def test_a_close_landing_mid_repost_still_reaches_the_new_board(test_db): 
     assert channel.send.await_args.kwargs["embed"].title.endswith("Registration open")
     redrawn = new.edit.await_args.kwargs["embed"]
     assert not redrawn.title.endswith("Registration open")
+
+
+@pytest.mark.asyncio
+async def test_a_new_board_is_posted_with_the_register_button(test_db):  # noqa: F811
+    from register_team_wizard import RegisterTeamView
+
+    t_id = await _seed_tournament()
+    channel = _channel()
+    channel.send = AsyncMock(return_value=_discord_message(900, channel))
+
+    await post_registration_board(MagicMock(), channel, t_id)
+
+    assert isinstance(channel.send.await_args.kwargs["view"], RegisterTeamView)
+
+
+@pytest.mark.asyncio
+async def test_a_repost_keeps_the_register_button(test_db):  # noqa: F811
+    from register_team_wizard import RegisterTeamView
+
+    t_id = await _seed_tournament(board_message_id="900")
+    await _make_sticky(t_id)
+    channel = _channel()
+    channel.send = AsyncMock(return_value=_discord_message(901, channel))
+    channel.fetch_message = AsyncMock(return_value=_discord_message(900, channel))
+
+    assert await _force_repost(_bot_for(channel)) == StickyUpdateResult.SUCCESS
+
+    assert isinstance(channel.send.await_args.kwargs["view"], RegisterTeamView)

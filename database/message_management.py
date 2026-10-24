@@ -346,10 +346,13 @@ class TournamentBoardStickyStrategy(StickyStrategy):
     async def generate_content(
         self, sticky_message: Message, bot: discord.Client, session: AsyncSession
     ) -> Tuple[str, Optional[discord.Embed], Optional[discord.ui.View], Dict[str, Any]]:
-        from services.tournament_formatter import registration_board_embed
+        from services.tournament_formatter import (
+            registration_board_embed, registration_board_view)
 
-        embed = await registration_board_embed(session, await self._tournament(sticky_message, session))
-        return sticky_message.content, embed, None, sticky_message.view_metadata
+        tournament = await self._tournament(sticky_message, session)
+        embed = await registration_board_embed(session, tournament)
+        return (sticky_message.content, embed, registration_board_view(tournament),
+                sticky_message.view_metadata)
 
     async def on_update_success(
         self, sticky_message: Message, new_message: discord.Message, bot: discord.Client, session: AsyncSession

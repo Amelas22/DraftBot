@@ -264,28 +264,19 @@ def create_standings_embed(tournament, participants, stage=STAGE_SWISS, omw=None
     return add_website_link(embed, tournament.website_url)
 
 
-def _add_how_to_join(embed, fee, closed):
-    """Spell out how to sign up, for as long as sign-ups are open.
+def _add_how_to_join(embed, closed, find_a_team=None):
+    """Point captains at the Register a team button, for as long as sign-ups are open.
 
-    This used to appear only on an empty board, so it vanished the moment the first
-    team registered — exactly when newcomers start reading the board. A paid entry
-    also isn't one step: the fee is paid from the captain's wallet, so someone who has
-    never deposited needs the MTGO link and the deposit named too, not just the
-    register command."""
+    This used to list every command -- /link_mtgo, register, /wallet deposit, then
+    add_teammate per player -- and captains got lost in it. The button's wizard walks
+    them through each of those, so the board only has to name the button, and send
+    players still looking for a team to ``find_a_team`` (a channel mention) where the
+    server has one."""
     if closed:
         return
-    if fee > 0:
-        value = (
-            f"1. `/link_mtgo <your MTGO username>` — once, so the bot can trade with you\n"
-            f"2. `/tournament register <team name>` — holds your spot\n"
-            f"3. `/wallet deposit {fee}` — your spot completes when the tix land\n"
-            f"4. `/tournament add_teammate @player` — once per teammate"
-        )
-    else:
-        value = (
-            "1. `/tournament register <team name>`\n"
-            "2. `/tournament add_teammate @player` — once per teammate"
-        )
+    value = "Captains: press **Register a team** below."
+    if find_a_team:
+        value += f" Looking for a team? Use {find_a_team}."
     embed.add_field(name="How to join", value=value, inline=False)
 
 
@@ -356,11 +347,12 @@ def _team_line(index, participant, fee, members, names):
 
 
 def create_registration_embed(tournament, participants, pot=0, deficits=None,
-                              closed=False, rosters=None, names=None):
+                              closed=False, rosters=None, names=None, find_a_team=None):
     """Build the registration board (pure): who is in, and for a paid tournament who
     has actually paid. ``deficits`` maps participant id -> tix still needed;
     ``rosters`` maps participant id -> that team's TournamentTeamMember rows;
-    ``names`` maps user id -> the name to show (see board_names)."""
+    ``names`` maps user id -> the name to show (see board_names); ``find_a_team``
+    is the mention of the server's Find a team channel, if it has one."""
     deficits = deficits or {}
     names = names or {}
     rosters = rosters or {}
@@ -379,7 +371,7 @@ def create_registration_embed(tournament, participants, pot=0, deficits=None,
 
     if not participants:
         embed.add_field(name="Teams (0)", value="No teams yet.", inline=False)
-        _add_how_to_join(embed, fee, closed)
+        _add_how_to_join(embed, closed, find_a_team)
         return embed
 
     lines = []
@@ -400,7 +392,7 @@ def create_registration_embed(tournament, participants, pot=0, deficits=None,
     # carries the paid count and repeating it on every field would read as a new total.
     _add_chunked_field(embed, label, lines, cont_label="Teams (cont.)")
     embed.set_footer(text=f"{CAPTAIN_MARK} team captain")
-    _add_how_to_join(embed, fee, closed)
+    _add_how_to_join(embed, closed, find_a_team)
     return embed
 
 
@@ -494,6 +486,9 @@ async def update_registration_board(bot, tournament_id):
         if tournament is None or not tournament.board_message_id:
             return
         embed = await registration_board_embed(session, tournament)
+        # Passed on every edit, not just the post: a board posted before the button
+        # existed picks it up, and a closed board drops it.
+        view = registration_board_view(tournament)
         channel_id = int(tournament.board_channel_id)
         message_id = int(tournament.board_message_id)
 
@@ -503,7 +498,7 @@ async def update_registration_board(bot, tournament_id):
         return
     try:
         message = await channel.fetch_message(message_id)
-        await message.edit(embed=embed)
+        await message.edit(embed=embed, view=view)
     except discord.NotFound:
         # A sticky repost moves the board and deletes the old message; a refresh
         # that fetched the old one just before must not orphan the new board.
@@ -527,7 +522,26 @@ async def registration_board_embed(session, tournament):
     guild = bot.get_guild(int(guild_id)) if bot is not None and guild_id.isdigit() else None
     return create_registration_embed(tournament, participants, pot, deficits,
                                      tournament.status != "registration", rosters,
-                                     board_names(guild, participants, rosters))
+                                     board_names(guild, participants, rosters),
+                                     _find_a_team_mention(guild_id))
+
+
+def _find_a_team_mention(guild_id):
+    """The server's Find a team channel as a mention, where Find a team is on."""
+    from config import get_config, scheduler_enabled
+
+    if not scheduler_enabled(guild_id):
+        return None
+    channel_id = get_config(guild_id).get("tournament", {}).get("default_lfg_channel_id")
+    return f"<#{channel_id}>" if channel_id else None
+
+
+def registration_board_view(tournament):
+    """The board's button while it takes registrations; None once it doesn't."""
+    # Local import: the wizard imports the registration service, which imports this.
+    from register_team_wizard import RegisterTeamView
+
+    return RegisterTeamView() if tournament.status == "registration" else None
 
 
 async def post_registration_board(bot, channel, tournament_id):
@@ -540,8 +554,9 @@ async def post_registration_board(bot, channel, tournament_id):
         if tournament is None:
             return None
         embed = await registration_board_embed(session, tournament)
+        view = registration_board_view(tournament)
     try:
-        message = await channel.send(embed=embed)
+        message = await channel.send(embed=embed, view=view)
     except discord.HTTPException as e:
         logger.warning(f"Could not post registration board for {tournament_id}: {e}")
         return None
