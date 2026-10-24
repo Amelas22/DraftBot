@@ -108,6 +108,21 @@ async def _current_members(session: AsyncSession, team_id: int) -> list[LfgTeamM
     )
 
 
+async def full_team_member_ids(session: AsyncSession, guild_id: str, captain_id: str) -> list[str]:
+    """The current members, other than the captain, of the full team this captain
+    leads in this guild (the newest, if somehow several); [] when there is none."""
+    team = (
+        await session.execute(
+            select(LfgTeam)
+            .where(LfgTeam.guild_id == guild_id, LfgTeam.captain_id == captain_id, LfgTeam.status == "full")
+            .order_by(LfgTeam.created_utc.desc())
+        )
+    ).scalars().first()
+    if team is None:
+        return []
+    return [str(m.user_id) for m in await _current_members(session, int(team.id)) if m.user_id != captain_id]
+
+
 def _team_id(raw: str) -> int | None:
     return int(raw) if raw.isascii() and raw.isdigit() else None
 
