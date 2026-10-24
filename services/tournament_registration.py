@@ -2,13 +2,15 @@
 Register a team wizard.
 
 Each function does the whole job behind one user action -- the database writes,
-the escrow hold, the board refresh, team roles, the team-finder reconcile -- and
-returns what happened instead of replying. The two front ends word their replies
+the escrow hold, the board refresh, team roles -- and returns what happened instead
+of replying. The Find a team reconcile is left to the caller, to run once its
+roster is final. The two front ends word their replies
 differently (a command says "try /tournament register again", the wizard says
 "press Register a team again"), so the replies stay with them; what they must never
 do is disagree about what registering means.
 """
 from dataclasses import dataclass, field, replace
+from typing import Literal
 
 import discord
 from loguru import logger
@@ -17,10 +19,13 @@ from database.db_session import db_session
 from helpers.display_names import get_display_name
 from models.tournament import Tournament, TournamentParticipant
 from services import tournament_escrow_service as escrow
-from services.team_finder_sync import reconcile_after_command
 from services.tournament_formatter import refresh_boards
 from services.tournament_roles import sync_member
 from services.tournament_service import add_teammate, other_teams_for_user, register_team
+
+
+RegisterKind = Literal["free_registered", "free_exists", "paid", "already_paid",
+                       "not_captain", "pending", "hold_failed", "refused"]
 
 
 @dataclass
@@ -37,7 +42,7 @@ class RegisterOutcome:
       hold_failed     -- a pending row exists but the escrow hold failed (``error``).
       refused         -- nothing was registered (``error`` says why).
     """
-    kind: str
+    kind: RegisterKind
     team_name: str = ""
     tournament_name: str = ""
     participant_id: int | None = None
@@ -58,15 +63,14 @@ class RosterAdd:
 
 
 async def register_captain(bot: discord.Bot, guild_id: str, tournament_id: int,
-                           captain_id: str, team_name: str, *,
-                           reconcile: bool = True) -> RegisterOutcome:
+                           captain_id: str, team_name: str) -> RegisterOutcome:
     """Register ``team_name`` with ``captain_id`` as captain, paying a fee from their
     wallet when there is one. The caller has already checked that a paid tournament's
     money stack is up and that the captain is linked to MTGO.
 
-    ``reconcile=False`` leaves the Find a team reconcile to the caller: one that fills
-    the roster straight after must reconcile after that, or the captain's Find a team
-    teammates are told the captain "registered a different team"."""
+    The caller runs the Find a team reconcile once its roster is final: run here,
+    before the roster is filled, it would tell the captain's Find a team teammates
+    the captain "registered a different team"."""
     try:
         async with db_session() as session:
             tournament = await session.get(Tournament, tournament_id)
@@ -78,33 +82,28 @@ async def register_captain(bot: discord.Bot, guild_id: str, tournament_id: int,
     except ValueError as e:
         return RegisterOutcome("refused", error=str(e))
 
-    base = RegisterOutcome("", team_name=p_name, tournament_name=t_name,
+    # Every return below replaces kind; "refused" is only a placeholder.
+    base = RegisterOutcome("refused", team_name=p_name, tournament_name=t_name,
                            participant_id=p_id, captain_id=p_captain, fee=fee)
 
     if fee == 0:
         if not created:
-            if reconcile:
-                await reconcile_after_command(bot, guild_id)
             return replace(base, kind="free_exists")
         logger.info(f"Team '{p_name}' registered for tournament {tournament_id} by {captain_id}")
         await refresh_boards(bot, [tournament_id])
-        if reconcile:
-            await reconcile_after_command(bot, guild_id)
         return replace(base, kind="free_registered")
 
     if p_status == "paid":
         return replace(base, kind="already_paid")
     # Escrow is paid from the captain's wallet, so only the captain can complete it.
-    if str(captain_id) != p_captain:
+    if captain_id != p_captain:
         return replace(base, kind="not_captain")
 
-    res = await escrow.secure_from_wallet(guild_id, str(captain_id), p_id, tournament_id,
+    res = await escrow.secure_from_wallet(guild_id, captain_id, p_id, tournament_id,
                                           fee, p_name)
     # Every branch below follows a committed participant row, so the board must show
     # it -- the watchdog only refreshes boards for entries it COMPLETES.
     await refresh_boards(bot, [tournament_id])
-    if reconcile:
-        await reconcile_after_command(bot, guild_id)
     if res.get("done"):
         return replace(base, kind="paid")
     if not res.get("ok"):
@@ -149,6 +148,4 @@ async def add_roster_members(bot: discord.Bot, guild: discord.Guild, participant
         await refresh_boards(bot, [t_id])
     for add in adds:
         add.role_synced = await sync_member(guild, role_id, add.user_id, add=True)
-    # A player now on a registered roster leaves any other forming Find a team team.
-    await reconcile_after_command(bot, guild.id)
     return adds

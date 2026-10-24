@@ -523,17 +523,19 @@ async def registration_board_embed(session, tournament):
     return create_registration_embed(tournament, participants, pot, deficits,
                                      tournament.status != "registration", rosters,
                                      board_names(guild, participants, rosters),
-                                     _find_a_team_mention(guild_id))
+                                     _find_a_team_mention(guild, guild_id))
 
 
-def _find_a_team_mention(guild_id):
-    """The server's Find a team channel as a mention, where Find a team is on."""
+def _find_a_team_mention(guild, guild_id):
+    """The server's Find a team channel as a mention, where Find a team is on and
+    the channel still exists."""
     from config import get_config, scheduler_enabled
+    from helpers.tournament_channels import FIND_A_TEAM, resolve_channel
 
-    if not scheduler_enabled(guild_id):
+    if guild is None or not scheduler_enabled(guild_id):
         return None
-    channel_id = get_config(guild_id).get("tournament", {}).get("default_lfg_channel_id")
-    return f"<#{channel_id}>" if channel_id else None
+    channel = resolve_channel(guild, get_config(guild_id), FIND_A_TEAM.setting)
+    return channel.mention if channel is not None else None
 
 
 def registration_board_view(tournament):

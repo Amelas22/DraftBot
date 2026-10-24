@@ -20,17 +20,16 @@ from typing import Any, cast
 import discord
 from discord.types.components import SelectMenu as SelectMenuPayload
 from loguru import logger
-from sqlalchemy import select
 from typing_extensions import override
 
 from database.db_session import db_session
 from helpers.money_gate import gate_serve, linked_username
 from helpers.utils import not_none, ui_button
 from models.mtgo_account import MtgoAccount
-from models.team_finder import LfgTeam, LfgTeamMember
 from models.tournament import Tournament, TournamentParticipant
 from notification_service import send_dm
 from services import wallet_service
+from services.team_finder import full_team_member_ids
 from services.team_finder_sync import reconcile_after_command
 from services.tournament_registration import (
     RegisterOutcome, RosterAdd, add_roster_members, register_captain)
@@ -67,6 +66,11 @@ class WizardView(discord.ui.View):
         self.state = state
         self.shown_by: discord.Interaction | None = None
 
+    def present(self, interaction: discord.Interaction) -> None:
+        """Mark this step as the one on screen, shown through ``interaction``."""
+        self.shown_by = interaction
+        self.state.current = self
+
     @override
     async def on_timeout(self) -> None:
         # A later step replaced this one on screen (or on a newer message): leave it.
@@ -90,8 +94,7 @@ async def _reply(interaction: discord.Interaction, content: str,
     new private message when the step came from the public board (editing there
     would rewrite the board)."""
     if isinstance(view, WizardView):
-        view.shown_by = interaction
-        view.state.current = view
+        view.present(interaction)
     if edit:
         await interaction.response.edit_message(content=content, view=view)
     elif view is None:
@@ -160,12 +163,16 @@ class LinkModal(discord.ui.Modal):
             return
         self.state.mtgo = str(detail)
         await _reply(interaction, f"✓ Linked as {detail}. Next, name your team.",
-                     NameButtonView(self.state), edit=False)
+                     NameButtonView(self.state, "Name your team"), edit=False)
 
 
 class NameButtonView(WizardView):
-    def __init__(self, state: WizardState) -> None:
+    """One button that opens the team-name pop-up: after linking, and after a
+    name turned out to be taken."""
+
+    def __init__(self, state: WizardState, label: str) -> None:
         super().__init__(state)
+        self.name_button.label = label
 
     @ui_button(label="Name your team", style=discord.ButtonStyle.primary)
     async def name_button(self, _button: discord.ui.Button[Any],
@@ -191,8 +198,8 @@ class NameModal(discord.ui.Modal):
             return
         self.state.team_name = name
         if await _name_taken(self.state):
-            await _reply(interaction, _taken_text(self.state), RenameView(self.state),
-                         edit=self.edit)
+            await _reply(interaction, _taken_text(self.state),
+                         NameButtonView(self.state, "Rename"), edit=self.edit)
             return
         await _show_teammates(interaction, self.state, edit=self.edit)
 
@@ -208,34 +215,11 @@ def _taken_text(state: WizardState) -> str:
             f"— pick another name.")
 
 
-class RenameView(WizardView):
-    def __init__(self, state: WizardState) -> None:
-        super().__init__(state)
-
-    @ui_button(label="Rename", style=discord.ButtonStyle.primary)
-    async def rename(self, _button: discord.ui.Button[Any],
-                     interaction: discord.Interaction) -> None:
-        await interaction.response.send_modal(NameModal(self.state, edit=True))
-
-
 # --- Step 2: teammates ------------------------------------------------------------
 
 async def lfg_defaults(guild_id: str, captain_id: str) -> list[str]:
-    """The current members, other than the captain, of the full Find a team team this
-    captain leads in this server (the newest, if somehow several)."""
     async with db_session() as session:
-        team = (await session.execute(
-            select(LfgTeam).where(LfgTeam.guild_id == guild_id,
-                                  LfgTeam.captain_id == captain_id,
-                                  LfgTeam.status == "full")
-            .order_by(LfgTeam.created_utc.desc()))).scalars().first()
-        if team is None:
-            return []
-        rows = (await session.execute(
-            select(LfgTeamMember.user_id).where(LfgTeamMember.team_id == team.id,
-                                                LfgTeamMember.left_utc.is_(None))
-            .order_by(LfgTeamMember.joined_utc))).scalars().all()
-    return [uid for uid in rows if uid != captain_id]
+        return await full_team_member_ids(session, guild_id, captain_id)
 
 
 class PrefilledUserSelect(discord.ui.Select[Any]):
@@ -401,8 +385,7 @@ class ConfirmView(WizardView):
                              f"Check the board: if your team is on it, you're registered. "
                              f"If not, {PRESS_AGAIN}."), None
         if isinstance(view, WizardView):
-            view.shown_by = interaction
-            self.state.current = view
+            view.present(interaction)
         await interaction.edit_original_response(content=content, view=view)
 
     async def on_back(self, interaction: discord.Interaction) -> None:
@@ -427,7 +410,7 @@ async def _register(interaction: discord.Interaction,
     if not still_open:
         return f"Registration for **{state.tournament_name}** has closed.", None
     if await _name_taken(state):
-        return _taken_text(state), RenameView(state)
+        return _taken_text(state), NameButtonView(state, "Rename")
     if state.fee > 0:
         gate = gate_serve(interaction)
         if gate:
@@ -436,14 +419,15 @@ async def _register(interaction: discord.Interaction,
             return f"Your MTGO link is gone — {PRESS_AGAIN} to link it.", None
 
     out = await register_captain(_bot(interaction), state.guild_id, state.tournament_id,
-                                 state.captain_id, state.team_name, reconcile=False)
+                                 state.captain_id, state.team_name)
     if out.kind == "refused":
         return f"❌ {out.error}", None
     if out.kind in ("free_exists", "already_paid", "not_captain"):
         # Someone registered this name between the check above and now.
-        return _taken_text(state), RenameView(state)
+        return _taken_text(state), NameButtonView(state, "Rename")
 
-    roster = await _add_and_tell(interaction, state, out, state.teammate_ids)
+    roster = await _add_and_tell(interaction, state, not_none(out.participant_id),
+                                 out.team_name)
     # Only now: the Find a team reconcile tells each teammate whether they're on the
     # registered roster, so it must see the roster filled.
     await reconcile_after_command(_bot(interaction), state.guild_id)
@@ -467,9 +451,10 @@ def _result_text(out: RegisterOutcome) -> str:
 
 
 async def _add_and_tell(interaction: discord.Interaction, state: WizardState,
-                        out: RegisterOutcome, teammate_ids: list[str]) -> str:
+                        participant_id: int, team_name: str) -> str:
     """Put the picked members on the roster and DM each newly added one. Returns the
     sentence for the captain's reply."""
+    teammate_ids = state.teammate_ids
     if not teammate_ids:
         return f"\nAdd teammates any time: {PRESS_AGAIN}."
     guild = not_none(interaction.guild)
@@ -485,11 +470,10 @@ async def _add_and_tell(interaction: discord.Interaction, state: WizardState,
                 continue
         members.append(member)
     try:
-        adds = await add_roster_members(_bot(interaction), guild, not_none(out.participant_id),
-                                        members)
+        adds = await add_roster_members(_bot(interaction), guild, participant_id, members)
     except ValueError as e:
         return f"\n❌ Couldn't add teammates: {e}"
-    text = await _tell_added(interaction, state, out.team_name, adds)
+    text = await _tell_added(interaction, state, team_name, adds)
     if missing:
         text += f"\nCouldn't find {', '.join(missing)} in this server, so they weren't added."
     return text
@@ -577,9 +561,8 @@ async def _add_to_existing(interaction: discord.Interaction, state: WizardState,
                                                 view=None)
         return
     await interaction.response.edit_message(content="Adding…", view=None)
-    out = RegisterOutcome("existing", team_name=state.team_name,
-                          tournament_name=state.tournament_name, participant_id=participant_id)
-    roster = await _add_and_tell(interaction, state, out, state.teammate_ids)
+    roster = await _add_and_tell(interaction, state, participant_id, state.team_name)
+    await reconcile_after_command(_bot(interaction), state.guild_id)
     logger.info(f"register wizard: {state.captain_id} added {state.teammate_ids} to "
                 f"participant {participant_id}")
     await interaction.edit_original_response(

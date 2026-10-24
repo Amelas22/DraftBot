@@ -65,7 +65,7 @@ def quiet():
     dm = AsyncMock(return_value=True)
     with ExitStack() as stack:
         stack.enter_context(patch.object(reg, "refresh_boards", AsyncMock()))
-        stack.enter_context(patch.object(reg, "reconcile_after_command", AsyncMock()))
+        stack.enter_context(patch.object(wiz, "reconcile_after_command", AsyncMock()))
         stack.enter_context(patch.object(reg, "sync_member", AsyncMock(return_value=True)))
         stack.enter_context(patch.object(wiz, "gate_serve", return_value=None))
         stack.enter_context(patch.object(wiz, "send_dm", dm))
@@ -532,8 +532,7 @@ async def test_find_a_team_is_reconciled_only_once_the_roster_is_filled(test_db,
                 .where(TournamentParticipant.tournament_id == t_id))).scalars().all()))
 
     confirm = await _through_to_confirm()
-    with patch.object(reg, "reconcile_after_command", snapshot), \
-            patch.object(wiz, "reconcile_after_command", snapshot, create=True):
+    with patch.object(wiz, "reconcile_after_command", snapshot):
         await _press_confirm(confirm)
 
     assert seen and all(roster == [str(WREN)] for roster in seen)
@@ -544,11 +543,10 @@ async def test_a_team_registered_alone_is_still_reconciled(test_db, quiet):  # n
     await _tournament()
     confirm = await _through_to_confirm()
     calls = AsyncMock()
-    with patch.object(reg, "reconcile_after_command", calls), \
-            patch.object(wiz, "reconcile_after_command", calls, create=True):
+    with patch.object(wiz, "reconcile_after_command", calls):
         await _press_confirm(confirm)
 
-    assert calls.await_count >= 1
+    calls.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -587,3 +585,16 @@ async def test_changing_the_picks_drops_the_find_a_team_note(test_db, quiet):  #
         await picker.callback(i)
 
     assert "Find a team" not in _sent(i)[0]
+
+
+@pytest.mark.asyncio
+async def test_adding_to_an_existing_team_reconciles_find_a_team(test_db, quiet):  # noqa: F811
+    t_id = await _tournament()
+    await _existing(t_id)
+    i = _interaction()
+    await wiz.start(i)
+    calls = AsyncMock()
+    with patch.object(wiz, "reconcile_after_command", calls):
+        await _pick_and_add(_sent(i)[1], MEMBERS[WREN])
+
+    calls.assert_awaited_once()

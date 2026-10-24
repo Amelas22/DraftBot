@@ -985,6 +985,7 @@ class TournamentCog(commands.Cog):
                 f"To finish, run `/wallet deposit {out.deficit}` whenever you're ready (you have "
                 f"{out.available} tix; the fee is {fee}). Registration completes automatically once the "
                 f"tix land — no need to re-register.", ephemeral=True)
+        await reconcile_after_command(self.bot, guild_id)
 
     async def _roster_target(self, ctx, session, tournament, team):
         """The participant whose roster this command edits, or None if it can't.
@@ -1077,6 +1078,8 @@ class TournamentCog(commands.Cog):
             await ctx.followup.send(
                 f"{player.mention} is already on **{p_name}**'s roster.{shared}{warning}",
                 ephemeral=True)
+        # A player now on a registered roster leaves any other forming Find a team team.
+        await reconcile_after_command(self.bot, ctx.guild.id)
 
     @tournament.command(name="remove_teammate",
                         description="Take a player off your team's roster")

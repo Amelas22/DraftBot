@@ -449,3 +449,18 @@ async def test_a_closed_board_loses_the_register_button(test_db):  # noqa: F811
     edit = await _refresh_and_capture_edit("active")
 
     assert "view" in edit and edit["view"] is None
+
+
+def test_the_find_a_team_link_is_dropped_when_the_channel_is_gone():
+    from unittest.mock import patch as _patch
+
+    from services.tournament_formatter import _find_a_team_mention
+
+    guild = MagicMock()
+    guild.get_channel.return_value = None
+    config = {"tournament": {"default_lfg_channel_id": "555"}}
+    with _patch("config.scheduler_enabled", return_value=True), \
+            _patch("config.get_config", return_value=config):
+        assert _find_a_team_mention(guild, "g1") is None
+        guild.get_channel.return_value = MagicMock(mention="<#555>")
+        assert _find_a_team_mention(guild, "g1") == "<#555>"

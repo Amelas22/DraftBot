@@ -29,8 +29,8 @@ async def _participant(t_id, name="Alpha", captain="10"):
 
 
 def _quiet():
-    """Board refresh and the team-finder reconcile talk to Discord; not under test here."""
-    return patch.multiple(reg, refresh_boards=AsyncMock(), reconcile_after_command=AsyncMock())
+    """The board refresh talks to Discord; not under test here."""
+    return patch.object(reg, "refresh_boards", AsyncMock())
 
 
 @pytest.mark.asyncio
