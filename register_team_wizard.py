@@ -54,6 +54,28 @@ class WizardState:
     teammate_ids: list[str] = field(default_factory=list)
     from_find_a_team: bool = False
     picked: bool = False  # the teammate step has been shown once (defaults loaded)
+    current: "WizardView | None" = None  # the step on screen; only it may time out
+
+
+class WizardView(discord.ui.View):
+    """A wizard step. When it times out while still on screen, it says how to start
+    over instead of leaving buttons that fail with Discord's generic error."""
+
+    def __init__(self, state: WizardState) -> None:
+        super().__init__(timeout=WIZARD_TIMEOUT)
+        self.state = state
+        self.shown_by: discord.Interaction | None = None
+
+    @override
+    async def on_timeout(self) -> None:
+        # A later step replaced this one on screen (or on a newer message): leave it.
+        if self.shown_by is None or self.state.current is not self:
+            return
+        try:
+            await self.shown_by.edit_original_response(
+                content=f"This step timed out — {PRESS_AGAIN}.", view=None)
+        except discord.HTTPException:
+            pass
 
 
 def _bot(interaction: discord.Interaction) -> discord.Bot:
@@ -66,6 +88,9 @@ async def _reply(interaction: discord.Interaction, content: str,
     """Show the next step: in place of the wizard message a button sat on, or as a
     new private message when the step came from the public board (editing there
     would rewrite the board)."""
+    if isinstance(view, WizardView):
+        view.shown_by = interaction
+        view.state.current = view
     if edit:
         await interaction.response.edit_message(content=content, view=view)
     elif view is None:
@@ -113,7 +138,7 @@ async def start(interaction: discord.Interaction) -> None:
 
 class LinkModal(discord.ui.Modal):
     def __init__(self, state: WizardState) -> None:
-        super().__init__(title="Link your MTGO account", timeout=WIZARD_TIMEOUT)
+        super().__init__(title="Link your MTGO account", timeout=None)
         self.state = state
         self.add_item(discord.ui.InputText(
             label="MTGO username", placeholder="e.g. rook_mtgo", max_length=64))
@@ -137,10 +162,9 @@ class LinkModal(discord.ui.Modal):
                      NameButtonView(self.state), edit=False)
 
 
-class NameButtonView(discord.ui.View):
+class NameButtonView(WizardView):
     def __init__(self, state: WizardState) -> None:
-        super().__init__(timeout=WIZARD_TIMEOUT)
-        self.state = state
+        super().__init__(state)
 
     @ui_button(label="Name your team", style=discord.ButtonStyle.primary)
     async def name_button(self, _button: discord.ui.Button[Any],
@@ -152,7 +176,7 @@ class NameButtonView(discord.ui.View):
 
 class NameModal(discord.ui.Modal):
     def __init__(self, state: WizardState, *, edit: bool) -> None:
-        super().__init__(title="Register a team", timeout=WIZARD_TIMEOUT)
+        super().__init__(title="Register a team", timeout=None)
         self.state = state
         self.edit = edit
         self.add_item(discord.ui.InputText(
@@ -183,10 +207,9 @@ def _taken_text(state: WizardState) -> str:
             f"— pick another name.")
 
 
-class RenameView(discord.ui.View):
+class RenameView(WizardView):
     def __init__(self, state: WizardState) -> None:
-        super().__init__(timeout=WIZARD_TIMEOUT)
-        self.state = state
+        super().__init__(state)
 
     @ui_button(label="Rename", style=discord.ButtonStyle.primary)
     async def rename(self, _button: discord.ui.Button[Any],
@@ -246,14 +269,13 @@ def _pick(values: list[Any], captain_id: str) -> tuple[list[str], list[str]]:
     return kept, dropped
 
 
-class TeammatesView(discord.ui.View):
+class TeammatesView(WizardView):
     """Step 2 for a new team (Next / Back), or the add-a-teammate prompt for an
     existing one (Add / Done) when ``participant_id`` is set."""
 
     def __init__(self, state: WizardState, *, participant_id: int | None = None,
                  header: str = "") -> None:
-        super().__init__(timeout=WIZARD_TIMEOUT)
-        self.state = state
+        super().__init__(state)
         self.participant_id = participant_id
         self.header = header
         picker = PrefilledUserSelect(
@@ -285,7 +307,7 @@ class TeammatesView(discord.ui.View):
         self.state.teammate_ids = kept
         note = (f"Left out {', '.join(dropped)}: bots can't be on a team." if dropped else "")
         view = TeammatesView(self.state, participant_id=self.participant_id, header=self.header)
-        await interaction.response.edit_message(content=view.content(note), view=view)
+        await _reply(interaction, view.content(note), view, edit=True)
 
     async def on_forward(self, interaction: discord.Interaction) -> None:
         if self.participant_id is not None:
@@ -332,10 +354,10 @@ async def _confirm_text(state: WizardState, guild: discord.Guild | None) -> str:
     return "\n".join(rows)
 
 
-class ConfirmView(discord.ui.View):
+class ConfirmView(WizardView):
     def __init__(self, state: WizardState) -> None:
-        super().__init__(timeout=WIZARD_TIMEOUT)
-        self.state = state
+        super().__init__(state)
+        self.busy = False
         label = f"Register and pay {state.fee} tix" if state.fee > 0 else "Register"
         confirm: discord.ui.Button[Any] = discord.ui.Button(
             label=label, style=discord.ButtonStyle.success)
@@ -349,8 +371,25 @@ class ConfirmView(discord.ui.View):
             self.add_item(item)
 
     async def on_confirm(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer()
-        content, view = await _register(interaction, self.state)
+        # Answer first and take the buttons away: registering, the roster and the DMs
+        # take seconds, and a second press in that window used to come back "name
+        # taken" -- inviting a rename into a second, separately paid team.
+        if self.busy:
+            await interaction.response.defer()
+            return
+        self.busy = True
+        self.stop()
+        await interaction.response.edit_message(content="Registering…", view=None)
+        try:
+            content, view = await _register(interaction, self.state)
+        except Exception:
+            logger.exception(f"register wizard: confirm failed for {self.state}")
+            content, view = (f"Something went wrong while registering **{self.state.team_name}**. "
+                             f"Check the board: if your team is on it, you're registered. "
+                             f"If not, {PRESS_AGAIN}."), None
+        if isinstance(view, WizardView):
+            view.shown_by = interaction
+            self.state.current = view
         await interaction.edit_original_response(content=content, view=view)
 
     async def on_back(self, interaction: discord.Interaction) -> None:
@@ -362,8 +401,8 @@ class ConfirmView(discord.ui.View):
 
 
 async def _show_confirm(interaction: discord.Interaction, state: WizardState) -> None:
-    await interaction.response.edit_message(
-        content=await _confirm_text(state, interaction.guild), view=ConfirmView(state))
+    await _reply(interaction, await _confirm_text(state, interaction.guild),
+                 ConfirmView(state), edit=True)
 
 
 async def _register(interaction: discord.Interaction,
@@ -477,15 +516,14 @@ async def start_existing(interaction: discord.Interaction, state: WizardState,
     if len(teams) == 1:
         await _existing_prompt(interaction, state, teams[0], edit=False)
         return
-    await interaction.response.send_message(
-        f"You captain {len(teams)} teams in **{state.tournament_name}**. Which one?",
-        view=WhichTeamView(state, teams), ephemeral=True)
+    await _reply(interaction,
+                 f"You captain {len(teams)} teams in **{state.tournament_name}**. Which one?",
+                 WhichTeamView(state, teams), edit=False)
 
 
-class WhichTeamView(discord.ui.View):
+class WhichTeamView(WizardView):
     def __init__(self, state: WizardState, teams: list[TournamentParticipant]) -> None:
-        super().__init__(timeout=WIZARD_TIMEOUT)
-        self.state = state
+        super().__init__(state)
         self.teams = {str(p.id): p for p in teams}
         select: discord.ui.Select[Any] = discord.ui.Select(
             placeholder="Pick a team",
@@ -522,7 +560,7 @@ async def _add_to_existing(interaction: discord.Interaction, state: WizardState,
         await interaction.response.edit_message(content="Nobody picked — nothing changed.",
                                                 view=None)
         return
-    await interaction.response.defer()
+    await interaction.response.edit_message(content="Adding…", view=None)
     out = RegisterOutcome("existing", team_name=state.team_name,
                           tournament_name=state.tournament_name, participant_id=participant_id)
     roster = await _add_and_tell(interaction, state, out, state.teammate_ids)

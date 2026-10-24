@@ -448,3 +448,68 @@ async def test_a_captain_of_two_teams_picks_one_first(test_db, quiet):  # noqa: 
     with patch.object(type(which), "values", new=[str(bravo)]):
         await which.callback(pick)
     assert "You captain **Bravo**" in _sent(pick)[0]
+
+
+# --- Review fixes -------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_confirm_takes_its_buttons_away_before_registering(test_db, quiet):  # noqa: F811
+    """A second press while the first is still working must not be able to show
+    'name taken' and invite a rename into a second, separately paid team."""
+    await _tournament()
+    confirm = await _through_to_confirm()
+    _content, view = _sent(confirm)
+    i = _interaction()
+    await _button(view, "Register").callback(i)
+
+    first = i.response.edit_message.await_args.kwargs
+    assert first["view"] is None and "Registering" in first["content"]
+    i.response.defer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_second_confirm_press_does_nothing(test_db, quiet):  # noqa: F811
+    t_id = await _tournament()
+    confirm = await _through_to_confirm()
+    _content, view = _sent(confirm)
+    button = _button(view, "Register")
+    await button.callback(_interaction())
+    again = _interaction()
+    await button.callback(again)
+
+    again.edit_original_response.assert_not_awaited()
+    async with db_session() as session:
+        assert len((await session.execute(select(TournamentParticipant).where(
+            TournamentParticipant.tournament_id == t_id))).scalars().all()) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failure_after_confirm_still_answers(test_db, quiet):  # noqa: F811
+    await _tournament()
+    confirm = await _through_to_confirm()
+    with patch.object(wiz, "register_captain", AsyncMock(side_effect=RuntimeError("db"))):
+        reply = await _press_confirm(confirm)
+
+    assert "Something went wrong" in reply and "board" in reply
+
+
+@pytest.mark.asyncio
+async def test_a_timed_out_step_says_to_press_the_button_again(test_db, quiet):  # noqa: F811
+    await _tournament()
+    start = _interaction()
+    await wiz.start(start)
+    teammates = await _name(start)
+    _content, view = _sent(teammates)
+
+    await view.on_timeout()
+
+    edit = teammates.edit_original_response.await_args.kwargs
+    assert wiz.PRESS_AGAIN in edit["content"] and edit["view"] is None
+
+
+@pytest.mark.asyncio
+async def test_the_pop_ups_never_time_out():
+    """A captain may sit on the name form; the view behind it carries the timeout."""
+    state = wiz.WizardState("1", 1, "Lotus Open", 0, "10")
+    assert wiz.NameModal(state, edit=False).timeout is None
+    assert wiz.LinkModal(state).timeout is None
