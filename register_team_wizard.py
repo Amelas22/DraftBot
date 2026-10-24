@@ -31,6 +31,7 @@ from models.team_finder import LfgTeam, LfgTeamMember
 from models.tournament import Tournament, TournamentParticipant
 from notification_service import send_dm
 from services import wallet_service
+from services.team_finder_sync import reconcile_after_command
 from services.tournament_registration import (
     RegisterOutcome, RosterAdd, add_roster_members, register_captain)
 from services.tournament_service import (
@@ -423,7 +424,7 @@ async def _register(interaction: discord.Interaction,
             return f"Your MTGO link is gone — {PRESS_AGAIN} to link it.", None
 
     out = await register_captain(_bot(interaction), state.guild_id, state.tournament_id,
-                                 state.captain_id, state.team_name)
+                                 state.captain_id, state.team_name, reconcile=False)
     if out.kind == "refused":
         return f"❌ {out.error}", None
     if out.kind in ("free_exists", "already_paid", "not_captain"):
@@ -431,6 +432,9 @@ async def _register(interaction: discord.Interaction,
         return _taken_text(state), RenameView(state)
 
     roster = await _add_and_tell(interaction, state, out, state.teammate_ids)
+    # Only now: the Find a team reconcile tells each teammate whether they're on the
+    # registered roster, so it must see the roster filled.
+    await reconcile_after_command(_bot(interaction), state.guild_id)
     return _result_text(out) + roster, None
 
 

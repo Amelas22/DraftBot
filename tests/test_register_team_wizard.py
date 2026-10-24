@@ -513,3 +513,39 @@ async def test_the_pop_ups_never_time_out():
     state = wiz.WizardState("1", 1, "Lotus Open", 0, "10")
     assert wiz.NameModal(state, edit=False).timeout is None
     assert wiz.LinkModal(state).timeout is None
+
+
+@pytest.mark.asyncio
+async def test_find_a_team_is_reconciled_only_once_the_roster_is_filled(test_db, quiet):  # noqa: F811
+    """Run before the roster, the reconcile told the captain's Find a team teammates
+    their captain had 'registered a different team' -- they weren't on it yet."""
+    t_id = await _tournament()
+    await _full_lfg_team(WREN)
+    seen = []
+
+    async def snapshot(_bot, _guild_id):
+        async with db_session() as session:
+            seen.append(sorted((await session.execute(
+                select(TournamentTeamMember.user_id)
+                .join(TournamentParticipant,
+                      TournamentParticipant.id == TournamentTeamMember.participant_id)
+                .where(TournamentParticipant.tournament_id == t_id))).scalars().all()))
+
+    confirm = await _through_to_confirm()
+    with patch.object(reg, "reconcile_after_command", snapshot), \
+            patch.object(wiz, "reconcile_after_command", snapshot, create=True):
+        await _press_confirm(confirm)
+
+    assert seen and all(roster == [str(WREN)] for roster in seen)
+
+
+@pytest.mark.asyncio
+async def test_a_team_registered_alone_is_still_reconciled(test_db, quiet):  # noqa: F811
+    await _tournament()
+    confirm = await _through_to_confirm()
+    calls = AsyncMock()
+    with patch.object(reg, "reconcile_after_command", calls), \
+            patch.object(wiz, "reconcile_after_command", calls, create=True):
+        await _press_confirm(confirm)
+
+    assert calls.await_count >= 1

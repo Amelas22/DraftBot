@@ -58,10 +58,15 @@ class RosterAdd:
 
 
 async def register_captain(bot: discord.Bot, guild_id: str, tournament_id: int,
-                           captain_id: str, team_name: str) -> RegisterOutcome:
+                           captain_id: str, team_name: str, *,
+                           reconcile: bool = True) -> RegisterOutcome:
     """Register ``team_name`` with ``captain_id`` as captain, paying a fee from their
     wallet when there is one. The caller has already checked that a paid tournament's
-    money stack is up and that the captain is linked to MTGO."""
+    money stack is up and that the captain is linked to MTGO.
+
+    ``reconcile=False`` leaves the Find a team reconcile to the caller: one that fills
+    the roster straight after must reconcile after that, or the captain's Find a team
+    teammates are told the captain "registered a different team"."""
     try:
         async with db_session() as session:
             tournament = await session.get(Tournament, tournament_id)
@@ -78,11 +83,13 @@ async def register_captain(bot: discord.Bot, guild_id: str, tournament_id: int,
 
     if fee == 0:
         if not created:
-            await reconcile_after_command(bot, guild_id)
+            if reconcile:
+                await reconcile_after_command(bot, guild_id)
             return replace(base, kind="free_exists")
         logger.info(f"Team '{p_name}' registered for tournament {tournament_id} by {captain_id}")
         await refresh_boards(bot, [tournament_id])
-        await reconcile_after_command(bot, guild_id)
+        if reconcile:
+            await reconcile_after_command(bot, guild_id)
         return replace(base, kind="free_registered")
 
     if p_status == "paid":
@@ -96,7 +103,8 @@ async def register_captain(bot: discord.Bot, guild_id: str, tournament_id: int,
     # Every branch below follows a committed participant row, so the board must show
     # it -- the watchdog only refreshes boards for entries it COMPLETES.
     await refresh_boards(bot, [tournament_id])
-    await reconcile_after_command(bot, guild_id)
+    if reconcile:
+        await reconcile_after_command(bot, guild_id)
     if res.get("done"):
         return replace(base, kind="paid")
     if not res.get("ok"):
