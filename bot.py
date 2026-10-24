@@ -140,6 +140,8 @@ async def main():
         await re_register_premade_nudges(bot)
         from cogs.lfg_cog import LfgBoardView
         bot.add_view(LfgBoardView())
+        from register_team_wizard import RegisterTeamView
+        bot.add_view(RegisterTeamView())
         from livedrafts import re_register_live_drafts
         await re_register_live_drafts(bot)
         # As a task, not awaited: this one fetches a Discord message per recent
