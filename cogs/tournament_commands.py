@@ -891,11 +891,17 @@ class TournamentCog(commands.Cog):
         try:
             await ctx.followup.send(
                 f"✅ Tournament **{tournament.name}** created ({detail}). "
-                f"Registration is open — captains can join with `/tournament register`.{fee_line}",
+                f"Registration is open — captains press **Register a team** on the board.{fee_line}",
                 ephemeral=True,
             )
         except Exception as e:
             logger.warning(f"Could not send tournament-create confirmation for {tournament.id}: {e}")
+        # Before the board: the board links the server's #find-a-team, which on its
+        # first tournament this is what creates.
+        try:
+            await ensure_lfg_board(self.bot, ctx.guild, getattr(ctx.channel, "category", None))
+        except Exception as e:
+            logger.warning(f"Could not post the Find a team board: {e}")
         try:
             # Deliberately NOT routed through _destination: the board belongs
             # wherever registration is being announced, which is why the
@@ -904,10 +910,6 @@ class TournamentCog(commands.Cog):
             await post_registration_board(self.bot, ctx.channel, tournament.id)
         except Exception as e:
             logger.warning(f"Could not post registration board: {e}")
-        try:
-            await ensure_lfg_board(self.bot, ctx.guild, getattr(ctx.channel, "category", None))
-        except Exception as e:
-            logger.warning(f"Could not post the Find a team board: {e}")
 
     @tournament.command(name="register", description="Register your team for the open tournament")
     async def register(

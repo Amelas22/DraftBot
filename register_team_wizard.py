@@ -306,6 +306,8 @@ class TeammatesView(WizardView):
     async def on_pick(self, interaction: discord.Interaction) -> None:
         kept, dropped = _pick(list(self.picker.values), self.state.captain_id)
         self.state.teammate_ids = kept
+        # The picks are the captain's own now, not what Find a team filled in.
+        self.state.from_find_a_team = False
         note = (f"Left out {', '.join(dropped)}: bots can't be on a team." if dropped else "")
         view = TeammatesView(self.state, participant_id=self.participant_id, header=self.header)
         await _reply(interaction, view.content(note), view, edit=True)
@@ -335,8 +337,10 @@ async def _show_teammates(interaction: discord.Interaction, state: WizardState, 
 
 # --- Step 3: check and confirm ----------------------------------------------------
 
-async def _confirm_text(state: WizardState, guild: discord.Guild | None) -> str:
+async def _confirm_text(state: WizardState, guild: discord.Guild | None) -> tuple[str, bool]:
+    """The confirm step's text, and whether the wallet is short of the fee."""
     teammates = ", ".join(_name_of(guild, uid) for uid in state.teammate_ids) or "None yet"
+    short = False
     rows = [f"**Step 3 of 3 · Check and confirm**",
             f"**Team:** {state.team_name}",
             f"**Captain:** {_name_of(guild, state.captain_id)} (you)",
@@ -348,18 +352,26 @@ async def _confirm_text(state: WizardState, guild: discord.Guild | None) -> str:
             rows.append(f"**Entry fee:** {state.fee} tix from your wallet "
                         f"(you have {balance}, leaving {balance - state.fee})")
         else:
+            short = True
             rows.append(f"**Entry fee:** {state.fee} tix. You have {balance}, so your spot "
                         f"is held until you deposit {state.fee - balance} more.")
     else:
         rows.append("**Entry fee:** free")
-    return "\n".join(rows)
+    return "\n".join(rows), short
 
 
 class ConfirmView(WizardView):
-    def __init__(self, state: WizardState) -> None:
+    def __init__(self, state: WizardState, *, short: bool = False) -> None:
         super().__init__(state)
         self.busy = False
-        label = f"Register and pay {state.fee} tix" if state.fee > 0 else "Register"
+        # A short wallet holds the spot without charging anything yet; "pay" would
+        # promise a charge that isn't going to happen.
+        if short:
+            label = "Register and hold my spot"
+        elif state.fee > 0:
+            label = f"Register and pay {state.fee} tix"
+        else:
+            label = "Register"
         confirm: discord.ui.Button[Any] = discord.ui.Button(
             label=label, style=discord.ButtonStyle.success)
         confirm.callback = self.on_confirm
@@ -402,8 +414,8 @@ class ConfirmView(WizardView):
 
 
 async def _show_confirm(interaction: discord.Interaction, state: WizardState) -> None:
-    await _reply(interaction, await _confirm_text(state, interaction.guild),
-                 ConfirmView(state), edit=True)
+    text, short = await _confirm_text(state, interaction.guild)
+    await _reply(interaction, text, ConfirmView(state, short=short), edit=True)
 
 
 async def _register(interaction: discord.Interaction,

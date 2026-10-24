@@ -1714,3 +1714,30 @@ async def test_play_in_modal_refuses_a_duplicate_pair_without_closing_the_prompt
     interaction.response.edit_message.assert_not_awaited()
     assert interaction.response.send_message.await_args.kwargs["ephemeral"] is True
     assert not any(c.disabled for c in view.children)
+
+
+@pytest.mark.asyncio
+async def test_create_makes_find_a_team_before_the_board_and_points_at_the_button():
+    """The board names #find-a-team only once the server has it, so on a server's
+    first tournament the channel must exist before the board is drawn."""
+    from cogs.tournament_commands import TournamentCog
+
+    cog = TournamentCog(MagicMock())
+    ctx = _ctx()
+    order = []
+    tournament = MagicMock(id=7, total_rounds=3)
+    tournament.name = "Cup"
+    with patch("cogs.tournament_commands.tournament_enabled", return_value=True), \
+            patch("cogs.tournament_commands.db_session", lambda: _NullSession()), \
+            patch("cogs.tournament_commands.create_tournament", AsyncMock(return_value=tournament)), \
+            patch("cogs.tournament_commands.ensure_lfg_board",
+                  AsyncMock(side_effect=lambda *a: order.append("lfg"))), \
+            patch("cogs.tournament_commands.post_registration_board",
+                  AsyncMock(side_effect=lambda *a: order.append("board"))):
+        await TournamentCog.create.callback(
+            cog, ctx, name="Cup", format="swiss", rounds=3, entry_fee=0,
+            payout="winner_take_all", cut=None)
+
+    assert order == ["lfg", "board"]
+    reply = ctx.followup.send.call_args.args[0]
+    assert "Register a team" in reply and "/tournament register" not in reply

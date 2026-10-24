@@ -549,3 +549,41 @@ async def test_a_team_registered_alone_is_still_reconciled(test_db, quiet):  # n
         await _press_confirm(confirm)
 
     assert calls.await_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_a_short_wallet_confirm_button_says_it_holds_the_spot(test_db, quiet):  # noqa: F811
+    await _tournament(fee=20)
+    await _link()
+    await wallet_service.adjust(GUILD, str(ROOK), 12, "seed", "test")
+    confirm = await _through_to_confirm()
+
+    labels = [item.label for item in _sent(confirm)[1].children]
+    assert "Register and hold my spot" in labels
+    assert not any("pay" in (label or "") for label in labels)
+
+
+@pytest.mark.asyncio
+async def test_a_funded_confirm_button_says_it_pays(test_db, quiet):  # noqa: F811
+    await _tournament(fee=20)
+    await _link()
+    await wallet_service.adjust(GUILD, str(ROOK), 35, "seed", "test")
+    confirm = await _through_to_confirm()
+
+    assert "Register and pay 20 tix" in [item.label for item in _sent(confirm)[1].children]
+
+
+@pytest.mark.asyncio
+async def test_changing_the_picks_drops_the_find_a_team_note(test_db, quiet):  # noqa: F811
+    await _tournament()
+    await _full_lfg_team(WREN, BEN)
+    start = _interaction()
+    await wiz.start(start)
+    teammates = await _name(start)
+    _content, view = _sent(teammates)
+    picker = next(item for item in view.children if isinstance(item, wiz.PrefilledUserSelect))
+    i = _interaction()
+    with patch.object(type(picker), "values", new=[MEMBERS[WREN]]):
+        await picker.callback(i)
+
+    assert "Find a team" not in _sent(i)[0]
