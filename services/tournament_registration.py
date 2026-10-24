@@ -141,4 +141,6 @@ async def add_roster_members(bot: discord.Bot, guild: discord.Guild, participant
         await refresh_boards(bot, [t_id])
     for add in adds:
         add.role_synced = await sync_member(guild, role_id, add.user_id, add=True)
+    # A player now on a registered roster leaves any other forming Find a team team.
+    await reconcile_after_command(bot, guild.id)
     return adds

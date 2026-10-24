@@ -1075,7 +1075,6 @@ class TournamentCog(commands.Cog):
             await ctx.followup.send(
                 f"{player.mention} is already on **{p_name}**'s roster.{shared}{warning}",
                 ephemeral=True)
-        await reconcile_after_command(self.bot, ctx.guild.id)
 
     @tournament.command(name="remove_teammate",
                         description="Take a player off your team's roster")
