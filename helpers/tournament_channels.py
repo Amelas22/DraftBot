@@ -46,6 +46,13 @@ PAIRINGS = ChannelSpec(
     # Players talk in the match threads that hang off this channel's lines.
     read_only=False,
 )
+FIND_A_TEAM = ChannelSpec(
+    setting="default_lfg_channel_id",
+    name="find-a-team",
+    topic="Looking for teammates? Press Find a team on the board at the bottom.",
+    # Players talk here; the board is sticky, so it stays at the bottom anyway.
+    read_only=False,
+)
 
 
 def resolve_channel(guild, config, setting):

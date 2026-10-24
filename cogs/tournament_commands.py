@@ -21,6 +21,7 @@ from helpers.pin_helpers import safe_pin
 from helpers.utils import not_none, ui_button
 from notification_service import send_dm
 from services.team_finder_sync import reconcile_after_command
+from cogs.lfg_cog import ensure_lfg_board
 from match_control_view import (
     MatchControlView,
     create_match_room,
@@ -905,6 +906,10 @@ class TournamentCog(commands.Cog):
             await post_registration_board(self.bot, ctx.channel, tournament.id)
         except Exception as e:
             logger.warning(f"Could not post registration board: {e}")
+        try:
+            await ensure_lfg_board(self.bot, ctx.guild, getattr(ctx.channel, "category", None))
+        except Exception as e:
+            logger.warning(f"Could not post the Find a team board: {e}")
 
     @tournament.command(name="register", description="Register your team for the open tournament")
     async def register(

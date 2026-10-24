@@ -1,4 +1,4 @@
-"""/lfg and the pinned "Find a team" board: hand out draftbot.fyi links."""
+"""/lfg and the sticky "Find a team" board: hand out draftbot.fyi links."""
 from datetime import datetime, timezone
 from typing import Any
 
@@ -7,8 +7,9 @@ from discord.ext import commands, tasks
 from loguru import logger
 from typing_extensions import override
 
-from config import scheduler_enabled
-from helpers.permissions import has_bot_manager_role
+from config import get_config, scheduler_enabled, update_setting
+from database.db_session import db_session
+from helpers.tournament_channels import FIND_A_TEAM, ensure_channel
 from helpers.utils import not_none, ui_button
 from services.scheduler_links import issue_link
 from services.team_finder_sync import run_reconcile
@@ -21,6 +22,11 @@ BOARD_TITLE = "Find a team"
 BOARD_TEXT = ("Looking for teammates for the next tournament? Press **Find a team** "
               "to see open teams ranked by how well your usual week fits theirs, "
               "ask to join one, or open your own.")
+
+
+def board_embed() -> discord.Embed:
+    """The Find a team board, as first posted and as the sticky manager reposts it."""
+    return discord.Embed(title=BOARD_TITLE, description=BOARD_TEXT, color=discord.Color.green())
 
 
 async def lfg_reply(guild_id: str, user_id: str,
@@ -39,7 +45,6 @@ async def lfg_reply(guild_id: str, user_id: str,
 
 
 NO_GUILD = "Use this in a server."
-POST_FAILED = "I couldn't post here. Check my permissions in this channel."
 
 
 async def _respond(interaction: discord.Interaction) -> None:
@@ -94,31 +99,33 @@ class LfgCog(commands.Cog):
     async def lfg(self, ctx: discord.ApplicationContext) -> None:
         await _respond(not_none(ctx.interaction))
 
-    @discord.slash_command(name="lfg_board",
-                           description="Admin: post and pin the Find a team button")
-    @has_bot_manager_role()
-    async def lfg_board(self, ctx: discord.ApplicationContext) -> None:
-        if ctx.guild_id is None:
-            await ctx.respond(NO_GUILD, ephemeral=True)
-            return
-        if not scheduler_enabled(str(ctx.guild_id)):
-            await ctx.respond(NOT_ENABLED, ephemeral=True)
-            return
-        embed = discord.Embed(title=BOARD_TITLE, description=BOARD_TEXT,
-                              color=discord.Color.green())
-        try:
-            message = await ctx.channel.send(embed=embed, view=LfgBoardView())
-        except (discord.Forbidden, discord.HTTPException):
-            logger.warning("lfg: couldn't post the board in channel {}", ctx.channel_id)
-            await ctx.respond(POST_FAILED, ephemeral=True)
-            return
-        try:
-            await message.pin()
-        except discord.HTTPException:
-            logger.warning("lfg: couldn't pin the board in channel {}", ctx.channel_id)
-            await ctx.respond("Posted, but I couldn't pin it.", ephemeral=True)
-            return
-        await ctx.respond("Posted and pinned.", ephemeral=True)
+
+
+async def ensure_lfg_board(bot: discord.Client, guild: discord.Guild,
+                           category: discord.CategoryChannel | None) -> None:
+    """Make sure the server's find-a-team channel holds the sticky board.
+
+    Called when a tournament opens registration. The channel is found or created
+    like the other tournament channels; a board that's already there isn't posted again.
+    """
+    guild_id = str(guild.id)
+    if not scheduler_enabled(guild_id):
+        return
+    # Local import: message_management pulls in views, which is heavy and cyclic here.
+    from database.message_management import (
+        LFG_BOARD_VIEW_TYPE, fetch_sticky_message, make_message_sticky)
+
+    channel, _created = await ensure_channel(guild, get_config(guild_id), FIND_A_TEAM, category)
+    update_setting(guild_id, f"tournament.{FIND_A_TEAM.setting}", str(channel.id))
+    channel_id = str(channel.id)
+    async with db_session() as session:
+        existing = await fetch_sticky_message(channel_id, session)
+    if existing is not None and (existing.view_metadata or {}).get("view_type") == LFG_BOARD_VIEW_TYPE:
+        return
+    message = await channel.send(embed=board_embed(), view=LfgBoardView())
+    await make_message_sticky(guild_id, channel_id, message, None, bot,
+                              view_metadata={"view_type": LFG_BOARD_VIEW_TYPE})
+    logger.info("lfg: posted the Find a team board in channel {}", channel_id)
 
 
 def setup(bot: discord.Bot) -> None:

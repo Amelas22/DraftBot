@@ -368,6 +368,31 @@ class TournamentBoardStickyStrategy(StickyStrategy):
         await update_registration_board(bot, sticky_message.view_metadata["tournament_id"])
 
 
+LFG_BOARD_VIEW_TYPE = "lfg_board"
+
+
+class LfgBoardStickyStrategy(StickyStrategy):
+    """Keeps the Find a team board at the bottom of its channel while the server's
+    scheduler flag is on. Turning the flag off ends the sticky; the board stays put."""
+
+    async def validate_state(self, sticky_message: Message, session: AsyncSession) -> bool:
+        from config import scheduler_enabled
+
+        return scheduler_enabled(sticky_message.guild_id)
+
+    async def generate_content(
+        self, sticky_message: Message, bot: discord.Client, session: AsyncSession
+    ) -> Tuple[str, Optional[discord.Embed], Optional[discord.ui.View], Dict[str, Any]]:
+        from cogs.lfg_cog import LfgBoardView, board_embed
+
+        return sticky_message.content, board_embed(), LfgBoardView(), sticky_message.view_metadata
+
+    async def on_update_success(
+        self, sticky_message: Message, new_message: discord.Message, bot: discord.Client, session: AsyncSession
+    ) -> None:
+        pass
+
+
 def get_sticky_strategy(view_metadata: Dict[str, Any]) -> StickyStrategy:
     """Factory method to get the appropriate strategy."""
     view_type = view_metadata.get("view_type", "draft")
@@ -376,6 +401,8 @@ def get_sticky_strategy(view_metadata: Dict[str, Any]) -> StickyStrategy:
         return DebtSummaryStickyStrategy()
     elif view_type == TOURNAMENT_BOARD_VIEW_TYPE:
         return TournamentBoardStickyStrategy()
+    elif view_type == LFG_BOARD_VIEW_TYPE:
+        return LfgBoardStickyStrategy()
     elif view_type == "draft" or view_type == "quiz":
         return DraftStickyStrategy()
     else:
