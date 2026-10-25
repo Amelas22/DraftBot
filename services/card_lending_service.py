@@ -1009,6 +1009,15 @@ async def lending_jobs_watchdog(bot: Any = None, interval_s: float = RESCAN_INTE
             await send_due_reminders()
         except Exception:
             logger.exception("Card-library return-reminder scan failed")
+        try:
+            # Draft-chat library panels that missed their switch to return mode
+            # or lost their message, e.g. to a restart between the decision and
+            # the repost.
+            if bot is not None:
+                from services.library_panel import reconcile_library_panels
+                await reconcile_library_panels(bot)
+        except Exception:
+            logger.exception("Card-library panel scan failed")
         await asyncio.sleep(interval_s)
 
 

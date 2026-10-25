@@ -177,6 +177,18 @@ def all_back(borrowers: list[Borrower]) -> bool:
     return not any(b.state in OUT_STATES for b in borrowers)
 
 
+async def _chat_channel(bot: Any, channel_id: Any) -> Optional[Any]:
+    """The draft chat, from the cache or else from Discord; None once it is gone
+    (its rooms were cleaned up)."""
+    channel = bot.get_channel(int(channel_id))
+    if channel is not None:
+        return channel
+    try:
+        return await bot.fetch_channel(int(channel_id))
+    except discord.NotFound:
+        return None
+
+
 async def _fetch_panel(channel: Any, message_id: Optional[str]) -> Optional[Any]:
     """The posted panel, or None when it is gone (deleted by hand, or never
     stored)."""
@@ -214,7 +226,7 @@ async def switch_to_returns(bot: Any, session_id: str) -> None:
         return
     if not (await draft_state(session_id)).settled:
         return
-    channel = bot.get_channel(int(draft.draft_chat_channel))
+    channel = await _chat_channel(bot, draft.draft_chat_channel)
     if channel is None:
         return
     borrowers = await panel_borrowers(session_id)
@@ -295,7 +307,7 @@ async def refresh_library_panel(bot: Any, session_id: str) -> None:
     if (draft is None or not draft.draft_chat_channel
             or draft.library_panel_mode not in ("borrow", "return")):
         return
-    channel = bot.get_channel(int(draft.draft_chat_channel))
+    channel = await _chat_channel(bot, draft.draft_chat_channel)
     if channel is None:
         return
     borrowers = await panel_borrowers(session_id)
@@ -338,3 +350,79 @@ def loan_changed(loan: Any) -> None:
     except Exception:
         logger.exception("library panel: could not schedule a refresh for loan {}",
                          getattr(loan, "id", None))
+
+
+async def _repost_return_panel(bot: Any, draft: Any, channel: Any,
+                               borrowers: list[Borrower]) -> None:
+    """Post the return panel again, sticky, after the live copy went missing."""
+    session_id = draft.session_id
+    from library_views.panel_view import panel_view  # see post_library_panel
+    view = not_none(panel_view("return"))
+    sent = await as_messageable(channel).send(
+        embed=return_embed(borrowers, await result_line(draft)), view=view)
+    if not await _set_mode(session_id, expect="return",
+                           library_panel_message_id=str(sent.id)):
+        # Closed while we were posting: the copy just sent is not wanted.
+        try:
+            await sent.delete()
+        except discord.NotFound:
+            pass
+        return
+    try:
+        await _make_sticky(bot, draft, sent, view)
+    except Exception:
+        logger.exception("library panel: could not make the reposted return panel "
+                         "for session_id={} sticky", session_id)
+    logger.info("Reposted the missing library return panel for session_id={}",
+                session_id)
+
+
+async def _reconcile_one(bot: Any, draft: Any) -> None:
+    session_id = draft.session_id
+    mode = draft.library_panel_mode
+    channel = (await _chat_channel(bot, draft.draft_chat_channel)
+               if draft.draft_chat_channel else None)
+    if channel is None:
+        # The chat is gone, so there is nowhere to show a panel: stop looking.
+        if await _set_mode(session_id, expect=mode, library_panel_mode="closed"):
+            logger.info("library panel: draft chat for session_id={} is gone; "
+                        "panel closed", session_id)
+        return
+    if mode == "borrow":
+        # Switches only a settled draft. An undecided one whose panel is
+        # missing is left be: a second borrow panel is worse than none.
+        await switch_to_returns(bot, session_id)
+        return
+    borrowers = await panel_borrowers(session_id)
+    message_id = draft.library_panel_message_id
+    if all_back(borrowers) or await _fetch_panel(channel, message_id) is not None:
+        await refresh_library_panel(bot, session_id)
+        return
+    # The sticky manager may have just moved the panel, deleting the copy this
+    # scan read: only a pointer that still names the missing message is stale.
+    now = await DraftSession.get_by_session_id(session_id)
+    if (now is None or now.library_panel_mode != "return"
+            or now.library_panel_message_id != message_id):
+        return
+    await _repost_return_panel(bot, now, channel, borrowers)
+
+
+async def reconcile_library_panels(bot: Any) -> None:
+    """Bring every open panel in step with its draft, from the watchdog's tick.
+
+    A settled draft still showing its borrow panel (a restart, or a failed
+    victory post, between the decision and the switch) is switched. A return
+    panel is redrawn, or reposted if its message is gone while decks are out.
+    A panel whose chat no longer exists is closed. Closed and never-posted
+    panels are not read at all.
+    """
+    async with AsyncSessionLocal() as s:
+        drafts = (await s.execute(select(DraftSession).where(
+            DraftSession.library_panel_mode.in_(("borrow", "return")))
+        )).scalars().all()
+    for draft in drafts:
+        try:
+            await _reconcile_one(bot, draft)
+        except Exception:
+            logger.exception("library panel: reconcile failed for session_id={}",
+                             draft.session_id)
