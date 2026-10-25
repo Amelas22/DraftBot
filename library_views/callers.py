@@ -13,12 +13,13 @@ them: an ephemeral defer, then ephemeral followups.
 from typing import Optional
 
 import discord
+from discord.utils import MISSING
 
 from helpers.utils import not_none
 
 
-def context_guild_id(ctx: discord.ApplicationContext) -> Optional[int]:
-    """The server a command was run in, as the library's gate reads it.
+def context_guild_id(ctx: "discord.ApplicationContext | discord.Interaction") -> Optional[int]:
+    """The server a command or press came from, as the library's gate reads it.
 
     A guild the bot can see: an id with no guild behind it is treated as no
     server at all.
@@ -39,10 +40,10 @@ class ContextCaller:
 
     async def send(self, content: str, *,
                    view: Optional[discord.ui.View] = None) -> None:
-        if view is None:
-            await self._ctx.followup.send(content, ephemeral=True)
-        else:
-            await self._ctx.followup.send(content, view=view, ephemeral=True)
+        # MISSING is pycord's own default for `view`, so this is the same
+        # request as leaving it out; None would mean something else to it.
+        await self._ctx.followup.send(
+            content, view=view if view is not None else MISSING, ephemeral=True)
 
 
 class InteractionCaller:
@@ -59,15 +60,12 @@ class InteractionCaller:
         self._interaction = interaction
         # Every component interaction carries the member or user who pressed it.
         self.user_id: int = not_none(interaction.user).id
-        self.guild_id: Optional[int] = (interaction.guild_id
-                                        if interaction.guild is not None else None)
+        self.guild_id: Optional[int] = context_guild_id(interaction)
 
     async def defer(self) -> None:
         await self._interaction.response.defer(ephemeral=True, invisible=False)
 
     async def send(self, content: str, *,
                    view: Optional[discord.ui.View] = None) -> None:
-        if view is None:
-            await self._interaction.followup.send(content, ephemeral=True)
-        else:
-            await self._interaction.followup.send(content, view=view, ephemeral=True)
+        await self._interaction.followup.send(
+            content, view=view if view is not None else MISSING, ephemeral=True)

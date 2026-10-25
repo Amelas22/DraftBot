@@ -13,6 +13,7 @@ is not told will run the command, see nothing happen, and the job will sit for
 its ten-minute wait and fail -- which looks like a broken bot rather than an
 unaccepted trade.
 """
+from functools import partial
 from typing import Any, Awaitable, Callable, Optional, Protocol
 
 import discord
@@ -26,6 +27,7 @@ from library_views.take_what_is_there import TakeWhatIsThereView
 from services.card_lending_service import (
     active_loan,
     borrow_when_free,
+    card_lines,
     hold_shortfall,
     library_busy_reason,
     poll_until_settled,
@@ -193,7 +195,7 @@ def deck_lines(loan: Any) -> str:
     cards = getattr(loan, "pending_cards", None) or getattr(loan, "cards", None)
     if not cards:            # also covers loan being None
         return ""
-    return "\n".join(f"• {c['qty']}× {c['name']}" for c in cards)
+    return card_lines(cards)
 
 
 OUTSIDE_A_SERVER = "The card library can only be used in a server."
@@ -274,10 +276,8 @@ async def borrow(caller: LibraryCaller) -> None:
     if loan is not None and loan.state == "assigned":
         short = await shortfall(guild_id, loan.cards or [], loan.id)
         if short:
-            def collect(offering: "list[dict[str, Any]]") -> "Awaitable[None]":
-                return _borrow_when_ready(caller, guild_id, offering=offering)
-
-            view = TakeWhatIsThereView(guild_id, loan.id, collect)
+            view = TakeWhatIsThereView(guild_id, loan.id,
+                                       partial(_borrow_when_ready, caller, guild_id))
             await caller.send(
                 f"📦 The library can't cover your whole deck right now:\n"
                 f"{describe_shortfall(short)}\n\n"
@@ -313,11 +313,8 @@ async def _warn_if_busy(caller: LibraryCaller) -> None:
 def _borrow_when_ready(caller: LibraryCaller, guild_id: int,
                        offering: "Optional[list[dict[str, Any]]]" = None
                        ) -> "Awaitable[None]":
-    def when_free(g: int, b: int) -> "Awaitable[tuple[str, bool]]":
-        return borrow_when_free(g, b, offering=offering)
-
     return _trade_when_ready(
-        caller, guild_id, when_free,
+        caller, guild_id, partial(borrow_when_free, offering=offering),
         "collect", "borrowed",
         note="\n⚠️ When you're done, **move these cards into your MTGO trade "
              "binder** before `/library return` — the bot can only take back what's "

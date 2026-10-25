@@ -483,6 +483,11 @@ def _cap(avail: "dict[str, int]", cards: "list[dict[str, Any]]"
     return out
 
 
+def card_lines(cards: "list[dict[str, Any]]") -> str:
+    """A card list as the player reads it: one `• 4× Name` line per entry."""
+    return "\n".join(f"• {c['qty']}× {c['name']}" for c in cards)
+
+
 async def trim_to_available(guild_id: Any, loan_id: Any) -> "list[dict[str, Any]]":
     """What of this deck the library can actually hand over right now.
 

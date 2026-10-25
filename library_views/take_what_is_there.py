@@ -5,7 +5,7 @@ import discord
 
 from helpers.money_gate import spawn_followup
 from helpers.utils import ui_button
-from services.card_lending_service import trim_to_available
+from services.card_lending_service import card_lines, trim_to_available
 
 
 class TakeWhatIsThereView(discord.ui.View):
@@ -35,8 +35,8 @@ class TakeWhatIsThereView(discord.ui.View):
                 "📭 There's nothing left of that deck to lend right now.", ephemeral=True)
             self.stop()
             return
-        lines = "\n".join(f"• {c['qty']}× {c['name']}" for c in trimmed)
-        await interaction.followup.send(f"👍 Borrowing what's there:\n{lines}", ephemeral=True)
+        await interaction.followup.send(f"👍 Borrowing what's there:\n{card_lines(trimmed)}",
+                                        ephemeral=True)
         self.stop()
         # The agreed subset rides along as an argument. A second click cannot
         # change what the first one is moving, because the offer is only written

@@ -47,7 +47,7 @@ from services.card_deposit_service import (
 )
 from services.card_deposit_service import poll_until_settled as poll_deposit
 from services.card_library_inventory import cube_as_the_library_sees_it
-from services.card_lending_service import active_loan
+from services.card_lending_service import active_loan, card_lines
 from services.library_loan_actions import (
     SETUP_MESSAGES, deck_lines, loan_said, within_a_message,
 )
@@ -589,8 +589,7 @@ class LibraryCommands(commands.Cog):
         def by_name(card: "dict[str, Any]") -> str:
             return str(card["name"])
 
-        lines = "\n".join(f"• {c['qty']}× {c['name']}"
-                          for c in sorted(held, key=by_name)[:40])
+        lines = card_lines(sorted(held, key=by_name)[:40])
         more = "" if len(held) <= 40 else f"\n…and {len(held) - 40} more."
         await ctx.followup.send(
             f"📦 The library is holding **{total}** of your cards:\n{lines}{more}",

@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 
 import discord
 import pytest
+from discord.utils import MISSING
 
 from library_views.callers import ContextCaller, InteractionCaller
 from services import library_loan_actions as actions
@@ -49,7 +50,7 @@ async def test_a_button_press_is_answered_privately():
     await caller.send("hello")
 
     interaction.response.defer.assert_awaited_once_with(ephemeral=True, invisible=False)
-    interaction.followup.send.assert_awaited_once_with("hello", ephemeral=True)
+    interaction.followup.send.assert_awaited_once_with("hello", view=MISSING, ephemeral=True)
 
 
 async def test_a_button_can_carry_a_view_with_its_reply():
@@ -86,6 +87,6 @@ async def test_a_button_runs_the_same_gate_as_the_command():
 
     said = actions.OUTSIDE_A_SERVER
     interaction.response.defer.assert_awaited_once_with(ephemeral=True, invisible=False)
-    interaction.followup.send.assert_awaited_once_with(said, ephemeral=True)
+    interaction.followup.send.assert_awaited_once_with(said, view=MISSING, ephemeral=True)
     ctx.defer.assert_awaited_once_with(ephemeral=True)
-    ctx.followup.send.assert_awaited_once_with(said, ephemeral=True)
+    ctx.followup.send.assert_awaited_once_with(said, view=MISSING, ephemeral=True)
