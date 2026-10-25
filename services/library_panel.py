@@ -177,6 +177,13 @@ def all_back(borrowers: list[Borrower]) -> bool:
     return not any(b.state in OUT_STATES for b in borrowers)
 
 
+def can_close(borrowers: list[Borrower]) -> bool:
+    """Every deck is back and none is still on offer. A deck offered but not yet
+    collected can still go out after the decision, until the watchdog retracts
+    the offer, so the panel stays open for it."""
+    return all_back(borrowers) and not any(b.state == "assigned" for b in borrowers)
+
+
 async def _chat_channel(bot: Any, channel_id: Any) -> Optional[Any]:
     """The draft chat, from the cache or else from Discord; None once it is gone
     (its rooms were cleaned up)."""
@@ -215,10 +222,12 @@ async def switch_to_returns(bot: Any, session_id: str) -> None:
     """Once the draft is decided, turn the borrow panel into a return reminder.
 
     With every deck back (or none ever collected) the borrow panel just takes
-    its final state in place. Otherwise it is posted again below the victory
-    post, in return mode, and the old one deleted. Anything but a borrow panel
-    on a settled draft: nothing happens. The mode's compare-and-set is the
-    guard, so two racing callers post once.
+    its final state in place. While a deck is still on offer it stays a borrow
+    panel, for the watchdog to switch once the offer is collected or lapses.
+    Otherwise it is posted again below the victory post, in return mode, and
+    the old one deleted. Anything but a borrow panel on a settled draft:
+    nothing happens. The mode's compare-and-set is the guard, so two racing
+    callers post once.
     """
     draft = await DraftSession.get_by_session_id(session_id)
     if (draft is None or draft.library_panel_mode != "borrow"
@@ -233,6 +242,8 @@ async def switch_to_returns(bot: Any, session_id: str) -> None:
     old_id = draft.library_panel_message_id
 
     if all_back(borrowers):
+        if not can_close(borrowers):
+            return
         if not await _set_mode(session_id, expect="borrow", library_panel_mode="closed"):
             return
         await _edit_panel(channel, old_id,
@@ -299,8 +310,9 @@ async def refresh_library_panel(bot: Any, session_id: str) -> None:
     """Redraw the panel from the loans as they are now, in the face it wears.
 
     Borrow mode re-renders in place, so "trade on its way" and "collected" are
-    live. Return mode does too, until every deck is back: then the panel closes,
-    loses its button and stops being sticky. Closed, or never posted: nothing.
+    live. Return mode does too, until every deck is back and none is still on
+    offer: then the panel closes, loses its button and stops being sticky.
+    Closed, or never posted: nothing.
     Re-reads everything, so a burst of calls costs edits, not correctness.
     """
     draft = await DraftSession.get_by_session_id(session_id)
@@ -319,7 +331,7 @@ async def refresh_library_panel(bot: Any, session_id: str) -> None:
                           view=panel_view("borrow"))
         return
     result = await result_line(draft)
-    if not all_back(borrowers):
+    if not can_close(borrowers):
         await _edit_panel(channel, message_id, embed=return_embed(borrowers, result),
                           view=panel_view("return"))
         return

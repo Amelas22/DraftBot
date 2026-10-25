@@ -504,3 +504,66 @@ async def test_the_watchdog_reconciles_library_panels(test_db, monkeypatch):
         with pytest.raises(asyncio.CancelledError):
             await task
     assert calls[0] is bot
+
+
+# --- A deck still on offer keeps the panel open ------------------------------
+
+
+async def _loan_now(borrower, state):
+    from sqlalchemy import update
+
+    async with AsyncSessionLocal() as s:
+        await s.execute(update(CardLoan).where(CardLoan.borrower_id == borrower)
+                        .values(state=state))
+        await s.commit()
+
+
+@pytest.mark.asyncio
+async def test_a_deck_on_offer_keeps_the_borrow_panel_open_until_it_lapses(
+        test_db, reserved, settled):
+    await _in_borrow_mode([("1", "assigned")])
+    bot, channel, _, old = _bot_with_old_panel()
+    await switch_to_returns(bot, "s1")
+    assert (await _row()).library_panel_mode == "borrow"
+    channel.send.assert_not_awaited()
+    old.edit.assert_not_awaited()
+
+    await _loan_now("1", "expired")
+    await library_panel.reconcile_library_panels(bot)
+    assert (await _row()).library_panel_mode == "closed"
+    assert old.edit.await_args.kwargs["view"] is None
+    assert "back on the shelf" in _line(old.edit.await_args.kwargs["embed"], "Ravenwood")
+
+
+@pytest.mark.asyncio
+async def test_a_deck_collected_after_the_decision_gets_a_return_panel(
+        test_db, reserved, settled):
+    await _in_borrow_mode([("1", "assigned")])
+    bot, channel, sent, _ = _bot_with_old_panel()
+    await switch_to_returns(bot, "s1")
+
+    await _loan_now("1", "borrowed")
+    await library_panel.reconcile_library_panels(bot)
+    row = await _row()
+    assert row.library_panel_mode == "return"
+    assert row.library_panel_message_id == str(sent.id)
+    embed = channel.send.await_args.kwargs["embed"]
+    assert "Ravenwood" in _field(embed, "Still out")
+
+
+@pytest.mark.asyncio
+async def test_a_deck_on_offer_keeps_the_return_panel_open_until_it_lapses(
+        test_db, reserved, settled):
+    await _seed({"1": "Ravenwood", "2": "kestrel_mtg"},
+                loans=[("1", "returned"), ("2", "assigned")])
+    await library_panel._set_mode("s1", library_panel_mode="return",
+                                  library_panel_message_id="777")
+    bot, _, _, old = _bot_with_old_panel()
+    await library_panel.refresh_library_panel(bot, "s1")
+    assert (await _row()).library_panel_mode == "return"
+    assert old.edit.await_args.kwargs["view"] is not None
+
+    await _loan_now("2", "expired")
+    await library_panel.refresh_library_panel(bot, "s1")
+    assert (await _row()).library_panel_mode == "closed"
+    assert old.edit.await_args.kwargs["view"] is None
