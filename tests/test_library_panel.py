@@ -2,6 +2,7 @@
 the chat opens, switched to returns once the draft is decided, closed once
 every deck is back, and recovered by the watchdog's reconcile."""
 import asyncio
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -37,10 +38,10 @@ def _field(embed, name):
     return next((f.value for f in embed.fields if f.name == name), "")
 
 
-async def _seed(sign_ups, chat="555", loans=()):
+async def _seed(sign_ups, chat="555", loans=(), reserved_at=datetime(2026, 10, 1)):
     async with AsyncSessionLocal() as s:
         s.add(DraftSession(session_id="s1", guild_id="g", sign_ups=sign_ups,
-                           draft_chat_channel=chat))
+                           draft_chat_channel=chat, library_reserved_at=reserved_at))
         for borrower, state in loans:
             s.add(CardLoan(guild_id="g", library_id="lib", borrower_id=borrower,
                            cards=[{"name": "Swamp", "qty": 4}], state=state,
@@ -100,6 +101,59 @@ async def test_no_panel_without_library_involvement(test_db, monkeypatch):  # no
     bot, channel, _ = _bot()
     await sync_panel(bot, "s1")
     channel.send.assert_not_awaited()
+    assert (await _row()).library_panel_mode is None
+
+
+@pytest.mark.asyncio
+async def test_a_draft_with_no_library_costs_one_read(test_db, monkeypatch):  # noqa: F811
+    # The victory check syncs on every match report, library or not.
+    await _seed({"1": "Ravenwood"}, reserved_at=None)
+    bot, channel, _ = _bot()
+    borrowers = AsyncMock(side_effect=AssertionError("read the borrowers"))
+    state = AsyncMock(side_effect=AssertionError("read the results"))
+    monkeypatch.setattr(library_panel, "borrowers_of", borrowers)
+    monkeypatch.setattr(library_panel, "draft_state", state)
+    await sync_panel(bot, "s1")
+    bot.get_channel.assert_not_called()
+    channel.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_loan_alone_is_library_involvement(test_db, monkeypatch, undecided):  # noqa: F811
+    async def none(draft, library_id=None):
+        return set()
+    monkeypatch.setattr(library_panel_state, "library_users", none)
+    await _seed({"1": "Ravenwood"}, loans=[("1", "assigned")], reserved_at=None)
+    bot, channel, _ = _bot()
+    await sync_panel(bot, "s1")
+    channel.send.assert_awaited_once()
+    assert (await _row()).library_panel_mode == "borrow"
+
+
+@pytest.mark.asyncio
+async def test_a_decided_draft_with_no_panel_reads_no_borrowers(
+        test_db, reserved, settled, monkeypatch):  # noqa: F811
+    await _seed({"3": "Tomasz88"})
+    bot, channel, _ = _bot()
+    monkeypatch.setattr(library_panel, "borrowers_of",
+                        AsyncMock(side_effect=AssertionError("read the borrowers")))
+    await sync_panel(bot, "s1")
+    bot.get_channel.assert_not_called()
+    channel.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_pointer_write_takes_the_new_copy_back(
+        test_db, reserved, undecided, monkeypatch):  # noqa: F811
+    await _seed({"3": "Tomasz88"})
+    bot, channel, sent = _bot()
+
+    async def locked(session_id, **values):
+        raise RuntimeError("database is locked")
+    monkeypatch.setattr(library_panel, "_write", locked)
+    with pytest.raises(RuntimeError):
+        await sync_panel(bot, "s1")
+    sent.delete.assert_awaited_once()
     assert (await _row()).library_panel_mode is None
 
 
@@ -226,8 +280,13 @@ def _bot_with_old_panel(fetch_error=None):
     async def fetch(message_id):
         if fetch_error is not None and message_id == 777:
             raise fetch_error
+        if message_id not in messages:
+            raise _gone()
         return messages[message_id]
     channel.fetch_message = AsyncMock(side_effect=fetch)
+    # A copy whose delete went through is gone.
+    for m in messages.values():
+        m.delete = AsyncMock(side_effect=lambda m=m: messages.pop(int(m.id), None) and None)
     return bot, channel, sent, old
 
 
@@ -301,13 +360,54 @@ async def test_an_undecided_draft_keeps_its_borrow_panel(
 @pytest.mark.asyncio
 async def test_failed_return_post_stays_in_borrow(test_db, reserved, settled):  # noqa: F811
     await _in_mode("borrow", [("1", "borrowed")])
-    bot, channel, _, old = _bot_with_old_panel()
+    bot, channel, sent, old = _bot_with_old_panel()
     channel.send = AsyncMock(side_effect=RuntimeError("403"))
     with pytest.raises(RuntimeError):
         await sync_panel(bot, "s1")
     row = await _row()
     assert row.library_panel_mode == "borrow" and row.library_panel_message_id == "777"
-    old.delete.assert_not_awaited()
+    # The borrow copy went first, so the next sync posts the return copy.
+    old.delete.assert_awaited_once()
+    channel.send = AsyncMock(return_value=sent)
+    await sync_panel(bot, "s1")
+    row = await _row()
+    assert row.library_panel_mode == "return"
+    assert row.library_panel_message_id == str(sent.id)
+
+
+@pytest.mark.asyncio
+async def test_the_borrow_copy_goes_before_the_return_copy_is_posted(
+        test_db, reserved, settled):  # noqa: F811
+    await _in_mode("borrow", [("1", "borrowed")])
+    bot, channel, sent, old = _bot_with_old_panel()
+    order = []
+    old.delete.side_effect = lambda: order.append("delete")
+
+    async def send(**kwargs):
+        order.append("send")
+        return sent
+    channel.send = AsyncMock(side_effect=send)
+    await sync_panel(bot, "s1")
+    assert order == ["delete", "send"]
+
+
+@pytest.mark.asyncio
+async def test_a_borrow_copy_that_will_not_delete_blocks_the_switch(
+        test_db, reserved, settled):  # noqa: F811
+    await _in_mode("borrow", [("1", "borrowed")])
+    bot, channel, sent, old = _bot_with_old_panel()
+    old.delete = AsyncMock(side_effect=discord.HTTPException(MagicMock(status=503), "down"))
+    with pytest.raises(discord.HTTPException):
+        await sync_panel(bot, "s1")
+    channel.send.assert_not_awaited()
+    row = await _row()
+    assert row.library_panel_mode == "borrow" and row.library_panel_message_id == "777"
+
+    old.delete = AsyncMock()  # Discord is back
+    await sync_panel(bot, "s1")
+    old.delete.assert_awaited_once()
+    channel.send.assert_awaited_once()
+    assert (await _row()).library_panel_mode == "return"
 
 
 @pytest.mark.asyncio

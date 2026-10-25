@@ -100,7 +100,9 @@ def _bot(*message_ids, send_id=901):
 
     async def fetch(mid):
         message = messages[mid]
-        if message.delete.await_count:
+        # Gone once deleted; a delete that raised left it where it was.
+        if (message.delete.await_count
+                and not isinstance(message.delete.side_effect, Exception)):
             raise discord.NotFound(MagicMock(status=404), "Unknown Message")
         return message
     channel.fetch_message = AsyncMock(side_effect=fetch)
@@ -172,12 +174,74 @@ async def test_a_sticky_naming_another_copy_is_dropped(test_db, decided):  # noq
     await library_panel._write("s1", library_panel_message_id="950")
     bot, channel, messages = _bot(900, 950)
 
-    assert await _repost(bot) == StickyUpdateResult.CLEANED_UP
+    assert await _repost(bot) == StickyUpdateResult.SUCCESS
 
+    # The stale record goes, and the live copy is made sticky in its place.
     channel.send.assert_not_awaited()
-    assert await _sticky_rows() == []
+    [sticky] = await _sticky_rows()
+    assert sticky.message_id == "950"
     assert (await _draft()).library_panel_message_id == "950"
     messages[950].delete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_sticky_is_restored_on_the_next_sync(
+        test_db, decided, monkeypatch):  # noqa: F811
+    await _seed("borrowed", mode="borrow", panel_id="900")
+    bot, _, _ = _bot(900, send_id=901)
+    real = library_panel._make_sticky
+    monkeypatch.setattr(library_panel, "_make_sticky",
+                        AsyncMock(side_effect=RuntimeError("pin failed")))
+
+    await library_panel.sync_panel(bot, "s1")
+    assert (await _draft()).library_panel_message_id == "901"
+    assert await _sticky_rows() == []
+
+    monkeypatch.setattr(library_panel, "_make_sticky", real)
+    await library_panel.sync_panel(bot, "s1")
+    [sticky] = await _sticky_rows()
+    assert sticky.message_id == "901"
+
+
+@pytest.mark.asyncio
+async def test_a_sticky_move_deletes_the_old_copy_before_posting(test_db, decided):  # noqa: F811
+    await _seed("borrowed", sticky_count=10)
+    bot, channel, messages = _bot(900, send_id=901)
+    order = []
+    messages[900].delete = AsyncMock(side_effect=lambda: order.append("delete"))
+    sent = messages[901]
+
+    async def send(**kwargs):
+        order.append("send")
+        return sent
+    channel.send = AsyncMock(side_effect=send)
+
+    assert await _repost(bot) == StickyUpdateResult.SUCCESS
+
+    assert order == ["delete", "send"]
+    assert (await _draft()).library_panel_message_id == "901"
+    [sticky] = await _sticky_rows()
+    assert sticky.message_id == "901"
+
+
+@pytest.mark.asyncio
+async def test_a_copy_that_will_not_delete_is_not_moved(test_db, decided):  # noqa: F811
+    await _seed("borrowed", sticky_count=10)
+    bot, channel, messages = _bot(900, send_id=901)
+    messages[900].delete = AsyncMock(
+        side_effect=discord.HTTPException(MagicMock(status=503), "down"))
+
+    with pytest.raises(discord.HTTPException):
+        await _repost(bot)
+
+    # No second copy; the one there is still the panel, and the next sync
+    # makes it sticky again.
+    channel.send.assert_not_awaited()
+    assert (await _draft()).library_panel_message_id == "900"
+    await library_panel.sync_panel(bot, "s1")
+    [sticky] = await _sticky_rows()
+    assert sticky.message_id == "900"
+    channel.send.assert_not_awaited()
 
 
 @pytest.mark.asyncio

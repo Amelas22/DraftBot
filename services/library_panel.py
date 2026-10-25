@@ -16,7 +16,7 @@ through sync_panel too, under the same lock.
 import asyncio
 import json
 import weakref
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import discord
 from loguru import logger
@@ -28,7 +28,8 @@ from helpers.utils import as_messageable, not_none
 from library_views.panel_view import LibraryPanelView, panel_view
 from models.draft_session import DraftSession
 from services.library_panel_state import (Borrower, Face, all_back, borrow_embed,
-                                          borrowers_of, desired_face, return_embed)
+                                          borrowers_of, desired_face,
+                                          has_library_involvement, return_embed)
 from services.library_reminders import draft_state, session_of
 
 
@@ -155,31 +156,44 @@ async def _make_sticky(bot: Any, draft: Any, message: Any,
                        "draft_session_id": draft.session_id})
 
 
-async def _our_sticky_names(channel_id: str, session_id: str,
-                            message_id: Optional[str]) -> bool:
-    """Whether the chat's sticky record is this draft's panel at `message_id`.
-    A record of this panel that names any other copy is stale, and is dropped."""
+async def _sticky_state(channel_id: str, session_id: str,
+                        message_id: Optional[str]) -> Literal["ours", "none", "other"]:
+    """What the chat's sticky record is to this panel: "ours" when it is this
+    draft's panel at `message_id`, "other" when it belongs to something else in
+    the chat, "none" when there is none. A record of this panel naming any
+    other copy is stale: it is dropped, and counts as none."""
     from database.message_management import (
         LIBRARY_PANEL_VIEW_TYPE, delete_sticky_message_record, fetch_sticky_message)
 
     async with AsyncSessionLocal() as s:
         sticky = await fetch_sticky_message(channel_id, s)
         if sticky is None:
-            return False
+            return "none"
         meta = sticky.view_metadata or {}
         if (meta.get("view_type") != LIBRARY_PANEL_VIEW_TYPE
                 or meta.get("draft_session_id") != session_id):
-            return False
+            return "other"
         if sticky.message_id == message_id:
-            return True
+            return "ours"
         await delete_sticky_message_record(sticky, s)
         await s.commit()
-        return False
+        return "none"
 
 
 async def _drop_sticky(channel_id: str, session_id: str) -> None:
     """Forget this draft's panel as the chat's sticky, so it stops moving."""
-    await _our_sticky_names(channel_id, session_id, None)
+    await _sticky_state(channel_id, session_id, None)
+
+
+async def _try_sticky(bot: Any, draft: Any, message: Any,
+                      view: Optional[LibraryPanelView]) -> None:
+    """Make a return copy sticky. A failure costs only the moving, and the next
+    sync tries again, so it is logged rather than raised."""
+    try:
+        await _make_sticky(bot, draft, message, view)
+    except Exception:
+        logger.exception("library panel: could not make the return panel for "
+                         "session_id={} sticky", draft.session_id)
 
 
 # --- Converging ----------------------------------------------------------------
@@ -188,25 +202,33 @@ async def _drop_sticky(channel_id: str, session_id: str) -> None:
 async def _post(bot: Any, draft: Any, channel: Any, borrowers: list[Borrower],
                 face: Face, *, replacing: Optional[Any] = None) -> None:
     """Post a copy wearing `face` at the bottom of the chat and point the draft
-    at it; a return copy is made sticky. Then the copy it replaces goes.
+    at it; a return copy is made sticky.
 
-    A failed send changes nothing, so the next sync tries again.
+    The copy it replaces goes first, so a copy is never left behind with
+    nothing pointing at it: if that delete fails nothing is posted, and if the
+    send then fails there is simply no copy, which the next sync posts. Its
+    sticky record goes before it does, so the delete event cannot take the
+    new copy's record with it.
     """
+    if replacing is not None:
+        await _drop_sticky(str(draft.draft_chat_channel), draft.session_id)
+        await _delete(replacing)
     embed, view = await _render(draft, borrowers, face, copy=face)
     sent = await as_messageable(channel).send(embed=embed, view=not_none(view))
-    await _write(draft.session_id, library_panel_mode=face.mode,
-                 library_panel_message_id=str(sent.id))
+    try:
+        await _write(draft.session_id, library_panel_mode=face.mode,
+                     library_panel_message_id=str(sent.id))
+    except Exception:
+        # Unrecorded, the copy would never be found again: take it back.
+        try:
+            await _delete(sent)
+        except Exception:
+            logger.exception("library panel: could not take back an unrecorded "
+                             "copy for session_id={}", draft.session_id)
+        raise
     _shown[str(sent.id)] = _digest(embed, view)
     if face is Face.RETURN:
-        # Before the replaced copy is deleted: deleting the message a sticky
-        # record names drops the record, so it must name the new copy first.
-        try:
-            await _make_sticky(bot, draft, sent, view)
-        except Exception:
-            logger.exception("library panel: could not make the return panel for "
-                             "session_id={} sticky", draft.session_id)
-    if replacing is not None:
-        await _delete(replacing)
+        await _try_sticky(bot, draft, sent, view)
 
 
 async def _converge(bot: Any, session_id: str, *, move_down: bool) -> None:
@@ -221,9 +243,14 @@ async def _converge(bot: Any, session_id: str, *, move_down: bool) -> None:
         if move_down and chat:
             await _drop_sticky(chat, session_id)
         return
+    if current is Face.NONE and (chat is None or not await has_library_involvement(draft)):
+        # The common case on the victory path: no chat yet, or no library.
+        return
+    settled = (await draft_state(session_id)).settled
+    if current is Face.NONE and settled:
+        return  # a panel is never first posted on a decided draft
     borrowers = await borrowers_of(draft)
     channel = await _chat_channel(bot, chat) if chat else None
-    settled = (await draft_state(session_id)).settled
     face = desired_face(current, borrowers, settled=settled,
                         chat_open=channel is not None)
     if channel is None or chat is None:
@@ -245,11 +272,16 @@ async def _converge(bot: Any, session_id: str, *, move_down: bool) -> None:
                 logger.info("Reposted the missing library return panel for "
                             "session_id={}", session_id)
             return
-        if (face is Face.RETURN and move_down
-                and await _our_sticky_names(chat, session_id, str(live.id))):
+        sticky = (await _sticky_state(chat, session_id, str(live.id))
+                  if face is Face.RETURN else None)
+        if sticky == "ours" and move_down:
             await _post(bot, draft, channel, borrowers, face, replacing=live)
             return
-        await _show(live, *await _render(draft, borrowers, face, copy=face))
+        embed, view = await _render(draft, borrowers, face, copy=face)
+        await _show(live, embed, view)
+        if sticky == "none":
+            # Its record was lost: a failed make-sticky, an unpin, a stale one.
+            await _try_sticky(bot, draft, live, view)
         return
     if face is Face.BORROW:  # from none
         await _post(bot, draft, channel, borrowers, face)

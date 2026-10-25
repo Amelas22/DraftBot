@@ -68,6 +68,18 @@ async def borrowers_of(draft: Any) -> list[Borrower]:
     return sorted(out, key=_sort_key)
 
 
+async def has_library_involvement(draft: Any) -> bool:
+    """Whether the draft ever touched the library: it reserved the cube's copy,
+    someone agreed to borrow, or a deck was offered from it. A cheap test, so
+    a draft with no library pays one indexed read, not borrowers_of."""
+    if draft.library_reserved_at is not None or draft.library_agreed:
+        return True
+    async with AsyncSessionLocal() as s:
+        found = await s.scalar(select(CardLoan.id).where(
+            CardLoan.source == loan_source(draft.session_id)).limit(1))
+    return found is not None
+
+
 async def panel_borrowers(session_id: str) -> list[Borrower]:
     """borrowers_of the draft with this id; nobody for a draft that is gone."""
     draft = await DraftSession.get_by_session_id(session_id)
