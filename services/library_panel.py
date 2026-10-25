@@ -344,6 +344,29 @@ async def refresh_library_panel(bot: Any, session_id: str) -> None:
                 session_id)
 
 
+async def after_sticky_repost(bot: Any, session_id: str) -> None:
+    """Bring the copy the sticky manager just posted in step with the loans.
+
+    A refresh that closed the panel while the repost was in flight closed the
+    old copy and left the new one live. So a closed panel gets its closed face
+    again on whatever copy the committed pointer names now, and its sticky is
+    dropped; both are idempotent. Anything else is an ordinary refresh.
+    """
+    draft = await DraftSession.get_by_session_id(session_id)
+    if (draft is None or draft.library_panel_mode != "closed"
+            or not draft.draft_chat_channel):
+        await refresh_library_panel(bot, session_id)
+        return
+    channel = await _chat_channel(bot, draft.draft_chat_channel)
+    if channel is None:
+        return
+    borrowers = await panel_borrowers(session_id)
+    await _edit_panel(channel, draft.library_panel_message_id,
+                      embed=return_embed(borrowers, await result_line(draft),
+                                         closed=True), view=None)
+    await _drop_sticky(str(draft.draft_chat_channel), session_id)
+
+
 def loan_changed(loan: Any) -> None:
     """A loan moved: refresh its draft's panel in the background. Called from
     the lending code after its commits, so it never raises and never waits."""

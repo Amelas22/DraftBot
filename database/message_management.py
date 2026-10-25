@@ -415,11 +415,11 @@ class LibraryPanelStickyStrategy(StickyStrategy):
             draft.library_panel_message_id = str(new_message.id)
 
     async def after_commit(self, sticky_message: Message, bot: discord.Client) -> None:
-        from services.library_panel import refresh_library_panel
+        from services.library_panel import after_sticky_repost
 
         # A loan that moved during the repost edited the old copy. Redraw (or
         # close) from committed state.
-        await refresh_library_panel(bot, sticky_message.view_metadata["draft_session_id"])
+        await after_sticky_repost(bot, sticky_message.view_metadata["draft_session_id"])
 
 
 LFG_BOARD_VIEW_TYPE = "lfg_board"

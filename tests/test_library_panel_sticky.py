@@ -280,3 +280,45 @@ async def test_retracting_offers_tells_the_panel_per_loan(test_db, monkeypatch):
         await card_lending_service._retract(s, loans)
 
     assert seen == loans
+
+
+@pytest.mark.asyncio
+async def test_a_repost_racing_the_last_return_closes_the_new_copy(
+        test_db, decided, monkeypatch):  # noqa: F811
+    # The last deck came back just as the sticky manager was reposting: the
+    # refresh closes copy 900 while the repost commits copy 901.
+    await _seed("returned", sticky_count=10)
+    bot, channel, messages = _bot(900, send_id=901)
+    committed = asyncio.Event()
+    real_drop = library_panel._drop_sticky
+
+    async def drop_after_the_repost_commits(*args):
+        await committed.wait()
+        await real_drop(*args)
+    monkeypatch.setattr(library_panel, "_drop_sticky", drop_after_the_repost_commits)
+    closing = []
+
+    async def send(**kwargs):
+        closing.append(asyncio.create_task(
+            library_panel.refresh_library_panel(bot, "s1")))
+        while (await _draft()).library_panel_mode != "closed":
+            await asyncio.sleep(0)
+        return messages[901]
+    channel.send = AsyncMock(side_effect=send)
+
+    async with AsyncSessionLocal() as s:
+        commit = s.commit
+
+        async def commit_then_signal():
+            await commit()
+            committed.set()
+        s.commit = commit_then_signal  # type: ignore[method-assign]
+        sticky = (await s.execute(select(Message))).scalars().one()
+        assert await handle_sticky_message_update(sticky, bot, s) == StickyUpdateResult.SUCCESS
+    await closing[0]
+
+    assert (await _draft()).library_panel_message_id == "901"
+    edit = messages[901].edit.await_args.kwargs
+    assert edit["view"] is None
+    assert "All decks are back. Thanks!" in edit["embed"].description
+    assert await _sticky_rows() == []
