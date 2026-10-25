@@ -24,6 +24,7 @@ import pytest
 import pytest_asyncio
 
 import cogs.library_commands as cog_mod
+import services.library_loan_actions as loan_actions
 import services.card_deposit_service as deposit_svc
 import services.card_lending_service as lending_svc
 import services.card_library_inventory as inventory
@@ -160,15 +161,17 @@ async def library(test_db, monkeypatch):
     """One library, one serve, two linked drafters, and the cube on offer."""
     serve = OneMtgoAccount()
     # Every module that reaches for the serve, because the arcs cross all
-    # three: the cog asks who the custodian is, and the two services dispatch.
-    for mod in (cog_mod, deposit_svc, lending_svc):
+    # three: the cog and the loan flows ask who the custodian is, and the two
+    # services dispatch.
+    for mod in (cog_mod, loan_actions, deposit_svc, lending_svc):
         monkeypatch.setattr(mod, "get_lending_client", lambda: serve)
     monkeypatch.setattr(inventory, "get_lending_client", lambda: serve, raising=False)
     # Detached followups are the only way most of these commands say anything,
     # so they are collected and driven rather than dropped on the floor.
     pending: list = []
-    monkeypatch.setattr(cog_mod, "spawn_followup",
-                        lambda label, coro: pending.append(coro))
+    for mod in (cog_mod, loan_actions):
+        monkeypatch.setattr(mod, "spawn_followup",
+                            lambda label, coro: pending.append(coro))
 
     async def _fetch(cube_id):
         return CUBE_CARDS if cube_id == CUBE else None

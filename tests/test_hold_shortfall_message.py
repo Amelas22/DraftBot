@@ -16,7 +16,7 @@ from conftest import stub_library
 from database.db_session import db_session
 from services import wallet_service
 import services.card_lending_service as svc
-from cogs.library_commands import describe_hold_shortfall
+from services.library_loan_actions import describe_hold_shortfall
 
 GUILD, BORROWER = "g1", "u1"
 

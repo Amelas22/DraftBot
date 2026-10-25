@@ -150,8 +150,8 @@ def _a_ctx(monkeypatch):
     """
     from types import SimpleNamespace
     from unittest.mock import MagicMock
-    import cogs.library_commands as cog
-    monkeypatch.setattr(cog, "get_lending_client",
+    import services.library_loan_actions as gate
+    monkeypatch.setattr(gate, "get_lending_client",
                         MagicMock(return_value=SimpleNamespace(enabled=True)))
     return SimpleNamespace(guild=SimpleNamespace(id=999), guild_id=999)
 

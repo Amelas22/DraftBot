@@ -39,7 +39,9 @@ def _said(ctx):
 
 
 async def _run(monkeypatch, command, status, loan=None, busy=None, waited=False):
-    import cogs.library_commands as mod
+    # The commands only adapt their context; the flows behind them, and every
+    # name patched here, live in the loan-actions service.
+    import services.library_loan_actions as mod
     cog = LibraryCommands(bot=SimpleNamespace())
     ctx = _ctx()
     # Borrows and returns both queue behind the serve and report out of band,
@@ -52,7 +54,7 @@ async def _run(monkeypatch, command, status, loan=None, busy=None, waited=False)
     # so a library that cannot cover the deck would short-circuit all of them.
     monkeypatch.setattr(mod, "shortfall", AsyncMock(return_value=[]))
     monkeypatch.setattr(mod, "poll_until_settled", AsyncMock(return_value=(status, None)))
-    # The real spawn_followup returns a Task and is not awaited by the cog, so
+    # The real spawn_followup returns a Task and is not awaited by the flow, so
     # capture the coroutine and drive it here -- otherwise the followup that
     # carries every message would never run.
     detached = []
@@ -60,7 +62,7 @@ async def _run(monkeypatch, command, status, loan=None, busy=None, waited=False)
     # The guild gate is exercised by its own tests below; these cover what each
     # service status says back, so a guild without a configured library would
     # otherwise short-circuit every one of them.
-    monkeypatch.setattr(mod, "library_gate", lambda ctx: None)
+    monkeypatch.setattr(mod, "unusable_reason", lambda guild_id: None)
     # Likewise the invite list and the library lookup, which have their own
     # tests: these drive the cog with the services mocked and should not reach
     # a database to do it.
@@ -141,8 +143,9 @@ async def test_no_status_leaves_the_player_without_an_answer(monkeypatch, status
 async def test_a_guild_without_a_library_is_told_so(monkeypatch):
     """The feature is per-guild; a server that never enabled it should not get
     a trade prompt for an account it has nothing to do with."""
-    import cogs.library_commands as mod
-    monkeypatch.setattr(mod, "library_gate", lambda ctx: "The card library isn't set up here.")
+    import services.library_loan_actions as mod
+    monkeypatch.setattr(mod, "unusable_reason",
+                        lambda guild_id: "The card library isn't set up here.")
     cog = LibraryCommands(bot=SimpleNamespace())
     ctx = _ctx()
     await cog.borrow.callback(cog, ctx)
@@ -163,10 +166,14 @@ async def test_the_gate_does_not_price_anything(monkeypatch):
     """
     import inspect
     import cogs.library_commands as mod
+    import services.library_loan_actions as actions
 
-    source = inspect.getsource(mod.library_gate)
-    assert "card_library_collateral" not in source
-    assert "is_money_server" not in source
+    # The command-side gate and the rule it reads, which is where the
+    # stale read would come back.
+    for gate in (mod.library_gate, actions.unusable_reason):
+        source = inspect.getsource(gate)
+        assert "card_library_collateral" not in source
+        assert "is_money_server" not in source
 
 
 async def test_a_free_library_needs_no_money_server(monkeypatch):
@@ -181,7 +188,7 @@ async def test_the_borrower_is_told_which_bot_is_trading_with_them(monkeypatch):
     """Two bot accounts now offer trades -- the wallet's and the library's. A
     prompt that does not name one leaves the player guessing which window is
     theirs."""
-    import cogs.library_commands as mod
+    import services.library_loan_actions as mod
     monkeypatch.setattr(mod, "custodian_name", AsyncMock(return_value="Team01"))
     said = await _run(monkeypatch, "borrow", "dispatched",
                       loan=SimpleNamespace(cards=DECK, state="assigned", id=1))
@@ -223,7 +230,7 @@ async def test_giving_up_on_a_long_queue_says_nothing_was_charged(monkeypatch):
 async def test_a_short_wallet_is_told_the_hold_and_the_gap(monkeypatch):
     """Straight through the command, not just the string: the figures have to
     be fetched and rendered on the path the player actually walks."""
-    import cogs.library_commands as mod
+    import services.library_loan_actions as mod
     monkeypatch.setattr(mod, "hold_shortfall",
                         AsyncMock(return_value={"hold": 5, "have": 2, "short": 3}))
 
@@ -273,7 +280,7 @@ async def test_a_short_wallet_still_gets_an_answer_if_the_figures_fail(monkeypat
     and never answered, which Discord shows as "the application did not
     respond". The player is told they are short either way.
     """
-    import cogs.library_commands as mod
+    import services.library_loan_actions as mod
 
     async def unreadable(*a, **k):
         raise RuntimeError("wallet unavailable")
@@ -294,8 +301,9 @@ async def test_an_unconfigured_library_says_so_instead_of_queueing(monkeypatch):
     client; it was simply never reached from behind the queue.
     """
     import cogs.library_commands as mod
+    import services.library_loan_actions as actions
     stub_library(monkeypatch, mod, collateral=0, stock=_STOCK)
-    monkeypatch.setattr(mod, "get_lending_client",
+    monkeypatch.setattr(actions, "get_lending_client",
                         lambda: SimpleNamespace(enabled=False))
 
     blocked = mod.library_gate(_ctx())
@@ -313,11 +321,12 @@ async def test_an_uninvited_borrower_is_turned_away(test_db, monkeypatch):
     up at all -- the failure mode where a check exists, passes its own tests,
     and is never called.
     """
-    import cogs.library_commands as mod
+    import cogs.library_commands as cog_mod
+    import services.library_loan_actions as mod
 
     cog = LibraryCommands(bot=SimpleNamespace())
     ctx = _ctx()
-    monkeypatch.setattr(mod, "library_gate", lambda ctx: None)
+    monkeypatch.setattr(mod, "unusable_reason", lambda guild_id: None)
     stub_library(monkeypatch, mod, stock=_STOCK)
     monkeypatch.setattr(mod, "may_borrow", AsyncMock(return_value=False))
     # A deck already assigned out of ANOTHER library. The loan is looked up
@@ -329,7 +338,7 @@ async def test_an_uninvited_borrower_is_turned_away(test_db, monkeypatch):
                         AsyncMock(return_value=SimpleNamespace(
                             id=1, library_id="other", cards=DECK)))
 
-    await mod.LibraryCommands.borrow.callback(cog, ctx)
+    await cog_mod.LibraryCommands.borrow.callback(cog, ctx)
 
     said = ctx.followup.send.await_args.args[0]
     assert "invite-only" in said.lower()
@@ -349,10 +358,12 @@ async def test_depositing_is_not_gated_by_the_invite_list(test_db, monkeypatch):
     while the behaviour it stood for did not change at all.
     """
     import cogs.library_commands as mod
+    import services.library_loan_actions as actions
     from conftest import a_library
 
     await a_library("lib-gated", guild=99, kind="curated")
-    monkeypatch.setattr(mod, "may_borrow", AsyncMock(return_value=False))
+    # Where /library borrow reads the invite list.
+    monkeypatch.setattr(actions, "may_borrow", AsyncMock(return_value=False))
     monkeypatch.setattr(mod, "defer_if_usable", AsyncMock(return_value=True))
     monkeypatch.setattr(mod, "cube_as_the_library_sees_it",
                         AsyncMock(return_value=None))
