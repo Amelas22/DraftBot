@@ -1093,13 +1093,14 @@ def _then_switch_library_panel(fn):
     report that got us here. A decorator rather than an edit to every return."""
     @functools.wraps(fn)
     async def wrapper(bot, draft_session_id):
-        await fn(bot, draft_session_id)
+        result = await fn(bot, draft_session_id)
         try:
             from services.library_panel import switch_to_returns
             await switch_to_returns(bot, draft_session_id)
         except Exception:
             logger.exception("library panel: switch to returns failed for {}",
                              draft_session_id)
+        return result
     return wrapper
 
 

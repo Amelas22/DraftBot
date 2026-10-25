@@ -18,7 +18,7 @@ from helpers.team_names import labels_for
 from helpers.utils import as_messageable, not_none
 from models.card_loan import CardLoan
 from models.draft_session import DraftSession
-from services.library_reminders import deck_summary, draft_state
+from services.library_reminders import deck_summary, draft_state, session_of
 from services.library_reservation import library_users
 
 # A loan in one of these has its cards (or a trade for them) out of the library.
@@ -150,14 +150,16 @@ async def result_line(draft: Any) -> Optional[str]:
     return f"{winner.name} won {max(a, b)}–{min(a, b)}"
 
 
-def return_embed(borrowers: list[Borrower], result: Optional[str]) -> discord.Embed:
+def return_embed(borrowers: list[Borrower], result: Optional[str], *,
+                 closed: bool = False) -> discord.Embed:
     """The panel once the draft is decided: who still holds a deck, who has
-    sent theirs back. A deck nobody collected was never lent, so is not listed."""
+    sent theirs back. A deck nobody collected was never lent, so is not listed.
+    `closed` is its final face, once every deck is back."""
     lead = f"{result}\n\n" if result else ""
-    embed = discord.Embed(
-        title=TITLE,
-        description=lead + "If you borrowed a deck, please send it back. "
-                           "Other drafters are waiting on those cards.")
+    ask = ("All decks are back. Thanks!" if closed
+           else "If you borrowed a deck, please send it back. "
+                "Other drafters are waiting on those cards.")
+    embed = discord.Embed(title=TITLE, description=lead + ask)
     out = [f"**{b.name}**: {deck_summary(b.cards)}"
            for b in borrowers if b.state in OUT_STATES]
     back = [f"**{b.name}**" for b in borrowers if b.state == "returned"]
@@ -166,7 +168,8 @@ def return_embed(borrowers: list[Borrower], result: Optional[str]) -> discord.Em
         embed.add_field(name="Still out", value="\n".join(out), inline=False)
     if back:
         embed.add_field(name="Back", value="\n".join(back), inline=False)
-    embed.set_footer(text="Move the cards into your trade binder first")
+    if not closed:
+        embed.set_footer(text="Move the cards into your trade binder first")
     return embed
 
 
@@ -183,6 +186,17 @@ async def _fetch_panel(channel: Any, message_id: Optional[str]) -> Optional[Any]
         return await as_messageable(channel).fetch_message(int(message_id))
     except discord.NotFound:
         return None
+
+
+async def _edit_panel(channel: Any, message_id: Optional[str], **fields: Any) -> None:
+    """Edit the posted panel; one already gone is not an error."""
+    message = await _fetch_panel(channel, message_id)
+    if message is None:
+        return
+    try:
+        await message.edit(**fields)
+    except discord.NotFound:
+        pass
 
 
 async def switch_to_returns(bot: Any, session_id: str) -> None:
@@ -209,24 +223,30 @@ async def switch_to_returns(bot: Any, session_id: str) -> None:
     if all_back(borrowers):
         if not await _set_mode(session_id, expect="borrow", library_panel_mode="closed"):
             return
-        old = await _fetch_panel(channel, old_id)
-        if old is not None:
-            await old.edit(embed=borrow_embed(borrowers, closed=True), view=None)
+        await _edit_panel(channel, old_id,
+                          embed=borrow_embed(borrowers, closed=True), view=None)
         logger.info("Closed library panel for session_id={}", session_id)
         return
 
     if not await _set_mode(session_id, expect="borrow", library_panel_mode="return"):
         return
     from library_views.panel_view import panel_view  # see post_library_panel
+    view = not_none(panel_view("return"))
     try:
         sent = await as_messageable(channel).send(
-            embed=return_embed(borrowers, await result_line(draft)),
-            view=not_none(panel_view("return")))
+            embed=return_embed(borrowers, await result_line(draft)), view=view)
     except Exception:
         # Back to borrow, so the watchdog's reconcile tries again.
         await _set_mode(session_id, expect="return", library_panel_mode="borrow")
         raise
     await _set_mode(session_id, library_panel_message_id=str(sent.id))
+    # Sticky before the old panel goes, though that one never was: deleting a
+    # message drops the channel's sticky record only when it is that message.
+    try:
+        await _make_sticky(bot, draft, sent, view)
+    except Exception:
+        logger.exception("library panel: could not make the return panel for "
+                         "session_id={} sticky", session_id)
     old = await _fetch_panel(channel, old_id)
     if old is not None:
         try:
@@ -234,3 +254,87 @@ async def switch_to_returns(bot: Any, session_id: str) -> None:
         except discord.NotFound:
             pass
     logger.info("Library panel for session_id={} now asks for returns", session_id)
+
+
+async def _make_sticky(bot: Any, draft: Any, message: Any, view: Any) -> None:
+    # Here, not at the top: message_management imports views, which is cyclic.
+    from database.message_management import (LIBRARY_PANEL_VIEW_TYPE,
+                                             make_message_sticky)
+
+    await make_message_sticky(
+        str(draft.guild_id), str(draft.draft_chat_channel), message, view, bot,
+        view_metadata={"view_type": LIBRARY_PANEL_VIEW_TYPE,
+                       "draft_session_id": draft.session_id})
+
+
+async def _drop_sticky(channel_id: str, session_id: str) -> None:
+    """Forget this draft's panel as the chat's sticky, so it stops moving."""
+    from database.message_management import (
+        LIBRARY_PANEL_VIEW_TYPE, delete_sticky_message_record, fetch_sticky_message)
+
+    async with AsyncSessionLocal() as s:
+        sticky = await fetch_sticky_message(channel_id, s)
+        if sticky is None:
+            return
+        meta = sticky.view_metadata or {}
+        if (meta.get("view_type") == LIBRARY_PANEL_VIEW_TYPE
+                and meta.get("draft_session_id") == session_id):
+            await delete_sticky_message_record(sticky, s)
+            await s.commit()
+
+
+async def refresh_library_panel(bot: Any, session_id: str) -> None:
+    """Redraw the panel from the loans as they are now, in the face it wears.
+
+    Borrow mode re-renders in place, so "trade on its way" and "collected" are
+    live. Return mode does too, until every deck is back: then the panel closes,
+    loses its button and stops being sticky. Closed, or never posted: nothing.
+    Re-reads everything, so a burst of calls costs edits, not correctness.
+    """
+    draft = await DraftSession.get_by_session_id(session_id)
+    if (draft is None or not draft.draft_chat_channel
+            or draft.library_panel_mode not in ("borrow", "return")):
+        return
+    channel = bot.get_channel(int(draft.draft_chat_channel))
+    if channel is None:
+        return
+    borrowers = await panel_borrowers(session_id)
+    message_id = draft.library_panel_message_id
+    from library_views.panel_view import panel_view  # see post_library_panel
+
+    if draft.library_panel_mode == "borrow":
+        await _edit_panel(channel, message_id, embed=borrow_embed(borrowers),
+                          view=panel_view("borrow"))
+        return
+    result = await result_line(draft)
+    if not all_back(borrowers):
+        await _edit_panel(channel, message_id, embed=return_embed(borrowers, result),
+                          view=panel_view("return"))
+        return
+    if not await _set_mode(session_id, expect="return", library_panel_mode="closed"):
+        return
+    await _edit_panel(channel, message_id,
+                      embed=return_embed(borrowers, result, closed=True), view=None)
+    await _drop_sticky(str(draft.draft_chat_channel), session_id)
+    logger.info("Every library deck from session_id={} is back; panel closed",
+                session_id)
+
+
+def loan_changed(loan: Any) -> None:
+    """A loan moved: refresh its draft's panel in the background. Called from
+    the lending code after its commits, so it never raises and never waits."""
+    try:
+        session_id = session_of(loan)
+        if session_id is None:
+            return
+        import bot_registry
+
+        bot = bot_registry.get_bot()
+        if bot is None:
+            return
+        from helpers.money_gate import spawn_followup
+
+        spawn_followup("library panel refresh", refresh_library_panel(bot, session_id))
+    except Exception:
+        logger.exception("library panel: could not schedule a refresh for loan {}",
+                         getattr(loan, "id", None))

@@ -429,7 +429,24 @@ async def assign_drafted_decks(session_id: Any) -> int:
 
     _report(session_id, sign_ups, assigned, done, busy, empty, failed, not_invited,
             not_opted)
+    if assigned:
+        await _refresh_panel(session_id)
     return assigned
+
+
+async def _refresh_panel(session_id: Any) -> None:
+    """Show the new decks on the draft chat's library panel, if one is up. A
+    panel that cannot be drawn costs nobody their deck."""
+    import bot_registry
+    from services.library_panel import refresh_library_panel
+
+    try:
+        bot = bot_registry.get_bot()
+        if bot is not None:
+            await refresh_library_panel(bot, str(session_id))
+    except Exception:
+        logger.opt(exception=True).warning(
+            "deck assignment: could not refresh the library panel for {}", session_id)
 
 
 async def _say_it_is_ready(loan_id: Any, discord_id: Any) -> None:

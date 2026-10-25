@@ -432,6 +432,18 @@ async def _park_for_review(loan: Any) -> None:
             fresh.state = "dispatch_unknown"
             await session.commit()
     loan.state = "dispatch_unknown"
+    _panel_changed(loan)
+
+
+def _panel_changed(loan: Any) -> None:
+    """Tell the loan's draft chat panel it moved. Only ever after a commit, and
+    never allowed to raise into the code that moves cards and money."""
+    try:
+        from services.library_panel import loan_changed
+        loan_changed(loan)
+    except Exception:
+        logger.opt(exception=True).warning(
+            "library: could not refresh the panel for loan {}", getattr(loan, "id", None))
 
 
 async def lendable_now(library_id: Any, *, exclude_loan_id: Optional[int] = None
@@ -626,6 +638,7 @@ async def _retract(session: Any, loans: "list[Any]") -> int:
     await session.commit()
     expired = int(result.rowcount or 0)
     for loan in loans:
+        _panel_changed(loan)
         # One line each: a count alone cannot answer "why did my deck vanish?"
         logger.warning("library: retracted {}'s uncollected deck from {} "
                        "(loan {}, {} cards)", loan.borrower_id, loan.source,
@@ -845,6 +858,7 @@ async def _dispatch(guild_id: Any, borrower_id: Any, *, from_state: str, to_stat
         fresh.state, fresh.job_id, fresh.pending_cards = to_state, job_id, offering
         fresh.library_id = library_id
         await session.commit()
+    _panel_changed(loan)
     logger.info("Library {} dispatched for {} as {} trade(s): {}",
                 to_state, handle, len(jobs), [j for j, _ in jobs])
     return ("dispatched", loan)
@@ -1385,6 +1399,7 @@ async def _settle_order(loan: Any, kind: str, landed: "list[dict[str, Any]]",
                 raise ValueError(f"not a library job kind: {kind!r}")
         fresh.job_id, fresh.pending_cards = None, None
         await session.commit()
+    _panel_changed(loan)
     return {"state": "done" if moved else "failed", "detail": detail}
 
 

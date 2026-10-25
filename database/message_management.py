@@ -371,6 +371,57 @@ class TournamentBoardStickyStrategy(StickyStrategy):
         await update_registration_board(bot, sticky_message.view_metadata["tournament_id"])
 
 
+LIBRARY_PANEL_VIEW_TYPE = "library_panel"
+
+
+class LibraryPanelStickyStrategy(StickyStrategy):
+    """Keeps a draft chat's library panel at the bottom while it asks for decks
+    back. The draft's panel pointer moves with every repost, so loan changes keep
+    editing the live copy. Once every deck is back the panel closes in place."""
+
+    @staticmethod
+    async def _draft(sticky_message: Message, session: AsyncSession):
+        from models.draft_session import DraftSession
+
+        session_id = sticky_message.view_metadata.get("draft_session_id")
+        if not session_id:
+            return None
+        return await session.scalar(
+            select(DraftSession).where(DraftSession.session_id == session_id))
+
+    async def validate_state(self, sticky_message: Message, session: AsyncSession) -> bool:
+        draft = await self._draft(sticky_message, session)
+        # A closed panel stays put; one replaced by hand is no longer this sticky's.
+        return (draft is not None and draft.library_panel_mode == "return"
+                and draft.library_panel_message_id == sticky_message.message_id)
+
+    async def generate_content(
+        self, sticky_message: Message, bot: discord.Client, session: AsyncSession
+    ) -> Tuple[str, Optional[discord.Embed], Optional[discord.ui.View], Dict[str, Any]]:
+        from library_views.panel_view import panel_view
+        from services.library_panel import panel_borrowers, result_line, return_embed
+
+        draft = await self._draft(sticky_message, session)
+        borrowers = await panel_borrowers(draft.session_id)
+        embed = return_embed(borrowers, await result_line(draft))
+        return sticky_message.content, embed, panel_view("return"), sticky_message.view_metadata
+
+    async def on_update_success(
+        self, sticky_message: Message, new_message: discord.Message, bot: discord.Client, session: AsyncSession
+    ) -> None:
+        # Repoint before the caller commits and deletes the old message.
+        draft = await self._draft(sticky_message, session)
+        if draft is not None:
+            draft.library_panel_message_id = str(new_message.id)
+
+    async def after_commit(self, sticky_message: Message, bot: discord.Client) -> None:
+        from services.library_panel import refresh_library_panel
+
+        # A loan that moved during the repost edited the old copy. Redraw (or
+        # close) from committed state.
+        await refresh_library_panel(bot, sticky_message.view_metadata["draft_session_id"])
+
+
 LFG_BOARD_VIEW_TYPE = "lfg_board"
 
 
@@ -406,6 +457,8 @@ def get_sticky_strategy(view_metadata: Dict[str, Any]) -> StickyStrategy:
         return TournamentBoardStickyStrategy()
     elif view_type == LFG_BOARD_VIEW_TYPE:
         return LfgBoardStickyStrategy()
+    elif view_type == LIBRARY_PANEL_VIEW_TYPE:
+        return LibraryPanelStickyStrategy()
     elif view_type == "draft" or view_type == "quiz":
         return DraftStickyStrategy()
     else:
