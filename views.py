@@ -1761,6 +1761,12 @@ class PersistentView(discord.ui.View):
                 from livedrafts import create_live_draft_summary
                 await create_live_draft_summary(bot, session.session_id)
 
+                try:
+                    from services.library_panel import post_library_panel
+                    await post_library_panel(bot, session.session_id)
+                except Exception:
+                    logger.exception("Library panel failed for session_id={}", session_id)
+
                 if interaction:
                     await interaction.followup.send("Pairings posted.", ephemeral=True)
                     logger.debug("Sent confirmation to interaction")
