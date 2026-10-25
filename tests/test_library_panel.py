@@ -189,7 +189,7 @@ def settled(monkeypatch):
 
 async def _in_borrow_mode(loans):
     await _seed({"1": "Ravenwood", "3": "Tomasz88"}, loans=loans)
-    await library_panel._set_mode("s1", library_panel_mode="borrow",
+    await library_panel._write("s1", library_panel_mode="borrow",
                                   library_panel_message_id="777")
 
 
@@ -326,7 +326,7 @@ async def test_reconcile_switches_an_abandoned_draft(test_db, reserved, monkeypa
     _wins(monkeypatch, 5, 3)
     await _in_borrow_mode([("1", "borrowed")])
     # The real draft_state: an abandoned draft counts as settled.
-    await library_panel._set_mode("s1", session_stage="abandoned")
+    await library_panel._write("s1", session_stage="abandoned")
     bot, channel, _, _ = _bot_with_old_panel()
     await library_panel.reconcile_library_panels(bot)
     assert (await _row()).library_panel_mode == "return"
@@ -338,7 +338,7 @@ async def test_reconcile_switches_an_abandoned_draft(test_db, reserved, monkeypa
 @pytest.mark.asyncio
 async def test_reconcile_reposts_a_deleted_return_panel(test_db, reserved, settled):
     await _seed({"1": "Ravenwood"}, loans=[("1", "borrowed")])
-    await library_panel._set_mode("s1", library_panel_mode="return",
+    await library_panel._write("s1", library_panel_mode="return",
                                   library_panel_message_id="777")
     bot, channel, sent, _ = _bot_with_old_panel(fetch_error=_gone())
     sent.content = ""  # recorded on the sticky row
@@ -356,13 +356,13 @@ async def test_reconcile_reposts_a_deleted_return_panel(test_db, reserved, settl
 async def test_reconcile_does_not_repost_a_panel_the_sticky_just_moved(
         test_db, reserved, settled):
     await _seed({"1": "Ravenwood"}, loans=[("1", "borrowed")])
-    await library_panel._set_mode("s1", library_panel_mode="return",
+    await library_panel._write("s1", library_panel_mode="return",
                                   library_panel_message_id="777")
     bot, channel, _, _ = _bot_with_old_panel()
 
     async def moved(message_id):
         # The sticky reposted the panel as 778 and deleted 777 mid-scan.
-        await library_panel._set_mode("s1", library_panel_message_id="778")
+        await library_panel._write("s1", library_panel_message_id="778")
         raise _gone()
     channel.fetch_message = AsyncMock(side_effect=moved)
     await library_panel.reconcile_library_panels(bot)
@@ -373,7 +373,7 @@ async def test_reconcile_does_not_repost_a_panel_the_sticky_just_moved(
 @pytest.mark.asyncio
 async def test_reconcile_refreshes_a_live_return_panel_in_place(test_db, reserved, settled):
     await _seed({"1": "Ravenwood"}, loans=[("1", "borrowed")])
-    await library_panel._set_mode("s1", library_panel_mode="return",
+    await library_panel._write("s1", library_panel_mode="return",
                                   library_panel_message_id="777")
     bot, channel, _, old = _bot_with_old_panel()
     await library_panel.reconcile_library_panels(bot)
@@ -386,7 +386,7 @@ async def test_reconcile_refreshes_a_live_return_panel_in_place(test_db, reserve
 async def test_reconcile_closes_a_deleted_return_panel_with_every_deck_back(
         test_db, reserved, settled):
     await _seed({"1": "Ravenwood"}, loans=[("1", "returned")])
-    await library_panel._set_mode("s1", library_panel_mode="return",
+    await library_panel._write("s1", library_panel_mode="return",
                                   library_panel_message_id="777")
     bot, channel, _, _ = _bot_with_old_panel(fetch_error=_gone())
     await library_panel.reconcile_library_panels(bot)
@@ -397,7 +397,7 @@ async def test_reconcile_closes_a_deleted_return_panel_with_every_deck_back(
 @pytest.mark.asyncio
 async def test_reconcile_leaves_closed_panels_alone(test_db, reserved, settled):
     await _seed({"1": "Ravenwood"}, loans=[("1", "borrowed")])
-    await library_panel._set_mode("s1", library_panel_mode="closed",
+    await library_panel._write("s1", library_panel_mode="closed",
                                   library_panel_message_id="777")
     bot, channel, _, old = _bot_with_old_panel()
     await library_panel.reconcile_library_panels(bot)
@@ -413,7 +413,7 @@ async def test_reconcile_switches_a_borrow_panel_whose_id_was_never_stored(
         test_db, reserved, settled):
     # A crash between sending the borrow panel and storing its id.
     await _seed({"1": "Ravenwood"}, loans=[("1", "borrowed")])
-    await library_panel._set_mode("s1", library_panel_mode="borrow")
+    await library_panel._write("s1", library_panel_mode="borrow")
     bot, channel, sent, _ = _bot_with_old_panel()
     await library_panel.reconcile_library_panels(bot)
     row = await _row()
@@ -430,7 +430,7 @@ async def test_reconcile_does_not_repost_an_undecided_borrow_panel(test_db, rese
         return SimpleNamespace(settled=False)
     monkeypatch.setattr(library_panel, "draft_state", state)
     await _seed({"1": "Ravenwood"}, loans=[("1", "borrowed")])
-    await library_panel._set_mode("s1", library_panel_mode="borrow")
+    await library_panel._write("s1", library_panel_mode="borrow")
     bot, channel, _, _ = _bot_with_old_panel()
     await library_panel.reconcile_library_panels(bot)
     channel.send.assert_not_awaited()
@@ -556,7 +556,7 @@ async def test_a_deck_on_offer_keeps_the_return_panel_open_until_it_lapses(
         test_db, reserved, settled):
     await _seed({"1": "Ravenwood", "2": "kestrel_mtg"},
                 loans=[("1", "returned"), ("2", "assigned")])
-    await library_panel._set_mode("s1", library_panel_mode="return",
+    await library_panel._write("s1", library_panel_mode="return",
                                   library_panel_message_id="777")
     bot, _, _, old = _bot_with_old_panel()
     await library_panel.refresh_library_panel(bot, "s1")

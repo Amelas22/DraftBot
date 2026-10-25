@@ -399,11 +399,11 @@ class LibraryPanelStickyStrategy(StickyStrategy):
         self, sticky_message: Message, bot: discord.Client, session: AsyncSession
     ) -> Tuple[str, Optional[discord.Embed], Optional[discord.ui.View], Dict[str, Any]]:
         from library_views.panel_view import panel_view
-        from services.library_panel import panel_borrowers, result_line, return_embed
+        from services.library_panel import panel_borrowers, render_return
 
         draft = await self._draft(sticky_message, session)
         borrowers = await panel_borrowers(draft.session_id)
-        embed = return_embed(borrowers, await result_line(draft))
+        embed = await render_return(draft, borrowers)
         return sticky_message.content, embed, panel_view("return"), sticky_message.view_metadata
 
     async def on_update_success(

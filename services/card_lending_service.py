@@ -438,12 +438,8 @@ async def _park_for_review(loan: Any) -> None:
 def _panel_changed(loan: Any) -> None:
     """Tell the loan's draft chat panel it moved. Only ever after a commit, and
     never allowed to raise into the code that moves cards and money."""
-    try:
-        from services.library_panel import loan_changed
-        loan_changed(loan)
-    except Exception:
-        logger.opt(exception=True).warning(
-            "library: could not refresh the panel for loan {}", getattr(loan, "id", None))
+    from services.library_panel import loan_changed
+    loan_changed(loan)
 
 
 async def lendable_now(library_id: Any, *, exclude_loan_id: Optional[int] = None

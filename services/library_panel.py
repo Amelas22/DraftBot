@@ -6,7 +6,6 @@ has loans. library_panel_mode on the draft is both the "already posted" guard
 and the face the panel wears: NULL (none), 'borrow', 'return' or 'closed'.
 """
 from dataclasses import dataclass
-from types import EllipsisType
 from typing import Any, Optional
 
 import discord
@@ -18,6 +17,7 @@ from helpers.team_names import labels_for
 from helpers.utils import as_messageable, not_none
 from models.card_loan import CardLoan
 from models.draft_session import DraftSession
+from services.draft_deck_assignment import loan_source
 from services.library_reminders import deck_summary, draft_state, session_of
 from services.library_reservation import library_users
 
@@ -61,7 +61,7 @@ async def panel_borrowers(session_id: str) -> list[Borrower]:
     reserved = await library_users(draft)
     async with AsyncSessionLocal() as s:
         loans = (await s.execute(
-            select(CardLoan).where(CardLoan.source == f"draft:{session_id}")
+            select(CardLoan).where(CardLoan.source == loan_source(session_id))
             .order_by(CardLoan.id))).scalars().all()
     newest = {str(loan.borrower_id): loan for loan in loans}  # later ids win
     names = {str(k): v for k, v in (draft.sign_ups or {}).items()}
@@ -90,19 +90,24 @@ def borrow_embed(borrowers: list[Borrower], *, closed: bool = False) -> discord.
     return discord.Embed(title=TITLE, description="\n".join(lines) + f"\n\n{footer}")
 
 
-async def _set_mode(session_id: str, *, expect: "Optional[str] | EllipsisType" = ...,
-                    **values: Any) -> bool:
-    """Write `values` to the draft's row; with `expect`, only while the mode is
-    still that (None for no panel). True when the row changed."""
-    cond = DraftSession.session_id == session_id
-    if expect is None:
-        cond = cond & DraftSession.library_panel_mode.is_(None)
-    elif not isinstance(expect, EllipsisType):
-        cond = cond & (DraftSession.library_panel_mode == expect)
+async def _write(session_id: str, **values: Any) -> None:
+    """Write `values` to the draft's row."""
+    async with AsyncSessionLocal() as s:
+        await s.execute(update(DraftSession)
+                        .where(DraftSession.session_id == session_id).values(**values))
+        await s.commit()
+
+
+async def _claim(session_id: str, expect: Optional[str], **values: Any) -> bool:
+    """Write `values` to the draft's row only while the mode is still `expect`
+    (None for no panel). True when the row changed."""
+    mode = DraftSession.library_panel_mode
+    cond = (DraftSession.session_id == session_id) & (
+        mode.is_(None) if expect is None else mode == expect)
     async with AsyncSessionLocal() as s:
         res = await s.execute(update(DraftSession).where(cond).values(**values))
         await s.commit()
-        return bool(res.rowcount)  # type: ignore[attr-defined]
+        return bool(res.rowcount)
 
 
 async def post_library_panel(bot: Any, session_id: str) -> None:
@@ -114,11 +119,11 @@ async def post_library_panel(bot: Any, session_id: str) -> None:
     borrowers = await panel_borrowers(session_id)
     if not borrowers:
         return
-    channel = bot.get_channel(int(draft.draft_chat_channel))
+    channel = await _chat_channel(bot, draft.draft_chat_channel)
     if channel is None:
         return
     # Claim before sending, so two racing callers cannot both post.
-    if not await _set_mode(session_id, expect=None, library_panel_mode="borrow"):
+    if not await _claim(session_id, None, library_panel_mode="borrow"):
         return
     # Here, not at the top: the view's gate reads panel_borrowers from this module.
     from library_views.panel_view import panel_view
@@ -126,9 +131,9 @@ async def post_library_panel(bot: Any, session_id: str) -> None:
         sent = await as_messageable(channel).send(
             embed=borrow_embed(borrowers), view=not_none(panel_view("borrow")))
     except Exception:
-        await _set_mode(session_id, library_panel_mode=None)
+        await _write(session_id, library_panel_mode=None)
         raise
-    await _set_mode(session_id, library_panel_message_id=str(sent.id))
+    await _write(session_id, library_panel_message_id=str(sent.id))
     logger.info("Posted library panel for session_id={}", session_id)
 
 
@@ -171,6 +176,11 @@ def return_embed(borrowers: list[Borrower], result: Optional[str], *,
     if not closed:
         embed.set_footer(text="Move the cards into your trade binder first")
     return embed
+
+
+async def render_return(draft: Any, borrowers: list[Borrower], *,
+                        closed: bool = False) -> discord.Embed:
+    return return_embed(borrowers, await result_line(draft), closed=closed)
 
 
 def all_back(borrowers: list[Borrower]) -> bool:
@@ -218,6 +228,16 @@ async def _edit_panel(channel: Any, message_id: Optional[str], **fields: Any) ->
         pass
 
 
+async def _delete_panel(message: Optional[Any]) -> None:
+    """Delete a copy of the panel; one already gone is not an error."""
+    if message is None:
+        return
+    try:
+        await message.delete()
+    except discord.NotFound:
+        pass
+
+
 async def switch_to_returns(bot: Any, session_id: str) -> None:
     """Once the draft is decided, turn the borrow panel into a return reminder.
 
@@ -242,27 +262,25 @@ async def switch_to_returns(bot: Any, session_id: str) -> None:
     old_id = draft.library_panel_message_id
 
     if all_back(borrowers):
-        if not can_close(borrowers):
-            return
-        if not await _set_mode(session_id, expect="borrow", library_panel_mode="closed"):
-            return
-        await _edit_panel(channel, old_id,
-                          embed=borrow_embed(borrowers, closed=True), view=None)
-        logger.info("Closed library panel for session_id={}", session_id)
+        if can_close(borrowers) and await _claim(session_id, "borrow",
+                                                 library_panel_mode="closed"):
+            await _edit_panel(channel, old_id,
+                              embed=borrow_embed(borrowers, closed=True), view=None)
+            logger.info("Closed library panel for session_id={}", session_id)
         return
 
-    if not await _set_mode(session_id, expect="borrow", library_panel_mode="return"):
+    if not await _claim(session_id, "borrow", library_panel_mode="return"):
         return
     from library_views.panel_view import panel_view  # see post_library_panel
     view = not_none(panel_view("return"))
     try:
         sent = await as_messageable(channel).send(
-            embed=return_embed(borrowers, await result_line(draft)), view=view)
+            embed=await render_return(draft, borrowers), view=view)
     except Exception:
         # Back to borrow, so the watchdog's reconcile tries again.
-        await _set_mode(session_id, expect="return", library_panel_mode="borrow")
+        await _claim(session_id, "return", library_panel_mode="borrow")
         raise
-    await _set_mode(session_id, library_panel_message_id=str(sent.id))
+    await _write(session_id, library_panel_message_id=str(sent.id))
     # Sticky before the old panel goes, though that one never was: deleting a
     # message drops the channel's sticky record only when it is that message.
     try:
@@ -270,12 +288,7 @@ async def switch_to_returns(bot: Any, session_id: str) -> None:
     except Exception:
         logger.exception("library panel: could not make the return panel for "
                          "session_id={} sticky", session_id)
-    old = await _fetch_panel(channel, old_id)
-    if old is not None:
-        try:
-            await old.delete()
-        except discord.NotFound:
-            pass
+    await _delete_panel(await _fetch_panel(channel, old_id))
     logger.info("Library panel for session_id={} now asks for returns", session_id)
 
 
@@ -330,15 +343,14 @@ async def refresh_library_panel(bot: Any, session_id: str) -> None:
         await _edit_panel(channel, message_id, embed=borrow_embed(borrowers),
                           view=panel_view("borrow"))
         return
-    result = await result_line(draft)
     if not can_close(borrowers):
-        await _edit_panel(channel, message_id, embed=return_embed(borrowers, result),
+        await _edit_panel(channel, message_id, embed=await render_return(draft, borrowers),
                           view=panel_view("return"))
         return
-    if not await _set_mode(session_id, expect="return", library_panel_mode="closed"):
+    embed = await render_return(draft, borrowers, closed=True)
+    if not await _claim(session_id, "return", library_panel_mode="closed"):
         return
-    await _edit_panel(channel, message_id,
-                      embed=return_embed(borrowers, result, closed=True), view=None)
+    await _edit_panel(channel, message_id, embed=embed, view=None)
     await _drop_sticky(str(draft.draft_chat_channel), session_id)
     logger.info("Every library deck from session_id={} is back; panel closed",
                 session_id)
@@ -362,8 +374,8 @@ async def after_sticky_repost(bot: Any, session_id: str) -> None:
         return
     borrowers = await panel_borrowers(session_id)
     await _edit_panel(channel, draft.library_panel_message_id,
-                      embed=return_embed(borrowers, await result_line(draft),
-                                         closed=True), view=None)
+                      embed=await render_return(draft, borrowers, closed=True),
+                      view=None)
     await _drop_sticky(str(draft.draft_chat_channel), session_id)
 
 
@@ -394,14 +406,10 @@ async def _repost_return_panel(bot: Any, draft: Any, channel: Any,
     from library_views.panel_view import panel_view  # see post_library_panel
     view = not_none(panel_view("return"))
     sent = await as_messageable(channel).send(
-        embed=return_embed(borrowers, await result_line(draft)), view=view)
-    if not await _set_mode(session_id, expect="return",
-                           library_panel_message_id=str(sent.id)):
+        embed=await render_return(draft, borrowers), view=view)
+    if not await _claim(session_id, "return", library_panel_message_id=str(sent.id)):
         # Closed while we were posting: the copy just sent is not wanted.
-        try:
-            await sent.delete()
-        except discord.NotFound:
-            pass
+        await _delete_panel(sent)
         return
     try:
         await _make_sticky(bot, draft, sent, view)
@@ -419,7 +427,7 @@ async def _reconcile_one(bot: Any, draft: Any) -> None:
                if draft.draft_chat_channel else None)
     if channel is None:
         # The chat is gone, so there is nowhere to show a panel: stop looking.
-        if await _set_mode(session_id, expect=mode, library_panel_mode="closed"):
+        if await _claim(session_id, mode, library_panel_mode="closed"):
             logger.info("library panel: draft chat for session_id={} is gone; "
                         "panel closed", session_id)
         return

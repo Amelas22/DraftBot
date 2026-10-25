@@ -71,7 +71,7 @@ _DRAFT_SOURCE_PREFIX = "draft:"
 def session_of(loan: Any) -> Optional[str]:
     """Which draft this deck went out for, or None if it went out for no draft.
 
-    Loans are stamped 'draft:<session_id>' by draft_deck_assignment._source.
+    Loans are stamped 'draft:<session_id>' by draft_deck_assignment.loan_source.
     Fixture loans carry another prefix and belong to no draft, so neither return
     trigger can ever apply to them.
     """
