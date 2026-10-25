@@ -335,6 +335,34 @@ async def test_a_failing_sync_does_not_break_the_victory_check(
     await check_and_post_victory_or_draw(MagicMock(), "nope")
 
 
+# --- Closing --------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_closing_unpins_the_panel(test_db, reserved, settled):  # noqa: F811
+    await _in_mode("return", [("1", "returned")])
+    bot, _, _, old = _bot_with_old_panel()
+    old.pinned = True
+    await sync_panel(bot, "s1")
+    assert (await _row()).library_panel_mode == "closed"
+    old.unpin.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [
+    discord.NotFound(MagicMock(status=404), "Unknown Message"),
+    discord.Forbidden(MagicMock(status=403), "Missing Permissions"),
+])
+async def test_an_unpin_that_cannot_happen_still_closes(
+        test_db, reserved, settled, error):  # noqa: F811
+    await _in_mode("return", [("1", "returned")])
+    bot, _, _, old = _bot_with_old_panel()
+    old.pinned = True
+    old.unpin = AsyncMock(side_effect=error)
+    await sync_panel(bot, "s1")
+    assert (await _row()).library_panel_mode == "closed"
+
+
 # --- Watchdog recovery -----------------------------------------------------------
 
 

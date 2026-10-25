@@ -122,6 +122,16 @@ async def _delete(message: Any) -> None:
         pass
 
 
+async def _unpin(message: Any) -> None:
+    """Unpin a closed panel. Gone, or not ours to unpin: nothing more to do."""
+    if not getattr(message, "pinned", False):
+        return
+    try:
+        await message.unpin()
+    except (discord.NotFound, discord.Forbidden):
+        pass
+
+
 # --- The draft's row and the channel's sticky record ---------------------------
 
 
@@ -252,6 +262,7 @@ async def _converge(bot: Any, session_id: str, *, move_down: bool) -> None:
     # Closed, from borrow or return: in place, with no button, and still.
     if live is not None:
         await _show(live, *await _render(draft, borrowers, face, copy=current))
+        await _unpin(live)
     await _write(session_id, library_panel_mode=Face.CLOSED.mode)
     await _drop_sticky(chat, session_id)
     logger.info("Closed library panel for session_id={}", session_id)

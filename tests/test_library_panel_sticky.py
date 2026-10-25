@@ -184,6 +184,8 @@ async def test_a_sticky_naming_another_copy_is_dropped(test_db, decided):  # noq
 async def test_sticky_ends_when_every_deck_is_back(test_db, decided):  # noqa: F811
     await _seed("returned", sticky_count=0)
     bot, channel, messages = _bot(900)
+    messages[900].pinned = True
+
     await library_panel.sync_panel(bot, "s1")
 
     assert (await _draft()).library_panel_mode == "closed"
@@ -191,6 +193,7 @@ async def test_sticky_ends_when_every_deck_is_back(test_db, decided):  # noqa: F
     assert edit["view"] is None
     assert "All decks are back. Thanks!" in edit["embed"].description
     assert await _sticky_rows() == []
+    messages[900].unpin.assert_awaited_once()
     channel.send.assert_not_awaited()
 
 
