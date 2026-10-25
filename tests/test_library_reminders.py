@@ -169,6 +169,30 @@ def test_an_unknown_finish_time_asks_at_once():
                         finished_at=None, now=NOW)
 
 
+def test_a_decided_draft_asks_at_once():
+    """No hour's grace once a side clinches: the cards are what the rest of the
+    room's next draft is waiting on."""
+    assert reminder_due(_loan(), done_playing=True, draft_settled=True,
+                        finished_at=NOW - timedelta(minutes=1), now=NOW)
+
+
+def test_a_result_after_the_ask_in_a_decided_draft_asks_again():
+    """A dead rubber means they still have the deck and just used it."""
+    loan = _loan(last_reminded_at=NOW - timedelta(minutes=10))
+
+    assert reminder_due(loan, done_playing=True, draft_settled=True,
+                        played_since_ask=True, now=NOW)
+
+
+def test_a_result_after_the_ask_waits_for_the_hour_while_the_draft_is_live():
+    """Only a decided draft is chased on results. Undecided, the hourly repeat
+    stands."""
+    loan = _loan(last_reminded_at=NOW - timedelta(minutes=10))
+
+    assert not reminder_due(loan, done_playing=True, draft_settled=False,
+                            played_since_ask=True, now=NOW)
+
+
 def test_a_deck_merely_on_offer_is_never_asked_for():
     """Nothing to return: an assigned loan is an offer nobody collected, and
     expire_stale_assignments retracts those on its own."""
@@ -221,6 +245,14 @@ def test_the_return_dm_does_not_quote_a_deposit_figure():
     assert not re.search(r"\d+ tix", msg), f"quoted a figure it cannot vouch for: {msg}"
 
 
+def test_the_ask_in_a_decided_draft_says_why_it_came():
+    assert return_message(_loan(), decided=True).startswith("Your draft is decided")
+
+
+def test_the_ask_for_a_finished_player_does_not_claim_a_decision():
+    assert "decided" not in return_message(_loan())
+
+
 # ---- who has finished playing ----------------------------------------------
 
 @pytest.mark.asyncio
@@ -259,22 +291,6 @@ async def test_a_player_finished_when_they_reported_their_last_match(test_db):
         ("p1", "p3", "p1", NOW - timedelta(minutes=30))])
 
     assert (await mod.draft_state("s1")).done_at["p1"] == NOW - timedelta(minutes=30)
-
-
-@pytest.mark.asyncio
-async def test_a_draft_was_decided_at_its_latest_result(test_db):
-    await seed_session("s1", stype="swiss", stage="completed", matches=[
-        ("p1", "p2", "p1", NOW - timedelta(hours=2)),
-        ("p3", "p4", "p3", NOW - timedelta(minutes=20))])
-
-    assert (await mod.draft_state("s1")).last_result == NOW - timedelta(minutes=20)
-
-
-@pytest.mark.asyncio
-async def test_a_draft_with_nothing_reported_has_no_finish_time(test_db):
-    await seed_session("s1", stype="random", stage="abandoned")
-
-    assert (await mod.draft_state("s1")).last_result is None
 
 
 @pytest.mark.asyncio
@@ -353,8 +369,9 @@ async def test_cards_still_out_an_hour_later_are_asked_for_again(test_db, dm):
 
 
 @pytest.mark.asyncio
-async def test_the_watchdog_waits_an_hour_after_the_draft_is_decided(test_db, dm):
-    """Then asks, then asks hourly while the cards stay out -- and not between."""
+async def test_the_watchdog_asks_as_soon_as_the_draft_is_decided(test_db, dm):
+    """The next tick after the decision asks, then hourly while the cards stay
+    out -- and not between."""
     await seed_session("s1", stype="swiss", stage="completed",
                        matches=[("p1", "p2", "p1", NOW)])
     await _a_loan()
@@ -362,7 +379,62 @@ async def test_the_watchdog_waits_an_hour_after_the_draft_is_decided(test_db, dm
     asks = [await mod.send_due_reminders(now=NOW + timedelta(minutes=m))
             for m in (10, 50, 60, 70, 110, 120, 130)]
 
-    assert asks == [0, 0, 1, 0, 0, 1, 0], dm.sent
+    assert asks == [1, 0, 0, 1, 0, 0, 1], dm.sent
+    assert dm.sent[0][1].startswith("Your draft is decided"), dm.sent[0][1]
+
+
+async def _report(session_id, p1, p2, winner, at):
+    from database.db_session import AsyncSessionLocal
+    from models.match import MatchResult
+
+    async with AsyncSessionLocal() as s:
+        s.add(MatchResult(session_id=session_id, match_number=99, player1_id=p1,
+                          player2_id=p2, player1_wins=2, player2_wins=0,
+                          winner_id=winner, result_submitted_at=at))
+        await s.commit()
+
+
+@pytest.mark.asyncio
+async def test_a_dead_rubber_reported_after_the_ask_asks_again(test_db, dm):
+    """Either player reporting counts: it is the borrower's match either way."""
+    await seed_session("s1", stype="random", stage="pairings", victory=1,
+                       matches=[("p1", "p2", "p1", NOW)])
+    await _a_loan()
+    assert await mod.send_due_reminders(now=NOW + timedelta(minutes=10)) == 1
+
+    await _report("s1", "p2", "p1", "p2", NOW + timedelta(minutes=15))
+
+    again = await mod.send_due_reminders(now=NOW + timedelta(minutes=20))
+    quiet = await mod.send_due_reminders(now=NOW + timedelta(minutes=30))
+    assert (again, quiet) == (1, 0), dm.sent
+
+
+@pytest.mark.asyncio
+async def test_a_result_dated_ahead_of_the_clock_asks_once_not_every_tick(test_db, dm):
+    """Naive local timestamps repeat an hour when the clocks go back, so a dead
+    rubber can read as later than every ask stamped after it."""
+    await seed_session("s1", stype="random", stage="pairings", victory=1,
+                       matches=[("p1", "p2", "p1", NOW)])
+    await _a_loan()
+    await mod.send_due_reminders(now=NOW + timedelta(minutes=10))
+
+    await _report("s1", "p2", "p1", "p2", NOW + timedelta(minutes=50))
+
+    asks = [await mod.send_due_reminders(now=NOW + timedelta(minutes=m))
+            for m in (20, 30, 40)]
+    assert asks == [0, 0, 0], dm.sent
+
+
+@pytest.mark.asyncio
+async def test_somebody_elses_dead_rubber_does_not_ask_again(test_db, dm):
+    await seed_session("s1", stype="random", stage="pairings", victory=1,
+                       matches=[("p1", "p2", "p1", NOW)])
+    await _a_loan()
+    await mod.send_due_reminders(now=NOW + timedelta(minutes=10))
+
+    await _report("s1", "p3", "p4", "p3", NOW + timedelta(minutes=15))
+
+    assert await mod.send_due_reminders(now=NOW + timedelta(minutes=20)) == 0, dm.sent
 
 
 @pytest.mark.asyncio
