@@ -1,6 +1,7 @@
 import random
 import discord
 import asyncio
+import functools
 import pytz
 from sqlalchemy import update, select, func, or_, desc, and_, create_engine
 from datetime import datetime, timedelta
@@ -1084,6 +1085,22 @@ async def sync_decided_draft_to_tournament(bot, draft_session_id):
             team_a_wins, team_b_wins, draft_session_id)
 
 
+def _then_sync_library_panel(fn):
+    """Sync the draft's library panel after every return from `fn`, once its
+    transaction has committed: the panel takes its own connection, and moves
+    below the victory post `fn` just made. A decorator rather than a call at
+    each of fn's exits; nudge never raises, so the report that got us here
+    never breaks on it."""
+    @functools.wraps(fn)
+    async def wrapper(bot, draft_session_id):
+        result = await fn(bot, draft_session_id)
+        from services.library_panel import nudge
+        await nudge(bot, draft_session_id)
+        return result
+    return wrapper
+
+
+@_then_sync_library_panel
 async def check_and_post_victory_or_draw(bot, draft_session_id):
     # Money first, and outside the transaction below. This is the one function
     # that decides a draft is over, so it is the one place a draft's money

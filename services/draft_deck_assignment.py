@@ -62,7 +62,7 @@ _UNSEATABLE: "set[str]" = set()
 _OVER: "set[str]" = set()
 
 
-def _source(session_id: Any) -> str:
+def loan_source(session_id: Any) -> str:
     """What a loan from this draft is stamped with.
 
     Both the endDraft push and the reconciler's retry sweep call this, and the
@@ -79,7 +79,7 @@ async def _already_assigned(session_id: Any) -> "set[str]":
     for them, and re-assigning would hand out the pool twice."""
     async with AsyncSessionLocal() as session:
         rows = await session.scalars(
-            select(CardLoan.borrower_id).where(CardLoan.source == _source(session_id)))
+            select(CardLoan.borrower_id).where(CardLoan.source == loan_source(session_id)))
         return {str(r) for r in rows.all()}
 
 
@@ -392,7 +392,7 @@ async def assign_drafted_decks(session_id: Any) -> int:
             continue
         try:
             loan_id = await assign_deck(guild_id, discord_id, cards,
-                                        source=_source(session_id),
+                                        source=loan_source(session_id),
                                         library_id=str(library.id))
         except IntegrityError:
             # The push path and a reconciler tick can both be inside this
@@ -429,7 +429,20 @@ async def assign_drafted_decks(session_id: Any) -> int:
 
     _report(session_id, sign_ups, assigned, done, busy, empty, failed, not_invited,
             not_opted)
+    if assigned:
+        await _refresh_panel(session_id)
     return assigned
+
+
+async def _refresh_panel(session_id: Any) -> None:
+    """Show the new decks on the draft chat's library panel, if one is up. A
+    panel that cannot be drawn costs nobody their deck."""
+    import bot_registry
+    from services.library_panel import nudge
+
+    bot = bot_registry.get_bot()
+    if bot is not None:
+        await nudge(bot, str(session_id))
 
 
 async def _say_it_is_ready(loan_id: Any, discord_id: Any) -> None:

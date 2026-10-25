@@ -432,6 +432,14 @@ async def _park_for_review(loan: Any) -> None:
             fresh.state = "dispatch_unknown"
             await session.commit()
     loan.state = "dispatch_unknown"
+    _panel_changed(loan)
+
+
+def _panel_changed(loan: Any) -> None:
+    """Tell the loan's draft chat panel it moved. Only ever after a commit, and
+    never allowed to raise into the code that moves cards and money."""
+    from services.library_panel import loan_changed
+    loan_changed(loan)
 
 
 async def lendable_now(library_id: Any, *, exclude_loan_id: Optional[int] = None
@@ -481,6 +489,11 @@ def _cap(avail: "dict[str, int]", cards: "list[dict[str, Any]]"
             out.append({"name": item["name"], "qty": qty})
             remaining[item["name"]] -= qty
     return out
+
+
+def card_lines(cards: "list[dict[str, Any]]") -> str:
+    """A card list as the player reads it: one `• 4× Name` line per entry."""
+    return "\n".join(f"• {c['qty']}× {c['name']}" for c in cards)
 
 
 async def trim_to_available(guild_id: Any, loan_id: Any) -> "list[dict[str, Any]]":
@@ -621,6 +634,7 @@ async def _retract(session: Any, loans: "list[Any]") -> int:
     await session.commit()
     expired = int(result.rowcount or 0)
     for loan in loans:
+        _panel_changed(loan)
         # One line each: a count alone cannot answer "why did my deck vanish?"
         logger.warning("library: retracted {}'s uncollected deck from {} "
                        "(loan {}, {} cards)", loan.borrower_id, loan.source,
@@ -840,6 +854,7 @@ async def _dispatch(guild_id: Any, borrower_id: Any, *, from_state: str, to_stat
         fresh.state, fresh.job_id, fresh.pending_cards = to_state, job_id, offering
         fresh.library_id = library_id
         await session.commit()
+    _panel_changed(loan)
     logger.info("Library {} dispatched for {} as {} trade(s): {}",
                 to_state, handle, len(jobs), [j for j, _ in jobs])
     return ("dispatched", loan)
@@ -990,6 +1005,15 @@ async def lending_jobs_watchdog(bot: Any = None, interval_s: float = RESCAN_INTE
             await send_due_reminders()
         except Exception:
             logger.exception("Card-library return-reminder scan failed")
+        try:
+            # Draft-chat library panels that missed their switch to return mode
+            # or lost their message, e.g. to a restart between the decision and
+            # the repost.
+            if bot is not None:
+                from services.library_panel import reconcile_library_panels
+                await reconcile_library_panels(bot)
+        except Exception:
+            logger.exception("Card-library panel scan failed")
         await asyncio.sleep(interval_s)
 
 
@@ -1380,6 +1404,7 @@ async def _settle_order(loan: Any, kind: str, landed: "list[dict[str, Any]]",
                 raise ValueError(f"not a library job kind: {kind!r}")
         fresh.job_id, fresh.pending_cards = None, None
         await session.commit()
+    _panel_changed(loan)
     return {"state": "done" if moved else "failed", "detail": detail}
 
 

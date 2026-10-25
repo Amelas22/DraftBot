@@ -81,6 +81,10 @@ class DraftSession(Base):
     # Players who agreed to borrow in THIS draft. Signing up holds the copy;
     # from the moment teams form, only these players count as needing it.
     library_agreed = Column(JSON)
+    # The "Library decks" panel in the draft chat: its message, and which face it
+    # wears. NULL mode: no panel; otherwise 'borrow', 'return' or 'closed'.
+    library_panel_message_id = Column(String(64))
+    library_panel_mode = Column(String(16))
     spaces_object_key = Column(String(256), nullable=True)  # DigitalOcean Spaces object path
     unlock_at = Column(DateTime)              # when the public embed may publish (logs_captured_at + PUBLISH_DELAY; manual release = now)
     drafttable_url = Column(String(512))   # published draft table page, once it exists

@@ -1761,6 +1761,9 @@ class PersistentView(discord.ui.View):
                 from livedrafts import create_live_draft_summary
                 await create_live_draft_summary(bot, session.session_id)
 
+                from services.library_panel import nudge
+                await nudge(bot, session.session_id)
+
                 if interaction:
                     await interaction.followup.send("Pairings posted.", ephemeral=True)
                     logger.debug("Sent confirmation to interaction")

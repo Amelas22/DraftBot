@@ -71,7 +71,7 @@ _DRAFT_SOURCE_PREFIX = "draft:"
 def session_of(loan: Any) -> Optional[str]:
     """Which draft this deck went out for, or None if it went out for no draft.
 
-    Loans are stamped 'draft:<session_id>' by draft_deck_assignment._source.
+    Loans are stamped 'draft:<session_id>' by draft_deck_assignment.loan_source.
     Fixture loans carry another prefix and belong to no draft, so neither return
     trigger can ever apply to them.
     """
@@ -125,7 +125,7 @@ def reminder_due(loan: Any, *, done_playing: bool, draft_settled: bool,
     return at - loan.last_reminded_at >= REPEAT_AFTER
 
 
-def _deck_summary(cards: Any) -> str:
+def deck_summary(cards: Any) -> str:
     """How many cards, not which ones: a 45-card list does not fit a DM and the
     borrower can see the deck itself with /library deck."""
     from debt_views.helpers import card_count_label
@@ -145,7 +145,7 @@ def deck_ready_message(cards: Any, collateral: int) -> str:
     version that wastes their evening. Today's price is the right figure here,
     unlike in return_message: they have not paid yet.
     """
-    msg = (f"📚 Your drafted deck is ready to borrow — **{_deck_summary(cards)}**.\n"
+    msg = (f"📚 Your drafted deck is ready to borrow — **{deck_summary(cards)}**.\n"
            "Run `/library borrow` to have it traded to you.")
     if collateral:
         msg += (f"\nThis library asks for a **{collateral} tix** hold, "
@@ -163,7 +163,7 @@ def return_message(loan: Any, decided: bool = False) -> str:
     real one at the moment it hands it back, where it cannot be stale.
     """
     lead = "Your draft is decided. " if decided else ""
-    return (f"{lead}📦 Please return your borrowed deck — **{_deck_summary(loan.cards)}**.\n"
+    return (f"{lead}📦 Please return your borrowed deck — **{deck_summary(loan.cards)}**.\n"
             "Run `/library return` and the library will collect it, and the "
             "hold comes back with it.\n"
             "Other drafters are waiting on those cards.")

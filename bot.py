@@ -132,6 +132,8 @@ async def main():
             logger.exception("Error loading library boards")
         from debt_views.settle_views import PublicSettleDebtsView
         bot.add_view(PublicSettleDebtsView())
+        from library_views.panel_view import LibraryPanelView
+        bot.add_view(LibraryPanelView())
         from cogs.tournament_commands import re_register_tournament_views
         await re_register_tournament_views(bot)
         from cogs.tournament_commands import sweep_brackets
