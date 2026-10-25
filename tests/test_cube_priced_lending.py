@@ -114,9 +114,7 @@ async def test_a_free_cube_needs_no_wallet(test_db, monkeypatch):
     server whose cubes are all free was told to enable the wallet before anyone
     could borrow. What a deck costs belongs to the CUBE, and a free one touches
     no money at all."""
-    import cogs.library_commands as cog
-
-    assert cog.library_gate(_a_ctx(monkeypatch)) is None
+    assert _gate(_a_ctx(monkeypatch)) is None
 
 
 async def test_the_gate_lets_a_charging_guild_through_without_a_wallet(
@@ -130,14 +128,19 @@ async def test_the_gate_lets_a_charging_guild_through_without_a_wallet(
     and now says nothing, because whether money is involved is a question
     about the cube and is asked at the charge.
     """
-    import cogs.library_commands as cog
-
     monkeypatch.setattr("config.get_config",
                         lambda gid: {"features": {"card_library":
                                                   {"enabled": True,
                                                    "collateral_tix": 100}}})
 
-    assert cog.library_gate(_a_ctx(monkeypatch)) is None
+    assert _gate(_a_ctx(monkeypatch)) is None
+
+
+def _gate(ctx):
+    """What the library commands' gate says for this context."""
+    from library_views.callers import context_guild_id
+    from services.library_loan_actions import unusable_reason
+    return unusable_reason(context_guild_id(ctx))
 
 
 def _a_ctx(monkeypatch):

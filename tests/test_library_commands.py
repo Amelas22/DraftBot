@@ -165,12 +165,11 @@ async def test_the_gate_does_not_price_anything(monkeypatch):
     still holds a collateral_tix, it simply must not decide anything now.
     """
     import inspect
-    import cogs.library_commands as mod
     import services.library_loan_actions as actions
 
-    # The command-side gate and the rule it reads, which is where the
-    # stale read would come back.
-    for gate in (mod.library_gate, actions.unusable_reason):
+    # The one gate every trading library command opens through, and the
+    # rule it reads, which is where the stale read would come back.
+    for gate in (actions.open_if_usable, actions.unusable_reason):
         source = inspect.getsource(gate)
         assert "card_library_collateral" not in source
         assert "is_money_server" not in source
@@ -180,8 +179,10 @@ async def test_a_free_library_needs_no_money_server(monkeypatch):
     """The case that was broken in Cube Night: every cube free, no wallet, and
     the gate refused everyone."""
     import cogs.library_commands as mod
+    import services.library_loan_actions as actions
+    from library_views.callers import context_guild_id
     monkeypatch.setattr(mod, "is_money_server", lambda gid: False)
-    assert mod.library_gate(_ctx()) is None
+    assert actions.unusable_reason(context_guild_id(_ctx())) is None
 
 
 async def test_the_borrower_is_told_which_bot_is_trading_with_them(monkeypatch):
@@ -306,7 +307,8 @@ async def test_an_unconfigured_library_says_so_instead_of_queueing(monkeypatch):
     monkeypatch.setattr(actions, "get_lending_client",
                         lambda: SimpleNamespace(enabled=False))
 
-    blocked = mod.library_gate(_ctx())
+    from library_views.callers import context_guild_id
+    blocked = actions.unusable_reason(context_guild_id(_ctx()))
 
     assert blocked, "a library that cannot reach its serve must refuse up front"
     assert "configured" in blocked.lower() or "unavailable" in blocked.lower()

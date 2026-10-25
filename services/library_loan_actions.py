@@ -227,13 +227,15 @@ def unusable_reason(guild_id: Optional[int]) -> Optional[str]:
     return None
 
 
-async def _open_if_usable(caller: LibraryCaller) -> Optional[int]:
+async def open_if_usable(caller: LibraryCaller) -> Optional[int]:
     """Answer the interaction, and give back the server it can trade in.
 
-    None, having already said why, where the library cannot be used. Both
-    flows open this way, so a server that is not set up is told so in one
-    voice -- and so the defer cannot be forgotten in one of them, which turns
-    a clear refusal into a silent "application did not respond".
+    None, having already said why, where the library cannot be used. Every
+    library command that trades opens this way -- these two flows here, and
+    /library deck, deposit and withdraw through the cog's `defer_if_usable` --
+    so a server that is not set up is told so in one voice, and so the defer
+    cannot be forgotten in one of them, which turns a clear refusal into a
+    silent "application did not respond".
     """
     await caller.defer()
     guild_id = caller.guild_id
@@ -246,7 +248,7 @@ async def _open_if_usable(caller: LibraryCaller) -> Optional[int]:
 
 async def borrow(caller: LibraryCaller) -> None:
     """Collect the deck the library is holding for this caller."""
-    guild_id = await _open_if_usable(caller)
+    guild_id = await open_if_usable(caller)
     if guild_id is None:
         return
 
@@ -290,7 +292,7 @@ async def borrow(caller: LibraryCaller) -> None:
 
 async def return_deck(caller: LibraryCaller) -> None:
     """Hand back the deck this caller borrowed."""
-    guild_id = await _open_if_usable(caller)
+    guild_id = await open_if_usable(caller)
     if guild_id is None:
         return
     await _warn_if_busy(caller)

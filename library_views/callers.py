@@ -17,15 +17,22 @@ import discord
 from helpers.utils import not_none
 
 
+def context_guild_id(ctx: discord.ApplicationContext) -> Optional[int]:
+    """The server a command was run in, as the library's gate reads it.
+
+    A guild the bot can see: an id with no guild behind it is treated as no
+    server at all.
+    """
+    return ctx.guild_id if ctx.guild is not None else None
+
+
 class ContextCaller:
     """A `LibraryCaller` for a slash command."""
 
     def __init__(self, ctx: discord.ApplicationContext) -> None:
         self._ctx = ctx
         self.user_id: int = ctx.author.id
-        # A guild the bot can see, as the gate has always asked for: an id
-        # with no guild behind it is treated as no server at all.
-        self.guild_id: Optional[int] = ctx.guild_id if ctx.guild is not None else None
+        self.guild_id: Optional[int] = context_guild_id(ctx)
 
     async def defer(self) -> None:
         await self._ctx.defer(ephemeral=True)

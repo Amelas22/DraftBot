@@ -49,7 +49,7 @@ from services.card_deposit_service import poll_until_settled as poll_deposit
 from services.card_library_inventory import cube_as_the_library_sees_it
 from services.card_lending_service import active_loan
 from services.library_loan_actions import (
-    SETUP_MESSAGES, deck_lines, loan_said, unusable_reason, within_a_message,
+    SETUP_MESSAGES, deck_lines, loan_said, within_a_message,
 )
 from services.library_service import is_communal, library_for, offer_cube
 from services.mtgo_tradebot_client import get_lending_client, max_cards_per_trade
@@ -91,33 +91,17 @@ _NO_LIBRARY = ("📭 This server isn't set up to borrow from a card library. "
                "Ask whoever runs the library to point it here.")
 
 
-def library_gate(ctx: Any) -> Optional[str]:
-    """Why the card library cannot be used from this command, or None.
-
-    The rule itself, and why it never looks at price, is
-    `services.library_loan_actions.unusable_reason`; this only reads where the
-    command was run from, the same way the borrow and return flows' callers do.
-    """
-    return unusable_reason(ctx.guild_id if getattr(ctx, "guild", None) else None)
-
-
 async def defer_if_usable(ctx: Any) -> bool:
     """Answer the interaction and say whether the library is usable here.
 
-    Every command that TRADES opens this way, in both cogs. Shared so a guild
-    that is not set up is told so in one voice -- and so the defer cannot be
-    forgotten in one command, which turns a clear refusal into a silent
-    "application did not respond".
+    /library deck, deposit and withdraw open this way; borrow and return open
+    the same way inside their flows. All five go through
+    `library_loan_actions.open_if_usable`, so there is one defer-then-gate.
 
     /library deposits is the exception and is right to be: it only reads a ledger,
     needs no serve, and says its own thing when the guild has no library.
     """
-    await ctx.defer(ephemeral=True)
-    blocked = library_gate(ctx)
-    if blocked:
-        await ctx.followup.send(blocked, ephemeral=True)
-        return False
-    return True
+    return await loan_actions.open_if_usable(ContextCaller(ctx)) is not None
 
 
 def list_cube_in_guild(guild_id: Any, cube_id: Any) -> bool:
