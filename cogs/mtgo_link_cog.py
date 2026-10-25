@@ -9,7 +9,8 @@ Commands:
 - /link_mtgo <username>            link (or update) your own MTGO account
 - /mtgo_whoami                     show your linked MTGO account
 - /unlink_mtgo                     remove your link
-- /link_mtgo_for @user <username>  (admin) link on a player's behalf — for backfill
+- /link_mtgo_for @user <username>  (admin) link on a player's behalf — for backfill, or to
+                                   move a handle off an account its owner can't use
 """
 import discord
 from discord.ext import commands
@@ -89,7 +90,16 @@ class MtgoLinkCommands(commands.Cog):
     async def link_mtgo_for(self, ctx, player: discord.Member, username: str):
         await ctx.defer(ephemeral=True)
         guild_id = ctx.guild.id if ctx.guild else None
-        status, detail = await MtgoAccount.link(player.id, username, guild_id)
+        status, detail = await MtgoAccount.link(player.id, username, guild_id, reassign=True)
+        if status == "reassigned":
+            logger.info(f"{ctx.author.id} moved MTGO username {username.strip()!r} "
+                        f"from {detail} to {player.id}")
+            await ctx.followup.send(
+                f"Linked <@{player.id}> to MTGO username **{username.strip()}**, "
+                f"moving it from <@{detail}>, who no longer has an MTGO link.",
+                ephemeral=True,
+            )
+            return
         await self._send_link_result(ctx, status, detail, f"<@{player.id}>")
 
 

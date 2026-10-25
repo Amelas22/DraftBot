@@ -40,24 +40,36 @@ class MtgoAccount(Base):
         return f"<MtgoAccount(discord={self.discord_user_id}, mtgo={self.mtgo_username})>"
 
     @classmethod
-    async def link(cls, discord_user_id, mtgo_username, guild_id=None):
+    async def link(cls, discord_user_id, mtgo_username, guild_id=None, *, reassign=False):
         """
         Create or update the caller's MTGO link. One MTGO handle maps to exactly one
         Discord user. Returns (status, detail):
           ("ok", mtgo_username)            link created/updated
           ("conflict", other_discord_id)   that handle is already linked to someone else
+          ("reassigned", other_discord_id) reassign=True took the handle from them;
+                                           they are left with no MTGO link
           ("empty", None)                  blank username supplied
+
+        ``reassign`` is for admins only: a self-service link must never be able to take
+        a handle, since the link decides whose wallet a deposit from it credits.
         """
         cleaned = (mtgo_username or "").strip()
         lower = normalize_mtgo(cleaned)
         if not lower:
             return ("empty", None)
         did = str(discord_user_id)
+        previous = None
         async with db_session() as session:
             existing = (await session.execute(
                 select(cls).where(cls.mtgo_username_lower == lower))).scalar_one_or_none()
             if existing is not None and existing.discord_user_id != did:
-                return ("conflict", existing.discord_user_id)
+                if not reassign:
+                    return ("conflict", existing.discord_user_id)
+                previous = existing.discord_user_id
+                await session.delete(existing)
+                # A flush runs deletes after inserts and updates, so the delete must be
+                # flushed on its own before the write below can take the unique handle.
+                await session.flush()
             row = await session.get(cls, did)
             if row is None:
                 session.add(cls(
@@ -68,6 +80,8 @@ class MtgoAccount(Base):
                 row.mtgo_username_lower = lower
                 if guild_id and not row.guild_id:
                     row.guild_id = str(guild_id)
+            if previous is not None:
+                return ("reassigned", previous)
             return ("ok", cleaned)
 
     @classmethod
