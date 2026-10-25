@@ -1,6 +1,7 @@
 import random
 import discord
 import asyncio
+import functools
 import pytz
 from sqlalchemy import update, select, func, or_, desc, and_, create_engine
 from datetime import datetime, timedelta
@@ -1084,6 +1085,25 @@ async def sync_decided_draft_to_tournament(bot, draft_session_id):
             team_a_wins, team_b_wins, draft_session_id)
 
 
+def _then_switch_library_panel(fn):
+    """Run the library panel's switch to returns after every return from `fn`,
+    once its transaction has committed: the panel takes its own
+    connection, and it moves below the victory post `fn` just made. Idle unless
+    a borrow panel is up on a settled draft, and never allowed to break the
+    report that got us here. A decorator rather than an edit to every return."""
+    @functools.wraps(fn)
+    async def wrapper(bot, draft_session_id):
+        await fn(bot, draft_session_id)
+        try:
+            from services.library_panel import switch_to_returns
+            await switch_to_returns(bot, draft_session_id)
+        except Exception:
+            logger.exception("library panel: switch to returns failed for {}",
+                             draft_session_id)
+    return wrapper
+
+
+@_then_switch_library_panel
 async def check_and_post_victory_or_draw(bot, draft_session_id):
     # Money first, and outside the transaction below. This is the one function
     # that decides a draft is over, so it is the one place a draft's money
