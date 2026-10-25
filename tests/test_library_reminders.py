@@ -410,6 +410,22 @@ async def test_a_dead_rubber_reported_after_the_ask_asks_again(test_db, dm):
 
 
 @pytest.mark.asyncio
+async def test_a_result_dated_ahead_of_the_clock_asks_once_not_every_tick(test_db, dm):
+    """Naive local timestamps repeat an hour when the clocks go back, so a dead
+    rubber can read as later than every ask stamped after it."""
+    await seed_session("s1", stype="random", stage="pairings", victory=1,
+                       matches=[("p1", "p2", "p1", NOW)])
+    await _a_loan()
+    await mod.send_due_reminders(now=NOW + timedelta(minutes=10))
+
+    await _report("s1", "p2", "p1", "p2", NOW + timedelta(minutes=50))
+
+    asks = [await mod.send_due_reminders(now=NOW + timedelta(minutes=m))
+            for m in (20, 30, 40)]
+    assert asks == [0, 0, 0], dm.sent
+
+
+@pytest.mark.asyncio
 async def test_somebody_elses_dead_rubber_does_not_ask_again(test_db, dm):
     await seed_session("s1", stype="random", stage="pairings", victory=1,
                        matches=[("p1", "p2", "p1", NOW)])

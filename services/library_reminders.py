@@ -296,8 +296,11 @@ async def send_due_reminders(now: Optional[datetime] = None) -> int:
         state = verdicts[session_id]
         mine = state.done_at.get(str(loan.borrower_id))
         played = state.played_at.get(str(loan.borrower_id))
+        # Up to now only: naive local timestamps repeat an hour when the clocks
+        # go back, and a result dated past every ask stamped after it would
+        # otherwise ask again at each tick until the clock caught up.
         played_since_ask = (played is not None and loan.last_reminded_at is not None
-                            and played > loan.last_reminded_at)
+                            and loan.last_reminded_at < played <= at)
         if reminder_due(loan, done_playing=mine is not None, draft_settled=state.settled,
                         finished_at=mine, played_since_ask=played_since_ask, now=at):
             due.append((loan, state.settled))
