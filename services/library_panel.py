@@ -13,7 +13,7 @@ from loguru import logger
 from sqlalchemy import select, update
 
 from database.db_session import AsyncSessionLocal
-from helpers.utils import as_messageable
+from helpers.utils import as_messageable, not_none
 from models.card_loan import CardLoan
 from models.draft_session import DraftSession
 from services.library_reservation import library_users
@@ -111,8 +111,11 @@ async def post_library_panel(bot: Any, session_id: str) -> None:
     # Claim before sending, so two racing callers cannot both post.
     if not await _set_mode(session_id, True, library_panel_mode="borrow"):
         return
+    # Here, not at the top: the view's gate reads panel_borrowers from this module.
+    from library_views.panel_view import panel_view
     try:
-        sent = await as_messageable(channel).send(embed=borrow_embed(borrowers))
+        sent = await as_messageable(channel).send(
+            embed=borrow_embed(borrowers), view=not_none(panel_view("borrow")))
     except Exception:
         await _set_mode(session_id, False, library_panel_mode=None)
         raise
