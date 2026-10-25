@@ -9,7 +9,7 @@ from conftest import test_db  # noqa: F401  (fixture)
 from database.db_session import AsyncSessionLocal
 from models.card_loan import CardLoan
 from models.draft_session import DraftSession
-from services import library_panel
+from services import library_panel_state
 from test_library_commands import _run
 
 pytestmark = pytest.mark.asyncio
@@ -21,7 +21,7 @@ NO_DECK = "📭 You have no deck from this draft."
 def reserved(monkeypatch):
     async def users(draft, library_id=None):
         return {"3"}
-    monkeypatch.setattr(library_panel, "library_users", users)
+    monkeypatch.setattr(library_panel_state, "library_users", users)
 
 
 async def _seed(loans=()):

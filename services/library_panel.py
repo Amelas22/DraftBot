@@ -1,11 +1,21 @@
 """The "Library decks" panel in a draft's shared chat.
 
-One message that says who has a library deck and where it stands. It is posted
-once, when the chat opens, for a draft that reserved library decks or already
-has loans. library_panel_mode on the draft is both the "already posted" guard
-and the face the panel wears: NULL (none), 'borrow', 'return' or 'closed'.
+One message that says who has a library deck and where it stands. Everything
+that can change it -- the chat opening, the draft being decided, a loan
+moving, the sticky manager wanting it at the bottom, the watchdog's tick --
+calls sync_panel, which reads the draft as it is now, works out the face the
+panel should wear (library_panel_state.desired_face) and makes the message and
+the draft's row match. One lock per draft keeps two of those from interleaving.
+
+DraftSession.library_panel_mode is the face the panel wears and
+library_panel_message_id the one pointer to its live copy. Only sync_panel
+writes either. The channel's sticky record follows the pointer: sync_panel
+sets it whenever it posts a return copy, and the sticky manager's repost runs
+through sync_panel too, under the same lock.
 """
-from dataclasses import dataclass
+import asyncio
+import json
+import weakref
 from typing import Any, Optional
 
 import discord
@@ -15,126 +25,11 @@ from sqlalchemy import select, update
 from database.db_session import AsyncSessionLocal
 from helpers.team_names import labels_for
 from helpers.utils import as_messageable, not_none
-from models.card_loan import CardLoan
+from library_views.panel_view import LibraryPanelView, panel_view
 from models.draft_session import DraftSession
-from services.draft_deck_assignment import loan_source
-from services.library_reminders import deck_summary, draft_state, session_of
-from services.library_reservation import library_users
-
-# A loan in one of these has its cards (or a trade for them) out of the library.
-OUT_STATES: frozenset[str] = frozenset(
-    {"out_pending", "borrowed", "return_pending", "dispatch_unknown"})
-
-TITLE = "🏛️ Library decks"
-
-_STATE_TEXT = {
-    None: "⏳ being prepared",
-    "assigned": "📦 ready, not collected",
-    "out_pending": "🚚 trade on its way",
-    "borrowed": "✅ collected",
-    "return_pending": "↩️ return on its way",
-    "dispatch_unknown": "🚚 trade on its way",
-    "returned": "☑️ returned",
-    "expired": "⌛ offer lapsed",
-}
-
-
-@dataclass(frozen=True)
-class Borrower:
-    user_id: str
-    name: str
-    # The loan's state, or None when the player is reserved with no loan yet.
-    state: Optional[str]
-    cards: Optional[list[Any]]
-
-
-def _sort_key(b: Borrower) -> tuple[str, str]:
-    return (b.name.lower(), b.user_id)
-
-
-async def panel_borrowers(session_id: str) -> list[Borrower]:
-    """Everyone the panel lists: the reserved plus anyone with a loan from this
-    draft, each with their newest loan, sorted by name."""
-    draft = await DraftSession.get_by_session_id(session_id)
-    if draft is None:
-        return []
-    reserved = await library_users(draft)
-    async with AsyncSessionLocal() as s:
-        loans = (await s.execute(
-            select(CardLoan).where(CardLoan.source == loan_source(session_id))
-            .order_by(CardLoan.id))).scalars().all()
-    newest = {str(loan.borrower_id): loan for loan in loans}  # later ids win
-    names = {str(k): v for k, v in (draft.sign_ups or {}).items()}
-    out: list[Borrower] = []
-    for uid in set(reserved) | set(newest):
-        loan = newest.get(uid)
-        out.append(Borrower(uid, names.get(uid, f"<@{uid}>"),
-                            loan.state if loan else None,
-                            loan.cards if loan else None))
-    return sorted(out, key=_sort_key)
-
-
-def borrow_embed(borrowers: list[Borrower], *, closed: bool = False) -> discord.Embed:
-    lines = []
-    for b in borrowers:
-        if closed and b.state in (None, "assigned", "expired"):
-            text = "not collected, back on the shelf"
-        else:
-            text = _STATE_TEXT.get(b.state, str(b.state))
-        lines.append(f"**{b.name}**: {text}")
-    if closed:
-        footer = "This draft's library decks are closed."
-    else:
-        footer = ("Press **Borrow my deck** and the library will trade you "
-                  "your pool on MTGO.")
-    return discord.Embed(title=TITLE, description="\n".join(lines) + f"\n\n{footer}")
-
-
-async def _write(session_id: str, **values: Any) -> None:
-    """Write `values` to the draft's row."""
-    async with AsyncSessionLocal() as s:
-        await s.execute(update(DraftSession)
-                        .where(DraftSession.session_id == session_id).values(**values))
-        await s.commit()
-
-
-async def _claim(session_id: str, expect: Optional[str], **values: Any) -> bool:
-    """Write `values` to the draft's row only while the mode is still `expect`
-    (None for no panel). True when the row changed."""
-    mode = DraftSession.library_panel_mode
-    cond = (DraftSession.session_id == session_id) & (
-        mode.is_(None) if expect is None else mode == expect)
-    async with AsyncSessionLocal() as s:
-        res = await s.execute(update(DraftSession).where(cond).values(**values))
-        await s.commit()
-        return bool(res.rowcount)
-
-
-async def post_library_panel(bot: Any, session_id: str) -> None:
-    """Post the borrow panel in the draft chat, once. No chat, nobody involved,
-    or already posted: nothing happens."""
-    draft = await DraftSession.get_by_session_id(session_id)
-    if draft is None or not draft.draft_chat_channel or draft.library_panel_mode:
-        return
-    borrowers = await panel_borrowers(session_id)
-    if not borrowers:
-        return
-    channel = await _chat_channel(bot, draft.draft_chat_channel)
-    if channel is None:
-        return
-    # Claim before sending, so two racing callers cannot both post.
-    if not await _claim(session_id, None, library_panel_mode="borrow"):
-        return
-    # Here, not at the top: the view's gate reads panel_borrowers from this module.
-    from library_views.panel_view import panel_view
-    try:
-        sent = await as_messageable(channel).send(
-            embed=borrow_embed(borrowers), view=not_none(panel_view("borrow")))
-    except Exception:
-        await _write(session_id, library_panel_mode=None)
-        raise
-    await _write(session_id, library_panel_message_id=str(sent.id))
-    logger.info("Posted library panel for session_id={}", session_id)
+from services.library_panel_state import (Borrower, Face, all_back, borrow_embed,
+                                          borrowers_of, desired_face, return_embed)
+from services.library_reminders import draft_state, session_of
 
 
 async def result_line(draft: Any) -> Optional[str]:
@@ -155,43 +50,19 @@ async def result_line(draft: Any) -> Optional[str]:
     return f"{winner.name} won {max(a, b)}–{min(a, b)}"
 
 
-def return_embed(borrowers: list[Borrower], result: Optional[str], *,
-                 closed: bool = False) -> discord.Embed:
-    """The panel once the draft is decided: who still holds a deck, who has
-    sent theirs back. A deck nobody collected was never lent, so is not listed.
-    `closed` is its final face, once every deck is back."""
-    lead = f"{result}\n\n" if result else ""
-    ask = ("All decks are back. Thanks!" if closed
-           else "If you borrowed a deck, please send it back. "
-                "Other drafters are waiting on those cards.")
-    embed = discord.Embed(title=TITLE, description=lead + ask)
-    out = [f"**{b.name}**: {deck_summary(b.cards)}"
-           for b in borrowers if b.state in OUT_STATES]
-    back = [f"**{b.name}**" for b in borrowers if b.state == "returned"]
-    # A field may not be empty, so a side with nobody on it is left off.
-    if out:
-        embed.add_field(name="Still out", value="\n".join(out), inline=False)
-    if back:
-        embed.add_field(name="Back", value="\n".join(back), inline=False)
-    if not closed:
-        embed.set_footer(text="Move the cards into your trade binder first")
-    return embed
+async def _render(draft: Any, borrowers: list[Borrower], face: Face, *,
+                  copy: Face) -> tuple[discord.Embed, Optional[LibraryPanelView]]:
+    """The embed and buttons for `face`. `copy` is the face of the copy being
+    drawn on, which only matters for CLOSED: a borrow panel closes as one."""
+    if face is Face.BORROW or (face is Face.CLOSED and copy is Face.BORROW):
+        embed = borrow_embed(borrowers, closed=face is Face.CLOSED)
+    else:
+        embed = return_embed(borrowers, await result_line(draft),
+                             closed=face is Face.CLOSED)
+    return embed, panel_view(face.value)
 
 
-async def render_return(draft: Any, borrowers: list[Borrower], *,
-                        closed: bool = False) -> discord.Embed:
-    return return_embed(borrowers, await result_line(draft), closed=closed)
-
-
-def all_back(borrowers: list[Borrower]) -> bool:
-    return not any(b.state in OUT_STATES for b in borrowers)
-
-
-def can_close(borrowers: list[Borrower]) -> bool:
-    """Every deck is back and none is still on offer. A deck offered but not yet
-    collected can still go out after the decision, until the watchdog retracts
-    the offer, so the panel stays open for it."""
-    return all_back(borrowers) and not any(b.state == "assigned" for b in borrowers)
+# --- Discord ------------------------------------------------------------------
 
 
 async def _chat_channel(bot: Any, channel_id: Any) -> Optional[Any]:
@@ -217,82 +88,53 @@ async def _fetch_panel(channel: Any, message_id: Optional[str]) -> Optional[Any]
         return None
 
 
-async def _edit_panel(channel: Any, message_id: Optional[str], **fields: Any) -> None:
-    """Edit the posted panel; one already gone is not an error."""
-    message = await _fetch_panel(channel, message_id)
-    if message is None:
+# What each live copy was last drawn with, so a redraw that changes nothing
+# costs no edit. In memory: after a restart the first redraw edits once.
+_shown: dict[str, str] = {}
+
+
+def _digest(embed: discord.Embed, view: Optional[LibraryPanelView]) -> str:
+    buttons: list[Optional[str]] = (
+        [getattr(item, "custom_id", None) for item in view.children] if view else [])
+    return json.dumps([embed.to_dict(), buttons], sort_keys=True, default=str)
+
+
+async def _show(message: Any, embed: discord.Embed,
+                view: Optional[LibraryPanelView]) -> None:
+    """Draw the panel on a live copy, unless it already shows exactly that. A
+    copy deleted meanwhile is not an error."""
+    digest = _digest(embed, view)
+    if _shown.get(str(message.id)) == digest:
         return
     try:
-        await message.edit(**fields)
+        await message.edit(embed=embed, view=view)
     except discord.NotFound:
-        pass
-
-
-async def _delete_panel(message: Optional[Any]) -> None:
-    """Delete a copy of the panel; one already gone is not an error."""
-    if message is None:
         return
+    _shown[str(message.id)] = digest
+
+
+async def _delete(message: Any) -> None:
+    """Delete a copy of the panel; one already gone is not an error."""
+    _shown.pop(str(message.id), None)
     try:
         await message.delete()
     except discord.NotFound:
         pass
 
 
-async def switch_to_returns(bot: Any, session_id: str) -> None:
-    """Once the draft is decided, turn the borrow panel into a return reminder.
-
-    With every deck back (or none ever collected) the borrow panel just takes
-    its final state in place. While a deck is still on offer it stays a borrow
-    panel, for the watchdog to switch once the offer is collected or lapses.
-    Otherwise it is posted again below the victory post, in return mode, and
-    the old one deleted. Anything but a borrow panel on a settled draft:
-    nothing happens. The mode's compare-and-set is the guard, so two racing
-    callers post once.
-    """
-    draft = await DraftSession.get_by_session_id(session_id)
-    if (draft is None or draft.library_panel_mode != "borrow"
-            or not draft.draft_chat_channel):
-        return
-    if not (await draft_state(session_id)).settled:
-        return
-    channel = await _chat_channel(bot, draft.draft_chat_channel)
-    if channel is None:
-        return
-    borrowers = await panel_borrowers(session_id)
-    old_id = draft.library_panel_message_id
-
-    if all_back(borrowers):
-        if can_close(borrowers) and await _claim(session_id, "borrow",
-                                                 library_panel_mode="closed"):
-            await _edit_panel(channel, old_id,
-                              embed=borrow_embed(borrowers, closed=True), view=None)
-            logger.info("Closed library panel for session_id={}", session_id)
-        return
-
-    if not await _claim(session_id, "borrow", library_panel_mode="return"):
-        return
-    from library_views.panel_view import panel_view  # see post_library_panel
-    view = not_none(panel_view("return"))
-    try:
-        sent = await as_messageable(channel).send(
-            embed=await render_return(draft, borrowers), view=view)
-    except Exception:
-        # Back to borrow, so the watchdog's reconcile tries again.
-        await _claim(session_id, "return", library_panel_mode="borrow")
-        raise
-    await _write(session_id, library_panel_message_id=str(sent.id))
-    # Sticky before the old panel goes, though that one never was: deleting a
-    # message drops the channel's sticky record only when it is that message.
-    try:
-        await _make_sticky(bot, draft, sent, view)
-    except Exception:
-        logger.exception("library panel: could not make the return panel for "
-                         "session_id={} sticky", session_id)
-    await _delete_panel(await _fetch_panel(channel, old_id))
-    logger.info("Library panel for session_id={} now asks for returns", session_id)
+# --- The draft's row and the channel's sticky record ---------------------------
 
 
-async def _make_sticky(bot: Any, draft: Any, message: Any, view: Any) -> None:
+async def _write(session_id: str, **values: Any) -> None:
+    """Write `values` to the draft's row."""
+    async with AsyncSessionLocal() as s:
+        await s.execute(update(DraftSession)
+                        .where(DraftSession.session_id == session_id).values(**values))
+        await s.commit()
+
+
+async def _make_sticky(bot: Any, draft: Any, message: Any,
+                       view: Optional[LibraryPanelView]) -> None:
     # Here, not at the top: message_management imports views, which is cyclic.
     from database.message_management import (LIBRARY_PANEL_VIEW_TYPE,
                                              make_message_sticky)
@@ -303,85 +145,165 @@ async def _make_sticky(bot: Any, draft: Any, message: Any, view: Any) -> None:
                        "draft_session_id": draft.session_id})
 
 
-async def _drop_sticky(channel_id: str, session_id: str) -> None:
-    """Forget this draft's panel as the chat's sticky, so it stops moving."""
+async def _our_sticky_names(channel_id: str, session_id: str,
+                            message_id: Optional[str]) -> bool:
+    """Whether the chat's sticky record is this draft's panel at `message_id`.
+    A record of this panel that names any other copy is stale, and is dropped."""
     from database.message_management import (
         LIBRARY_PANEL_VIEW_TYPE, delete_sticky_message_record, fetch_sticky_message)
 
     async with AsyncSessionLocal() as s:
         sticky = await fetch_sticky_message(channel_id, s)
         if sticky is None:
-            return
+            return False
         meta = sticky.view_metadata or {}
-        if (meta.get("view_type") == LIBRARY_PANEL_VIEW_TYPE
-                and meta.get("draft_session_id") == session_id):
-            await delete_sticky_message_record(sticky, s)
-            await s.commit()
+        if (meta.get("view_type") != LIBRARY_PANEL_VIEW_TYPE
+                or meta.get("draft_session_id") != session_id):
+            return False
+        if sticky.message_id == message_id:
+            return True
+        await delete_sticky_message_record(sticky, s)
+        await s.commit()
+        return False
 
 
-async def refresh_library_panel(bot: Any, session_id: str) -> None:
-    """Redraw the panel from the loans as they are now, in the face it wears.
+async def _drop_sticky(channel_id: str, session_id: str) -> None:
+    """Forget this draft's panel as the chat's sticky, so it stops moving."""
+    await _our_sticky_names(channel_id, session_id, None)
 
-    Borrow mode re-renders in place, so "trade on its way" and "collected" are
-    live. Return mode does too, until every deck is back and none is still on
-    offer: then the panel closes, loses its button and stops being sticky.
-    Closed, or never posted: nothing.
-    Re-reads everything, so a burst of calls costs edits, not correctness.
+
+# --- Converging ----------------------------------------------------------------
+
+
+async def _post(bot: Any, draft: Any, channel: Any, borrowers: list[Borrower],
+                face: Face, *, replacing: Optional[Any] = None) -> None:
+    """Post a copy wearing `face` at the bottom of the chat and point the draft
+    at it; a return copy is made sticky. Then the copy it replaces goes.
+
+    A failed send changes nothing, so the next sync tries again.
     """
+    embed, view = await _render(draft, borrowers, face, copy=face)
+    sent = await as_messageable(channel).send(embed=embed, view=not_none(view))
+    await _write(draft.session_id, library_panel_mode=face.mode,
+                 library_panel_message_id=str(sent.id))
+    _shown[str(sent.id)] = _digest(embed, view)
+    if face is Face.RETURN:
+        # Before the replaced copy is deleted: deleting the message a sticky
+        # record names drops the record, so it must name the new copy first.
+        try:
+            await _make_sticky(bot, draft, sent, view)
+        except Exception:
+            logger.exception("library panel: could not make the return panel for "
+                             "session_id={} sticky", draft.session_id)
+    if replacing is not None:
+        await _delete(replacing)
+
+
+async def _converge(bot: Any, session_id: str, *, move_down: bool) -> None:
     draft = await DraftSession.get_by_session_id(session_id)
-    if (draft is None or not draft.draft_chat_channel
-            or draft.library_panel_mode not in ("borrow", "return")):
+    if draft is None:
         return
-    channel = await _chat_channel(bot, draft.draft_chat_channel)
-    if channel is None:
+    current = Face.of(draft.library_panel_mode)
+    chat = str(draft.draft_chat_channel) if draft.draft_chat_channel else None
+    if current is Face.CLOSED:
+        # Closed is final. A sticky record that outlived the close goes when
+        # the sticky manager next asks about it.
+        if move_down and chat:
+            await _drop_sticky(chat, session_id)
         return
-    borrowers = await panel_borrowers(session_id)
-    message_id = draft.library_panel_message_id
-    from library_views.panel_view import panel_view  # see post_library_panel
+    borrowers = await borrowers_of(draft)
+    channel = await _chat_channel(bot, chat) if chat else None
+    settled = (await draft_state(session_id)).settled
+    face = desired_face(current, borrowers, settled=settled,
+                        chat_open=channel is not None)
+    if channel is None or chat is None:
+        if face is Face.CLOSED:
+            await _write(session_id, library_panel_mode=Face.CLOSED.mode)
+            logger.info("library panel: draft chat for session_id={} is gone; "
+                        "panel closed", session_id)
+        return
+    live = await _fetch_panel(channel, draft.library_panel_message_id)
 
-    if draft.library_panel_mode == "borrow":
-        await _edit_panel(channel, message_id, embed=borrow_embed(borrowers),
-                          view=panel_view("borrow"))
+    if face is Face.NONE:
         return
-    if not can_close(borrowers):
-        await _edit_panel(channel, message_id, embed=await render_return(draft, borrowers),
-                          view=panel_view("return"))
+    if face is current:
+        if live is None:
+            # A return panel lost while decks are out is posted again. A lost
+            # borrow panel is left be: a second one is worse than none.
+            if face is Face.RETURN and not all_back(borrowers):
+                await _post(bot, draft, channel, borrowers, face)
+                logger.info("Reposted the missing library return panel for "
+                            "session_id={}", session_id)
+            return
+        if (face is Face.RETURN and move_down
+                and await _our_sticky_names(chat, session_id, str(live.id))):
+            await _post(bot, draft, channel, borrowers, face, replacing=live)
+            return
+        await _show(live, *await _render(draft, borrowers, face, copy=face))
         return
-    embed = await render_return(draft, borrowers, closed=True)
-    if not await _claim(session_id, "return", library_panel_mode="closed"):
+    if face is Face.BORROW:  # from none
+        await _post(bot, draft, channel, borrowers, face)
+        logger.info("Posted library panel for session_id={}", session_id)
         return
-    await _edit_panel(channel, message_id, embed=embed, view=None)
-    await _drop_sticky(str(draft.draft_chat_channel), session_id)
-    logger.info("Every library deck from session_id={} is back; panel closed",
-                session_id)
+    if face is Face.RETURN:  # from borrow: below the victory post
+        await _post(bot, draft, channel, borrowers, face, replacing=live)
+        logger.info("Library panel for session_id={} now asks for returns", session_id)
+        return
+    # Closed, from borrow or return: in place, with no button, and still.
+    if live is not None:
+        await _show(live, *await _render(draft, borrowers, face, copy=current))
+    await _write(session_id, library_panel_mode=Face.CLOSED.mode)
+    await _drop_sticky(chat, session_id)
+    logger.info("Closed library panel for session_id={}", session_id)
 
 
-async def after_sticky_repost(bot: Any, session_id: str) -> None:
-    """Bring the copy the sticky manager just posted in step with the loans.
+# One lock per draft, held while its panel converges. Weak values: a lock
+# lives only while someone holds or waits on it. Kept per event loop, since an
+# asyncio lock belongs to the loop it is used on: a task stranded on a closed
+# loop (a restart in tests) must not hold a later loop's draft forever.
+_locks: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, weakref.WeakValueDictionary[str, asyncio.Lock]]" = (
+    weakref.WeakKeyDictionary())
 
-    A refresh that closed the panel while the repost was in flight closed the
-    old copy and left the new one live. So a closed panel gets its closed face
-    again on whatever copy the committed pointer names now, and its sticky is
-    dropped; both are idempotent. Anything else is an ordinary refresh.
+
+def _lock_for(session_id: str) -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    locks = _locks.get(loop)
+    if locks is None:
+        locks = weakref.WeakValueDictionary()
+        _locks[loop] = locks
+    lock = locks.get(session_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        locks[session_id] = lock
+    return lock
+
+
+async def sync_panel(bot: Any, session_id: str, *, move_down: bool = False) -> None:
+    """Bring the draft's panel in step with the draft as it is now.
+
+    Posts it, redraws it in place, moves it below the victory post when the
+    draft is decided with decks out, posts it again if it went missing while
+    decks are out, and closes it in place once every deck is back. Already
+    right: nothing. Safe to call any number of times from anywhere.
+
+    `move_down` is the sticky manager asking for the return panel at the
+    bottom of the chat: it is posted again there and the old copy deleted.
     """
-    draft = await DraftSession.get_by_session_id(session_id)
-    if (draft is None or draft.library_panel_mode != "closed"
-            or not draft.draft_chat_channel):
-        await refresh_library_panel(bot, session_id)
-        return
-    channel = await _chat_channel(bot, draft.draft_chat_channel)
-    if channel is None:
-        return
-    borrowers = await panel_borrowers(session_id)
-    await _edit_panel(channel, draft.library_panel_message_id,
-                      embed=await render_return(draft, borrowers, closed=True),
-                      view=None)
-    await _drop_sticky(str(draft.draft_chat_channel), session_id)
+    async with _lock_for(session_id):
+        await _converge(bot, session_id, move_down=move_down)
+
+
+async def nudge(bot: Any, session_id: str) -> None:
+    """sync_panel for a caller whose own work must not fail with it."""
+    try:
+        await sync_panel(bot, session_id)
+    except Exception:
+        logger.exception("library panel: sync failed for session_id={}", session_id)
 
 
 def loan_changed(loan: Any) -> None:
-    """A loan moved: refresh its draft's panel in the background. Called from
-    the lending code after its commits, so it never raises and never waits."""
+    """A loan moved: sync its draft's panel in the background. Called from the
+    lending code after its commits, so it never raises and never waits."""
     try:
         session_id = session_of(loan)
         if session_id is None:
@@ -393,79 +315,27 @@ def loan_changed(loan: Any) -> None:
             return
         from helpers.money_gate import spawn_followup
 
-        spawn_followup("library panel refresh", refresh_library_panel(bot, session_id))
+        spawn_followup("library panel sync", sync_panel(bot, session_id))
     except Exception:
-        logger.exception("library panel: could not schedule a refresh for loan {}",
+        logger.exception("library panel: could not schedule a sync for loan {}",
                          getattr(loan, "id", None))
 
 
-async def _repost_return_panel(bot: Any, draft: Any, channel: Any,
-                               borrowers: list[Borrower]) -> None:
-    """Post the return panel again, sticky, after the live copy went missing."""
-    session_id = draft.session_id
-    from library_views.panel_view import panel_view  # see post_library_panel
-    view = not_none(panel_view("return"))
-    sent = await as_messageable(channel).send(
-        embed=await render_return(draft, borrowers), view=view)
-    if not await _claim(session_id, "return", library_panel_message_id=str(sent.id)):
-        # Closed while we were posting: the copy just sent is not wanted.
-        await _delete_panel(sent)
-        return
-    try:
-        await _make_sticky(bot, draft, sent, view)
-    except Exception:
-        logger.exception("library panel: could not make the reposted return panel "
-                         "for session_id={} sticky", session_id)
-    logger.info("Reposted the missing library return panel for session_id={}",
-                session_id)
-
-
-async def _reconcile_one(bot: Any, draft: Any) -> None:
-    session_id = draft.session_id
-    mode = draft.library_panel_mode
-    channel = (await _chat_channel(bot, draft.draft_chat_channel)
-               if draft.draft_chat_channel else None)
-    if channel is None:
-        # The chat is gone, so there is nowhere to show a panel: stop looking.
-        if await _claim(session_id, mode, library_panel_mode="closed"):
-            logger.info("library panel: draft chat for session_id={} is gone; "
-                        "panel closed", session_id)
-        return
-    if mode == "borrow":
-        # Switches only a settled draft. An undecided one whose panel is
-        # missing is left be: a second borrow panel is worse than none.
-        await switch_to_returns(bot, session_id)
-        return
-    borrowers = await panel_borrowers(session_id)
-    message_id = draft.library_panel_message_id
-    if all_back(borrowers) or await _fetch_panel(channel, message_id) is not None:
-        await refresh_library_panel(bot, session_id)
-        return
-    # The sticky manager may have just moved the panel, deleting the copy this
-    # scan read: only a pointer that still names the missing message is stale.
-    now = await DraftSession.get_by_session_id(session_id)
-    if (now is None or now.library_panel_mode != "return"
-            or now.library_panel_message_id != message_id):
-        return
-    await _repost_return_panel(bot, now, channel, borrowers)
-
-
 async def reconcile_library_panels(bot: Any) -> None:
-    """Bring every open panel in step with its draft, from the watchdog's tick.
+    """Sync every open panel, from the lending watchdog's tick.
 
-    A settled draft still showing its borrow panel (a restart, or a failed
-    victory post, between the decision and the switch) is switched. A return
-    panel is redrawn, or reposted if its message is gone while decks are out.
-    A panel whose chat no longer exists is closed. Closed and never-posted
-    panels are not read at all.
+    Catches what a missed trigger left behind: a decided draft still showing
+    its borrow panel (a restart, or a failed victory post, between the decision
+    and the switch), a return panel whose message is gone, a panel whose chat
+    no longer exists. Closed and never-posted panels are not read at all.
     """
     async with AsyncSessionLocal() as s:
-        drafts = (await s.execute(select(DraftSession).where(
-            DraftSession.library_panel_mode.in_(("borrow", "return")))
-        )).scalars().all()
-    for draft in drafts:
+        session_ids = (await s.execute(select(DraftSession.session_id).where(
+            DraftSession.library_panel_mode.in_(
+                (Face.BORROW.mode, Face.RETURN.mode))))).scalars().all()
+    for session_id in session_ids:
         try:
-            await _reconcile_one(bot, draft)
+            await sync_panel(bot, session_id)
         except Exception:
             logger.exception("library panel: reconcile failed for session_id={}",
-                             draft.session_id)
+                             session_id)

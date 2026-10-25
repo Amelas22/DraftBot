@@ -18,7 +18,7 @@ from library_views.callers import InteractionCaller
 from models.draft_session import DraftSession
 from services.card_lending_service import active_loan
 from services.library_loan_actions import borrow, return_deck
-from services.library_panel import panel_borrowers
+from services.library_panel_state import panel_borrowers
 from services.library_reminders import session_of
 
 NO_DECK = "📭 You have no deck from this draft."

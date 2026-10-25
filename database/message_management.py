@@ -152,6 +152,15 @@ class StickyStrategy:
         work that must see the committed state (re-renders racing the repost)."""
         pass
 
+    async def repost(
+        self, sticky_message: Message, bot: discord.Client, session: AsyncSession
+    ) -> Optional[StickyUpdateResult]:
+        """Hook for a strategy whose message reposts itself. Return a result to
+        skip handle_sticky_message_update's own validate/send/repoint/delete,
+        or None to run them.
+        The decision to repost (counts, inactivity) stays the manager's."""
+        return None
+
 
 class DraftStickyStrategy(StickyStrategy):
     """Strategy for Draft Session sticky messages."""
@@ -376,8 +385,9 @@ LIBRARY_PANEL_VIEW_TYPE = "library_panel"
 
 class LibraryPanelStickyStrategy(StickyStrategy):
     """Keeps a draft chat's library panel at the bottom while it asks for decks
-    back. The draft's panel pointer moves with every repost, so loan changes keep
-    editing the live copy. Once every deck is back the panel closes in place."""
+    back. The repost itself is the panel's own: services.library_panel.sync_panel
+    posts the new copy, points the draft and this record at it and deletes the
+    old one, under the lock every other change to the panel takes."""
 
     @staticmethod
     async def _draft(sticky_message: Message, session: AsyncSession):
@@ -391,35 +401,22 @@ class LibraryPanelStickyStrategy(StickyStrategy):
 
     async def validate_state(self, sticky_message: Message, session: AsyncSession) -> bool:
         draft = await self._draft(sticky_message, session)
-        # A closed panel stays put; one replaced by hand is no longer this sticky's.
+        # A closed panel stays put; a record naming another copy is stale.
         return (draft is not None and draft.library_panel_mode == "return"
                 and draft.library_panel_message_id == sticky_message.message_id)
 
-    async def generate_content(
+    async def repost(
         self, sticky_message: Message, bot: discord.Client, session: AsyncSession
-    ) -> Tuple[str, Optional[discord.Embed], Optional[discord.ui.View], Dict[str, Any]]:
-        from library_views.panel_view import panel_view
-        from services.library_panel import panel_borrowers, render_return
+    ) -> Optional[StickyUpdateResult]:
+        from services.library_panel import sync_panel
 
-        draft = await self._draft(sticky_message, session)
-        borrowers = await panel_borrowers(draft.session_id)
-        embed = await render_return(draft, borrowers)
-        return sticky_message.content, embed, panel_view("return"), sticky_message.view_metadata
-
-    async def on_update_success(
-        self, sticky_message: Message, new_message: discord.Message, bot: discord.Client, session: AsyncSession
-    ) -> None:
-        # Repoint before the caller commits and deletes the old message.
-        draft = await self._draft(sticky_message, session)
-        if draft is not None:
-            draft.library_panel_message_id = str(new_message.id)
-
-    async def after_commit(self, sticky_message: Message, bot: discord.Client) -> None:
-        from services.library_panel import after_sticky_repost
-
-        # A loan that moved during the repost edited the old copy. Redraw (or
-        # close) from committed state.
-        await after_sticky_repost(bot, sticky_message.view_metadata["draft_session_id"])
+        session_id = sticky_message.view_metadata.get("draft_session_id")
+        if not session_id:
+            return None  # the generic path cleans up a record it cannot use
+        await sync_panel(bot, session_id, move_down=True)
+        async with AsyncSessionLocal() as fresh:
+            still = await fetch_sticky_message(sticky_message.channel_id, fresh)
+        return StickyUpdateResult.SUCCESS if still is not None else StickyUpdateResult.CLEANED_UP
 
 
 LFG_BOARD_VIEW_TYPE = "lfg_board"
@@ -513,6 +510,10 @@ async def handle_sticky_message_update(
         return StickyUpdateResult.CLEANED_UP
 
     strategy = get_sticky_strategy(sticky_message.view_metadata)
+
+    reposted = await strategy.repost(sticky_message, bot, session)
+    if reposted is not None:
+        return reposted
 
     # Validate state
     if not await strategy.validate_state(sticky_message, session):

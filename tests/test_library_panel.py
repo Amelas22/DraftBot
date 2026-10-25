@@ -1,4 +1,6 @@
-"""The library panel posted in a draft's chat when the draft has library decks."""
+"""The library panel in a draft's chat, driven through sync_panel: posted when
+the chat opens, switched to returns once the draft is decided, closed once
+every deck is back, and recovered by the watchdog's reconcile."""
 import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -11,9 +13,15 @@ from database.db_session import AsyncSessionLocal
 from database.message_management import Message
 from models.card_loan import CardLoan
 from models.draft_session import DraftSession
-from services import library_panel
-from services.library_panel import (Borrower, borrow_embed, post_library_panel,
-                                    result_line, return_embed, switch_to_returns)
+from services import library_panel, library_panel_state
+from services.library_panel import result_line, sync_panel
+
+
+@pytest.fixture(autouse=True)
+def fresh_panel_memory():
+    library_panel._shown.clear()
+    yield
+    library_panel._shown.clear()
 
 
 def _text(embed):
@@ -25,23 +33,8 @@ def _line(embed, name):
     return next(line for line in _text(embed).splitlines() if name in line)
 
 
-def test_borrow_embed_lists_each_borrower_by_state():
-    embed = borrow_embed([
-        Borrower("1", "Ravenwood", "borrowed", []),
-        Borrower("2", "kestrel_mtg", "assigned", []),
-        Borrower("3", "Tomasz88", "out_pending", []),
-        Borrower("4", "Ali", None, None),
-    ])
-    assert embed.title == "🏛️ Library decks"
-    assert "collected" in _line(embed, "Ravenwood")
-    assert "ready, not collected" in _line(embed, "kestrel_mtg")
-    assert "trade on its way" in _line(embed, "Tomasz88")
-    assert "being prepared" in _line(embed, "Ali")
-
-
-def test_borrow_embed_closed_marks_uncollected_back_on_shelf():
-    embed = borrow_embed([Borrower("1", "Ravenwood", "expired", [])], closed=True)
-    assert "not collected, back on the shelf" in _line(embed, "Ravenwood")
+def _field(embed, name):
+    return next((f.value for f in embed.fields if f.name == name), "")
 
 
 async def _seed(sign_ups, chat="555", loans=()):
@@ -56,15 +49,26 @@ async def _seed(sign_ups, chat="555", loans=()):
 
 
 async def _row():
-    async with AsyncSessionLocal() as s:
-        return await DraftSession.get_by_session_id("s1")
+    return await DraftSession.get_by_session_id("s1")
+
+
+def _message(message_id):
+    m = MagicMock()
+    m.id = message_id
+    m.content = ""
+    m.pinned = False
+    m.edit = AsyncMock()
+    m.delete = AsyncMock()
+    m.pin = AsyncMock()
+    m.unpin = AsyncMock()
+    return m
 
 
 def _bot():
-    sent = MagicMock()
-    sent.id = 9001
+    sent = _message(9001)
     channel = MagicMock(spec=discord.TextChannel)
     channel.send = AsyncMock(return_value=sent)
+    channel.fetch_message = AsyncMock(return_value=sent)
     bot = MagicMock()
     bot.get_channel = MagicMock(return_value=channel)
     return bot, channel, sent
@@ -74,54 +78,94 @@ def _bot():
 def reserved(monkeypatch):
     async def users(draft, library_id=None):
         return {"3"}
-    monkeypatch.setattr(library_panel, "library_users", users)
+    monkeypatch.setattr(library_panel_state, "library_users", users)
+
+
+@pytest.fixture
+def undecided(monkeypatch):
+    async def state(session_id):
+        return SimpleNamespace(settled=False)
+    monkeypatch.setattr(library_panel, "draft_state", state)
+
+
+# --- Posting it when the chat opens -------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_no_panel_without_library_involvement(test_db, monkeypatch):
+async def test_no_panel_without_library_involvement(test_db, monkeypatch):  # noqa: F811
     async def none(draft, library_id=None):
         return set()
-    monkeypatch.setattr(library_panel, "library_users", none)
+    monkeypatch.setattr(library_panel_state, "library_users", none)
     await _seed({"1": "Ravenwood"})
     bot, channel, _ = _bot()
-    await post_library_panel(bot, "s1")
+    await sync_panel(bot, "s1")
     channel.send.assert_not_awaited()
     assert (await _row()).library_panel_mode is None
 
 
 @pytest.mark.asyncio
-async def test_panel_is_posted_once_and_its_id_stored(test_db, reserved):
+async def test_panel_is_posted_once_and_its_id_stored(test_db, reserved):  # noqa: F811
     await _seed({"1": "Ravenwood", "3": "Tomasz88"}, loans=[("1", "borrowed")])
     bot, channel, sent = _bot()
-    await post_library_panel(bot, "s1")
-    await post_library_panel(bot, "s1")
+    await sync_panel(bot, "s1")
+    await sync_panel(bot, "s1")
     assert channel.send.await_count == 1
+    assert channel.send.await_args.kwargs["view"] is not None
     row = await _row()
     assert row.library_panel_message_id == str(sent.id)
     assert row.library_panel_mode == "borrow"
+    # Nothing changed between the two, so the second drew nothing.
+    sent.edit.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_borrowers_are_the_reserved_plus_loaned_newest_loan_by_name(test_db, reserved):
-    await _seed({"1": "Ravenwood", "3": "Tomasz88"},
-                loans=[("1", "returned"), ("1", "borrowed")])
-    got = await library_panel.panel_borrowers("s1")
-    assert [(b.name, b.state) for b in got] == [("Ravenwood", "borrowed"),
-                                                ("Tomasz88", None)]
+async def test_no_panel_without_a_draft_chat(test_db, reserved):  # noqa: F811
+    await _seed({"3": "Tomasz88"}, chat=None)
+    bot, channel, _ = _bot()
+    await sync_panel(bot, "s1")
+    channel.send.assert_not_awaited()
+    bot.get_channel.assert_not_called()
+    assert (await _row()).library_panel_mode is None
 
 
 @pytest.mark.asyncio
-async def test_failed_send_resets_the_mode(test_db, reserved):
+async def test_a_failed_post_leaves_no_panel(test_db, reserved):  # noqa: F811
     await _seed({"3": "Tomasz88"})
     bot, channel, _ = _bot()
     channel.send = AsyncMock(side_effect=RuntimeError("403"))
     with pytest.raises(RuntimeError):
-        await post_library_panel(bot, "s1")
+        await sync_panel(bot, "s1")
     row = await _row()
     assert row.library_panel_mode is None and row.library_panel_message_id is None
 
 
-# --- Return mode, once the draft is decided ---------------------------------
+@pytest.mark.asyncio
+async def test_two_concurrent_syncs_post_one_panel(test_db, reserved, undecided):  # noqa: F811
+    await _seed({"3": "Tomasz88"})
+    bot, channel, sent = _bot()
+
+    async def slow_send(**kwargs):
+        await asyncio.sleep(0.05)
+        return sent
+    channel.send = AsyncMock(side_effect=slow_send)
+    await asyncio.gather(sync_panel(bot, "s1"), sync_panel(bot, "s1"))
+    assert channel.send.await_count == 1
+    assert (await _row()).library_panel_message_id == str(sent.id)
+
+
+@pytest.mark.asyncio
+async def test_a_nudge_syncs_and_never_raises(monkeypatch):
+    calls = []
+
+    async def boom(bot, session_id):
+        calls.append(session_id)
+        raise RuntimeError("discord down")
+    monkeypatch.setattr(library_panel, "sync_panel", boom)
+    await library_panel.nudge(MagicMock(), "s1")
+    assert calls == ["s1"]
+
+
+# --- Return mode, once the draft is decided ------------------------------------
 
 
 def _wins(monkeypatch, a, b):
@@ -159,26 +203,6 @@ async def test_result_line_is_none_for_swiss_and_abandoned(monkeypatch):
     assert await result_line(_draft(session_stage="abandoned")) is None
 
 
-def _field(embed, name):
-    return next((f.value for f in embed.fields if f.name == name), "")
-
-
-def test_return_embed_names_who_still_holds_a_deck():
-    cards = [{"name": "Swamp", "qty": 45}]
-    embed = return_embed([
-        Borrower("1", "Ravenwood", "borrowed", cards),
-        Borrower("2", "kestrel_mtg", "returned", cards),
-        Borrower("3", "Tomasz88", "expired", cards),
-    ], "Red won 5–3")
-    assert embed.title == "🏛️ Library decks"
-    assert "Red won 5–3" in (embed.description or "")
-    assert "Ravenwood" in _field(embed, "Still out")
-    assert "45" in _field(embed, "Still out")
-    assert "kestrel_mtg" in _field(embed, "Back")
-    assert "Tomasz88" not in _text(embed)
-    assert embed.footer.text == "Move the cards into your trade binder first"
-
-
 @pytest.fixture
 def settled(monkeypatch):
     async def state(session_id):
@@ -187,26 +211,36 @@ def settled(monkeypatch):
     _wins(monkeypatch, 5, 3)
 
 
-async def _in_borrow_mode(loans):
-    await _seed({"1": "Ravenwood", "3": "Tomasz88"}, loans=loans)
-    await library_panel._write("s1", library_panel_mode="borrow",
-                                  library_panel_message_id="777")
+async def _in_mode(mode, loans, panel_id="777", sign_ups=None):
+    await _seed(sign_ups or {"1": "Ravenwood", "3": "Tomasz88"}, loans=loans)
+    await library_panel._write("s1", library_panel_mode=mode,
+                               library_panel_message_id=panel_id)
 
 
 def _bot_with_old_panel(fetch_error=None):
+    """A chat whose stored panel is `old` (777); whatever is sent is `sent` (9001)."""
     bot, channel, sent = _bot()
-    old = MagicMock()
-    old.delete = AsyncMock()
-    old.edit = AsyncMock()
-    channel.fetch_message = AsyncMock(side_effect=fetch_error, return_value=old)
+    old = _message(777)
+    messages = {777: old, 9001: sent}
+
+    async def fetch(message_id):
+        if fetch_error is not None and message_id == 777:
+            raise fetch_error
+        return messages[message_id]
+    channel.fetch_message = AsyncMock(side_effect=fetch)
     return bot, channel, sent, old
 
 
+def _gone():
+    return discord.NotFound(MagicMock(status=404), "Unknown")
+
+
 @pytest.mark.asyncio
-async def test_switch_posts_return_panel_and_deletes_borrow_panel(test_db, reserved, settled):
-    await _in_borrow_mode([("1", "borrowed")])
+async def test_switch_posts_return_panel_and_deletes_borrow_panel(
+        test_db, reserved, settled):  # noqa: F811
+    await _in_mode("borrow", [("1", "borrowed")])
     bot, channel, sent, old = _bot_with_old_panel()
-    await switch_to_returns(bot, "s1")
+    await sync_panel(bot, "s1")
     row = await _row()
     assert row.library_panel_mode == "return"
     assert row.library_panel_message_id == str(sent.id)
@@ -217,18 +251,24 @@ async def test_switch_posts_return_panel_and_deletes_borrow_panel(test_db, reser
 
 
 @pytest.mark.asyncio
-async def test_switch_twice_posts_once(test_db, reserved, settled):
-    await _in_borrow_mode([("1", "borrowed")])
-    bot, channel, _, _ = _bot_with_old_panel()
-    await asyncio.gather(switch_to_returns(bot, "s1"), switch_to_returns(bot, "s1"))
+async def test_switch_twice_posts_once(test_db, reserved, settled):  # noqa: F811
+    await _in_mode("borrow", [("1", "borrowed")])
+    bot, channel, sent, _ = _bot_with_old_panel()
+
+    async def slow_send(**kwargs):
+        await asyncio.sleep(0.05)
+        return sent
+    channel.send = AsyncMock(side_effect=slow_send)
+    await asyncio.gather(sync_panel(bot, "s1"), sync_panel(bot, "s1"))
     assert channel.send.await_count == 1
 
 
 @pytest.mark.asyncio
-async def test_switch_with_every_deck_back_closes_in_place(test_db, reserved, settled):
-    await _in_borrow_mode([("1", "returned")])
+async def test_switch_with_every_deck_back_closes_in_place(
+        test_db, reserved, settled):  # noqa: F811
+    await _in_mode("borrow", [("1", "returned")])
     bot, channel, _, old = _bot_with_old_panel()
-    await switch_to_returns(bot, "s1")
+    await sync_panel(bot, "s1")
     assert (await _row()).library_panel_mode == "closed"
     channel.send.assert_not_awaited()
     old.edit.assert_awaited_once()
@@ -237,69 +277,65 @@ async def test_switch_with_every_deck_back_closes_in_place(test_db, reserved, se
 
 
 @pytest.mark.asyncio
-async def test_switch_survives_a_missing_old_panel(test_db, reserved, settled):
-    await _in_borrow_mode([("1", "borrowed")])
-    gone = discord.NotFound(MagicMock(status=404), "Unknown Message")
-    bot, channel, sent, _ = _bot_with_old_panel(fetch_error=gone)
-    await switch_to_returns(bot, "s1")
+async def test_switch_survives_a_missing_old_panel(test_db, reserved, settled):  # noqa: F811
+    await _in_mode("borrow", [("1", "borrowed")])
+    bot, _, sent, _ = _bot_with_old_panel(fetch_error=_gone())
+    await sync_panel(bot, "s1")
     row = await _row()
     assert row.library_panel_mode == "return"
     assert row.library_panel_message_id == str(sent.id)
 
 
 @pytest.mark.asyncio
-async def test_switch_ignores_an_undecided_draft(test_db, reserved, monkeypatch):
-    async def state(session_id):
-        return SimpleNamespace(settled=False)
-    monkeypatch.setattr(library_panel, "draft_state", state)
-    await _in_borrow_mode([("1", "borrowed")])
+async def test_an_undecided_draft_keeps_its_borrow_panel(
+        test_db, reserved, undecided):  # noqa: F811
+    await _in_mode("borrow", [("1", "borrowed")])
     bot, channel, _, old = _bot_with_old_panel()
-    await switch_to_returns(bot, "s1")
+    await sync_panel(bot, "s1")
     assert (await _row()).library_panel_mode == "borrow"
     channel.send.assert_not_awaited()
     old.delete.assert_not_awaited()
+    assert "collected" in _line(old.edit.await_args.kwargs["embed"], "Ravenwood")
 
 
 @pytest.mark.asyncio
-async def test_failed_return_post_goes_back_to_borrow(test_db, reserved, settled):
-    await _in_borrow_mode([("1", "borrowed")])
+async def test_failed_return_post_stays_in_borrow(test_db, reserved, settled):  # noqa: F811
+    await _in_mode("borrow", [("1", "borrowed")])
     bot, channel, _, old = _bot_with_old_panel()
     channel.send = AsyncMock(side_effect=RuntimeError("403"))
     with pytest.raises(RuntimeError):
-        await switch_to_returns(bot, "s1")
+        await sync_panel(bot, "s1")
     row = await _row()
     assert row.library_panel_mode == "borrow" and row.library_panel_message_id == "777"
     old.delete.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_the_victory_check_switches_the_panel_on_its_way_out(test_db, monkeypatch):
+async def test_the_victory_check_syncs_the_panel_on_its_way_out(
+        test_db, monkeypatch):  # noqa: F811
     from utils import check_and_post_victory_or_draw
     calls = []
 
-    async def switch(bot, session_id):
+    async def sync(bot, session_id):
         calls.append(session_id)
-    monkeypatch.setattr(library_panel, "switch_to_returns", switch)
-    # No such draft: the check returns at its first exit, and the switch still runs.
+    monkeypatch.setattr(library_panel, "sync_panel", sync)
+    # No such draft: the check returns at its first exit, and the sync still runs.
     await check_and_post_victory_or_draw(MagicMock(), "nope")
     assert calls == ["nope"]
 
 
 @pytest.mark.asyncio
-async def test_a_failing_switch_does_not_break_the_victory_check(test_db, monkeypatch):
+async def test_a_failing_sync_does_not_break_the_victory_check(
+        test_db, monkeypatch):  # noqa: F811
     from utils import check_and_post_victory_or_draw
 
     async def boom(bot, session_id):
         raise RuntimeError("discord down")
-    monkeypatch.setattr(library_panel, "switch_to_returns", boom)
+    monkeypatch.setattr(library_panel, "sync_panel", boom)
     await check_and_post_victory_or_draw(MagicMock(), "nope")
 
 
-# --- Watchdog recovery -------------------------------------------------------
-
-
-def _gone():
-    return discord.NotFound(MagicMock(status=404), "Unknown")
+# --- Watchdog recovery -----------------------------------------------------------
 
 
 async def _sticky_rows():
@@ -310,8 +346,8 @@ async def _sticky_rows():
 
 
 @pytest.mark.asyncio
-async def test_reconcile_switches_a_missed_decision(test_db, reserved, settled):
-    await _in_borrow_mode([("1", "borrowed")])
+async def test_reconcile_switches_a_missed_decision(test_db, reserved, settled):  # noqa: F811
+    await _in_mode("borrow", [("1", "borrowed")])
     bot, channel, sent, old = _bot_with_old_panel()
     await library_panel.reconcile_library_panels(bot)
     row = await _row()
@@ -322,9 +358,9 @@ async def test_reconcile_switches_a_missed_decision(test_db, reserved, settled):
 
 
 @pytest.mark.asyncio
-async def test_reconcile_switches_an_abandoned_draft(test_db, reserved, monkeypatch):
+async def test_reconcile_switches_an_abandoned_draft(test_db, reserved, monkeypatch):  # noqa: F811
     _wins(monkeypatch, 5, 3)
-    await _in_borrow_mode([("1", "borrowed")])
+    await _in_mode("borrow", [("1", "borrowed")])
     # The real draft_state: an abandoned draft counts as settled.
     await library_panel._write("s1", session_stage="abandoned")
     bot, channel, _, _ = _bot_with_old_panel()
@@ -336,12 +372,9 @@ async def test_reconcile_switches_an_abandoned_draft(test_db, reserved, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_reconcile_reposts_a_deleted_return_panel(test_db, reserved, settled):
-    await _seed({"1": "Ravenwood"}, loans=[("1", "borrowed")])
-    await library_panel._write("s1", library_panel_mode="return",
-                                  library_panel_message_id="777")
+async def test_reconcile_reposts_a_deleted_return_panel(test_db, reserved, settled):  # noqa: F811
+    await _in_mode("return", [("1", "borrowed")], sign_ups={"1": "Ravenwood"})
     bot, channel, sent, _ = _bot_with_old_panel(fetch_error=_gone())
-    sent.content = ""  # recorded on the sticky row
     await library_panel.reconcile_library_panels(bot)
     row = await _row()
     assert row.library_panel_mode == "return"
@@ -353,41 +386,23 @@ async def test_reconcile_reposts_a_deleted_return_panel(test_db, reserved, settl
 
 
 @pytest.mark.asyncio
-async def test_reconcile_does_not_repost_a_panel_the_sticky_just_moved(
-        test_db, reserved, settled):
-    await _seed({"1": "Ravenwood"}, loans=[("1", "borrowed")])
-    await library_panel._write("s1", library_panel_mode="return",
-                                  library_panel_message_id="777")
-    bot, channel, _, _ = _bot_with_old_panel()
-
-    async def moved(message_id):
-        # The sticky reposted the panel as 778 and deleted 777 mid-scan.
-        await library_panel._write("s1", library_panel_message_id="778")
-        raise _gone()
-    channel.fetch_message = AsyncMock(side_effect=moved)
-    await library_panel.reconcile_library_panels(bot)
-    channel.send.assert_not_awaited()
-    assert (await _row()).library_panel_message_id == "778"
-
-
-@pytest.mark.asyncio
-async def test_reconcile_refreshes_a_live_return_panel_in_place(test_db, reserved, settled):
-    await _seed({"1": "Ravenwood"}, loans=[("1", "borrowed")])
-    await library_panel._write("s1", library_panel_mode="return",
-                                  library_panel_message_id="777")
+async def test_reconcile_refreshes_a_live_return_panel_in_place(
+        test_db, reserved, settled):  # noqa: F811
+    await _in_mode("return", [("1", "borrowed")], sign_ups={"1": "Ravenwood"})
     bot, channel, _, old = _bot_with_old_panel()
     await library_panel.reconcile_library_panels(bot)
     channel.send.assert_not_awaited()
     old.edit.assert_awaited_once()
     assert (await _row()).library_panel_message_id == "777"
+    # The next tick finds it already right and leaves it be.
+    await library_panel.reconcile_library_panels(bot)
+    old.edit.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_reconcile_closes_a_deleted_return_panel_with_every_deck_back(
-        test_db, reserved, settled):
-    await _seed({"1": "Ravenwood"}, loans=[("1", "returned")])
-    await library_panel._write("s1", library_panel_mode="return",
-                                  library_panel_message_id="777")
+        test_db, reserved, settled):  # noqa: F811
+    await _in_mode("return", [("1", "returned")], sign_ups={"1": "Ravenwood"})
     bot, channel, _, _ = _bot_with_old_panel(fetch_error=_gone())
     await library_panel.reconcile_library_panels(bot)
     assert (await _row()).library_panel_mode == "closed"
@@ -395,10 +410,8 @@ async def test_reconcile_closes_a_deleted_return_panel_with_every_deck_back(
 
 
 @pytest.mark.asyncio
-async def test_reconcile_leaves_closed_panels_alone(test_db, reserved, settled):
-    await _seed({"1": "Ravenwood"}, loans=[("1", "borrowed")])
-    await library_panel._write("s1", library_panel_mode="closed",
-                                  library_panel_message_id="777")
+async def test_reconcile_leaves_closed_panels_alone(test_db, reserved, settled):  # noqa: F811
+    await _in_mode("closed", [("1", "borrowed")], sign_ups={"1": "Ravenwood"})
     bot, channel, _, old = _bot_with_old_panel()
     await library_panel.reconcile_library_panels(bot)
     bot.get_channel.assert_not_called()
@@ -410,10 +423,10 @@ async def test_reconcile_leaves_closed_panels_alone(test_db, reserved, settled):
 
 @pytest.mark.asyncio
 async def test_reconcile_switches_a_borrow_panel_whose_id_was_never_stored(
-        test_db, reserved, settled):
+        test_db, reserved, settled):  # noqa: F811
     # A crash between sending the borrow panel and storing its id.
-    await _seed({"1": "Ravenwood"}, loans=[("1", "borrowed")])
-    await library_panel._write("s1", library_panel_mode="borrow")
+    await _in_mode("borrow", [("1", "borrowed")], panel_id=None,
+                   sign_ups={"1": "Ravenwood"})
     bot, channel, sent, _ = _bot_with_old_panel()
     await library_panel.reconcile_library_panels(bot)
     row = await _row()
@@ -424,13 +437,10 @@ async def test_reconcile_switches_a_borrow_panel_whose_id_was_never_stored(
 
 
 @pytest.mark.asyncio
-async def test_reconcile_does_not_repost_an_undecided_borrow_panel(test_db, reserved,
-                                                                   monkeypatch):
-    async def state(session_id):
-        return SimpleNamespace(settled=False)
-    monkeypatch.setattr(library_panel, "draft_state", state)
-    await _seed({"1": "Ravenwood"}, loans=[("1", "borrowed")])
-    await library_panel._write("s1", library_panel_mode="borrow")
+async def test_reconcile_does_not_repost_an_undecided_borrow_panel(
+        test_db, reserved, undecided):  # noqa: F811
+    await _in_mode("borrow", [("1", "borrowed")], panel_id=None,
+                   sign_ups={"1": "Ravenwood"})
     bot, channel, _, _ = _bot_with_old_panel()
     await library_panel.reconcile_library_panels(bot)
     channel.send.assert_not_awaited()
@@ -439,8 +449,8 @@ async def test_reconcile_does_not_repost_an_undecided_borrow_panel(test_db, rese
 
 
 @pytest.mark.asyncio
-async def test_reconcile_closes_a_panel_whose_chat_is_gone(test_db, reserved, settled):
-    await _in_borrow_mode([("1", "borrowed")])
+async def test_reconcile_closes_a_panel_whose_chat_is_gone(test_db, reserved, settled):  # noqa: F811
+    await _in_mode("borrow", [("1", "borrowed")])
     bot, channel, _, _ = _bot_with_old_panel()
     bot.get_channel = MagicMock(return_value=None)
     bot.fetch_channel = AsyncMock(side_effect=_gone())
@@ -452,8 +462,8 @@ async def test_reconcile_closes_a_panel_whose_chat_is_gone(test_db, reserved, se
 
 
 @pytest.mark.asyncio
-async def test_reconcile_finds_a_chat_missing_from_the_cache(test_db, reserved, settled):
-    await _in_borrow_mode([("1", "borrowed")])
+async def test_reconcile_finds_a_chat_missing_from_the_cache(test_db, reserved, settled):  # noqa: F811
+    await _in_mode("borrow", [("1", "borrowed")])
     bot, channel, sent, _ = _bot_with_old_panel()
     bot.get_channel = MagicMock(return_value=None)
     bot.fetch_channel = AsyncMock(return_value=channel)
@@ -464,25 +474,25 @@ async def test_reconcile_finds_a_chat_missing_from_the_cache(test_db, reserved, 
 
 
 @pytest.mark.asyncio
-async def test_one_failing_draft_does_not_stop_the_scan(test_db, monkeypatch):
+async def test_one_failing_draft_does_not_stop_the_scan(test_db, monkeypatch):  # noqa: F811
     async with AsyncSessionLocal() as s:
-        for sid in ("a", "b"):
+        for sid, mode in (("a", "borrow"), ("b", "return"), ("c", "closed"), ("d", None)):
             s.add(DraftSession(session_id=sid, guild_id="g", draft_chat_channel="555",
-                               library_panel_mode="borrow"))
+                               library_panel_mode=mode))
         await s.commit()
     seen = []
 
-    async def reconcile_one(bot, draft):
-        seen.append(draft.session_id)
-        if draft.session_id == "a":
+    async def sync(bot, session_id):
+        seen.append(session_id)
+        if session_id == "a":
             raise RuntimeError("discord down")
-    monkeypatch.setattr(library_panel, "_reconcile_one", reconcile_one)
+    monkeypatch.setattr(library_panel, "sync_panel", sync)
     await library_panel.reconcile_library_panels(MagicMock())
     assert sorted(seen) == ["a", "b"]
 
 
 @pytest.mark.asyncio
-async def test_the_watchdog_reconciles_library_panels(test_db, monkeypatch):
+async def test_the_watchdog_reconciles_library_panels(test_db, monkeypatch):  # noqa: F811
     from services import card_lending_service as lending
 
     for name in ("settle_in_flight", "expire_stale_assignments"):
@@ -506,7 +516,7 @@ async def test_the_watchdog_reconciles_library_panels(test_db, monkeypatch):
     assert calls[0] is bot
 
 
-# --- A deck still on offer keeps the panel open ------------------------------
+# --- A deck still on offer keeps the panel open ----------------------------------
 
 
 async def _loan_now(borrower, state):
@@ -520,13 +530,13 @@ async def _loan_now(borrower, state):
 
 @pytest.mark.asyncio
 async def test_a_deck_on_offer_keeps_the_borrow_panel_open_until_it_lapses(
-        test_db, reserved, settled):
-    await _in_borrow_mode([("1", "assigned")])
+        test_db, reserved, settled):  # noqa: F811
+    await _in_mode("borrow", [("1", "assigned")])
     bot, channel, _, old = _bot_with_old_panel()
-    await switch_to_returns(bot, "s1")
+    await sync_panel(bot, "s1")
     assert (await _row()).library_panel_mode == "borrow"
     channel.send.assert_not_awaited()
-    old.edit.assert_not_awaited()
+    assert old.edit.await_args.kwargs["view"] is not None
 
     await _loan_now("1", "expired")
     await library_panel.reconcile_library_panels(bot)
@@ -537,10 +547,10 @@ async def test_a_deck_on_offer_keeps_the_borrow_panel_open_until_it_lapses(
 
 @pytest.mark.asyncio
 async def test_a_deck_collected_after_the_decision_gets_a_return_panel(
-        test_db, reserved, settled):
-    await _in_borrow_mode([("1", "assigned")])
+        test_db, reserved, settled):  # noqa: F811
+    await _in_mode("borrow", [("1", "assigned")])
     bot, channel, sent, _ = _bot_with_old_panel()
-    await switch_to_returns(bot, "s1")
+    await sync_panel(bot, "s1")
 
     await _loan_now("1", "borrowed")
     await library_panel.reconcile_library_panels(bot)
@@ -553,17 +563,15 @@ async def test_a_deck_collected_after_the_decision_gets_a_return_panel(
 
 @pytest.mark.asyncio
 async def test_a_deck_on_offer_keeps_the_return_panel_open_until_it_lapses(
-        test_db, reserved, settled):
-    await _seed({"1": "Ravenwood", "2": "kestrel_mtg"},
-                loans=[("1", "returned"), ("2", "assigned")])
-    await library_panel._write("s1", library_panel_mode="return",
-                                  library_panel_message_id="777")
+        test_db, reserved, settled):  # noqa: F811
+    await _in_mode("return", [("1", "returned"), ("2", "assigned")],
+                   sign_ups={"1": "Ravenwood", "2": "kestrel_mtg"})
     bot, _, _, old = _bot_with_old_panel()
-    await library_panel.refresh_library_panel(bot, "s1")
+    await sync_panel(bot, "s1")
     assert (await _row()).library_panel_mode == "return"
     assert old.edit.await_args.kwargs["view"] is not None
 
     await _loan_now("2", "expired")
-    await library_panel.refresh_library_panel(bot, "s1")
+    await sync_panel(bot, "s1")
     assert (await _row()).library_panel_mode == "closed"
     assert old.edit.await_args.kwargs["view"] is None
