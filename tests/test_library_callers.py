@@ -37,6 +37,10 @@ def _ctx(guild=True):
 
 
 async def test_a_button_press_is_answered_privately():
+    """Visibly, too: pycord defers a component invisibly unless told not to,
+    and ignores `ephemeral` when it does, so the press would show nothing --
+    not the ephemeral "thinking…" the slash command shows -- while the flow
+    queues behind the serve."""
     interaction = _interaction()
     caller = InteractionCaller(interaction)
 
@@ -44,7 +48,7 @@ async def test_a_button_press_is_answered_privately():
     await caller.defer()
     await caller.send("hello")
 
-    interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    interaction.response.defer.assert_awaited_once_with(ephemeral=True, invisible=False)
     interaction.followup.send.assert_awaited_once_with("hello", ephemeral=True)
 
 
@@ -81,7 +85,7 @@ async def test_a_button_runs_the_same_gate_as_the_command():
     await actions.return_deck(ContextCaller(ctx))
 
     said = actions.OUTSIDE_A_SERVER
-    interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    interaction.response.defer.assert_awaited_once_with(ephemeral=True, invisible=False)
     interaction.followup.send.assert_awaited_once_with(said, ephemeral=True)
     ctx.defer.assert_awaited_once_with(ephemeral=True)
     ctx.followup.send.assert_awaited_once_with(said, ephemeral=True)

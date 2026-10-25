@@ -41,8 +41,11 @@ class ContextCaller:
 class InteractionCaller:
     """A `LibraryCaller` for a button or other component interaction.
 
-    Answers the way a component handler does: `interaction.response.defer`
-    to acknowledge, then the interaction's followup webhook.
+    Acknowledged with a visible, ephemeral "thinking…" and answered on the
+    interaction's followup webhook, as a slash command is. The visible part
+    has to be asked for: pycord defers a component invisibly by default, as a
+    silent update to the message the button sits on, and ignores `ephemeral`
+    when it does -- so the press would show nothing while the flow works.
     """
 
     def __init__(self, interaction: discord.Interaction) -> None:
@@ -53,7 +56,7 @@ class InteractionCaller:
                                         if interaction.guild is not None else None)
 
     async def defer(self) -> None:
-        await self._interaction.response.defer(ephemeral=True)
+        await self._interaction.response.defer(ephemeral=True, invisible=False)
 
     async def send(self, content: str, *,
                    view: Optional[discord.ui.View] = None) -> None:
