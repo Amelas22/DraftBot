@@ -11,6 +11,8 @@ from services.availability import UsualWeek, cells_to_bytes
 from services.tournament_service import add_teammate, create_tournament, register_team
 from services.team_finder import (
     accept,
+    BoardTeam,
+    board_teams,
     close_team,
     decline,
     leave_team,
@@ -589,3 +591,30 @@ async def test_reconcile_roster_is_the_captains_own_participant(test_db):
         assert notices == [
             Notice("ben", "Rook closed their team: they registered a different team for the tournament.")
         ]
+
+
+@pytest.mark.asyncio
+async def test_the_board_lists_teams_still_short_of_players(test_db):
+    async with db_session() as s:
+        roomy = await _open(s, "cap", "Rook", 3, "evenings")
+        assert (await request_join(s, G, "ben", "Ben", roomy, "", NOW)).ok
+        assert (await accept(s, G, "cap", roomy, "ben", NOW)).ok
+        full = await _open(s, "cap2", "Moss", 3)
+        for user in ("a", "b"):
+            assert (await request_join(s, G, user, user.upper(), full, "", NOW)).ok
+            assert (await accept(s, G, "cap2", full, user, NOW)).ok
+        paused = await _open(s, "cap3", "Thistle", 4)
+        assert (await set_taking_requests(s, G, "cap3", paused, False, NOW)).ok
+        closed = await _open(s, "cap4", "Fern", 3)
+        assert (await close_team(s, G, "cap4", closed, NOW)).ok
+        await open_team(s, "other-guild", "cap5", "Ash", 3, "", NOW)
+        alone = await _open(s, "cap6", "Wren", 4)
+        await s.flush()
+
+        teams = await board_teams(s, G)
+
+    assert teams == [
+        BoardTeam(team_id=roomy, captain_name="Rook", others=("Ben",), size=3, note="evenings"),
+        BoardTeam(team_id=alone, captain_name="Wren", others=(), size=4, note=""),
+    ]
+    assert teams[0].filled == 2

@@ -1,7 +1,9 @@
 """The Find a team board is sticky while the server's scheduler flag is on: the sticky
 manager reposts it, button and all, at the bottom of its channel."""
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import discord
 import pytest
 from sqlalchemy import select
 
@@ -139,3 +141,88 @@ async def test_the_sticky_ends_when_the_flag_is_turned_off(test_db):  # noqa: F8
 
     assert await _sticky_rows() == []
     channel.send.assert_not_awaited()
+
+
+async def _open_team(captain="cap", name="Rook"):
+    from services.team_finder import open_team
+    async with db_session() as session:
+        assert (await open_team(session, "1", captain, name, 3, "", NOW)).ok
+        await session.commit()
+
+
+NOW = datetime(2026, 10, 26, tzinfo=timezone.utc)
+
+
+@pytest.mark.asyncio
+async def test_the_first_board_and_every_repost_list_the_open_teams(test_db):  # noqa: F811
+    await _open_team()
+    channel = _channel()
+    channel.send = AsyncMock(return_value=_discord_message(900, channel))
+    await _ensure(channel)
+    assert "**Rook's team** · 1/3 · needs 2" in channel.send.await_args.kwargs["embed"].description
+
+    channel.send = AsyncMock(return_value=_discord_message(901, channel))
+    channel.fetch_message = AsyncMock(return_value=_discord_message(900, channel))
+    bot = MagicMock()
+    bot.fetch_channel = AsyncMock(return_value=channel)
+    with patch("config.scheduler_enabled", return_value=True):
+        assert await _force_repost(bot) == StickyUpdateResult.SUCCESS
+    assert "**Rook's team**" in channel.send.await_args.kwargs["embed"].description
+
+
+def _refresh_bot(board):
+    channel = MagicMock(spec=discord.TextChannel)  # refresh narrows the fetched channel
+    channel.fetch_message = AsyncMock(return_value=board)
+    bot = MagicMock()
+    bot.fetch_channel = AsyncMock(return_value=channel)
+    return bot
+
+
+@pytest.mark.asyncio
+async def test_the_board_is_edited_in_place_only_when_its_list_changes(test_db):  # noqa: F811
+    await _make_sticky(view_type="lfg_board")
+    board = _discord_message(900, _channel())
+    board.edit = AsyncMock()
+    bot = _refresh_bot(board)
+    lfg_cog.forget_rendered_boards()
+
+    await lfg_cog.refresh_lfg_board(bot, "1")
+    assert lfg_cog.NO_TEAMS in board.edit.await_args.kwargs["embed"].description
+    await lfg_cog.refresh_lfg_board(bot, "1")
+    assert board.edit.await_count == 1
+
+    await _open_team()
+    await lfg_cog.refresh_lfg_board(bot, "1")
+    assert board.edit.await_count == 2
+    assert "**Rook's team**" in board.edit.await_args.kwargs["embed"].description
+
+
+@pytest.mark.asyncio
+async def test_a_reposted_board_is_not_edited_again_for_the_same_list(test_db):  # noqa: F811
+    await _make_sticky(view_type="lfg_board")
+    channel = _channel()
+    new = _discord_message(901, channel)
+    new.edit = AsyncMock()
+
+    def sent(**kwargs):
+        new.embeds = [kwargs["embed"]]  # a sent discord.Message carries its embed
+        return new
+    channel.send = AsyncMock(side_effect=sent)
+    channel.fetch_message = AsyncMock(side_effect=[_discord_message(900, channel), new])
+    bot = MagicMock()
+    bot.fetch_channel = AsyncMock(return_value=channel)
+    lfg_cog.forget_rendered_boards()
+    with patch("config.scheduler_enabled", return_value=True):
+        assert await _force_repost(bot) == StickyUpdateResult.SUCCESS
+
+    await lfg_cog.refresh_lfg_board(bot, "1")
+
+    new.edit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_no_board_means_nothing_to_refresh(test_db):  # noqa: F811
+    bot = MagicMock()
+    bot.fetch_channel = AsyncMock()
+    await lfg_cog.refresh_lfg_board(bot, "1")
+    bot.fetch_channel.assert_not_awaited()
