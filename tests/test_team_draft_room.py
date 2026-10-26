@@ -654,3 +654,21 @@ async def test_side_rosters_expand_roles_drop_bots_and_skip_deleted_roles(test_d
     assert a == Roster(label="Team Garruk, deleted role", people=(("202", "Bo"),))
     assert b == Roster(label="Team Ash, Ash", people=(("201", "Ash"), ("203", "Cy")))
 
+
+@pytest.mark.asyncio
+async def test_rebooking_the_same_time_pings_nobody_but_still_refreshes(test_db):
+    from team_draft_view import announce_booking
+
+    team_draft_id = await seed_team_draft(thread_id="900", control_message_id="777")
+    thread = MagicMock(spec=discord.Thread)
+    thread.send = AsyncMock()
+    bot = MagicMock()
+    bot.get_guild.return_value = make_guild()
+    bot.get_channel.return_value = thread
+    same = datetime(2026, 10, 28, 19, 30, tzinfo=timezone.utc)
+
+    with patch("team_draft_view.refresh_team_draft_control", AsyncMock()) as refresh:
+        await announce_booking(bot, team_draft_id, _booking_change(old=same, new=same))
+
+    thread.send.assert_not_awaited()
+    refresh.assert_awaited_once_with(bot, team_draft_id)

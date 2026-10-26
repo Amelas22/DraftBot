@@ -295,7 +295,11 @@ async def refresh_freed_team_draft(team_draft_id: int) -> None:
 async def announce_booking(bot: discord.Client, team_draft_id: int, change: BookingChange) -> None:
     """Tag both sides in the matchup's thread with a committed booking change,
     then re-render the control message. Discord errors are logged, never raised:
-    the booking already stands."""
+    the booking already stands. Re-booking the time already booked pings
+    nobody; only the control message (its "booked by") is re-rendered."""
+    if change.old is not None and change.old == change.new:
+        await refresh_team_draft_control(bot, team_draft_id)
+        return
     async with db_session() as session:
         row = await session.get(TeamDraft, team_draft_id)
         if row is None:
