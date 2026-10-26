@@ -3,6 +3,7 @@
 Every function takes the caller's session; none commits. The caller commits.
 """
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -16,6 +17,9 @@ from services.availability import naive_utc
 
 MAX_PICKS = 5
 MAX_SIDE_PEOPLE = 12
+# Held by the web API across its action-id lookup, the change and the commit,
+# so a retried action can't run twice (the scheduler_teams_api pattern).
+WRITE_LOCK = asyncio.Lock()
 
 
 @dataclass(frozen=True)
@@ -145,6 +149,7 @@ async def release_draft(session: AsyncSession, team_draft_id: int, draft_session
 
 
 DRAFT_CELLS = 2  # a draft takes two half-hour cells
+MIN_PER_SIDE = 2  # a good start has this many of each side free (all of a smaller side)
 WINDOW_CELLS = 336  # the bookable window: seven days of half-hour cells
 _CELL = timedelta(minutes=30)
 
@@ -169,7 +174,7 @@ def _aware(moment: datetime | None) -> datetime | None:
     return None if moment is None else moment.replace(tzinfo=timezone.utc)
 
 
-def _window_start(now: datetime) -> datetime:
+def window_start(now: datetime) -> datetime:
     """`now` floored to the half hour, in UTC."""
     moment = now.astimezone(timezone.utc)
     return moment.replace(minute=moment.minute - moment.minute % 30, second=0, microsecond=0)
@@ -214,7 +219,7 @@ async def _change(
             return BookingChange(False, "bad_input", old_aware, None, name, version)
         if start_utc < now:
             return BookingChange(False, "past", old_aware, None, name, version)
-        if start_utc >= _window_start(now) + WINDOW_CELLS * _CELL:
+        if start_utc >= window_start(now) + WINDOW_CELLS * _CELL:
             return BookingChange(False, "out_of_window", old_aware, None, name, version)
     elif old is None:
         return BookingChange(False, "not_booked", None, None, name, version)

@@ -6,6 +6,7 @@ cycle through cogs/. The text itself is rendered by helpers/matchup.py, which
 stays free of Discord and database imports.
 """
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
 import discord
@@ -17,18 +18,27 @@ from config import scheduler_enabled
 from database.db_session import db_session
 from helpers.matchup import (
     Booking,
+    Roster,
     Side,
+    assign_people,
+    booking_announcement,
     launch_block,
     matchup_state,
     render_matchup_control,
     side_label,
 )
 from helpers.pin_helpers import safe_pin
-from helpers.utils import DISCORD_THREAD_NAME_LIMIT, THREAD_ARCHIVE_MAX_MINUTES, as_messageable
+from helpers.utils import (
+    DISCORD_THREAD_NAME_LIMIT,
+    THREAD_ARCHIVE_MAX_MINUTES,
+    as_messageable,
+    not_none,
+)
 from match_control_view import lobby_link
 from models.draft_session import DraftSession
 from models.team_draft import TeamDraft
-from services.team_draft import by_thread, set_room
+from services.scheduler_links import issue_link
+from services.team_draft import BookingChange, by_thread, set_room
 
 if TYPE_CHECKING:
     from cube_views.pack_options import BaseCubeSelectionView
@@ -38,6 +48,10 @@ GONE = "This team draft no longer exists."
 # scheduler (board, wizard, /team_draft_board, Start draft, /premade_draft).
 NOT_ENABLED = "Team drafts aren't turned on in this server."
 DELETED_ROLE = "deleted role"
+TIME_LINK_VIEW = "team_draft"  # the scheduler link view for one matchup (scheduler_team_draft_api.VIEW)
+TIME_LINK_INTRO = ("See both sides' usual weeks side by side and book a time that suits "
+                   "everyone. The link works for 7 days.")
+TIME_LINK_FAILED = "Couldn't make your link just now. Try again in a minute."
 
 
 @dataclass(frozen=True)
@@ -133,26 +147,35 @@ def _cube_picker(guild_id: int | None, facts: TeamDraftFacts) -> "BaseCubeSelect
     )
 
 
+Press = Callable[[discord.Interaction, int], Coroutine[Any, Any, None]]
+
+
 class TeamDraftControlView(discord.ui.View):
-    """Persistent buttons on a team draft's control message."""
+    """Persistent buttons on a team draft's control message: Find a time, Start draft."""
 
     def __init__(self, team_draft_id: int) -> None:
         super().__init__(timeout=None)
+        self._add(team_draft_id, "Find a time", discord.ButtonStyle.secondary,
+                  f"team_draft_time:{team_draft_id}", find_a_time)
+        self._add(team_draft_id, "Start draft", discord.ButtonStyle.primary,
+                  f"team_draft_start:{team_draft_id}", start_team_draft)
+
+    def _add(self, team_draft_id: int, label: str, style: discord.ButtonStyle,
+             custom_id: str, press: Press) -> None:
         button: discord.ui.Button[Any] = discord.ui.Button(
-            label="Start draft",
-            style=discord.ButtonStyle.primary,
-            custom_id=f"team_draft_start:{team_draft_id}",
-        )
+            label=label, style=style, custom_id=custom_id)
         # discord.ui.Item.callback is declared on the class as an unbound method
         # (self, interaction), so pyrefly sees the attribute type as still
         # expecting `self` even though py-cord calls it bound at dispatch time.
-        button.callback = self._make_callback(team_draft_id)  # pyrefly: ignore [bad-assignment]
+        button.callback = self._make_callback(team_draft_id, press)  # pyrefly: ignore [bad-assignment]
         self.add_item(button)
 
     @staticmethod
-    def _make_callback(team_draft_id: int) -> Callable[[discord.Interaction], Coroutine[Any, Any, None]]:
+    def _make_callback(
+        team_draft_id: int, press: Press
+    ) -> Callable[[discord.Interaction], Coroutine[Any, Any, None]]:
         async def callback(interaction: discord.Interaction) -> None:
-            await start_team_draft(interaction, team_draft_id)
+            await press(interaction, team_draft_id)
         return callback
 
 
@@ -204,6 +227,17 @@ async def open_team_draft_room(
     return thread
 
 
+async def _reach_thread(bot: discord.Client, thread_id: int) -> object | None:
+    """The thread from the cache, else fetched; None (logged by the caller) if unreachable."""
+    channel = bot.get_channel(thread_id)
+    if channel is not None:
+        return channel
+    try:
+        return await bot.fetch_channel(thread_id)
+    except discord.HTTPException:
+        return None
+
+
 async def refresh_team_draft_control(bot: discord.Client, team_draft_id: int) -> None:
     """Re-render a matchup's control message in place. No-op if it was never posted."""
     async with db_session() as session:
@@ -217,13 +251,10 @@ async def refresh_team_draft_control(bot: discord.Client, team_draft_id: int) ->
     body, view = _body_and_view(facts)
 
     thread_id, control_id = int(facts.thread_id), int(facts.control_message_id)
-    channel = bot.get_channel(thread_id)
+    channel = await _reach_thread(bot, thread_id)
     if channel is None:
-        try:
-            channel = await bot.fetch_channel(thread_id)
-        except discord.HTTPException:
-            logger.warning(f"Team draft {team_draft_id} thread {thread_id} unreachable; not refreshed")
-            return
+        logger.warning(f"Team draft {team_draft_id} thread {thread_id} unreachable; not refreshed")
+        return
     try:
         message = await as_messageable(channel).fetch_message(control_id)
         await message.edit(content=body, view=view)
@@ -231,6 +262,87 @@ async def refresh_team_draft_control(bot: discord.Client, team_draft_id: int) ->
         logger.warning(f"Team draft {team_draft_id} control message {control_id} gone; not refreshed")
     except discord.HTTPException as e:
         logger.error(f"Failed to refresh control message for team draft {team_draft_id}: {e}")
+
+
+async def announce_booking(bot: discord.Client, team_draft_id: int, change: BookingChange) -> None:
+    """Tag both sides in the matchup's thread with a committed booking change,
+    then re-render the control message. Discord errors are logged, never raised:
+    the booking already stands."""
+    async with db_session() as session:
+        row = await session.get(TeamDraft, team_draft_id)
+        if row is None:
+            return
+        guild = bot.get_guild(int(row.guild_id))
+        facts = await team_draft_facts(session, team_draft_id, guild)
+    if facts is None or not facts.thread_id:
+        return
+    content = booking_announcement(change.by_name, change.old, change.new, facts.a, facts.b)
+
+    thread_id = int(facts.thread_id)
+    channel = await _reach_thread(bot, thread_id)
+    if channel is None:
+        logger.warning(f"Team draft {team_draft_id} thread {thread_id} unreachable; booking not announced")
+        return
+    try:
+        await as_messageable(channel).send(
+            content=content,
+            allowed_mentions=discord.AllowedMentions(everyone=False, roles=True, users=True))
+    except discord.HTTPException as e:
+        logger.warning(f"Could not announce the booking for team draft {team_draft_id}: {e}")
+    await refresh_team_draft_control(bot, team_draft_id)
+
+
+def _is_bot(guild: discord.Guild | None, user_id: str) -> bool:
+    member = guild.get_member(int(user_id)) if guild is not None else None
+    return member is not None and member.bot
+
+
+def _role_members(guild: discord.Guild | None, side: Side) -> list[str]:
+    """Current non-bot members of a side's roles; a deleted role contributes nobody."""
+    found: list[str] = []
+    for role_id in side.role_ids:
+        role = guild.get_role(int(role_id)) if guild is not None else None
+        if role is not None:
+            found.extend(str(m.id) for m in role.members if not m.bot)
+    return found
+
+
+async def side_rosters(bot: discord.Client, guild_id: str, team_draft_id: int) -> tuple[Roster, Roster]:
+    """Both sides' labels and people as the guild's cache has them now (no Discord call).
+
+    Bots are left out; someone on both sides is counted once (assign_people).
+    """
+    guild = bot.get_guild(int(guild_id))
+    async with db_session() as session:
+        facts = await team_draft_facts(session, team_draft_id, guild)
+    if facts is None or facts.guild_id != guild_id:
+        return Roster("Side A", ()), Roster("Side B", ())
+    a_people, b_people = assign_people(
+        [u for u in facts.a.user_ids if not _is_bot(guild, u)], _role_members(guild, facts.a),
+        [u for u in facts.b.user_ids if not _is_bot(guild, u)], _role_members(guild, facts.b),
+    )
+    return (
+        Roster(facts.a.label, tuple((u, _member_name(guild, u)) for u in a_people)),
+        Roster(facts.b.label, tuple((u, _member_name(guild, u)) for u in b_people)),
+    )
+
+
+async def find_a_time(interaction: discord.Interaction, team_draft_id: int) -> None:
+    """Find a time button: the presser's own 7-day draftbot.fyi link to this matchup."""
+    if interaction.guild_id is None or not scheduler_enabled(str(interaction.guild_id)):
+        await interaction.response.send_message(NOT_ENABLED, ephemeral=True)
+        return
+    user_id = str(not_none(interaction.user).id)
+    try:
+        url = await issue_link(user_id, str(interaction.guild_id), TIME_LINK_VIEW,
+                               datetime.now(timezone.utc), subject=str(team_draft_id))
+    except Exception:
+        logger.exception(f"Team draft {team_draft_id}: couldn't issue a link for {user_id}")
+        await interaction.response.send_message(TIME_LINK_FAILED, ephemeral=True)
+        return
+    view = discord.ui.View()
+    view.add_item(discord.ui.Button(label="Open Find a time", url=url))
+    await interaction.response.send_message(TIME_LINK_INTRO, view=view, ephemeral=True)
 
 
 async def start_team_draft(interaction: discord.Interaction, team_draft_id: int) -> None:

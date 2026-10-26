@@ -13,6 +13,9 @@ from datetime import date, datetime, timedelta, timezone
 from functools import cache
 from zoneinfo import ZoneInfo, available_timezones
 
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from database.db_session import db_session
 from models.scheduler import PlayerAvailability
 
@@ -150,6 +153,28 @@ def usual_week_doc(week: UsualWeek) -> dict[str, object]:
         "version": _VERSION,
         "zone": week.zone,
         "cells": base64.b64encode(cells_to_bytes(week.cells)).decode("ascii"),
+    }
+
+
+def cells_b64(week: UsualWeek | None) -> str | None:
+    """A week's cells as the page reads them (base64), or None without a week."""
+    if week is None:
+        return None
+    return base64.b64encode(cells_to_bytes(week.cells)).decode("ascii")
+
+
+async def usual_weeks(session: AsyncSession, users: list[str]) -> dict[str, UsualWeek]:
+    """The saved usual weeks of ``users``; anyone without one is left out."""
+    if not users:
+        return {}
+    rows = (
+        await session.execute(
+            select(PlayerAvailability).where(PlayerAvailability.user_id.in_(users))
+        )
+    ).scalars()
+    return {
+        str(r.user_id): UsualWeek(zone=str(r.zone), cells=cells_from_bytes(bytes(r.cells)))
+        for r in rows
     }
 
 

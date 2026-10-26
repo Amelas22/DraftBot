@@ -8,9 +8,12 @@ from loguru import logger
 from typing_extensions import override
 
 from config import scheduler_host, scheduler_port
+from helpers.matchup import Roster
 from services.scheduler_web import build_app
+from services.team_draft import BookingChange
 from services.team_finder import Notice
 from services.team_finder_sync import notify
+from team_draft_view import announce_booking, side_rosters
 
 
 class SchedulerWebCog(commands.Cog):
@@ -34,9 +37,20 @@ class SchedulerWebCog(commands.Cog):
     async def _notify(self, notice: Notice, guild_id: str) -> bool:
         return await notify(self.bot, notice, guild_id)
 
+    async def _side_people(self, guild_id: str, team_draft_id: int) -> tuple[Roster, Roster]:
+        return await side_rosters(self.bot, guild_id, team_draft_id)
+
+    async def _announce(self, team_draft_id: int, change: BookingChange) -> None:
+        await announce_booking(self.bot, team_draft_id, change)
+
     async def _start(self) -> None:
         host, port = scheduler_host(), scheduler_port()
-        runner = web.AppRunner(build_app(notify=self._notify, display_name=self._display_name))
+        runner = web.AppRunner(build_app(
+            notify=self._notify,
+            display_name=self._display_name,
+            side_people=self._side_people,
+            announce=self._announce,
+        ))
         try:
             await runner.setup()
             await web.TCPSite(runner, host, port).start()

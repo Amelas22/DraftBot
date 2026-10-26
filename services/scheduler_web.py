@@ -8,6 +8,7 @@ from pathlib import Path
 from aiohttp import web
 
 from config import scheduler_enabled, scheduler_trusted_proxies
+from helpers.matchup import Roster
 from services.availability import (
     MAX_FILE_BYTES,
     InvalidWeek,
@@ -18,17 +19,21 @@ from services.availability import (
     usual_week_doc,
 )
 from services.scheduler_http import (
+    ANNOUNCE,
     DISPLAY_NAME,
     IDENTITY,
     NOTIFY,
     NOW,
+    SIDE_PEOPLE,
     error,
     identity,
     read_body,
     utc_now,
 )
 from services.scheduler_links import resolve_token
+from services.scheduler_team_draft_api import routes as team_draft_routes
 from services.scheduler_teams_api import routes as teams_routes
+from services.team_draft import BookingChange
 from services.team_finder import Notice
 
 TOKEN_LIMIT = 60
@@ -224,6 +229,14 @@ async def _id_as_name(guild_id: str, user_id: str) -> str:
     return user_id
 
 
+async def _nobody(guild_id: str, team_draft_id: int) -> tuple[Roster, Roster]:
+    return Roster("Side A", ()), Roster("Side B", ())
+
+
+async def _no_announce(team_draft_id: int, change: BookingChange) -> None:
+    return None
+
+
 def build_app(
     now: Callable[[], datetime] = utc_now,
     static_dir: Path = _REPO_PAGE_DIR,
@@ -231,6 +244,8 @@ def build_app(
     trusted_proxies: Collection[str] | None = None,
     notify: Callable[[Notice, str], Awaitable[bool]] = _no_notify,
     display_name: Callable[[str, str], Awaitable[str]] = _id_as_name,
+    side_people: Callable[[str, int], Awaitable[tuple[Roster, Roster]]] = _nobody,
+    announce: Callable[[int, BookingChange], Awaitable[None]] = _no_announce,
 ) -> web.Application:
     app = web.Application(middlewares=[auth_middleware])
     app[NOW] = now
@@ -242,6 +257,9 @@ def build_app(
     app[_LIMITER] = RateLimiter()
     app[NOTIFY] = notify
     app[DISPLAY_NAME] = display_name
+    app[SIDE_PEOPLE] = side_people
+    app[ANNOUNCE] = announce
     app.add_routes(routes)
     app.add_routes(teams_routes)
+    app.add_routes(team_draft_routes)
     return app

@@ -1,5 +1,5 @@
 """A team draft's thread: opening it, its control message and the one-shot Start draft."""
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -394,4 +394,191 @@ async def test_restart_re_registers_every_posted_control_message(test_db):
     view = bot.add_view.call_args.args[0]
     assert isinstance(view, TeamDraftControlView)
     assert bot.add_view.call_args.kwargs["message_id"] == 777
-    assert [c.custom_id for c in view.children] == [f"team_draft_start:{posted}"]
+    assert [c.custom_id for c in view.children] == [
+        f"team_draft_time:{posted}", f"team_draft_start:{posted}"]
+
+
+def _press_interaction(guild, user_id=201):
+    interaction = make_interaction(guild)
+    interaction.user = SimpleNamespace(id=user_id)
+    return interaction
+
+
+def _time_button(view):
+    return next(c for c in view.children if c.custom_id.startswith("team_draft_time:"))
+
+
+@pytest.mark.asyncio
+async def test_find_a_time_hands_out_a_link_for_this_matchup(test_db):
+    from team_draft_view import TeamDraftControlView
+
+    team_draft_id = await seed_team_draft(thread_id="900", control_message_id="777")
+    view = TeamDraftControlView(team_draft_id)
+    assert [c.custom_id for c in view.children] == [
+        f"team_draft_time:{team_draft_id}", f"team_draft_start:{team_draft_id}"]
+    interaction = _press_interaction(make_guild())
+    link = AsyncMock(return_value="https://draftbot.fyi/#tok")
+
+    with patch("team_draft_view.issue_link", link):
+        await _time_button(view).callback(interaction)
+
+    args, kwargs = link.await_args
+    assert args[:3] == ("201", "1", "team_draft")
+    assert kwargs == {"subject": str(team_draft_id)}
+    reply = interaction.response.send_message.await_args
+    assert reply.kwargs["ephemeral"] is True
+    assert "7 days" in reply.args[0]
+    [button] = reply.kwargs["view"].children
+    assert button.url == "https://draftbot.fyi/#tok"
+
+
+@pytest.mark.asyncio
+async def test_find_a_time_says_so_when_the_link_cannot_be_made(test_db):
+    from team_draft_view import TIME_LINK_FAILED, TeamDraftControlView
+
+    team_draft_id = await seed_team_draft(thread_id="900", control_message_id="777")
+    interaction = _press_interaction(make_guild())
+
+    with patch("team_draft_view.issue_link", AsyncMock(side_effect=RuntimeError("db"))):
+        await _time_button(TeamDraftControlView(team_draft_id)).callback(interaction)
+
+    interaction.response.send_message.assert_awaited_once_with(TIME_LINK_FAILED, ephemeral=True)
+
+
+@pytest.mark.asyncio
+async def test_find_a_time_is_off_where_the_scheduler_is_off(test_db):
+    from team_draft_view import NOT_ENABLED, TeamDraftControlView
+
+    interaction = _press_interaction(make_guild())
+    link = AsyncMock()
+    with patch("team_draft_view.scheduler_enabled", return_value=False), \
+         patch("team_draft_view.issue_link", link):
+        await _time_button(TeamDraftControlView(5)).callback(interaction)
+
+    interaction.response.send_message.assert_awaited_once_with(NOT_ENABLED, ephemeral=True)
+    link.assert_not_awaited()
+
+
+def _booking_change(old=None, new=datetime(2026, 10, 28, 19, 30, tzinfo=timezone.utc)):
+    from services.team_draft import BookingChange
+    return BookingChange(True, None, old, new, "Bo", 1)
+
+
+@pytest.mark.asyncio
+async def test_announce_posts_in_the_thread_then_refreshes(test_db):
+    from helpers.matchup import booking_announcement
+    from team_draft_view import announce_booking
+
+    team_draft_id = await seed_team_draft(thread_id="900", control_message_id="777")
+    order = []
+    thread = MagicMock(spec=discord.Thread)
+    thread.send = AsyncMock(side_effect=lambda **kw: order.append("send"))
+    bot = MagicMock()
+    bot.get_guild.return_value = make_guild()
+    bot.get_channel.return_value = thread
+    refresh = AsyncMock(side_effect=lambda *a: order.append("refresh"))
+    change = _booking_change()
+
+    with patch("team_draft_view.refresh_team_draft_control", refresh):
+        await announce_booking(bot, team_draft_id, change)
+
+    bot.get_channel.assert_called_once_with(900)
+    sent = thread.send.await_args.kwargs
+    async with db_session() as session:
+        from team_draft_view import team_draft_facts
+        facts = await team_draft_facts(session, team_draft_id, make_guild())
+    assert sent["content"] == booking_announcement("Bo", None, change.new, facts.a, facts.b)
+    assert sent["content"].startswith("<@&111> <@201> <@202>\n")
+    mentions = sent["allowed_mentions"]
+    assert (mentions.everyone, mentions.roles, mentions.users) == (False, True, True)
+    refresh.assert_awaited_once_with(bot, team_draft_id)
+    assert order == ["send", "refresh"]
+
+
+@pytest.mark.asyncio
+async def test_announce_with_a_deleted_thread_logs_and_returns(test_db):
+    from team_draft_view import announce_booking
+
+    team_draft_id = await seed_team_draft(thread_id="900", control_message_id="777")
+    bot = MagicMock()
+    bot.get_guild.return_value = make_guild()
+    bot.get_channel.return_value = None
+    bot.fetch_channel = AsyncMock(
+        side_effect=discord.NotFound(MagicMock(status=404), "Unknown Channel"))
+    refresh = AsyncMock()
+
+    with patch("team_draft_view.refresh_team_draft_control", refresh):
+        await announce_booking(bot, team_draft_id, _booking_change())
+
+    bot.fetch_channel.assert_awaited_once_with(900)
+    refresh.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_announce_that_discord_refuses_still_refreshes(test_db):
+    from team_draft_view import announce_booking
+
+    team_draft_id = await seed_team_draft(thread_id="900", control_message_id="777")
+    thread = MagicMock(spec=discord.Thread)
+    thread.send = AsyncMock(side_effect=discord.Forbidden(MagicMock(status=403), "Missing Access"))
+    bot = MagicMock()
+    bot.get_guild.return_value = make_guild()
+    bot.get_channel.return_value = thread
+    refresh = AsyncMock()
+
+    with patch("team_draft_view.refresh_team_draft_control", refresh):
+        await announce_booking(bot, team_draft_id, _booking_change())
+
+    refresh.assert_awaited_once_with(bot, team_draft_id)
+
+
+@pytest.mark.asyncio
+async def test_announce_for_a_vanished_matchup_does_nothing(test_db):
+    from team_draft_view import announce_booking
+
+    bot = MagicMock()
+    refresh = AsyncMock()
+    with patch("team_draft_view.refresh_team_draft_control", refresh):
+        await announce_booking(bot, 4242, _booking_change())
+
+    bot.get_channel.assert_not_called()
+    refresh.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_side_rosters_expand_roles_drop_bots_and_skip_deleted_roles(test_db):
+    from helpers.matchup import Roster
+    from team_draft_view import side_rosters
+
+    async with db_session() as session:
+        row = await create_team_draft(
+            session, "1", "50", "Garruk vs Ash",
+            Picks(role_ids=("111", "112"), user_ids=()),   # 112 has been deleted
+            Picks(role_ids=("113",), user_ids=("201",)),
+            created_by="300", now=NOW,
+        )
+        team_draft_id = row.id
+
+    def member(uid, name, bot=False):
+        return SimpleNamespace(id=uid, display_name=name, bot=bot)
+
+    people = {
+        201: member(201, "Ash"), 202: member(202, "Bo"), 203: member(203, "Cy"),
+        900: member(900, "Robo", bot=True),
+    }
+    roles = {
+        111: SimpleNamespace(name="Team Garruk",
+                             members=[people[202], people[201], people[900]]),
+        113: SimpleNamespace(name="Team Ash", members=[people[203], people[202]]),
+    }
+    guild = MagicMock()
+    guild.get_role.side_effect = lambda rid: roles.get(rid)
+    guild.get_member.side_effect = lambda uid: people.get(uid)
+    bot = MagicMock()
+    bot.get_guild.return_value = guild
+
+    a, b = await side_rosters(bot, "1", team_draft_id)
+
+    # 201 is named on side B, so B keeps them; 202 is in both roles, so A (first) wins.
+    assert a == Roster(label="Team Garruk, deleted role", people=(("202", "Bo"),))
+    assert b == Roster(label="Team Ash, Ash", people=(("201", "Ash"), ("203", "Cy")))

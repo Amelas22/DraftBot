@@ -28,6 +28,15 @@ class Side:
 
 
 @dataclass(frozen=True)
+class Roster:
+    """A side as the scheduler page lists it: its label and its people,
+    each a (user id, display name) pair."""
+
+    label: str
+    people: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
 class Booking:
     start_utc: datetime | None
     by_name: str | None
