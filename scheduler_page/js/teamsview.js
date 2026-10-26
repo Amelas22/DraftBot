@@ -11,7 +11,7 @@ import { expiredMessage } from "./messages.js";
 import { plural, pluralWord } from "./words.js";
 import {
   CLOSE_CONFIRM, FORMAT, MULTI_TEAM_WARNING, NOTE_MAX, actionErrorText, cellText, createSync, declinedText, isFull,
-  joinNote, joinState, leaveConfirm, modeAfterSelect, myTeams, noteDrafts, noteError, onOtherTeam, rankTeams, refusalText, requestHeading,
+  joinNote, joinState, leaveConfirm, membersText, modeAfterSelect, myTeams, noteDrafts, noteError, onOtherTeam, rankTeams, refusalText, requestHeading,
   requestsFor, shadeLevel, slotsText, teamName, windowStart,
 } from "./teams.js";
 
@@ -184,11 +184,13 @@ async function showList(root, api, usualDoc, now, cleanups, notice, firstStatus)
     const dots = el("span", { class: "slots", "aria-hidden": "true" });
     for (let i = 0; i < team.size; i++) dots.append(el("i", { class: i < filled ? "" : "open" }));
     const js = joinState(state, team);
+    const others = membersText(team, state.me.user);
     const tag = js.kind === "member" ? "Your team" : js.kind === "requested" ? "Requested" : js.kind === "full" ? "Full" : js.kind === "paused" ? "Paused" : "";
     const key = `t:${team.team_id}`;
     const b = el("button", { type: "button", class: "card", "data-sel": key, "data-focus": `card:${team.team_id}`, "aria-pressed": String(key === selected) },
       el("span", { class: "row" }, el("b", { text: teamName(team) }), el("span", { class: "fit", text: hoursShort(hours), title: `${plural(hours, "hour")} a week together` })),
       el("span", { class: "meta" }, dots, ` ${slotsText(team)}`, ...(tag ? [" · ", el("span", { class: "tag", text: tag })] : [])),
+      ...(others ? [el("span", { class: "members", text: others })] : []),
       ...(team.note ? [el("span", { class: "note", text: team.note })] : []));
     b.addEventListener("click", () => select(key));
     return b;

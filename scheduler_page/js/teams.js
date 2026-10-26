@@ -19,6 +19,11 @@ export function windowStart(prev, now) {
   return prev && prev.getTime() === next.getTime() ? prev : next;
 }
 export const teamName = (team) => `${team.captain_name}'s team`;
+// Who else is on the team ("with Wren, you and Ash"), or "" when the captain is alone; the captain is in teamName.
+export const membersText = (team, viewer) => {
+  const others = team.members.filter((m) => m.user !== team.captain).map((m) => (m.user === viewer ? "you" : m.name));
+  return others.length ? `with ${andList(others)}` : "";
+};
 
 // A member without a saved week (cells null) is never free.
 const memberFree = (m, startUtc) => (m.cells && m.zone ? windowCells(m.zone, decodeCells(m.cells), startUtc) : new Set());
