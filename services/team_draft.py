@@ -13,7 +13,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.team_draft import TeamDraft
-from services.availability import naive_utc
+from services.availability import CELL_MINUTES, floor_half_hour, naive_utc
 
 MAX_PICKS = 5
 MAX_SIDE_PEOPLE = 12
@@ -166,7 +166,7 @@ async def release_deleted_draft(session: AsyncSession, draft_session_id: str) ->
 DRAFT_CELLS = 2  # a draft takes two half-hour cells
 MIN_PER_SIDE = 2  # a good start has this many of each side free (all of a smaller side)
 WINDOW_CELLS = 336  # the bookable window: seven days of half-hour cells
-_CELL = timedelta(minutes=30)
+_CELL = timedelta(minutes=CELL_MINUTES)
 
 
 @dataclass(frozen=True)
@@ -187,12 +187,6 @@ class BookingChange:
 
 def _aware(moment: datetime | None) -> datetime | None:
     return None if moment is None else moment.replace(tzinfo=timezone.utc)
-
-
-def window_start(now: datetime) -> datetime:
-    """`now` floored to the half hour, in UTC."""
-    moment = now.astimezone(timezone.utc)
-    return moment.replace(minute=moment.minute - moment.minute % 30, second=0, microsecond=0)
 
 
 async def _current(session: AsyncSession, team_draft_id: int) -> tuple[datetime | None, int, bool] | None:
@@ -234,7 +228,7 @@ async def _change(
             return BookingChange(False, "bad_input", old_aware, None, name, version)
         if start_utc < now:
             return BookingChange(False, "past", old_aware, None, name, version)
-        if start_utc >= window_start(now) + WINDOW_CELLS * _CELL:
+        if start_utc >= floor_half_hour(now) + WINDOW_CELLS * _CELL:
             return BookingChange(False, "out_of_window", old_aware, None, name, version)
     elif old is None:
         return BookingChange(False, "not_booked", None, None, name, version)

@@ -6,7 +6,7 @@ sends a DM. The caller commits, then sends the returned notices.
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -18,6 +18,7 @@ from services.availability import (
     CELL_MINUTES,
     UsualWeek,
     cells_b64,
+    floor_half_hour,
     iso_z,
     naive_utc,
     usual_weeks,
@@ -54,11 +55,6 @@ class ActionResult:
 
 def _refuse(code: str) -> ActionResult:
     return ActionResult(ok=False, code=code)
-
-
-def _floor_half_hour(moment: datetime) -> datetime:
-    utc = moment.astimezone(timezone.utc)
-    return utc.replace(minute=utc.minute - utc.minute % CELL_MINUTES, second=0, microsecond=0)
 
 
 def overlap_hours(weeks: list[UsualWeek | None], start_utc: datetime) -> float:
@@ -253,7 +249,7 @@ async def request_join(
     weeks = await usual_weeks(session, [user_id] + [str(m.user_id) for m in members])
     hours = overlap_hours(
         [weeks.get(user_id)] + [weeks.get(str(m.user_id)) for m in members],
-        _floor_half_hour(now),
+        floor_half_hour(now),
     )
     captain = next((m for m in members if m.user_id == team.captain_id), None)
     captain_name = str(captain.display_name) if captain else str(team.captain_id)

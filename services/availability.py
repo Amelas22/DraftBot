@@ -42,6 +42,12 @@ def naive_utc(moment: datetime) -> datetime:
     return moment.astimezone(timezone.utc).replace(tzinfo=None)
 
 
+def floor_half_hour(moment: datetime) -> datetime:
+    """``moment`` floored to the start of its cell, in UTC: where a window starts."""
+    utc = moment.astimezone(timezone.utc)
+    return utc.replace(minute=utc.minute - utc.minute % CELL_MINUTES, second=0, microsecond=0)
+
+
 def iso_z(moment: datetime) -> str:
     """UTC ISO-8601 to the second with a ``Z``; a naive moment is taken as UTC (the *_utc columns)."""
     if moment.tzinfo is not None:

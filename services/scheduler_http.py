@@ -30,6 +30,13 @@ def error(status: int, code: str) -> web.Response:
     return web.json_response({"error": code}, status=status)
 
 
+def view_refused(request: web.Request, view: str) -> web.Response | None:
+    """A 403 when the request's link was issued for another page, else None."""
+    if identity(request).view != view:
+        return error(403, "wrong_view")
+    return None
+
+
 def identity(request: web.Request) -> LinkIdentity:
     """Who the request's bearer token belongs to (set by the auth middleware)."""
     found: LinkIdentity = request[IDENTITY]

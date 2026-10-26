@@ -17,7 +17,7 @@ from database.db_session import db_session
 from helpers.matchup import matchup_state
 from models.team_draft import TeamDraft, TeamDraftAction
 from services import team_draft
-from services.availability import CELL_MINUTES, cells_b64, iso_z, naive_utc, usual_weeks
+from services.availability import CELL_MINUTES, cells_b64, floor_half_hour, iso_z, naive_utc, usual_weeks
 from services.scheduler_http import (
     ANNOUNCE,
     DISPLAY_NAME,
@@ -26,6 +26,7 @@ from services.scheduler_http import (
     error,
     identity,
     read_body,
+    view_refused,
 )
 from services.scheduler_links import LinkIdentity
 from services.team_draft import (
@@ -33,7 +34,6 @@ from services.team_draft import (
     MIN_PER_SIDE,
     WINDOW_CELLS,
     BookingChange,
-    window_start,
 )
 
 MAX_ACTION_BYTES = 1024
@@ -47,12 +47,6 @@ routes = web.RouteTableDef()
 
 class _BadInput(Exception):
     pass
-
-
-def _view_refused(request: web.Request) -> web.Response | None:
-    if identity(request).view != VIEW:
-        return error(403, "wrong_view")
-    return None
 
 
 def _subject_id(who: LinkIdentity) -> int | None:
@@ -105,7 +99,7 @@ async def _state(request: web.Request, team_draft_id: int) -> dict[str, object] 
         "version": _VERSION,
         "matchup": matchup,
         "window": {
-            "start_utc": iso_z(window_start(now)),
+            "start_utc": iso_z(floor_half_hour(now)),
             "cell_minutes": CELL_MINUTES,
             "cells": WINDOW_CELLS,
         },
@@ -132,7 +126,7 @@ async def _state(request: web.Request, team_draft_id: int) -> dict[str, object] 
 
 @routes.get("/api/team-draft")
 async def get_team_draft(request: web.Request) -> web.Response:
-    if (refused := _view_refused(request)) is not None:
+    if (refused := view_refused(request, VIEW)) is not None:
         return refused
     team_draft_id = _subject_id(identity(request))
     state = None if team_draft_id is None else await _state(request, team_draft_id)
@@ -180,7 +174,7 @@ async def _reply(request: web.Request, team_draft_id: int, ok: bool, code: str |
 
 @routes.post("/api/team-draft/actions")
 async def post_action(request: web.Request) -> web.Response:
-    if (refused := _view_refused(request)) is not None:
+    if (refused := view_refused(request, VIEW)) is not None:
         return refused
     raw = await read_body(request, MAX_ACTION_BYTES)
     if raw is None:
