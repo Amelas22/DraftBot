@@ -30,3 +30,4 @@ class SchedulerLink(Base):
     issued_utc = Column(DateTime, nullable=False)
     expires_utc = Column(DateTime, nullable=False, index=True)
     removed_utc = Column(DateTime, nullable=True)
+    subject = Column(String(64), nullable=True)  # what the link opens, e.g. a team draft id

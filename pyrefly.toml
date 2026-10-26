@@ -18,6 +18,7 @@ project-includes = [
     "cogs/scheduler_web_cog.py",
     "models/scheduler.py",
     "models/team_finder.py",
+    "models/team_draft.py",
     "services/team_finder.py",
     "services/team_finder_sync.py",
     "services/scheduler_teams_api.py",
