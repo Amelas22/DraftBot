@@ -213,7 +213,7 @@ async def test_a_pending_registration_also_gets_its_roles(test_db):  # noqa: F81
 
     assert out.kind == "pending"
     ensure.assert_awaited_once_with(guild, out.participant_id)
-    assert guild.members[10].add_roles.await_count == 2
+    assert guild.members[10].add_roles.await_count == 1
 
 
 @pytest.mark.asyncio

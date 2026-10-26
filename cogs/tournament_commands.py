@@ -1291,8 +1291,19 @@ class TournamentCog(commands.Cog):
         if not await self._check_enabled(ctx):
             return
         await ctx.defer(ephemeral=True)
-        plan = await (apply_role_sync if apply else plan_role_sync)(ctx.guild)
-        await ctx.followup.send(format_role_sync(plan, bool(apply)), ephemeral=True)
+        # Applying on a large server is hundreds of sequential Discord calls; a
+        # failure partway must still reach the operator, and the run can be repeated.
+        try:
+            plan = await (apply_role_sync if apply else plan_role_sync)(ctx.guild)
+        except Exception:
+            logger.exception(f"[league-roles] sync_roles failed in guild {ctx.guild.id}")
+            await ctx.followup.send(
+                "❌ Role sync failed partway — check the logs, then run it again "
+                "(it only does what is still missing).", ephemeral=True)
+            return
+        reply = format_role_sync(plan, bool(apply))
+        logger.info(f"[league-roles] sync_roles in guild {ctx.guild.id} by {ctx.author.id}:\n{reply}")
+        await ctx.followup.send(reply, ephemeral=True)
 
     async def _match_autocomplete(ctx: discord.AutocompleteContext):
         """Suggest this server's reportable matches by id, name and teams."""

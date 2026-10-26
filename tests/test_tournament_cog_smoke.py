@@ -1884,3 +1884,22 @@ async def test_remove_teammate_replies_even_if_the_release_raises():
     reply = ctx.followup.send.call_args.args[0]
     assert "✅" in reply
     assert "⚠️" in reply
+
+
+
+@pytest.mark.asyncio
+async def test_sync_roles_reports_a_failure_instead_of_hanging():
+    from cogs.tournament_commands import TournamentCog
+
+    cog = TournamentCog.__new__(TournamentCog)
+    cog._check_enabled = AsyncMock(return_value=True)
+    ctx = _ctx()
+    with patch("cogs.tournament_commands.apply_role_sync",
+               AsyncMock(side_effect=RuntimeError("gateway"))), \
+         patch("cogs.tournament_commands.logger") as log:
+        await TournamentCog.sync_roles.callback(cog, ctx, apply=True)
+
+    log.exception.assert_called_once()
+    ctx.followup.send.assert_awaited_once_with(
+        "❌ Role sync failed partway — check the logs, then run it again "
+        "(it only does what is still missing).", ephemeral=True)

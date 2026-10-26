@@ -82,14 +82,15 @@ async def grant_league_roles(guild: discord.Guild, user_ids: Iterable[str]) -> b
             logger.info(f"[league-roles] {user_id} is not in the guild; no roles granted")
             ok = False
             continue
-        for role in roles:
-            if role in member.roles:
-                continue
-            try:
-                await member.add_roles(role)
-            except discord.HTTPException as e:
-                logger.warning(f"[league-roles] could not give {role} to {user_id}: {e}")
-                ok = False
+        missing = [role for role in roles if role not in member.roles]
+        if not missing:
+            continue
+        # One call per member: sync_roles on a large server runs this hundreds of times.
+        try:
+            await member.add_roles(*missing)
+        except discord.HTTPException as e:
+            logger.warning(f"[league-roles] could not give {missing} to {user_id}: {e}")
+            ok = False
     return ok
 
 

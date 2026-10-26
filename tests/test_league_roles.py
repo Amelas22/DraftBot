@@ -121,8 +121,7 @@ async def test_grant_adds_both_roles_only_where_missing():
     assert await grant_league_roles(guild, ["1", "2"]) is True
 
     holder.add_roles.assert_awaited_once_with(_role_of(guild, "League Participant"))
-    given = [a for c in fresh.add_roles.await_args_list for a in c.args]
-    assert sorted(r.name for r in given) == ["Active", "League Participant"]
+    fresh.add_roles.assert_awaited_once_with(_role_of(guild, "League Participant"), active)
 
 
 @pytest.mark.asyncio
@@ -339,8 +338,7 @@ async def test_sync_roles_apply_makes_the_changes(test_db):
     ensure.assert_awaited_once()
     members[12].remove_roles.assert_awaited_once_with(lp)
     members[11].add_roles.assert_awaited_once_with(active)
-    given = [a for c in members[20].add_roles.await_args_list for a in c.args]
-    assert sorted(r.name for r in given) == ["Active", "League Participant"]
+    members[20].add_roles.assert_awaited_once_with(lp, active)
     members[10].add_roles.assert_not_called()
 
 
