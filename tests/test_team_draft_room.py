@@ -550,7 +550,7 @@ async def test_announce_posts_in_the_thread_then_refreshes(test_db):
     refresh = AsyncMock(side_effect=lambda *a: order.append("refresh"))
     change = _booking_change()
 
-    with patch("team_draft_view.refresh_team_draft_control", refresh):
+    with patch("team_draft_view._edit_control", refresh):
         await announce_booking(bot, team_draft_id, change)
 
     bot.get_channel.assert_called_once_with(900)
@@ -562,7 +562,8 @@ async def test_announce_posts_in_the_thread_then_refreshes(test_db):
     assert sent["content"].startswith("<@&111> <@201> <@202>\n")
     mentions = sent["allowed_mentions"]
     assert (mentions.everyone, mentions.roles, mentions.users) == (False, True, True)
-    refresh.assert_awaited_once_with(bot, team_draft_id)
+    refresh.assert_awaited_once()
+    assert refresh.await_args.args[0] is bot and refresh.await_args.args[1].id == team_draft_id
     assert order == ["send", "refresh"]
 
 
@@ -578,7 +579,7 @@ async def test_announce_with_a_deleted_thread_logs_and_returns(test_db):
         side_effect=discord.NotFound(MagicMock(status=404), "Unknown Channel"))
     refresh = AsyncMock()
 
-    with patch("team_draft_view.refresh_team_draft_control", refresh):
+    with patch("team_draft_view._edit_control", refresh):
         await announce_booking(bot, team_draft_id, _booking_change())
 
     bot.fetch_channel.assert_awaited_once_with(900)
@@ -597,10 +598,11 @@ async def test_announce_that_discord_refuses_still_refreshes(test_db):
     bot.get_channel.return_value = thread
     refresh = AsyncMock()
 
-    with patch("team_draft_view.refresh_team_draft_control", refresh):
+    with patch("team_draft_view._edit_control", refresh):
         await announce_booking(bot, team_draft_id, _booking_change())
 
-    refresh.assert_awaited_once_with(bot, team_draft_id)
+    refresh.assert_awaited_once()
+    assert refresh.await_args.args[0] is bot and refresh.await_args.args[1].id == team_draft_id
 
 
 @pytest.mark.asyncio
@@ -609,7 +611,7 @@ async def test_announce_for_a_vanished_matchup_does_nothing(test_db):
 
     bot = MagicMock()
     refresh = AsyncMock()
-    with patch("team_draft_view.refresh_team_draft_control", refresh):
+    with patch("team_draft_view._edit_control", refresh):
         await announce_booking(bot, 4242, _booking_change())
 
     bot.get_channel.assert_not_called()

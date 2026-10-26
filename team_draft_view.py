@@ -39,6 +39,7 @@ from match_control_view import lobby_link
 from models.draft_session import DraftSession
 from models.team_draft import TeamDraft
 from services.scheduler_links import issue_link
+from services.scheduler_team_draft_api import VIEW as TIME_LINK_VIEW
 from services.team_draft import BookingChange, by_thread, set_room
 
 if TYPE_CHECKING:
@@ -49,7 +50,6 @@ GONE = "This team draft no longer exists."
 # scheduler (board, wizard, /team_draft_board, Start draft, /premade_draft).
 NOT_ENABLED = "Team drafts aren't turned on in this server."
 DELETED_ROLE = "deleted role"
-TIME_LINK_VIEW = "team_draft"  # the scheduler link view for one matchup (scheduler_team_draft_api.VIEW)
 TIME_LINK_INTRO = ("See both sides' usual weeks side by side and book a time that suits "
                    "everyone. The link works for 7 days.")
 TIME_LINK_FAILED = "Couldn't make your link just now. Try again in a minute."
@@ -249,30 +249,40 @@ async def _reach_thread(bot: discord.Client, thread_id: int) -> object | None:
         return None
 
 
-async def refresh_team_draft_control(bot: discord.Client, team_draft_id: int) -> None:
-    """Re-render a matchup's control message in place. No-op if it was never posted."""
+async def _load_facts(bot: discord.Client, team_draft_id: int) -> TeamDraftFacts | None:
+    """team_draft_facts named from the matchup's own guild in the bot's cache."""
     async with db_session() as session:
         row = await session.get(TeamDraft, team_draft_id)
         if row is None:
-            return
-        guild = bot.get_guild(int(row.guild_id))
-        facts = await team_draft_facts(session, team_draft_id, guild)
-    if facts is None or not facts.thread_id or not facts.control_message_id:
+            return None
+        return await team_draft_facts(session, team_draft_id, bot.get_guild(int(row.guild_id)))
+
+
+async def _edit_control(bot: discord.Client, facts: TeamDraftFacts) -> None:
+    """Re-render the control message from ``facts``. No-op if it was never posted."""
+    if not facts.thread_id or not facts.control_message_id:
         return
     body, view = _body_and_view(facts)
 
     thread_id, control_id = int(facts.thread_id), int(facts.control_message_id)
     channel = await _reach_thread(bot, thread_id)
     if channel is None:
-        logger.warning(f"Team draft {team_draft_id} thread {thread_id} unreachable; not refreshed")
+        logger.warning(f"Team draft {facts.id} thread {thread_id} unreachable; not refreshed")
         return
     try:
         message = await as_messageable(channel).fetch_message(control_id)
         await message.edit(content=body, view=view)
     except discord.NotFound:
-        logger.warning(f"Team draft {team_draft_id} control message {control_id} gone; not refreshed")
+        logger.warning(f"Team draft {facts.id} control message {control_id} gone; not refreshed")
     except discord.HTTPException as e:
-        logger.error(f"Failed to refresh control message for team draft {team_draft_id}: {e}")
+        logger.error(f"Failed to refresh control message for team draft {facts.id}: {e}")
+
+
+async def refresh_team_draft_control(bot: discord.Client, team_draft_id: int) -> None:
+    """Re-render a matchup's control message in place. No-op if it was never posted."""
+    facts = await _load_facts(bot, team_draft_id)
+    if facts is not None:
+        await _edit_control(bot, facts)
 
 
 async def refresh_freed_team_draft(team_draft_id: int) -> None:
@@ -300,12 +310,7 @@ async def announce_booking(bot: discord.Client, team_draft_id: int, change: Book
     if change.old is not None and change.old == change.new:
         await refresh_team_draft_control(bot, team_draft_id)
         return
-    async with db_session() as session:
-        row = await session.get(TeamDraft, team_draft_id)
-        if row is None:
-            return
-        guild = bot.get_guild(int(row.guild_id))
-        facts = await team_draft_facts(session, team_draft_id, guild)
+    facts = await _load_facts(bot, team_draft_id)
     if facts is None or not facts.thread_id:
         return
     content = booking_announcement(change.by_name, change.old, change.new, facts.a, facts.b)
@@ -321,22 +326,27 @@ async def announce_booking(bot: discord.Client, team_draft_id: int, change: Book
             allowed_mentions=discord.AllowedMentions(everyone=False, roles=True, users=True))
     except discord.HTTPException as e:
         logger.warning(f"Could not announce the booking for team draft {team_draft_id}: {e}")
-    await refresh_team_draft_control(bot, team_draft_id)
+    # The booking was committed before these facts were read, so they are current.
+    await _edit_control(bot, facts)
 
 
-def _is_bot(guild: discord.Guild | None, user_id: str) -> bool:
+def is_bot(guild: discord.Guild | None, user_id: str) -> bool:
+    """Whether ``user_id`` is a bot the guild's cache knows of."""
     member = guild.get_member(int(user_id)) if guild is not None else None
     return member is not None and member.bot
 
 
+def role_member_ids(guild: discord.Guild | None, role_id: str) -> list[str] | None:
+    """A role's current members (bots included), or None for a role Discord no longer has."""
+    role = guild.get_role(int(role_id)) if guild is not None else None
+    return None if role is None else [str(m.id) for m in role.members]
+
+
 def _role_members(guild: discord.Guild | None, side: Side) -> list[str]:
     """Current non-bot members of a side's roles; a deleted role contributes nobody."""
-    found: list[str] = []
-    for role_id in side.role_ids:
-        role = guild.get_role(int(role_id)) if guild is not None else None
-        if role is not None:
-            found.extend(str(m.id) for m in role.members if not m.bot)
-    return found
+    return [user_id for role_id in side.role_ids
+            for user_id in role_member_ids(guild, role_id) or []
+            if not is_bot(guild, user_id)]
 
 
 async def side_rosters(bot: discord.Client, guild_id: str, team_draft_id: int) -> tuple[Roster, Roster]:
@@ -350,8 +360,8 @@ async def side_rosters(bot: discord.Client, guild_id: str, team_draft_id: int) -
     if facts is None or facts.guild_id != guild_id:
         return Roster("Side A", ()), Roster("Side B", ())
     a_people, b_people = assign_people(
-        [u for u in facts.a.user_ids if not _is_bot(guild, u)], _role_members(guild, facts.a),
-        [u for u in facts.b.user_ids if not _is_bot(guild, u)], _role_members(guild, facts.b),
+        [u for u in facts.a.user_ids if not is_bot(guild, u)], _role_members(guild, facts.a),
+        [u for u in facts.b.user_ids if not is_bot(guild, u)], _role_members(guild, facts.b),
     )
     return (
         Roster(facts.a.label, tuple((u, _member_name(guild, u)) for u in a_people)),

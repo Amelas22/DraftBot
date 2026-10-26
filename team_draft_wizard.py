@@ -23,7 +23,7 @@ from helpers.matchup import Side, matchup_name, side_label
 from helpers.utils import DISCORD_THREAD_NAME_LIMIT, PrefilledSelect, not_none, ui_button
 from services.team_draft import (
     MAX_PICKS, Picks, check_sides, create_team_draft, delete_team_draft)
-from team_draft_view import NOT_ENABLED, open_team_draft_room
+from team_draft_view import NOT_ENABLED, is_bot, open_team_draft_room, role_member_ids
 
 WIZARD_TIMEOUT = 600
 PRESS_AGAIN = "press **Set up a team draft** again"
@@ -233,20 +233,6 @@ class NameModal(discord.ui.Modal):
         await _show_confirm(interaction, self.state)
 
 
-def _members_of(guild: discord.Guild) -> Callable[[str], list[str] | None]:
-    def members(role_id: str) -> list[str] | None:
-        role = guild.get_role(int(role_id))
-        return None if role is None else [str(m.id) for m in role.members]
-    return members
-
-
-def _is_bot_in(guild: discord.Guild) -> Callable[[str], bool]:
-    def is_bot(user_id: str) -> bool:
-        member = guild.get_member(int(user_id))
-        return member is not None and member.bot
-    return is_bot
-
-
 def _picks(side: Side) -> Picks:
     return Picks(role_ids=side.role_ids, user_ids=side.user_ids)
 
@@ -280,7 +266,8 @@ class ConfirmView(WizardView):
             return
         guild = not_none(interaction.guild)
         refusal = check_sides(_picks(not_none(state.a)), _picks(not_none(state.b)),
-                              _members_of(guild), state.guild_id, _is_bot_in(guild))
+                              lambda role_id: role_member_ids(guild, role_id), state.guild_id,
+                              lambda user_id: is_bot(guild, user_id))
         if refusal is not None:
             await _show_confirm(interaction, state, f"❌ {refusal}")
             return
