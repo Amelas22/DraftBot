@@ -294,55 +294,6 @@ async def _team_count(t_id):
             TournamentParticipant.tournament_id == t_id))).scalars().all())
 
 
-@pytest.mark.asyncio
-async def test_registering_a_team_named_after_a_role_is_refused(test_db):  # noqa: F811
-    t_id = await _tournament()
-    guild = _role_guild([10], role_names=("League Participant", "Active", "Bot Manager"))
-    guild.id = GUILD
-    guild.create_role = AsyncMock()
-    with _quiet(), _named_config(), \
-            patch.object(reg, "ensure_team_role", AsyncMock(return_value="555")) as ensure:
-        out = await reg.register_captain(_bot_with(guild), GUILD, t_id, "10", " bot manager ")
-
-    assert out.kind == "refused"
-    assert out.error == ("A team can't be named “bot manager” — that's already a role on "
-                         "this server. Pick another name.")
-    assert await _team_count(t_id) == 0
-    ensure.assert_not_awaited()
-    guild.create_role.assert_not_awaited()
-    guild.members[10].add_roles.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_registering_a_team_named_after_the_active_setting_is_refused_even_without_the_role(test_db):  # noqa: F811
-    t_id = await _tournament()
-    guild = _role_guild([10], role_names=())
-    guild.id = GUILD
-    with _quiet(), _named_config(active="Regular"):
-        out = await reg.register_captain(_bot_with(guild), GUILD, t_id, "10", "REGULAR")
-
-    assert out.kind == "refused"
-    assert "already a role on this server" in out.error
-    assert await _team_count(t_id) == 0
-
-
-@pytest.mark.asyncio
-async def test_a_pending_team_can_still_pay_although_its_own_role_has_its_name(test_db):  # noqa: F811
-    t_id = await _tournament(fee=20)
-    p_id = await _participant(t_id, "Alpha", "10")
-    async with db_session() as session:
-        (await session.get(TournamentParticipant, p_id)).role_id = "77"
-    await wallet_service.adjust(GUILD, "10", 35, "seed", "test")
-    guild = _with_role_ids(_role_guild([10], role_names=("League Participant", "Active", "Alpha")),
-                           {"Alpha": 77})
-    guild.id = GUILD
-    with _quiet(), _named_config():
-        out = await reg.register_captain(_bot_with(guild), GUILD, t_id, "10", "alpha")
-
-    assert out.kind == "paid"
-    assert out.participant_id == p_id
-
-
 def _with_role_ids(guild, ids):
     """Give the guild's roles ids, by name."""
     guild.roles = [SimpleNamespace(id=ids.get(r.name, 0), name=r.name) for r in guild.roles]
@@ -366,29 +317,15 @@ async def test_a_pending_non_ascii_team_can_still_pay(test_db):  # noqa: F811
 
 
 @pytest.mark.asyncio
-async def test_an_unrecorded_role_with_the_team_name_still_refuses(test_db):  # noqa: F811
-    t_id = await _tournament(fee=20)
-    p_id = await _participant(t_id, "Alpha", "10")
-    async with db_session() as session:
-        (await session.get(TournamentParticipant, p_id)).role_id = "77"
-    await wallet_service.adjust(GUILD, "10", 35, "seed", "test")
-    guild = _with_role_ids(_role_guild([10], role_names=("Alpha",)), {"Alpha": 88})
-    guild.id = GUILD
-    with _quiet(), _named_config():
-        out = await reg.register_captain(_bot_with(guild), GUILD, t_id, "10", "Alpha")
-
-    assert out.kind == "refused"
-    assert "already a role on this server" in out.error
-    assert await wallet_service.get_balance(GUILD, "10") == 35
-
-
-@pytest.mark.asyncio
-async def test_a_team_named_after_the_admin_setting_is_refused_even_without_the_role(test_db):  # noqa: F811
+async def test_a_team_named_after_a_role_registers_under_a_prefixed_role(test_db):  # noqa: F811
     t_id = await _tournament()
-    guild = _role_guild([10], role_names=())
+    guild = _role_guild([10], role_names=("League Participant", "Active", "Bot Manager"))
     guild.id = GUILD
-    with _quiet(), _named_config(admin="Cube Overseer"):
-        out = await reg.register_captain(_bot_with(guild), GUILD, t_id, "10", "cube overseer")
+    with _quiet(), _named_config(), \
+            patch.object(reg, "ensure_team_role", AsyncMock(return_value="555")) as ensure:
+        out = await reg.register_captain(_bot_with(guild), GUILD, t_id, "10", "Bot Manager")
 
-    assert out.kind == "refused"
-    assert await _team_count(t_id) == 0
+    assert out.kind == "free_registered"
+    assert await _team_count(t_id) == 1
+    ensure.assert_awaited_once()
+

@@ -1816,35 +1816,6 @@ async def test_sync_roles_replies_ephemerally_and_only_applies_when_asked(apply,
 
 
 @pytest.mark.asyncio
-async def test_add_team_refuses_a_role_name(test_db):  # noqa: F811
-    from sqlalchemy import select
-    from cogs.tournament_commands import TournamentCog
-    from database.db_session import db_session
-    from models.tournament import TournamentParticipant
-    from services.tournament_service import create_tournament
-
-    async with db_session() as session:
-        await create_tournament(session, "123", "Spring", 3)
-    cog = TournamentCog(MagicMock())
-    cog._refresh_board = AsyncMock()
-    ctx = _ctx()
-    ctx.guild.roles = [SimpleNamespace(id=1, name="Mod")]
-    with patch("cogs.tournament_commands.tournament_enabled", return_value=True), \
-         patch("helpers.permissions.get_config", return_value={}), \
-         patch("services.league_roles.get_config", return_value={}), \
-         patch("cogs.tournament_commands.ensure_team_role", AsyncMock()) as ensure:
-        await TournamentCog.add_team.callback(cog, ctx, team="mod", captain=_player(777))
-
-    assert ctx.followup.send.await_args.args[0] == (
-        "❌ A team can't be named “mod” — that's already a role on this server. "
-        "Pick another name.")
-    ensure.assert_not_awaited()
-    async with db_session() as session:
-        assert (await session.execute(select(TournamentParticipant))).scalars().all() == []
-
-
-
-@pytest.mark.asyncio
 async def test_finish_still_releases_league_participant_when_role_deletion_raises():
     from cogs.tournament_commands import TournamentCog
 

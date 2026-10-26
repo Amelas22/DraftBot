@@ -49,33 +49,33 @@ def role_target(participant: Any) -> TeamRoleTarget:
     )
 
 
+TEAM_ROLE_PREFIX = "Team "
+
+
 def team_role_name(team_name: str) -> str:
-    """The role name for a team. Clipped to Discord's limit; names are not
+    """The role name for a team: the team's name behind TEAM_ROLE_PREFIX, so it
+    can never read as a role the bot looks up by name (a team called "Bot
+    Manager" gets "Team Bot Manager"). Clipped to Discord's limit; names are not
     made unique, because two concurrent tournaments may each have an "Alpha"
     and the id -- not the name -- is what we store and delete by."""
-    return team_name[:DISCORD_ROLE_NAME_LIMIT]
+    return f"{TEAM_ROLE_PREFIX}{team_name}"[:DISCORD_ROLE_NAME_LIMIT]
 
 
-def role_name_clash(guild: discord.Guild, team_name: str,
-                    own_role_id: str | None = None) -> str | None:
+def role_name_clash(guild: discord.Guild, team_name: str) -> str | None:
     """The role name a team called ``team_name`` would share, or None.
 
     Roles are found by NAME across the bot -- a manager name grants bot-manager
     (helpers/permissions.py), ``roles.admin`` sees draft rooms
-    (helpers/draft_rooms.py), League Participant / Active are looked up by name
-    -- and a team role is just the team's name, handed out at sign-up. So it
-    must not equal, case-insensitively, any role already in the guild, nor one
-    of those configured names even before that role exists.
-
-    ``own_role_id`` is the team's own recorded role, which carries its name and
-    is not a clash. A configured name is never excused.
+    (helpers/draft_rooms.py), League Participant / Active are looked up by name.
+    The prefix keeps a team role clear of those in practice; this is the check
+    that it really is: no case-insensitive match with any role already in the
+    guild, nor with one of those configured names even before that role exists.
     """
     # Imported here: league_roles imports this module.
     from services.league_roles import active_role_name, league_participant_name
 
     wanted = team_role_name(team_name.strip()).strip().casefold()
-    reserved = [role.name for role in guild.roles
-                if own_role_id is None or str(role.id) != str(own_role_id)]
+    reserved = [role.name for role in guild.roles]
     admin = get_config(guild.id).get("roles", {}).get("admin")
     reserved += [*sorted(get_manager_role_names(guild.id)),
                  league_participant_name(guild.id), active_role_name(guild.id),
@@ -163,8 +163,8 @@ async def _ensure(guild: discord.Guild, participant_id: int) -> tuple[str | None
             target = role_target(participant)
         clash = role_name_clash(guild, target.team_name)
         if clash is not None:
-            # Sign-up refuses these names; a team that predates that check must
-            # still never be handed a role that reads as someone else's.
+            # Only when the guild already has a role called "Team <name>": never
+            # hand a team a role that reads as someone else's.
             logger.warning(f"[team-roles] not creating a role for {target.team_name}: "
                            f"the name is taken by role '{clash}'")
             return None, False

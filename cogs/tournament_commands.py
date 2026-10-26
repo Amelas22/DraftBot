@@ -20,7 +20,7 @@ from helpers.pin_helpers import safe_pin
 from helpers.utils import not_none, ui_button
 from notification_service import send_dm
 from services.team_finder_sync import reconcile_after_command
-from services.tournament_registration import add_roster_members, check_team_name, register_captain
+from services.tournament_registration import add_roster_members, register_captain
 from cogs.lfg_cog import ensure_lfg_board
 from match_control_view import (
     MatchControlView,
@@ -1080,8 +1080,6 @@ class TournamentCog(commands.Cog):
                     await ctx.followup.send("There is no tournament accepting registrations right now.", ephemeral=True)
                     return
                 participant, created = await register_team(session, tournament.id, team, captain.id)
-                # Before comp: a refused name rolls back the registration above.
-                check_team_name(ctx.guild, team, None if created else participant.role_id)
                 # Admin add is a comp: paid with no escrow, so it's seed-eligible even in a
                 # paid tournament. Same transaction as the registration, so a crash can't
                 # leave the team registered-but-pending. The captain isn't billed.

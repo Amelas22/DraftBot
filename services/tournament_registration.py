@@ -21,12 +21,9 @@ from models.tournament import Tournament, TournamentParticipant
 from services import tournament_escrow_service as escrow
 from services.tournament_formatter import refresh_boards
 from services.league_roles import grant_league_roles
-from services.tournament_roles import ensure_team_role, role_name_clash, sync_member
+from services.tournament_roles import ensure_team_role, sync_member
 from services.tournament_service import add_teammate, other_teams_for_user, register_team
 
-
-TEAM_NAME_TAKEN = ("A team can't be named “{name}” — that's already a role on this server. "
-                   "Pick another name.")
 
 RegisterKind = Literal["free_registered", "free_exists", "paid", "already_paid",
                        "not_captain", "pending", "hold_failed", "refused"]
@@ -70,19 +67,6 @@ class RosterAdd:
     role_synced: bool = True
 
 
-def check_team_name(guild: discord.Guild, team_name: str, own_role_id: str | None) -> None:
-    """Raise ValueError if ``team_name``'s role would share a name with a role the
-    bot looks up by name (see role_name_clash).
-
-    Call it right after register_team, inside the same session, so a refusal
-    rolls back whatever that wrote. ``own_role_id`` is the recorded role of the
-    team register_team found (None for a new team): the one excused clash, since
-    a pending captain re-registers to pay under the name their role carries.
-    """
-    if role_name_clash(guild, team_name, own_role_id) is not None:
-        raise ValueError(TEAM_NAME_TAKEN.format(name=team_name.strip()))
-
-
 async def register_captain(bot: discord.Bot, guild_id: str, tournament_id: int,
                            captain_id: str, team_name: str) -> RegisterOutcome:
     """Register a team (see ``_register_row``) and, for every outcome that left a
@@ -90,7 +74,7 @@ async def register_captain(bot: discord.Bot, guild_id: str, tournament_id: int,
     A role the bot could not give is reported in ``roles_synced``, never raised:
     the registration has already committed."""
     guild = bot.get_guild(int(guild_id))
-    out = await _register_row(bot, guild, guild_id, tournament_id, captain_id, team_name)
+    out = await _register_row(bot, guild_id, tournament_id, captain_id, team_name)
     if out.participant_id is None or out.kind in ("refused", "not_captain"):
         return out
     if guild is None:
@@ -101,14 +85,11 @@ async def register_captain(bot: discord.Bot, guild_id: str, tournament_id: int,
     return replace(out, roles_synced=role_id is not None and league_ok)
 
 
-async def _register_row(bot: discord.Bot, guild: discord.Guild | None, guild_id: str,
-                        tournament_id: int, captain_id: str,
-                        team_name: str) -> RegisterOutcome:
+async def _register_row(bot: discord.Bot, guild_id: str, tournament_id: int,
+                        captain_id: str, team_name: str) -> RegisterOutcome:
     """Register ``team_name`` with ``captain_id`` as captain, paying a fee from their
     wallet when there is one. The caller has already checked that a paid tournament's
-    money stack is up and that the captain is linked to MTGO. A name check_team_name
-    refuses writes nothing; with no visible guild no role is made here, and
-    ensure_team_role repeats the check before it makes one later.
+    money stack is up and that the captain is linked to MTGO.
 
     The caller runs the Find a team reconcile once its roster is final: run here,
     before the roster is filled, it would tell the captain's Find a team teammates
@@ -119,8 +100,6 @@ async def _register_row(bot: discord.Bot, guild: discord.Guild | None, guild_id:
             t_name = tournament.name if tournament is not None else ""
             fee = (tournament.entry_fee or 0) if tournament is not None else 0
             participant, created = await register_team(session, tournament_id, team_name, captain_id)
-            if guild is not None:
-                check_team_name(guild, team_name, None if created else participant.role_id)
             p_id, p_name = participant.id, participant.team_name
             p_captain, p_status = participant.captain_user_id, participant.status
     except ValueError as e:

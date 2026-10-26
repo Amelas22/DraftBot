@@ -70,7 +70,7 @@ def _guild(create_fails_on=None, present_user_ids=()):
     created = []
 
     async def create_role(name, **kwargs):
-        if name == create_fails_on:
+        if create_fails_on is not None and name == team_role_name(create_fails_on):
             raise discord.Forbidden(MagicMock(status=403), "Missing Permissions")
         role = MagicMock()
         role.id = 1000 + len(created)
@@ -99,8 +99,10 @@ def _guild(create_fails_on=None, present_user_ids=()):
     return guild
 
 
-def test_role_name_is_the_team_name():
-    assert team_role_name("Alpha Squad") == "Alpha Squad"
+def test_role_name_is_the_team_name_with_a_prefix():
+    # The prefix keeps a team role from reading as any role the bot finds by
+    # name: a team called "Bot Manager" gets "Team Bot Manager", not bot-manager.
+    assert team_role_name("Alpha Squad") == "Team Alpha Squad"
 
 
 def test_role_name_is_clipped_to_discords_limit():
@@ -108,8 +110,8 @@ def test_role_name_is_clipped_to_discords_limit():
 
 
 def test_role_name_of_exactly_the_limit_is_untouched():
-    name = "y" * 100
-    assert team_role_name(name) == name
+    name = "y" * 95
+    assert team_role_name(name) == "Team " + name
 
 
 @pytest.mark.asyncio
@@ -118,7 +120,7 @@ async def test_create_team_roles_returns_a_role_per_participant():
     parts = [_participant(1, "Alpha", 10), _participant(2, "Bravo", 20)]
     out = await create_team_roles(guild, parts)
     assert set(out) == {1, 2}
-    assert [r.name for r in guild.created] == ["Alpha", "Bravo"]
+    assert [r.name for r in guild.created] == ["Team Alpha", "Team Bravo"]
     # mentionable is the whole point: a role nobody can mention cannot pull
     # anyone into a thread.
     assert guild.create_role.await_args_list[0].kwargs["mentionable"] is True
@@ -627,7 +629,7 @@ async def test_ensure_refuses_to_create_a_clashing_role(test_db):
     _, pid = await _seed_team(test_db, name="mod")
     guild = _guild(present_user_ids=[10, 200])
     guild.id = "g1"
-    guild.roles = [SimpleNamespace(id=1, name="Mod")]
+    guild.roles = [SimpleNamespace(id=1, name="Team Mod")]
     with _route_roles_at(test_db), \
             patch("helpers.permissions.get_config", return_value={}), \
             patch("services.league_roles.get_config", return_value={}), \
