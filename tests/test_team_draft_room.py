@@ -279,6 +279,30 @@ async def test_a_failed_draft_creation_frees_the_matchup(test_db):
 
 
 @pytest.mark.asyncio
+async def test_a_draft_that_fails_after_it_was_saved_keeps_the_matchup(test_db):
+    from sessions.premade_session import PremadeSession
+
+    team_draft_id = await seed_team_draft(thread_id="900", control_message_id="777")
+    interaction = make_interaction(make_guild())
+
+    async def saved_then_fails(_self, _interaction, _bot):
+        # The base create commits the row and posts the lobby, then a later
+        # step (message info, sticky) raises.
+        async with db_session() as session:
+            session.add(DraftSession(session_id="s-1", guild_id="1", draft_channel_id="60",
+                                     message_id="61", session_type="premade"))
+        raise RuntimeError("sticky failed")
+
+    with patch("sessions.base_session.BaseSession.create_draft_session", saved_then_fails), \
+         patch("team_draft_view.refresh_team_draft_control", AsyncMock()):
+        with pytest.raises(RuntimeError):
+            await PremadeSession(_details("s-1", team_draft_id)).create_draft_session(
+                interaction, MagicMock())
+
+    assert (await stored(team_draft_id)).draft_session_id == "s-1"
+
+
+@pytest.mark.asyncio
 async def test_a_failing_refresh_never_breaks_the_draft(test_db):
     from sessions.premade_session import PremadeSession
 

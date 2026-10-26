@@ -139,9 +139,23 @@ class PremadeSession(BaseSession):
         try:
             await super().create_draft_session(interaction, bot)
         except Exception:
+            # Free the matchup only if no draft row was saved. The base create
+            # commits the row and posts the lobby before steps that can still
+            # raise; freeing then would let a second draft start beside a live one.
             try:
+                from sqlalchemy import select
+
+                from models.draft_session import DraftSession
                 async with db_session() as session:
-                    await release_draft(session, team_draft_id, session_id)
+                    saved = (await session.execute(
+                        select(DraftSession.id).where(DraftSession.session_id == session_id)
+                    )).first() is not None
+                    if not saved:
+                        await release_draft(session, team_draft_id, session_id)
+                if saved:
+                    logger.error(
+                        f"Draft {session_id} for team draft {team_draft_id} failed after "
+                        "it was saved; keeping the matchup claimed")
             except Exception:
                 logger.exception(
                     f"Could not free team draft {team_draft_id} after its draft failed")
