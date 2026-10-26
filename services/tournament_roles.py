@@ -8,6 +8,7 @@ guild state, and every function takes the guild it is reconciling.
 A role's lifetime is one tournament. The largest real event had 42 teams and a
 guild caps at 250 roles, so roles are given back when the tournament ends.
 """
+import asyncio
 from typing import Any, Iterable, NamedTuple
 
 import discord
@@ -114,36 +115,44 @@ async def create_team_roles(guild: discord.Guild, participants: Iterable[Any]) -
     return role_ids
 
 
-async def _create_and_store(guild: discord.Guild, target: TeamRoleTarget) -> str | None:
-    """Create one team's role and record it. None if Discord refused."""
-    try:
-        role_ids = await create_team_roles(guild, [target])
-    except discord.HTTPException as e:
-        logger.warning(f"[team-roles] could not create a role for {target.team_name}: {e}")
-        return None
-    # Imported here: tournament_service is the heavier module and nothing else
-    # in this file needs it.
-    from services.tournament_service import store_role_ids
-    await store_role_ids(role_ids)
-    return role_ids[target.id]
+# One lock per participant: a sign-up and /tournament start can both ask for the
+# same team's role at once, and without this each would create its own.
+_ensure_locks: dict[int, asyncio.Lock] = {}
+
+
+async def _ensure(guild: discord.Guild, participant_id: int) -> tuple[str | None, bool]:
+    """(role id, whether this call created it). The stored id is re-read under
+    the lock, so a caller that waited sees the role the first one made."""
+    lock = _ensure_locks.setdefault(participant_id, asyncio.Lock())
+    async with lock:
+        async with db_session() as session:
+            participant = await session.get(TournamentParticipant, participant_id)
+            if participant is None or participant.dropped_at is not None:
+                return None, False
+            if participant.role_id and guild.get_role(int(participant.role_id)) is not None:
+                return participant.role_id, False
+            target = role_target(participant)
+        try:
+            role_ids = await create_team_roles(guild, [target])
+        except discord.HTTPException as e:
+            logger.warning(f"[team-roles] could not create a role for {target.team_name}: {e}")
+            return None, False
+        # Imported here: tournament_service is the heavier module and nothing
+        # else in this file needs it.
+        from services.tournament_service import store_role_ids
+        await store_role_ids(role_ids)
+        return role_ids[target.id], True
 
 
 async def ensure_team_role(guild: discord.Guild, participant_id: int) -> str | None:
     """Return the live role id for a team, creating, assigning and recording
     one when it has none or its recorded role is gone from the guild.
 
-    None if the participant no longer exists or Discord refused the creation
-    (logged, never raised): the callers have already committed the change that
-    needs the role, and must not fail because of it.
+    None if the participant no longer exists, has dropped, or Discord refused
+    the creation (logged, never raised): the callers have already committed the
+    change that needs the role, and must not fail because of it.
     """
-    async with db_session() as session:
-        participant = await session.get(TournamentParticipant, participant_id)
-        if participant is None:
-            return None
-        if participant.role_id and guild.get_role(int(participant.role_id)) is not None:
-            return participant.role_id
-        target = role_target(participant)
-    return await _create_and_store(guild, target)
+    return (await _ensure(guild, participant_id))[0]
 
 
 async def ensure_team_roles(guild: discord.Guild, tournament_id: int) -> dict[int, str]:
@@ -152,20 +161,17 @@ async def ensure_team_roles(guild: discord.Guild, tournament_id: int) -> dict[in
     logged and skipped; it does not stop the others."""
     async with db_session() as session:
         result = await session.execute(
-            select(TournamentParticipant).where(
+            select(TournamentParticipant.id).where(
                 TournamentParticipant.tournament_id == tournament_id,
                 TournamentParticipant.dropped_at.is_(None),
             )
         )
-        targets = [
-            role_target(p) for p in result.scalars()
-            if not (p.role_id and guild.get_role(int(p.role_id)) is not None)
-        ]
+        participant_ids = list(result.scalars())
     created: dict[int, str] = {}
-    for target in targets:
-        role_id = await _create_and_store(guild, target)
-        if role_id is not None:
-            created[target.id] = role_id
+    for participant_id in participant_ids:
+        role_id, was_created = await _ensure(guild, participant_id)
+        if was_created and role_id is not None:
+            created[participant_id] = role_id
     return created
 
 

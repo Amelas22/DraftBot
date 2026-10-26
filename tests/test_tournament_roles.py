@@ -1,4 +1,5 @@
 """Tournament team roles: naming, creation with rollback, sync, deletion."""
+import asyncio
 import os
 import tempfile
 from contextlib import ExitStack, asynccontextmanager
@@ -594,3 +595,29 @@ async def test_ensure_survives_a_refused_create(test_db):
     with _route_roles_at(test_db):
         assert await ensure_team_role(guild, pid) is None
     assert await _stored_role_id(test_db, pid) is None
+
+
+@pytest.mark.asyncio
+async def test_concurrent_ensures_create_one_role(test_db):
+    _, pid = await _seed_team(test_db)
+    guild = _guild(present_user_ids=[10, 200])
+    inner = guild.create_role.side_effect
+
+    async def slow_create(name, **kwargs):
+        await asyncio.sleep(0)
+        return await inner(name, **kwargs)
+
+    guild.create_role = AsyncMock(side_effect=slow_create)
+    with _route_roles_at(test_db):
+        a, b = await asyncio.gather(ensure_team_role(guild, pid), ensure_team_role(guild, pid))
+    assert guild.create_role.await_count == 1
+    assert a == b is not None
+
+
+@pytest.mark.asyncio
+async def test_ensure_refuses_a_dropped_team(test_db):
+    _, pid = await _seed_team(test_db, dropped=True)
+    guild = _guild()
+    with _route_roles_at(test_db):
+        assert await ensure_team_role(guild, pid) is None
+    guild.create_role.assert_not_awaited()
