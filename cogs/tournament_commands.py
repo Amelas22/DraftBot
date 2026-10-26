@@ -1046,8 +1046,14 @@ class TournamentCog(commands.Cog):
             # role_id captured above survives past the commit.
             synced = await sync_member(ctx.guild, role_id, str(player.id), add=False)
             # After the removal committed, so they no longer read as live here;
-            # still live on another team, they keep League Participant.
-            released = await release_league_role(ctx.guild, [str(player.id)])
+            # still live on another team, they keep League Participant. Guarded
+            # like _take_back_roles: the removal stands, so the reply must too.
+            try:
+                released = await release_league_role(ctx.guild, [str(player.id)])
+            except Exception:
+                logger.exception(f"[league-roles] could not release {player.id} after "
+                                 f"their removal from '{p_name}'")
+                released = False
             synced = synced and released
 
         if not removed:

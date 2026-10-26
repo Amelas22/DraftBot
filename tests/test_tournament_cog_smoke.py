@@ -1861,3 +1861,26 @@ async def test_finish_still_releases_league_participant_when_role_deletion_raise
 
     release.assert_awaited_once()
     assert sorted(release.await_args.args[1]) == ["10", "11"]
+
+
+
+@pytest.mark.asyncio
+async def test_remove_teammate_replies_even_if_the_release_raises():
+    from cogs.tournament_commands import TournamentCog
+
+    cog = TournamentCog(MagicMock())
+    ctx = _ctx()
+    participant = MagicMock()
+    participant.role_id = "555"
+    participant.team_name = "Alpha"
+
+    with _roster_command_open(participant), \
+         patch("cogs.tournament_commands.remove_teammate", AsyncMock(return_value=True)), \
+         patch("cogs.tournament_commands.release_league_role",
+               AsyncMock(side_effect=RuntimeError("db"))), \
+         patch("cogs.tournament_commands.sync_member", AsyncMock(return_value=True)):
+        await TournamentCog.remove_teammate_cmd.callback(cog, ctx, player=_player(), team=None)
+
+    reply = ctx.followup.send.call_args.args[0]
+    assert "✅" in reply
+    assert "⚠️" in reply
