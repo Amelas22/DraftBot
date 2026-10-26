@@ -19,6 +19,7 @@ from services.league_roles import (
     plan_role_sync,
     release_league_role,
 )
+from services import league_roles
 from services.tournament_service import add_teammate, create_tournament, register_team
 
 GUILD = "g1"
@@ -31,6 +32,14 @@ def _default_config():
            "activity_tracking": {"active_role": "Active"}}
     with patch("services.league_roles.get_config", return_value=cfg):
         yield
+
+
+@pytest.fixture(autouse=True)
+def _fresh_missing_role_warnings():
+    """A missing role warns once per process; each test starts unwarned."""
+    league_roles._warned_missing.clear()
+    yield
+    league_roles._warned_missing.clear()
 
 
 async def _team(session, tournament, name, captain, roster=()):
@@ -406,3 +415,22 @@ async def test_applied_reply_warns_when_a_change_was_refused(test_db):
     clean = await apply_role_sync(_sync_guild({})[0])
     assert clean.ok is True
     assert "Couldn't" not in format_role_sync(clean, True)
+
+
+
+def test_missing_role_warns_once_per_guild():
+    guild = _guild(["Active"], {})
+    other = _guild(["Active"], {})
+    other.id = "g2"
+    messages = []
+    sink = logger.add(messages.append, level="WARNING")
+    try:
+        for _ in range(3):
+            assert league_participant_role(guild) is None
+        assert league_participant_role(other) is None
+    finally:
+        logger.remove(sink)
+
+    warned = [str(m) for m in messages if "League Participant" in str(m)]
+    assert len(warned) == 2
+    assert any("g1" in m for m in warned) and any("g2" in m for m in warned)

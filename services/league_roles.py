@@ -45,10 +45,21 @@ async def live_member_ids(session: Any, guild_id: str | int) -> set[str]:
     return {str(uid) for uid in captains.scalars()} | {str(uid) for uid in roster.scalars()}
 
 
+# (guild id, role name) pairs already warned about. Most guilds never create these
+# roles, and the lookup runs on every sign-up: warn once per process, then debug.
+_warned_missing: set[tuple[str, str]] = set()
+
+
 def _find_role(guild: discord.Guild, name: str) -> discord.Role | None:
     role = discord.utils.get(guild.roles, name=name)
     if role is None:
-        logger.warning(f"[league-roles] role '{name}' does not exist in guild {guild.id}; skipping it")
+        message = f"[league-roles] role '{name}' does not exist in guild {guild.id}; skipping it"
+        key = (str(guild.id), name)
+        if key in _warned_missing:
+            logger.debug(message)
+        else:
+            _warned_missing.add(key)
+            logger.warning(message)
     return role
 
 
