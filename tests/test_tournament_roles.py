@@ -620,3 +620,19 @@ async def test_ensure_refuses_a_dropped_team(test_db):
     with _route_roles_at(test_db):
         assert await ensure_team_role(guild, pid) is None
     guild.create_role.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ensure_refuses_to_create_a_clashing_role(test_db):
+    _, pid = await _seed_team(test_db, name="mod")
+    guild = _guild(present_user_ids=[10, 200])
+    guild.id = "g1"
+    guild.roles = [SimpleNamespace(id=1, name="Mod")]
+    with _route_roles_at(test_db), \
+            patch("helpers.permissions.get_config", return_value={}), \
+            patch("services.league_roles.get_config", return_value={}), \
+            patch("services.tournament_roles.logger") as log:
+        assert await ensure_team_role(guild, pid) is None
+    guild.create_role.assert_not_awaited()
+    assert await _stored_role_id(test_db, pid) is None
+    assert "[team-roles]" in log.warning.call_args.args[0]

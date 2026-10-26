@@ -52,14 +52,20 @@ def _find_role(guild: discord.Guild, name: str) -> discord.Role | None:
     return role
 
 
+def league_participant_name(guild_id: str | int) -> str:
+    return get_config(guild_id).get("roles", {}).get("league_participant", "League Participant")
+
+
+def active_role_name(guild_id: str | int) -> str:
+    return get_config(guild_id).get("activity_tracking", {}).get("active_role", "Active")
+
+
 def league_participant_role(guild: discord.Guild) -> discord.Role | None:
-    name = get_config(guild.id).get("roles", {}).get("league_participant", "League Participant")
-    return _find_role(guild, name)
+    return _find_role(guild, league_participant_name(guild.id))
 
 
 def active_role(guild: discord.Guild) -> discord.Role | None:
-    name = get_config(guild.id).get("activity_tracking", {}).get("active_role", "Active")
-    return _find_role(guild, name)
+    return _find_role(guild, active_role_name(guild.id))
 
 
 async def grant_league_roles(guild: discord.Guild, user_ids: Iterable[str]) -> bool:

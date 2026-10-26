@@ -275,3 +275,65 @@ async def test_adding_members_gives_team_and_league_roles(test_db):  # noqa: F81
         (guild, "555", "20"), (guild, "555", "21")]
     assert [c.args for c in grant.await_args_list] == [(guild, ["20"]), (guild, ["21"])]
     assert [(a.user_id, a.role_synced) for a in adds] == [("20", True), ("21", False)]
+
+
+
+def _named_config(active="Active"):
+    cfg = {"roles": {"league_participant": "League Participant"},
+           "activity_tracking": {"active_role": active}}
+    stack = ExitStack()
+    stack.enter_context(patch("services.league_roles.get_config", return_value=cfg))
+    stack.enter_context(patch("helpers.permissions.get_config", return_value=cfg))
+    return stack
+
+
+async def _team_count(t_id):
+    async with db_session() as session:
+        return len((await session.execute(select(TournamentParticipant).where(
+            TournamentParticipant.tournament_id == t_id))).scalars().all())
+
+
+@pytest.mark.asyncio
+async def test_registering_a_team_named_after_a_role_is_refused(test_db):  # noqa: F811
+    t_id = await _tournament()
+    guild = _role_guild([10], role_names=("League Participant", "Active", "Bot Manager"))
+    guild.id = GUILD
+    guild.create_role = AsyncMock()
+    with _quiet(), _named_config(), \
+            patch.object(reg, "ensure_team_role", AsyncMock(return_value="555")) as ensure:
+        out = await reg.register_captain(_bot_with(guild), GUILD, t_id, "10", " bot manager ")
+
+    assert out.kind == "refused"
+    assert out.error == ("A team can't be named “bot manager” — that's already a role on "
+                         "this server. Pick another name.")
+    assert await _team_count(t_id) == 0
+    ensure.assert_not_awaited()
+    guild.create_role.assert_not_awaited()
+    guild.members[10].add_roles.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_registering_a_team_named_after_the_active_setting_is_refused_even_without_the_role(test_db):  # noqa: F811
+    t_id = await _tournament()
+    guild = _role_guild([10], role_names=())
+    guild.id = GUILD
+    with _quiet(), _named_config(active="Regular"):
+        out = await reg.register_captain(_bot_with(guild), GUILD, t_id, "10", "REGULAR")
+
+    assert out.kind == "refused"
+    assert "already a role on this server" in out.error
+    assert await _team_count(t_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_pending_team_can_still_pay_although_its_own_role_has_its_name(test_db):  # noqa: F811
+    t_id = await _tournament(fee=20)
+    p_id = await _participant(t_id, "Alpha", "10")
+    await wallet_service.adjust(GUILD, "10", 35, "seed", "test")
+    guild = _role_guild([10], role_names=("League Participant", "Active", "Alpha"))
+    guild.id = GUILD
+    with _quiet(), _named_config():
+        out = await reg.register_captain(_bot_with(guild), GUILD, t_id, "10", "alpha")
+
+    assert out.kind == "paid"
+    assert out.participant_id == p_id

@@ -10,10 +10,11 @@ differently (a command says "try /tournament register again", the wizard says
 do is disagree about what registering means.
 """
 from dataclasses import dataclass, field, replace
-from typing import Literal
+from typing import Any, Literal
 
 import discord
 from loguru import logger
+from sqlalchemy import func, select
 
 from database.db_session import db_session
 from helpers.display_names import get_display_name
@@ -21,9 +22,12 @@ from models.tournament import Tournament, TournamentParticipant
 from services import tournament_escrow_service as escrow
 from services.tournament_formatter import refresh_boards
 from services.league_roles import grant_league_roles
-from services.tournament_roles import ensure_team_role, sync_member
+from services.tournament_roles import ensure_team_role, role_name_clash, sync_member
 from services.tournament_service import add_teammate, other_teams_for_user, register_team
 
+
+TEAM_NAME_TAKEN = ("A team can't be named “{name}” — that's already a role on this server. "
+                   "Pick another name.")
 
 RegisterKind = Literal["free_registered", "free_exists", "paid", "already_paid",
                        "not_captain", "pending", "hold_failed", "refused"]
@@ -67,16 +71,36 @@ class RosterAdd:
     role_synced: bool = True
 
 
+async def check_team_name(session: Any, guild: discord.Guild, tournament_id: int,
+                          team_name: str) -> None:
+    """Raise ValueError if a NEW team may not take ``team_name``: its role would
+    share a name with a role the bot looks up by name (see role_name_clash).
+
+    A team already registered in this tournament under that name passes -- its
+    own role carries the name, and a pending captain re-registers to pay.
+    """
+    if role_name_clash(guild, team_name) is None:
+        return
+    existing = await session.execute(
+        select(TournamentParticipant.id).where(
+            TournamentParticipant.tournament_id == tournament_id,
+            func.lower(TournamentParticipant.team_name) == team_name.strip().lower(),
+        )
+    )
+    if existing.first() is None:
+        raise ValueError(TEAM_NAME_TAKEN.format(name=team_name.strip()))
+
+
 async def register_captain(bot: discord.Bot, guild_id: str, tournament_id: int,
                            captain_id: str, team_name: str) -> RegisterOutcome:
     """Register a team (see ``_register_row``) and, for every outcome that left a
     team behind, give it its role and the captain League Participant and Active.
     A role the bot could not give is reported in ``roles_synced``, never raised:
     the registration has already committed."""
-    out = await _register_row(bot, guild_id, tournament_id, captain_id, team_name)
+    guild = bot.get_guild(int(guild_id))
+    out = await _register_row(bot, guild, guild_id, tournament_id, captain_id, team_name)
     if out.participant_id is None or out.kind in ("refused", "not_captain"):
         return out
-    guild = bot.get_guild(int(guild_id))
     if guild is None:
         logger.info(f"Guild {guild_id} not visible; no roles given for team '{out.team_name}'")
         return replace(out, roles_synced=False)
@@ -85,11 +109,14 @@ async def register_captain(bot: discord.Bot, guild_id: str, tournament_id: int,
     return replace(out, roles_synced=role_id is not None and league_ok)
 
 
-async def _register_row(bot: discord.Bot, guild_id: str, tournament_id: int,
-                        captain_id: str, team_name: str) -> RegisterOutcome:
+async def _register_row(bot: discord.Bot, guild: discord.Guild | None, guild_id: str,
+                        tournament_id: int, captain_id: str,
+                        team_name: str) -> RegisterOutcome:
     """Register ``team_name`` with ``captain_id`` as captain, paying a fee from their
     wallet when there is one. The caller has already checked that a paid tournament's
-    money stack is up and that the captain is linked to MTGO.
+    money stack is up and that the captain is linked to MTGO. A name check_team_name
+    refuses writes nothing; with no visible guild no role is made here, and
+    ensure_team_role repeats the check before it makes one later.
 
     The caller runs the Find a team reconcile once its roster is final: run here,
     before the roster is filled, it would tell the captain's Find a team teammates
@@ -99,6 +126,8 @@ async def _register_row(bot: discord.Bot, guild_id: str, tournament_id: int,
             tournament = await session.get(Tournament, tournament_id)
             t_name = tournament.name if tournament is not None else ""
             fee = (tournament.entry_fee or 0) if tournament is not None else 0
+            if guild is not None:
+                await check_team_name(session, guild, tournament_id, team_name)
             participant, created = await register_team(session, tournament_id, team_name, captain_id)
             p_id, p_name = participant.id, participant.team_name
             p_captain, p_status = participant.captain_user_id, participant.status

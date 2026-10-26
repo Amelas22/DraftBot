@@ -16,6 +16,7 @@ from loguru import logger
 from sqlalchemy import select
 
 from database.db_session import db_session
+from helpers.permissions import get_manager_role_names
 from models.tournament import TournamentParticipant
 
 # Discord's cap on a role name. A platform limit, not a product choice.
@@ -52,6 +53,25 @@ def team_role_name(team_name: str) -> str:
     made unique, because two concurrent tournaments may each have an "Alpha"
     and the id -- not the name -- is what we store and delete by."""
     return team_name[:DISCORD_ROLE_NAME_LIMIT]
+
+
+def role_name_clash(guild: discord.Guild, team_name: str) -> str | None:
+    """The role name a team called ``team_name`` would share, or None.
+
+    Roles are found by NAME across the bot -- a manager name grants bot-manager
+    (helpers/permissions.py), ``roles.admin`` and League Participant / Active are
+    looked up by name -- and a team role is just the team's name, handed out at
+    sign-up. So it must not equal, case-insensitively, any role already in the
+    guild, nor a name the bot treats as special even before that role exists.
+    """
+    # Imported here: league_roles imports this module.
+    from services.league_roles import active_role_name, league_participant_name
+
+    wanted = team_role_name(team_name.strip()).strip().casefold()
+    reserved = [role.name for role in guild.roles]
+    reserved += [*sorted(get_manager_role_names(guild.id)),
+                 league_participant_name(guild.id), active_role_name(guild.id)]
+    return next((name for name in reserved if name.strip().casefold() == wanted), None)
 
 
 async def _assign(guild: discord.Guild, role: discord.Role, user_id: str) -> bool:
@@ -132,6 +152,13 @@ async def _ensure(guild: discord.Guild, participant_id: int) -> tuple[str | None
             if participant.role_id and guild.get_role(int(participant.role_id)) is not None:
                 return participant.role_id, False
             target = role_target(participant)
+        clash = role_name_clash(guild, target.team_name)
+        if clash is not None:
+            # Sign-up refuses these names; a team that predates that check must
+            # still never be handed a role that reads as someone else's.
+            logger.warning(f"[team-roles] not creating a role for {target.team_name}: "
+                           f"the name is taken by role '{clash}'")
+            return None, False
         try:
             role_ids = await create_team_roles(guild, [target])
         except discord.HTTPException as e:
@@ -148,9 +175,10 @@ async def ensure_team_role(guild: discord.Guild, participant_id: int) -> str | N
     """Return the live role id for a team, creating, assigning and recording
     one when it has none or its recorded role is gone from the guild.
 
-    None if the participant no longer exists, has dropped, or Discord refused
-    the creation (logged, never raised): the callers have already committed the
-    change that needs the role, and must not fail because of it.
+    None if the participant no longer exists, has dropped, its name clashes
+    with a role (see role_name_clash), or Discord refused the creation (logged,
+    never raised): the callers have already committed the change that needs the
+    role, and must not fail because of it.
     """
     return (await _ensure(guild, participant_id))[0]
 
