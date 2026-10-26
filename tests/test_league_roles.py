@@ -185,3 +185,46 @@ def test_get_config_backfills_league_participant():
         assert config_module.get_config(guild_id)["roles"]["league_participant"] == "League Participant"
     finally:
         del config_module.bot_config.configs[guild_id]
+
+
+@pytest.mark.asyncio
+async def test_inactivity_sweep_skips_live_tournament_players(test_db):
+    from datetime import timedelta
+    from session import AsyncSessionLocal, PlayerStats
+    from utils import _sweep_guild
+
+    old = datetime.now() - timedelta(days=400)
+    async with db_session() as session:
+        t = await create_tournament(session, GUILD, "Reg", 3)
+        await _team(session, t, "Alpha", "10")
+    async with AsyncSessionLocal() as session:
+        session.add_all([
+            PlayerStats(player_id=pid, guild_id=GUILD, display_name=pid, last_draft_timestamp=old)
+            for pid in ("10", "20")
+        ])
+        await session.commit()
+
+    guild = _guild(["Active", "degen"], {})
+    guild.name = "Guild"
+    mod_chat = MagicMock()
+    mod_chat.name = "mod-chat"
+    mod_chat.send = AsyncMock()
+    guild.text_channels = [mod_chat]
+    active = _role_of(guild, "Active")
+    live, idle = _member(active), _member(active)
+    live.display_name, idle.display_name = "Live", "Idle"
+    guild.get_member.side_effect = {10: live, 20: idle}.get
+
+    cfg = {"activity_tracking": {"enabled": True, "active_role": "Active"}}
+    messages = []
+    sink = logger.add(messages.append, level="INFO")
+    try:
+        with patch("config.get_config", return_value=cfg):
+            removed = await _sweep_guild(MagicMock(), guild)
+    finally:
+        logger.remove(sink)
+
+    live.remove_roles.assert_not_called()
+    idle.remove_roles.assert_awaited_once_with(active)
+    assert removed == ["Idle"]
+    assert any("Skipping Live: in the current tournament" in str(m) for m in messages)
