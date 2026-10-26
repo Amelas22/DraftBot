@@ -1,6 +1,6 @@
 // Team draft, the decisions: when both sides have enough people free to draft, whether a cell can be booked, and
 // what the booking and a refusal say. No DOM; the view draws it.
-import { CELLS, CELL_MS } from "./week.js";
+import { CELLS, CELL_MS, addCells } from "./week.js";
 import { memberFree } from "./teams.js";
 
 export const FORMAT = "draftbot.scheduler.team_draft";
@@ -33,7 +33,7 @@ export function goodStarts(state, startUtc) {
 export function bookable(j, state, now, startUtc) {
   if (state.matchup.state !== "open") return false;
   if (!Number.isInteger(j) || j < 0 || j >= CELLS) return false;
-  return startUtc.getTime() + j * CELL_MS > now.getTime();
+  return addCells(startUtc, j).getTime() > now.getTime();
 }
 
 // The window cell index that names the same moment as `selected` once the window starts at `newStartUtc` instead of

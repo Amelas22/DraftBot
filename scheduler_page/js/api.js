@@ -1,5 +1,7 @@
 // The page's only door to the bot: a JSON API on the same origin, authorised by the link token. No DOM;
 // fetch is injectable for tests.
+import { CELL_MS, isoSeconds } from "./week.js";
+
 export class LinkExpired extends Error {
   constructor(message = "link expired") { super(message); this.name = "LinkExpired"; }
 }
@@ -22,7 +24,6 @@ export function checkDoc(body, format) {
 const FIXTURE_RE = /^[A-Za-z0-9._-]+$/;
 const TOKEN_RE = /^[A-Za-z0-9_-]{20,64}$/;
 const USUAL_PATH = "/api/usual-week";
-const WINDOW_CELL_MS = 30 * 60000;
 
 // A failed call: `code` is the server's error code ("too_large", "rate_limited", ...), `status` the HTTP status.
 async function failure(res) {
@@ -214,8 +215,7 @@ function teamDraftFixtureApi(read) {
   const load = async () => {
     if (!state) {
       state = await read("fixtures/team-draft.json");
-      const now = Date.now();
-      state.window.start_utc = new Date(now - (now % WINDOW_CELL_MS)).toISOString().replace(/\.\d{3}Z$/, "Z");
+      state.window.start_utc = isoSeconds(new Date(Math.floor(Date.now() / CELL_MS) * CELL_MS));
     }
     return state;
   };
@@ -231,7 +231,7 @@ function teamDraftFixtureApi(read) {
       const at = Date.parse(body.start_utc);
       const first = Date.parse(state.window.start_utc);
       if (at < Date.now()) return answer("past");
-      if (at >= first + state.window.cells * WINDOW_CELL_MS) return answer("out_of_window");
+      if (at >= first + state.window.cells * CELL_MS) return answer("out_of_window");
       booking.start_utc = body.start_utc;
       booking.by_name = state.sides.flatMap((s) => s.people).find((p) => p.user === user())?.name ?? null;
     } else if (body.kind === "clear") {

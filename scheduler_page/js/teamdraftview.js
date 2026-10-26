@@ -2,7 +2,7 @@
 // marked, and Book / Move / Clear for the matchup's time. Every decision lives in teamdraft.js; this file only
 // draws and wires.
 import { LinkExpired, checkDoc } from "./api.js";
-import { CELLS, CELL_MS } from "./week.js";
+import { CELLS, CELL_MS, addCells, isoSeconds } from "./week.js";
 import { mountHeatmap, formatCell } from "./grid.js";
 import { appBar } from "./appbar.js";
 import { el } from "./dom.js";
@@ -163,9 +163,9 @@ export async function mountTeamDraft(root, api, deps = {}) {
     }
   };
 
-  const startOf = (j) => new Date(startUtc.getTime() + j * CELL_MS).toISOString().replace(/\.\d{3}Z$/, "Z");
-  bookBtn.addEventListener("click", () => { if (selected !== null) send({ kind: "book", start_utc: startOf(selected) }); });
-  moveBtn.addEventListener("click", () => { if (selected !== null) send({ kind: "book", start_utc: startOf(selected) }); });
+  const book = () => { if (selected !== null) send({ kind: "book", start_utc: isoSeconds(addCells(startUtc, selected)) }); };
+  bookBtn.addEventListener("click", book);
+  moveBtn.addEventListener("click", book);
   clearBtn.addEventListener("click", () => send({ kind: "clear" }));
 
   async function refresh() {
