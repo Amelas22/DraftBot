@@ -359,6 +359,12 @@ def _roster_command_open(participant):
     stack.enter_context(patch("services.tournament_registration.other_teams_for_user",
                               AsyncMock(return_value=[])))
     stack.enter_context(patch("services.tournament_registration.refresh_boards", AsyncMock()))
+    # The role work opens its own sessions and calls Discord. A team with a role keeps
+    # it; one without gets "777" created for it.
+    stack.enter_context(patch("services.tournament_registration.ensure_team_role",
+                              AsyncMock(return_value=participant.role_id or "777")))
+    stack.enter_context(patch("services.tournament_registration.grant_league_roles",
+                              AsyncMock(return_value=True)))
     return stack
 
 
@@ -1059,17 +1065,10 @@ async def test_re_adding_an_existing_teammate_still_repairs_their_role():
 
 
 @pytest.mark.asyncio
-async def test_add_teammate_on_a_not_yet_started_tournament_gets_no_warning():
-    """role_id is None for every tournament before /tournament start runs (and
-    every tournament that predates this feature) -- the ordinary path, not an
-    edge case. sync_member is NOT mocked here: the real
-    services.tournament_roles.sync_member must run and hit its
-    `if not role_id: return True` branch, or this test would just be
-    re-asserting the mock's own return value instead of the production
-    no-op logic. Regression for a mutation that flipped that branch to
-    False and slipped past every other test: it made this, the most-used
-    path through the command, reply with a false "couldn't give them the
-    role" warning about a role that isn't supposed to exist yet."""
+async def test_add_teammate_on_a_team_without_a_role_gets_the_role_created():
+    """A team with no role (tournament not started, or one that predates roles)
+    gets one made by ensure_team_role, and the new member receives it -- no
+    warning, since nothing failed."""
     from cogs.tournament_commands import TournamentCog
 
     cog = TournamentCog(MagicMock())
@@ -1081,9 +1080,11 @@ async def test_add_teammate_on_a_not_yet_started_tournament_gets_no_warning():
 
     with _roster_command_open(participant), \
          patch("services.tournament_registration.add_teammate",
-               AsyncMock(return_value=(MagicMock(), True))):
+               AsyncMock(return_value=(MagicMock(), True))), \
+         patch("services.tournament_registration.sync_member", AsyncMock(return_value=True)) as sync:
         await TournamentCog.add_teammate_cmd.callback(cog, ctx, player=player, team=None)
 
+    assert sync.await_args.args[1] == "777"
     reply = ctx.followup.send.call_args.args[0]
     assert "✅" in reply and "Alpha" in reply
     assert "⚠️" not in reply
@@ -1741,3 +1742,46 @@ async def test_create_makes_find_a_team_before_the_board_and_points_at_the_butto
     assert order == ["lfg", "board"]
     reply = ctx.followup.send.call_args.args[0]
     assert "Register a team" in reply and "/tournament register" not in reply
+
+
+@pytest.mark.asyncio
+async def test_add_team_gives_the_captain_the_roles():
+    from cogs.tournament_commands import TournamentCog
+
+    cog = TournamentCog(MagicMock())
+    cog._refresh_board = AsyncMock()
+    ctx = _ctx()
+    captain = _player(777)
+    participant = SimpleNamespace(id=9, team_name="Alpha")
+
+    with patch("cogs.tournament_commands.tournament_enabled", return_value=True), \
+         patch("cogs.tournament_commands.db_session", lambda: _NullSession()), \
+         patch("cogs.tournament_commands.get_active_tournament",
+               AsyncMock(return_value=SimpleNamespace(id=1))), \
+         patch("cogs.tournament_commands.register_team",
+               AsyncMock(return_value=(participant, True))), \
+         patch("cogs.tournament_commands.escrow.comp", return_value=True), \
+         patch("cogs.tournament_commands.reconcile_after_command", AsyncMock()), \
+         patch("cogs.tournament_commands.ensure_team_role",
+               AsyncMock(return_value="555")) as ensure, \
+         patch("cogs.tournament_commands.grant_league_roles",
+               AsyncMock(return_value=True)) as grant:
+        await TournamentCog.add_team.callback(cog, ctx, team="Alpha", captain=captain)
+
+    ensure.assert_awaited_once_with(ctx.guild, 9)
+    grant.assert_awaited_once_with(ctx.guild, ["777"])
+    assert "⚠️" not in ctx.followup.send.call_args.args[0]
+
+    with patch("cogs.tournament_commands.tournament_enabled", return_value=True), \
+         patch("cogs.tournament_commands.db_session", lambda: _NullSession()), \
+         patch("cogs.tournament_commands.get_active_tournament",
+               AsyncMock(return_value=SimpleNamespace(id=1))), \
+         patch("cogs.tournament_commands.register_team",
+               AsyncMock(return_value=(participant, True))), \
+         patch("cogs.tournament_commands.escrow.comp", return_value=True), \
+         patch("cogs.tournament_commands.reconcile_after_command", AsyncMock()), \
+         patch("cogs.tournament_commands.ensure_team_role", AsyncMock(return_value=None)), \
+         patch("cogs.tournament_commands.grant_league_roles", AsyncMock(return_value=True)):
+        await TournamentCog.add_team.callback(cog, ctx, team="Alpha", captain=captain)
+
+    assert "Couldn't give every role" in ctx.followup.send.call_args.args[0]

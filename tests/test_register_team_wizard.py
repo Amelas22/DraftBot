@@ -67,6 +67,8 @@ def quiet():
         stack.enter_context(patch.object(reg, "refresh_boards", AsyncMock()))
         stack.enter_context(patch.object(wiz, "reconcile_after_command", AsyncMock()))
         stack.enter_context(patch.object(reg, "sync_member", AsyncMock(return_value=True)))
+        stack.enter_context(patch.object(reg, "ensure_team_role", AsyncMock(return_value="1")))
+        stack.enter_context(patch.object(reg, "grant_league_roles", AsyncMock(return_value=True)))
         stack.enter_context(patch.object(wiz, "gate_serve", return_value=None))
         stack.enter_context(patch.object(wiz, "send_dm", dm))
         yield dm

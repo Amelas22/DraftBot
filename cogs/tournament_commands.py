@@ -91,8 +91,9 @@ from services.tournament_service import (
 from services.mtgo_tradebot_client import EVENT_TICKET
 from services import tournament_escrow_service as escrow
 from services import wallet_service
-from services.tournament_roles import (create_team_roles, delete_team_roles, role_target,
-                                       sync_member)
+from services.league_roles import grant_league_roles
+from services.tournament_roles import (create_team_roles, delete_team_roles, ensure_team_role,
+                                       role_target, sync_member)
 
 
 # Registering records only the captain, so every successful registration has to say
@@ -100,6 +101,7 @@ from services.tournament_roles import (create_team_roles, delete_team_roles, rol
 # a team of one.
 ROSTER_PROMPT = ("Now add your teammates with `/tournament add_teammate @player` "
                  "— one command per player.")
+ROLES_WARNING = "\n⚠️ Couldn't give every role — check that the bot's own role sits above them."
 
 
 def tournament_enabled(guild_id):
@@ -948,20 +950,21 @@ class TournamentCog(commands.Cog):
 
         out = await register_captain(self.bot, guild_id, t_id, captain_id, team)
         p_name = out.team_name
+        roles_warning = "" if out.roles_synced else ROLES_WARNING
         if out.kind == "refused":
             await ctx.followup.send(f"❌ {out.error}", ephemeral=True)
         elif out.kind == "free_registered":
             await ctx.followup.send(
                 f"✅ **{p_name}** is registered for **{t_name}** with "
                 f"{ctx.author.mention} as captain.\n"
-                f"{ROSTER_PROMPT}", ephemeral=True)
+                f"{ROSTER_PROMPT}{roles_warning}", ephemeral=True)
         elif out.kind == "free_exists":
             await ctx.followup.send(
                 f"**{p_name}** is already registered for **{t_name}** "
-                f"(captain: <@{out.captain_id}>).", ephemeral=True)
+                f"(captain: <@{out.captain_id}>).{roles_warning}", ephemeral=True)
         elif out.kind == "already_paid":
             await ctx.followup.send(
-                f"**{p_name}** is already registered and paid for **{t_name}**.", ephemeral=True)
+                f"**{p_name}** is already registered and paid for **{t_name}**.{roles_warning}", ephemeral=True)
         elif out.kind == "not_captain":
             await ctx.followup.send(
                 f"**{p_name}** is registered (pending). Only its captain "
@@ -971,7 +974,7 @@ class TournamentCog(commands.Cog):
             await ctx.followup.send(
                 f"✅ **{p_name}** is registered for **{t_name}** — **{fee} "
                 f"{EVENT_TICKET}(s)** paid into the prize pool. You're in.\n"
-                f"{ROSTER_PROMPT}", ephemeral=True)
+                f"{ROSTER_PROMPT}{roles_warning}", ephemeral=True)
         elif out.kind == "hold_failed":
             await ctx.followup.send(
                 f"⚠️ **{p_name}** is registered but I couldn't hold the escrow: {out.error}. "
@@ -984,7 +987,7 @@ class TournamentCog(commands.Cog):
                 f"**{p_name}** is registered (pending) for **{t_name}** — your spot is held.\n"
                 f"To finish, run `/wallet deposit {out.deficit}` whenever you're ready (you have "
                 f"{out.available} tix; the fee is {fee}). Registration completes automatically once the "
-                f"tix land — no need to re-register.", ephemeral=True)
+                f"tix land — no need to re-register.{roles_warning}", ephemeral=True)
         await reconcile_after_command(self.bot, guild_id)
 
     async def _roster_target(self, ctx, session, tournament, team):
@@ -1169,8 +1172,13 @@ class TournamentCog(commands.Cog):
         verb = "registered" if created else "already registered"
         note = " (entry fee comped)" if comped else ""
         await self._refresh_board(tournament.id)
+        # After the session closed: both open their own and call Discord.
+        role_id = await ensure_team_role(ctx.guild, participant.id)
+        league_ok = await grant_league_roles(ctx.guild, [str(captain.id)])
+        warning = "" if role_id is not None and league_ok else ROLES_WARNING
         await ctx.followup.send(
-            f"✅ **{participant.team_name}** {verb} with {captain.mention} as captain{note}.",
+            f"✅ **{participant.team_name}** {verb} with {captain.mention} as captain{note}."
+            f"{warning}",
             ephemeral=True,
         )
         await reconcile_after_command(self.bot, ctx.guild.id)
