@@ -141,3 +141,21 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
   .hours::before { display: none; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; scroll-behavior: auto !important; } }
+
+/* Team draft: the two sides, the booking line and the shared heatmap with good starts outlined */
+.bookline { margin: 0 0 8px; font-weight: 800; }
+.threadlink { display: inline-block; margin-bottom: 10px; color: var(--accent); font-weight: 700; }
+.sides { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+.side { background: var(--surface); border-radius: 12px; padding: 12px; min-width: 0; }
+.side h2 { margin: 0 0 6px; font-size: 15px; font-weight: 800; }
+.side ul { margin: 0; padding-left: 18px; }
+.side li { overflow-wrap: anywhere; }
+.noweek { color: var(--muted); font-size: 13px; }
+.hcell.good { outline: 2px solid var(--fg); outline-offset: -2px; }
+.hcell.booked { box-shadow: inset 0 0 0 3px var(--warn); }
+.hcell.picked { outline: 3px solid var(--accent); outline-offset: -1px; z-index: 1; }
+.legend .key { width: 12px; height: 12px; margin-left: 8px; background: var(--empty); }
+.legend .key.good { outline: 2px solid var(--fg); outline-offset: -2px; }
+.legend .key.booked { box-shadow: inset 0 0 0 3px var(--warn); }
+.pane .actions { margin: 0; flex-wrap: wrap; }
+@media (max-width: 479px) { .sides { grid-template-columns: 1fr; } }

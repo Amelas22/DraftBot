@@ -252,3 +252,52 @@ test("leaving a team: a member leaves and a full team reopens; the captain leavi
   assert.equal(r.ok, true);
   assert.equal(r.state.teams.some((x) => x.team_id === "101"), false);
 });
+
+const TD = "/api/team-draft/actions";
+const td = (api, body) => api.post(TD, { action_id: uuid(), ...body });
+
+test("the team-draft fixture is a team_draft link with the viewer's week and an open matchup", async () => {
+  const fake = diskFetch();
+  const api = createFixtureApi("team-draft", fake);
+  const me = await api.me();
+  assert.equal(me.view, "team_draft");
+  assert.equal(me.user, "900000000000000002");
+  assert.equal((await api.getUsual()).format, "draftbot.scheduler.usual_week");
+  const state = await api.get("/api/team-draft");
+  assert.equal(state.format, "draftbot.scheduler.team_draft");
+  assert.equal(state.sides.length, 2);
+  assert.equal(state.booking.start_utc, null);
+});
+
+test("the team-draft fixture's window starts at the current half hour, so cells can be booked", async () => {
+  const api = createFixtureApi("team-draft", diskFetch());
+  const { window } = await api.get("/api/team-draft");
+  const start = Date.parse(window.start_utc);
+  assert.equal(start % 1800000, 0);
+  assert.ok(Math.abs(start - Date.now()) <= 1800000);
+});
+
+test("the team-draft fixture books, moves and clears in memory, bumping the version", async () => {
+  const fake = diskFetch();
+  const api = createFixtureApi("team-draft", fake);
+  const { window } = await api.get("/api/team-draft");
+  const at = (j) => new Date(Date.parse(window.start_utc) + j * 1800000).toISOString().replace(/\.\d{3}Z$/, "Z");
+  const before = fake.calls.length;
+
+  let r = await td(api, { kind: "book", start_utc: at(100), seen_version: 0 });
+  assert.deepEqual([r.ok, r.code, r.state.booking.start_utc, r.state.booking.version, r.state.booking.by_name], [true, null, at(100), 1, "Ben"]);
+  r = await td(api, { kind: "book", start_utc: at(101), seen_version: 0 });
+  assert.deepEqual([r.ok, r.code, r.state.booking.start_utc, r.state.booking.version], [false, "changed", at(100), 1]);
+  r = await td(api, { kind: "book", start_utc: at(101), seen_version: 1 });
+  assert.deepEqual([r.ok, r.state.booking.start_utc, r.state.booking.version], [true, at(101), 2]);
+  r = await td(api, { kind: "book", start_utc: at(-1), seen_version: 2 });
+  assert.deepEqual([r.ok, r.code], [false, "past"]);
+  r = await td(api, { kind: "book", start_utc: at(336), seen_version: 2 });
+  assert.deepEqual([r.ok, r.code], [false, "out_of_window"]);
+  r = await td(api, { kind: "clear", seen_version: 2 });
+  assert.deepEqual([r.ok, r.state.booking.start_utc, r.state.booking.version], [true, null, 3]);
+  r = await td(api, { kind: "clear", seen_version: 3 });
+  assert.deepEqual([r.ok, r.code], [false, "not_booked"]);
+  assert.equal((await api.get("/api/team-draft")).booking.version, 3);
+  assert.equal(fake.calls.length, before);
+});
