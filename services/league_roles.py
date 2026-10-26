@@ -8,6 +8,7 @@ is only ever granted here, never removed.
 Discord-facing like tournament_roles: every function takes the guild it
 reconciles, and the database is only opened for the one lookup that needs it.
 """
+from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 import discord
@@ -17,7 +18,8 @@ from sqlalchemy import select
 from config import get_config
 from database.db_session import db_session
 from models.tournament import Tournament, TournamentParticipant, TournamentTeamMember
-from services.tournament_service import ACTIVE_STATUSES
+from services.tournament_roles import ensure_team_roles
+from services.tournament_service import ACTIVE_STATUSES, get_active_tournament
 
 
 async def live_member_ids(session: Any, guild_id: str | int) -> set[str]:
@@ -110,3 +112,99 @@ async def release_league_role(guild: discord.Guild, user_ids: Iterable[str]) -> 
             logger.warning(f"[league-roles] could not take {role} from {user_id}: {e}")
             ok = False
     return ok
+
+
+@dataclass
+class RoleSyncPlan:
+    """What /tournament sync_roles would change. Team names and user ids."""
+    teams_missing_role: list[str] = field(default_factory=list)
+    grant: list[str] = field(default_factory=list)
+    strip: list[str] = field(default_factory=list)
+
+
+async def plan_role_sync(guild: discord.Guild) -> RoleSyncPlan:
+    """Work out what brings the guild's tournament roles up to date.
+
+    Makes no Discord writes. The database is read in one session that is
+    closed before any guild state is inspected.
+    """
+    async with db_session() as session:
+        live = await live_member_ids(session, guild.id)
+        tournament = await get_active_tournament(session, guild.id)
+        teams: list[tuple[str, str | None]] = []
+        if tournament is not None:
+            result = await session.execute(
+                select(TournamentParticipant.team_name, TournamentParticipant.role_id)
+                .where(
+                    TournamentParticipant.tournament_id == tournament.id,
+                    TournamentParticipant.dropped_at.is_(None),
+                )
+                .order_by(TournamentParticipant.id)
+            )
+            teams = [(name, role_id) for name, role_id in result.all()]
+
+    teams_missing_role = [
+        name for name, role_id in teams
+        if not role_id or guild.get_role(int(role_id)) is None
+    ]
+
+    league = league_participant_role(guild)
+    active = active_role(guild)
+    wanted = [r for r in (league, active) if r is not None]
+    grant: list[str] = []
+    for user_id in sorted(live):
+        member = guild.get_member(int(user_id))
+        if member is not None and any(r not in member.roles for r in wanted):
+            grant.append(user_id)
+
+    strip: list[str] = []
+    if league is not None:
+        strip = [str(m.id) for m in league.members if str(m.id) not in live]
+    return RoleSyncPlan(teams_missing_role, grant, strip)
+
+
+async def apply_role_sync(guild: discord.Guild) -> RoleSyncPlan:
+    """Make the changes plan_role_sync describes. Returns the plan acted on."""
+    plan = await plan_role_sync(guild)
+    async with db_session() as session:
+        tournament = await get_active_tournament(session, guild.id)
+        tournament_id = tournament.id if tournament is not None else None
+    if tournament_id is not None:
+        await ensure_team_roles(guild, tournament_id)
+    await grant_league_roles(guild, plan.grant)
+    league = league_participant_role(guild)
+    if league is not None:
+        for user_id in plan.strip:
+            member = guild.get_member(int(user_id))
+            if member is None or league not in member.roles:
+                continue
+            try:
+                await member.remove_roles(league)
+            except discord.HTTPException as e:
+                logger.warning(f"[league-roles] could not take {league} from {user_id}: {e}")
+    return plan
+
+
+DISCORD_MESSAGE_LIMIT = 2000
+SYNC_LIST_LIMIT = 20
+
+
+def _listing(title: str, items: list[str]) -> str:
+    shown = ", ".join(items[:SYNC_LIST_LIMIT])
+    more = f", and {len(items) - SYNC_LIST_LIMIT} more" if len(items) > SYNC_LIST_LIMIT else ""
+    return f"**{title}** ({len(items)}): {shown}{more}" if items else f"**{title}** (0)"
+
+
+def format_role_sync(plan: RoleSyncPlan, applied: bool) -> str:
+    """The operator's reply: counts, then up to 20 of each, within one message."""
+    lines = [] if applied else [
+        "Dry run — nothing changed. Run again with apply:True to make these changes."]
+    titles = (
+        ("Team roles created", "Members given League Participant / Active", "Members who lost League Participant")
+        if applied else
+        ("Teams without a role", "Members to give League Participant / Active",
+         "Members to take League Participant from"))
+    lines.append(_listing(titles[0], [f"**{n}**" for n in plan.teams_missing_role]))
+    lines.append(_listing(titles[1], [f"<@{u}>" for u in plan.grant]))
+    lines.append(_listing(titles[2], [f"<@{u}>" for u in plan.strip]))
+    return "\n".join(lines)[:DISCORD_MESSAGE_LIMIT]

@@ -24,7 +24,7 @@ def test_tournament_group_has_slice_one_and_two_commands():
     assert {"create", "register", "status",
             "start", "set_result", "next_round", "finish",
             "add_team", "remove_team", "add_match", "refresh_standings",
-            "recover_draft", "open_rooms"} <= subcommands
+            "recover_draft", "open_rooms", "sync_roles"} <= subcommands
 
 
 def test_admin_commands_are_gated_by_bot_manager_check():
@@ -32,7 +32,7 @@ def test_admin_commands_are_gated_by_bot_manager_check():
 
     for command in ("create", "start", "set_result", "next_round", "finish",
                     "add_team", "remove_team", "add_match", "refresh_standings",
-                    "recover_draft", "open_rooms"):
+                    "recover_draft", "open_rooms", "sync_roles"):
         assert is_bot_manager in getattr(TournamentCog, command).checks, command
 
 
@@ -1786,3 +1786,28 @@ async def test_drop_team_roles_never_raises_when_the_league_release_fails():
          patch("cogs.tournament_commands.logger") as log:
         await cog._drop_team_roles(MagicMock(), 1)
     log.exception.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("apply, runs, skips", [(False, "plan_role_sync", "apply_role_sync"),
+                                                (True, "apply_role_sync", "plan_role_sync")])
+async def test_sync_roles_replies_ephemerally_and_only_applies_when_asked(apply, runs, skips):
+    from cogs.tournament_commands import TournamentCog
+    from services.league_roles import RoleSyncPlan
+
+    cog = TournamentCog.__new__(TournamentCog)
+    cog._check_enabled = AsyncMock(return_value=True)
+    ctx = _ctx()
+    mocks = {n: AsyncMock(return_value=RoleSyncPlan(["Bravo"], ["1"], ["2"]))
+             for n in ("plan_role_sync", "apply_role_sync")}
+    with patch("cogs.tournament_commands.plan_role_sync", mocks["plan_role_sync"]), \
+         patch("cogs.tournament_commands.apply_role_sync", mocks["apply_role_sync"]):
+        await TournamentCog.sync_roles.callback(cog, ctx, apply=apply)
+
+    mocks[runs].assert_awaited_once()
+    mocks[skips].assert_not_called()
+    ctx.defer.assert_awaited_once_with(ephemeral=True)
+    text = ctx.followup.send.await_args.args[0]
+    assert ctx.followup.send.await_args.kwargs == {"ephemeral": True}
+    assert text.startswith("Dry run") is (not apply)
+    assert "<@1>" in text and "**Bravo**" in text

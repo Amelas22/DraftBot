@@ -12,7 +12,11 @@ from services.league_roles import (
     active_role,
     grant_league_roles,
     league_participant_role,
+    RoleSyncPlan,
+    apply_role_sync,
+    format_role_sync,
     live_member_ids,
+    plan_role_sync,
     release_league_role,
 )
 from services.tournament_service import add_teammate, create_tournament, register_team
@@ -228,3 +232,141 @@ async def test_inactivity_sweep_skips_live_tournament_players(test_db):
     idle.remove_roles.assert_awaited_once_with(active)
     assert removed == ["Idle"]
     assert any("Skipping Live: in the current tournament" in str(m) for m in messages)
+
+
+def _sync_guild(members, *, with_lp=True):
+    """A guild for the sync tests: roles carry ids and .members, members have ids."""
+    lp = MagicMock(); lp.name = "League Participant"; lp.id = 501
+    active = MagicMock(); active.name = "Active"; active.id = 502
+    team_role = MagicMock(); team_role.name = "Alpha"; team_role.id = 601
+    by_id = {}
+    for uid, held in members.items():
+        member = _member(*[{"lp": lp, "active": active}[h] for h in held])
+        member.id = uid
+        by_id[uid] = member
+    lp.members = [m for m in by_id.values() if lp in m.roles]
+    guild = _guild(["x"], by_id)
+    guild.roles = [lp, active] if with_lp else [active]
+    guild.get_role = MagicMock(side_effect={501: lp, 502: active, 601: team_role}.get)
+    guild.create_role = AsyncMock()
+    return guild, lp, active, by_id
+
+
+async def _season(session):
+    t = await create_tournament(session, GUILD, "Reg", 3)
+    alpha = await _team(session, t, "Alpha", "10", roster=["11"])
+    await _team(session, t, "Bravo", "20")
+    alpha.role_id = "601"      # Alpha has a live role; Bravo has none
+    return t
+
+
+@pytest.mark.asyncio
+async def test_plan_lists_missing_team_roles_grants_and_strips(test_db):
+    async with db_session() as session:
+        await _season(session)
+    # 10 has both roles; 11 lacks Active; 20 has nothing; 12 is last season's captain.
+    guild, lp, active, _ = _sync_guild({
+        10: ["lp", "active"], 11: ["lp"], 20: [], 12: ["lp"],
+    })
+
+    plan = await plan_role_sync(guild)
+
+    assert plan.teams_missing_role == ["Bravo"]
+    assert sorted(plan.grant) == ["11", "20"]
+    assert plan.strip == ["12"]
+
+
+@pytest.mark.asyncio
+async def test_plan_leaves_out_live_members_who_are_not_in_the_guild(test_db):
+    async with db_session() as session:
+        await _season(session)
+    guild, *_ = _sync_guild({10: ["lp", "active"]})   # 11 and 20 have left
+
+    plan = await plan_role_sync(guild)
+
+    assert plan.grant == []
+
+
+@pytest.mark.asyncio
+async def test_plan_treats_a_role_the_guild_lacks_as_not_lacking(test_db):
+    async with db_session() as session:
+        await _season(session)
+    guild, *_ = _sync_guild({10: ["active"], 11: ["active"], 20: ["active"]}, with_lp=False)
+
+    plan = await plan_role_sync(guild)
+
+    assert plan.grant == []
+    assert plan.strip == []
+
+
+@pytest.mark.asyncio
+async def test_plan_with_no_current_tournament_strips_every_holder(test_db):
+    guild, *_ = _sync_guild({1: ["lp"], 2: ["lp", "active"], 3: []})
+
+    plan = await plan_role_sync(guild)
+
+    assert plan.teams_missing_role == []
+    assert plan.grant == []
+    assert sorted(plan.strip) == ["1", "2"]
+
+
+@pytest.mark.asyncio
+async def test_sync_roles_dry_run_changes_nothing(test_db):
+    async with db_session() as session:
+        await _season(session)
+    guild, lp, active, members = _sync_guild({10: ["lp", "active"], 11: ["lp"], 20: [], 12: ["lp"]})
+
+    await plan_role_sync(guild)
+
+    guild.create_role.assert_not_called()
+    for member in members.values():
+        member.add_roles.assert_not_called()
+        member.remove_roles.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_sync_roles_apply_makes_the_changes(test_db):
+    async with db_session() as session:
+        await _season(session)
+    guild, lp, active, members = _sync_guild({10: ["lp", "active"], 11: ["lp"], 20: [], 12: ["lp"]})
+    guild.create_role = AsyncMock(return_value=MagicMock(id=777))
+    guild.get_member.side_effect = members.get
+
+    with patch("services.league_roles.ensure_team_roles", new=AsyncMock()) as ensure:
+        plan = await apply_role_sync(guild)
+
+    assert plan.strip == ["12"]
+    ensure.assert_awaited_once()
+    members[12].remove_roles.assert_awaited_once_with(lp)
+    members[11].add_roles.assert_awaited_once_with(active)
+    given = [a for c in members[20].add_roles.await_args_list for a in c.args]
+    assert sorted(r.name for r in given) == ["Active", "League Participant"]
+    members[10].add_roles.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_apply_keeps_going_when_one_removal_is_refused(test_db):
+    import discord
+    guild, lp, active, members = _sync_guild({1: ["lp"], 2: ["lp"]})
+    members[1].remove_roles.side_effect = discord.HTTPException(MagicMock(status=500), "boom")
+
+    plan = await apply_role_sync(guild)
+
+    assert sorted(plan.strip) == ["1", "2"]
+    members[2].remove_roles.assert_awaited_once_with(lp)
+
+
+def test_sync_roles_reply_fits_in_one_message():
+    plan = RoleSyncPlan(
+        teams_missing_role=[f"Team {i}" * 5 for i in range(300)],
+        grant=[str(10**17 + i) for i in range(300)],
+        strip=[str(10**17 + i) for i in range(300)],
+    )
+    for applied in (False, True):
+        reply = format_role_sync(plan, applied)
+        assert len(reply) <= 2000
+        assert ", and 280 more" in reply
+    assert format_role_sync(plan, False).startswith(
+        "Dry run — nothing changed. Run again with apply:True to make these changes.")
+    assert not format_role_sync(plan, True).startswith("Dry run")
+    assert "<@" + str(10**17) + ">" in format_role_sync(plan, False)

@@ -90,7 +90,8 @@ from services.tournament_service import (
 from services.mtgo_tradebot_client import EVENT_TICKET
 from services import tournament_escrow_service as escrow
 from services import wallet_service
-from services.league_roles import grant_league_roles, release_league_role
+from services.league_roles import (apply_role_sync, format_role_sync, grant_league_roles,
+                                    plan_role_sync, release_league_role)
 from services.tournament_roles import (delete_team_roles, ensure_team_role, ensure_team_roles,
                                        sync_member)
 
@@ -1270,6 +1271,21 @@ class TournamentCog(commands.Cog):
             await self._post_standings(standings, tournament_id)
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
+
+    @tournament.command(name="sync_roles",
+                        description="Admin: bring team, League Participant and Active roles up to date")
+    @has_bot_manager_role()
+    async def sync_roles(
+        self,
+        ctx,
+        apply: discord.Option(bool, "Make the changes (default: dry run)",
+                              required=False, default=False),
+    ):
+        if not await self._check_enabled(ctx):
+            return
+        await ctx.defer(ephemeral=True)
+        plan = await (apply_role_sync if apply else plan_role_sync)(ctx.guild)
+        await ctx.followup.send(format_role_sync(plan, bool(apply)), ephemeral=True)
 
     async def _match_autocomplete(ctx: discord.AutocompleteContext):
         """Suggest this server's reportable matches by id, name and teams."""
