@@ -550,7 +550,7 @@ async def test_announce_posts_in_the_thread_then_refreshes(test_db):
     refresh = AsyncMock(side_effect=lambda *a: order.append("refresh"))
     change = _booking_change()
 
-    with patch("team_draft_view._edit_control", refresh):
+    with patch("team_draft_view.refresh_team_draft_control", refresh):
         await announce_booking(bot, team_draft_id, change)
 
     bot.get_channel.assert_called_once_with(900)
@@ -562,8 +562,7 @@ async def test_announce_posts_in_the_thread_then_refreshes(test_db):
     assert sent["content"].startswith("<@&111> <@201> <@202>\n")
     mentions = sent["allowed_mentions"]
     assert (mentions.everyone, mentions.roles, mentions.users) == (False, True, True)
-    refresh.assert_awaited_once()
-    assert refresh.await_args.args[0] is bot and refresh.await_args.args[1].id == team_draft_id
+    refresh.assert_awaited_once_with(bot, team_draft_id)
     assert order == ["send", "refresh"]
 
 
@@ -579,7 +578,7 @@ async def test_announce_with_a_deleted_thread_logs_and_returns(test_db):
         side_effect=discord.NotFound(MagicMock(status=404), "Unknown Channel"))
     refresh = AsyncMock()
 
-    with patch("team_draft_view._edit_control", refresh):
+    with patch("team_draft_view.refresh_team_draft_control", refresh):
         await announce_booking(bot, team_draft_id, _booking_change())
 
     bot.fetch_channel.assert_awaited_once_with(900)
@@ -598,11 +597,10 @@ async def test_announce_that_discord_refuses_still_refreshes(test_db):
     bot.get_channel.return_value = thread
     refresh = AsyncMock()
 
-    with patch("team_draft_view._edit_control", refresh):
+    with patch("team_draft_view.refresh_team_draft_control", refresh):
         await announce_booking(bot, team_draft_id, _booking_change())
 
-    refresh.assert_awaited_once()
-    assert refresh.await_args.args[0] is bot and refresh.await_args.args[1].id == team_draft_id
+    refresh.assert_awaited_once_with(bot, team_draft_id)
 
 
 @pytest.mark.asyncio
@@ -611,7 +609,7 @@ async def test_announce_for_a_vanished_matchup_does_nothing(test_db):
 
     bot = MagicMock()
     refresh = AsyncMock()
-    with patch("team_draft_view._edit_control", refresh):
+    with patch("team_draft_view.refresh_team_draft_control", refresh):
         await announce_booking(bot, 4242, _booking_change())
 
     bot.get_channel.assert_not_called()
@@ -674,3 +672,40 @@ async def test_rebooking_the_same_time_pings_nobody_but_still_refreshes(test_db)
 
     thread.send.assert_not_awaited()
     refresh.assert_awaited_once_with(bot, team_draft_id)
+
+
+@pytest.mark.asyncio
+async def test_announce_renders_a_booking_committed_while_the_post_was_sending(test_db):
+    """The real refresh path: the control message shows the database as it is
+    after the send, not the facts read before it."""
+    from sqlalchemy import update
+
+    from helpers.matchup import discord_time
+    from team_draft_view import announce_booking
+
+    team_draft_id = await seed_team_draft(thread_id="900", control_message_id="777")
+    first = datetime(2026, 10, 28, 19, 30)
+    newer = datetime(2026, 10, 29, 20, 0)
+    async with db_session() as session:
+        await session.execute(update(TeamDraft).where(TeamDraft.id == team_draft_id)
+                              .values(booked_start_utc=first, booked_by_name="Bo"))
+
+    async def another_booking_lands(**_kw):
+        async with db_session() as session:
+            await session.execute(update(TeamDraft).where(TeamDraft.id == team_draft_id)
+                                  .values(booked_start_utc=newer, booked_by_name="Ash"))
+
+    message = MagicMock()
+    message.edit = AsyncMock()
+    thread = MagicMock(spec=discord.Thread)
+    thread.send = AsyncMock(side_effect=another_booking_lands)
+    thread.fetch_message = AsyncMock(return_value=message)
+    bot = MagicMock()
+    bot.get_guild.return_value = make_guild()
+    bot.get_channel.return_value = thread
+
+    await announce_booking(bot, team_draft_id, _booking_change(new=first.replace(tzinfo=timezone.utc)))
+
+    content = message.edit.await_args.kwargs["content"]
+    assert discord_time(newer) in content
+    assert discord_time(first) not in content

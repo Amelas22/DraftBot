@@ -326,8 +326,9 @@ async def announce_booking(bot: discord.Client, team_draft_id: int, change: Book
             allowed_mentions=discord.AllowedMentions(everyone=False, roles=True, users=True))
     except discord.HTTPException as e:
         logger.warning(f"Could not announce the booking for team draft {team_draft_id}: {e}")
-    # The booking was committed before these facts were read, so they are current.
-    await _edit_control(bot, facts)
+    # Read again after the send: another booking may have committed during it,
+    # and the control message must show the latest one.
+    await refresh_team_draft_control(bot, team_draft_id)
 
 
 def is_bot(guild: discord.Guild | None, user_id: str) -> bool:
