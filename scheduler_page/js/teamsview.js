@@ -39,24 +39,26 @@ export async function mountTeams(root, api, deps = {}) {
     if (e instanceof LinkExpired) { notice(expiredMessage()); return controller; }
     throw e;
   }
+  const list = (doc, firstStatus) => showList(root, api, doc, now, cleanups, notice, firstStatus, editWeek).catch((e) => {
+    if (e instanceof LinkExpired) notice(expiredMessage());
+    else { console.error(e); notice(actionErrorText(e)); }
+  });
+  // The list's refresh loop and listeners are disposed before the editor takes the page; showList registers
+  // them afresh when the list comes back.
+  const editWeek = (doc) => {
+    controller.dispose();
+    root.classList.remove("wide");
+    return mountUsual(root, api, { now, onSaved: (saved) => list(saved, "Saved."), onBack: () => list(doc, "") });
+  };
   if (usual === null) {
-    await mountUsual(root, api, {
-      now,
-      intro: PAINT_FIRST,
-      onSaved: (doc) => {
-        showList(root, api, doc, now, cleanups, notice, "Saved.").catch((e) => {
-          if (e instanceof LinkExpired) notice(expiredMessage());
-          else { console.error(e); notice(actionErrorText(e)); }
-        });
-      },
-    });
+    await mountUsual(root, api, { now, intro: PAINT_FIRST, onSaved: (doc) => list(doc, "Saved.") });
     return controller;
   }
-  await showList(root, api, checkDoc(usual, USUAL_FORMAT), now, cleanups, notice, "");
+  await showList(root, api, checkDoc(usual, USUAL_FORMAT), now, cleanups, notice, "", editWeek);
   return controller;
 }
 
-async function showList(root, api, usualDoc, now, cleanups, notice, firstStatus) {
+async function showList(root, api, usualDoc, now, cleanups, notice, firstStatus, editWeek) {
   root.replaceChildren(el("p", { class: "status", text: "Loading teams…" }));
   let state;
   try {
@@ -114,7 +116,9 @@ async function showList(root, api, usualDoc, now, cleanups, notice, firstStatus)
 
   const bar = appBar("Find a team");
   bar.classList.add("withaction");
-  bar.append(openBtn);
+  const editBtn = el("button", { type: "button", class: "secondary small", text: "Edit my usual week" });
+  editBtn.addEventListener("click", () => { editWeek(usualDoc); });
+  bar.append(editBtn, openBtn);
   const lede = el("p", { class: "lede" });
   // Page-level news ("Saved." after a first-run save) stays visible even when there are no teams to show.
   const pageStatus = el("p", { class: "status", role: "status", "aria-live": "polite", text: firstStatus });
