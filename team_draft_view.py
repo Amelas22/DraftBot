@@ -17,13 +17,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config import scheduler_enabled
 from database.db_session import db_session
 from helpers.matchup import (
+    OPEN,
     Booking,
     Roster,
     Side,
     assign_people,
     booking_announcement,
+    claimed_state,
     launch_block,
-    matchup_state,
     render_matchup_control,
     side_label,
 )
@@ -85,6 +86,11 @@ def _side(guild: discord.Guild | None, role_ids: list[str], user_ids: list[str])
     return Side(label=label, role_ids=tuple(role_ids), user_ids=tuple(user_ids))
 
 
+def _ran(draft: DraftSession | None) -> bool:
+    """Whether a saved draft got past its sign-up: teams made, or a later stage."""
+    return draft is not None and (draft.teams_start_time is not None or draft.session_stage is not None)
+
+
 async def team_draft_facts(
     session: AsyncSession, team_draft_id: int, guild: discord.Guild | None
 ) -> TeamDraftFacts | None:
@@ -92,6 +98,9 @@ async def team_draft_facts(
 
     Names come from the guild's cache (no Discord call), so a caller may hold
     the session while building these. The lobby is the claiming draft's.
+    A claim whose draft has neither a lobby nor has run yet is SETTING_UP:
+    a draft deleted unplayed frees its matchup (release_deleted_draft), so a
+    claim is only ever left without its draft while that draft is being made.
     """
     row = await session.get(TeamDraft, team_draft_id)
     if row is None:
@@ -101,15 +110,17 @@ async def team_draft_facts(
         draft = (await session.execute(
             select(DraftSession).where(DraftSession.session_id == row.draft_session_id)
         )).scalars().first()
+    link = lobby_link(draft)
     return TeamDraftFacts(
         id=row.id,
         name=row.name,
         a=_side(guild, list(row.side_a_roles or []), list(row.side_a_users or [])),
         b=_side(guild, list(row.side_b_roles or []), list(row.side_b_users or [])),
         booking=Booking(start_utc=row.booked_start_utc, by_name=row.booked_by_name),
-        state=matchup_state(row.draft_session_id is not None),
+        state=OPEN if row.draft_session_id is None else claimed_state(
+            has_lobby=link is not None, ran=_ran(draft)),
         set_up_by=_member_name(guild, row.created_by),
-        lobby_link=lobby_link(draft),
+        lobby_link=link,
         thread_id=row.thread_id,
         control_message_id=row.control_message_id,
         guild_id=row.guild_id,
@@ -262,6 +273,23 @@ async def refresh_team_draft_control(bot: discord.Client, team_draft_id: int) ->
         logger.warning(f"Team draft {team_draft_id} control message {control_id} gone; not refreshed")
     except discord.HTTPException as e:
         logger.error(f"Failed to refresh control message for team draft {team_draft_id}: {e}")
+
+
+async def refresh_freed_team_draft(team_draft_id: int) -> None:
+    """Re-render a matchup whose draft was just deleted unplayed, so its control
+    message offers Start draft again. Logged, never raised: the draft is
+    already gone. The bot comes from bot_registry, as the delete is reached
+    from paths (cancel, the queue reaper) that go through the pool service."""
+    import bot_registry
+
+    bot = bot_registry.get_bot()
+    if bot is None:
+        logger.warning(f"Team draft {team_draft_id} freed but no bot registered; not refreshed")
+        return
+    try:
+        await refresh_team_draft_control(bot, team_draft_id)
+    except Exception as e:
+        logger.error(f"Failed to refresh control message for freed team draft {team_draft_id}: {e}")
 
 
 async def announce_booking(bot: discord.Client, team_draft_id: int, change: BookingChange) -> None:

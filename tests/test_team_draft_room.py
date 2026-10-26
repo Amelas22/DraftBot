@@ -242,7 +242,8 @@ async def test_two_starts_create_one_draft(test_db):
     nudge.assert_not_awaited()
     first.response.send_message.assert_not_awaited()
     refused = second.response.send_message.await_args
-    assert "already" in refused.args[0]
+    # The winner's draft is mocked out, so it never gets a row: still being set up.
+    assert "being set up right now" in refused.args[0]
     assert refused.kwargs["ephemeral"] is True
     assert (await stored(team_draft_id)).draft_session_id == "s-1"
 
@@ -374,10 +375,80 @@ async def test_room_context_pre_names_and_blocks_once_started(test_db):
         "team_draft_id": team_draft_id}, None)
 
     async with db_session() as session:
-        (await session.get(TeamDraft, team_draft_id)).draft_session_id = "gone"
+        session.add(DraftSession(session_id="s-ran", guild_id="1", session_type="premade",
+                                 session_stage="pairings"))
+        (await session.get(TeamDraft, team_draft_id)).draft_session_id = "s-ran"
     async with db_session() as session:
         _id, _overrides, block = await team_draft_room_context(session, 900, make_guild())
     assert block is not None and "already been played" in block
+
+
+async def _claim(team_draft_id, draft=None):
+    async with db_session() as session:
+        if draft is not None:
+            session.add(draft)
+        (await session.get(TeamDraft, team_draft_id)).draft_session_id = "s-new"
+
+
+async def _start_block(team_draft_id):
+    from team_draft_view import start_team_draft
+
+    interaction = make_interaction(make_guild())
+    with patch("modals.CubeDraftSelectionView") as picker:
+        await start_team_draft(interaction, team_draft_id)
+    picker.assert_not_called()
+    return (interaction.response.edit_message.await_args.kwargs["content"],
+            interaction.followup.send.await_args.args[0])
+
+
+@pytest.mark.asyncio
+async def test_a_claim_whose_draft_row_is_not_saved_yet_is_being_set_up(test_db):
+    team_draft_id = await seed_team_draft(thread_id="900", control_message_id="777")
+    await _claim(team_draft_id)
+
+    body, block = await _start_block(team_draft_id)
+
+    assert "being set up right now" in block and "played" not in block
+    assert "being set up" in body and "played" not in body
+
+
+@pytest.mark.asyncio
+async def test_a_saved_draft_without_its_lobby_yet_is_being_set_up(test_db):
+    team_draft_id = await seed_team_draft(thread_id="900", control_message_id="777")
+    await _claim(team_draft_id, DraftSession(session_id="s-new", guild_id="1",
+                                             session_type="premade"))
+
+    _body, block = await _start_block(team_draft_id)
+
+    assert "being set up right now" in block
+
+
+@pytest.mark.asyncio
+async def test_a_draft_that_ran_and_lost_its_lobby_was_played(test_db):
+    team_draft_id = await seed_team_draft(thread_id="900", control_message_id="777")
+    await _claim(team_draft_id, DraftSession(session_id="s-new", guild_id="1",
+                                             session_type="premade",
+                                             teams_start_time=datetime(2026, 10, 26, 19, 0)))
+
+    body, block = await _start_block(team_draft_id)
+
+    assert "already been played" in block
+    assert "Draft played." in body
+
+
+@pytest.mark.asyncio
+async def test_a_refused_start_while_the_winner_is_being_set_up_says_so(test_db):
+    from sessions.premade_session import PremadeSession
+
+    team_draft_id = await seed_team_draft(thread_id="900", control_message_id="777")
+    await _claim(team_draft_id)
+    interaction = make_interaction(make_guild())
+
+    with patch("sessions.base_session.BaseSession.create_draft_session", AsyncMock()):
+        await PremadeSession(_details("s-2", team_draft_id)).create_draft_session(
+            interaction, MagicMock())
+
+    assert "being set up right now" in interaction.response.send_message.await_args.args[0]
 
 
 @pytest.mark.asyncio
@@ -582,3 +653,4 @@ async def test_side_rosters_expand_roles_drop_bots_and_skip_deleted_roles(test_d
     # 201 is named on side B, so B keeps them; 202 is in both roles, so A (first) wins.
     assert a == Roster(label="Team Garruk, deleted role", people=(("202", "Bo"),))
     assert b == Roster(label="Team Ash, Ash", people=(("201", "Ash"), ("203", "Cy")))
+

@@ -148,6 +148,21 @@ async def release_draft(session: AsyncSession, team_draft_id: int, draft_session
     )
 
 
+async def release_deleted_draft(session: AsyncSession, draft_session_id: str) -> int | None:
+    """Free the matchup a just-deleted draft held; its id, or None if none did.
+
+    A draft deleted before it ran (cancelled, or a queue that never filled)
+    must not keep its matchup claimed. The caller commits.
+    """
+    team_draft_id = (
+        await session.execute(select(TeamDraft.id).where(TeamDraft.draft_session_id == draft_session_id))
+    ).scalars().first()
+    if team_draft_id is None:
+        return None
+    await release_draft(session, team_draft_id, draft_session_id)
+    return team_draft_id
+
+
 DRAFT_CELLS = 2  # a draft takes two half-hour cells
 MIN_PER_SIDE = 2  # a good start has this many of each side free (all of a smaller side)
 WINDOW_CELLS = 336  # the bookable window: seven days of half-hour cells

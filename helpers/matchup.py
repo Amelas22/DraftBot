@@ -9,6 +9,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 OPEN = "open"
+# Claimed, but the draft's row or its lobby doesn't exist yet: the seconds
+# between Start draft winning the claim and the sign-up being posted.
+SETTING_UP = "setting_up"
 STARTED = "started"
 
 _THREAD_NAME_MAX = 100
@@ -69,6 +72,12 @@ def matchup_state(has_draft: bool) -> str:
     return STARTED if has_draft else OPEN
 
 
+def claimed_state(has_lobby: bool, ran: bool) -> str:
+    """The state of a matchup a draft has claimed: STARTED once that draft has a
+    lobby or has run, SETTING_UP until then."""
+    return STARTED if has_lobby or ran else SETTING_UP
+
+
 def render_matchup_control(
     a: Side,
     b: Side,
@@ -90,7 +99,9 @@ def render_matchup_control(
         lines.append(when)
     else:
         lines.append("No time booked yet — press **Find a time**.")
-    if state == STARTED:
+    if state == SETTING_UP:
+        lines.append("⏳ Draft being set up…")
+    elif state == STARTED:
         if lobby_link:
             lines.append(f"🟢 Draft started — [jump to the lobby]({lobby_link})")
         else:
@@ -100,6 +111,8 @@ def render_matchup_control(
 
 def launch_block(state: str, lobby_link: str | None) -> str | None:
     """Why a new draft can't start for a matchup in ``state``, or None."""
+    if state == SETTING_UP:
+        return "This matchup's draft is being set up right now — give it a moment."
     if state != STARTED:
         return None
     if lobby_link:

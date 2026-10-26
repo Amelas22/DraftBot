@@ -121,7 +121,7 @@ class PremadeSession(BaseSession):
         from loguru import logger
 
         from database.db_session import db_session
-        from helpers.matchup import STARTED, launch_block
+        from helpers.matchup import SETTING_UP, launch_block
         from services.team_draft import claim_draft, release_draft
         import team_draft_view
 
@@ -132,8 +132,11 @@ class PremadeSession(BaseSession):
             async with db_session() as session:
                 facts = await team_draft_view.team_draft_facts(
                     session, team_draft_id, interaction.guild)
+            # A matchup freed again in between reads as being set up: whoever
+            # holds it next is, and Start draft will say so either way.
             reason = (team_draft_view.GONE if facts is None
-                      else launch_block(STARTED, facts.lobby_link))
+                      else launch_block(facts.state, facts.lobby_link)
+                      or launch_block(SETTING_UP, None))
             await interaction.response.send_message(reason, ephemeral=True)
             return
         try:

@@ -2,11 +2,13 @@ from datetime import datetime, timezone
 
 from helpers.matchup import (
     OPEN,
+    SETTING_UP,
     STARTED,
     Booking,
     Side,
     assign_people,
     booking_announcement,
+    claimed_state,
     discord_time,
     launch_block,
     matchup_name,
@@ -112,3 +114,18 @@ def test_someone_on_both_sides_is_counted_once():
         ["9"],
     )
     assert assign_people([], ["1"], ["1"], []) == ([], ["1"])
+
+
+def test_a_claimed_matchup_is_being_set_up_until_its_lobby_exists_or_it_ran():
+    assert claimed_state(has_lobby=False, ran=False) == SETTING_UP
+    assert claimed_state(has_lobby=True, ran=False) == STARTED
+    assert claimed_state(has_lobby=False, ran=True) == STARTED
+
+
+def test_a_matchup_being_set_up_says_so_not_played():
+    text = launch_block(SETTING_UP, None)
+    assert text is not None and "being set up right now" in text
+    assert "played" not in text
+    a, b = Side("A", (), ("1",)), Side("B", (), ("2",))
+    body = render_matchup_control(a, b, Booking(None, None), SETTING_UP, "Ann", None)
+    assert "being set up" in body and "played" not in body
