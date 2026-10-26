@@ -9,7 +9,7 @@ import { el } from "./dom.js";
 import { expiredMessage } from "./messages.js";
 import { plural } from "./words.js";
 import { actionErrorText, createSync, shadeLevel } from "./teams.js";
-import { FORMAT, bookable, bookingLine, freeBySide, goodStarts, refusalText } from "./teamdraft.js";
+import { FORMAT, bookable, bookingLine, freeBySide, goodStarts, refusalText, shiftSelection } from "./teamdraft.js";
 
 const PATH = "/api/team-draft";
 const ACTIONS_PATH = "/api/team-draft/actions";
@@ -176,7 +176,14 @@ export async function mountTeamDraft(root, api, deps = {}) {
       if (!sync.isCurrent(ticket)) return;
       state = fresh;
       const start = new Date(state.window.start_utc);
-      if (start.getTime() !== startUtc.getTime()) { startUtc = start; heat = makeHeat(); }
+      if (start.getTime() !== startUtc.getTime()) {
+        // The window slid forward: keep the picked moment, not its cell index.
+        const had = selected !== null;
+        selected = shiftSelection(selected, startUtc, start);
+        if (had && selected === null) readout.textContent = HOVER_HINT;
+        startUtc = start;
+        heat = makeHeat();
+      }
       render();
     } catch (e) {
       if (e instanceof LinkExpired) notice(expiredMessage());

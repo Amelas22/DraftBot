@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { FORMAT, freeBySide, goodStarts, bookable, bookingLine, refusalText } from "../js/teamdraft.js";
+import { FORMAT, freeBySide, goodStarts, bookable, bookingLine, refusalText, shiftSelection } from "../js/teamdraft.js";
 import { decodeCells, encodeCells, usualCellOf, CELLS } from "../js/week.js";
 
 const fx = (n) => JSON.parse(readFileSync(new URL(`../fixtures/${n}`, import.meta.url)));
@@ -101,4 +101,17 @@ test("every refusal code has its own words", () => {
   assert.equal(new Set(texts).size, codes.length);
   assert.ok(refusalText("nonsense").length > 0);
   assert.ok(!texts.includes(refusalText("nonsense")));
+});
+
+test("shiftSelection keeps the picked time when the window start moves", () => {
+  const t0 = new Date("2026-10-26T18:00:00Z");
+  const later = (min) => new Date(t0.getTime() + min * 60000);
+  assert.equal(shiftSelection(10, t0, t0), 10);
+  assert.equal(shiftSelection(10, t0, later(30)), 9);
+  assert.equal(shiftSelection(10, t0, later(90)), 7);
+  assert.equal(shiftSelection(1, t0, later(30)), 0);
+  assert.equal(shiftSelection(0, t0, later(30)), null, "a pick that slid before the window is dropped");
+  assert.equal(shiftSelection(2, t0, later(120)), null);
+  assert.equal(shiftSelection(null, t0, later(30)), null);
+  assert.equal(shiftSelection(CELLS - 1, later(30), t0), null, "a pick pushed past the window's end is dropped");
 });

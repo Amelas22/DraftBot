@@ -36,6 +36,14 @@ export function bookable(j, state, now, startUtc) {
   return startUtc.getTime() + j * CELL_MS > now.getTime();
 }
 
+// The window cell index that names the same moment as `selected` once the window starts at `newStartUtc` instead of
+// `oldStartUtc`; null when nothing was picked or the moment is no longer in the window.
+export function shiftSelection(selected, oldStartUtc, newStartUtc) {
+  if (selected === null) return null;
+  const j = selected - (newStartUtc.getTime() - oldStartUtc.getTime()) / CELL_MS;
+  return Number.isInteger(j) && j >= 0 && j < CELLS ? j : null;
+}
+
 // "Booked for Fri 30 Oct, 8:00 PM by Bo" in the viewer's zone, or "No time booked yet".
 export function bookingLine(state, zone) {
   const { start_utc: startUtc, by_name: byName } = state.booking;
