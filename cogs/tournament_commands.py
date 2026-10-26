@@ -1423,6 +1423,7 @@ class TournamentCog(commands.Cog):
         role that outlives it costs a slot against the guild's 250-role cap,
         not correctness.
         """
+        member_ids: set[str] = set()
         try:
             async with db_session() as session:
                 participants = await list_participants(session, tournament_id)
@@ -1445,13 +1446,20 @@ class TournamentCog(commands.Cog):
                 for participant in await list_participants(session, tournament_id):
                     if participant.role_id in gone:
                         participant.role_id = None
-            # After the tournament was marked completed (every caller does that
-            # first), so nobody here reads as live on it any more; a player
-            # still on a team in another live tournament keeps the role.
-            await release_league_role(guild, member_ids)
         except Exception:
             logger.exception(
                 f"[team-roles] cleanup failed for tournament {tournament_id}")
+        # Its own try: a team role that would not delete must not also leave
+        # every player holding League Participant. After the tournament was
+        # marked completed (every caller does that first), so nobody here reads
+        # as live on it any more; a player still on a team in another live
+        # tournament keeps the role.
+        try:
+            await release_league_role(guild, member_ids)
+        except Exception:
+            logger.exception(
+                f"[league-roles] could not release League Participant after tournament "
+                f"{tournament_id}")
 
     @tournament.command(name="payout", description="Admin: distribute a tournament's prize pool to the winners")
     @has_bot_manager_role()

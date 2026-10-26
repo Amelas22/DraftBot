@@ -1001,6 +1001,7 @@ async def test_drop_team_roles_logs_instead_of_raising_on_failure():
          patch("cogs.tournament_commands.list_participants", AsyncMock(return_value=[])), \
          patch("cogs.tournament_commands.delete_team_roles",
                AsyncMock(side_effect=RuntimeError("boom"))), \
+         patch("cogs.tournament_commands.release_league_role", AsyncMock(return_value=True)), \
          patch("cogs.tournament_commands.logger") as log:
         await cog._drop_team_roles(MagicMock(), 1)  # must not raise
 
@@ -1840,3 +1841,23 @@ async def test_add_team_refuses_a_role_name(test_db):  # noqa: F811
     ensure.assert_not_awaited()
     async with db_session() as session:
         assert (await session.execute(select(TournamentParticipant))).scalars().all() == []
+
+
+
+@pytest.mark.asyncio
+async def test_finish_still_releases_league_participant_when_role_deletion_raises():
+    from cogs.tournament_commands import TournamentCog
+
+    cog = TournamentCog(MagicMock())
+    participants = [SimpleNamespace(role_id="111", captain_user_id="10", roster_user_ids=["11"])]
+    with patch("cogs.tournament_commands.db_session", lambda: _NullSession()), \
+         patch("cogs.tournament_commands.list_participants",
+               AsyncMock(return_value=participants)), \
+         patch("cogs.tournament_commands.delete_team_roles",
+               AsyncMock(side_effect=RuntimeError("boom"))), \
+         patch("cogs.tournament_commands.release_league_role",
+               AsyncMock(return_value=True)) as release:
+        await cog._drop_team_roles(MagicMock(), 1)  # must not raise
+
+    release.assert_awaited_once()
+    assert sorted(release.await_args.args[1]) == ["10", "11"]
