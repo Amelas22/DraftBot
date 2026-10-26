@@ -370,3 +370,41 @@ def test_sync_roles_reply_fits_in_one_message():
         "Dry run — nothing changed. Run again with apply:True to make these changes.")
     assert not format_role_sync(plan, True).startswith("Dry run")
     assert "<@" + str(10**17) + ">" in format_role_sync(plan, False)
+
+
+@pytest.mark.asyncio
+async def test_apply_does_not_strip_someone_who_became_live_mid_apply(test_db):
+    guild, lp, active, members = _sync_guild({12: ["lp"]})
+
+    async def _register_12(*_a):
+        async with db_session() as session:
+            t = await create_tournament(session, GUILD, "Late", 3)
+            await _team(session, t, "Late", "12")
+        return {}
+
+    with patch("services.league_roles.ensure_team_roles", new=AsyncMock(side_effect=_register_12)), \
+         patch("services.league_roles.get_active_tournament", new=AsyncMock(
+             side_effect=[None, SimpleNamespace(id=1)])):
+        plan = await apply_role_sync(guild)
+
+    assert plan.strip == ["12"]
+    members[12].remove_roles.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_applied_reply_warns_when_a_change_was_refused(test_db):
+    import discord
+    guild, lp, active, members = _sync_guild({1: ["lp"]})
+    members[1].remove_roles.side_effect = discord.HTTPException(MagicMock(status=403), "no")
+
+    plan = await apply_role_sync(guild)
+    reply = format_role_sync(plan, True)
+
+    assert plan.ok is False
+    assert "Couldn't make every change" in reply
+    assert "removed" not in reply and "created" not in reply
+    assert len(reply) <= 2000
+
+    clean = await apply_role_sync(_sync_guild({})[0])
+    assert clean.ok is True
+    assert "Couldn't" not in format_role_sync(clean, True)

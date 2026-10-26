@@ -120,6 +120,7 @@ class RoleSyncPlan:
     teams_missing_role: list[str] = field(default_factory=list)
     grant: list[str] = field(default_factory=list)
     strip: list[str] = field(default_factory=list)
+    ok: bool = True  # False once an applied change was refused by Discord
 
 
 async def plan_role_sync(guild: discord.Guild) -> RoleSyncPlan:
@@ -169,24 +170,21 @@ async def apply_role_sync(guild: discord.Guild) -> RoleSyncPlan:
     async with db_session() as session:
         tournament = await get_active_tournament(session, guild.id)
         tournament_id = tournament.id if tournament is not None else None
+    ok = True
     if tournament_id is not None:
-        await ensure_team_roles(guild, tournament_id)
-    await grant_league_roles(guild, plan.grant)
-    league = league_participant_role(guild)
-    if league is not None:
-        for user_id in plan.strip:
-            member = guild.get_member(int(user_id))
-            if member is None or league not in member.roles:
-                continue
-            try:
-                await member.remove_roles(league)
-            except discord.HTTPException as e:
-                logger.warning(f"[league-roles] could not take {league} from {user_id}: {e}")
+        created = await ensure_team_roles(guild, tournament_id)
+        ok = len(created) >= len(plan.teams_missing_role)
+    ok = await grant_league_roles(guild, plan.grant) and ok
+    # Liveness is re-checked here: the plan is older than the Discord calls above.
+    ok = await release_league_role(guild, plan.strip) and ok
+    plan.ok = ok
     return plan
 
 
 DISCORD_MESSAGE_LIMIT = 2000
 SYNC_LIST_LIMIT = 20
+REFUSED_NOTE = ("\n⚠️ Couldn't make every change — check that the bot's own role sits above them, "
+                "then run this again.")
 
 
 def _listing(title: str, items: list[str]) -> str:
@@ -200,11 +198,16 @@ def format_role_sync(plan: RoleSyncPlan, applied: bool) -> str:
     lines = [] if applied else [
         "Dry run — nothing changed. Run again with apply:True to make these changes."]
     titles = (
-        ("Team roles created", "Members given League Participant / Active", "Members who lost League Participant")
+        ("Team roles created", "Given League Participant / Active", "League Participant removed")
+        if applied and plan.ok else
+        ("Team roles", "League Participant / Active", "League Participant removal")
         if applied else
         ("Teams without a role", "Members to give League Participant / Active",
          "Members to take League Participant from"))
     lines.append(_listing(titles[0], [f"**{n}**" for n in plan.teams_missing_role]))
     lines.append(_listing(titles[1], [f"<@{u}>" for u in plan.grant]))
     lines.append(_listing(titles[2], [f"<@{u}>" for u in plan.strip]))
-    return "\n".join(lines)[:DISCORD_MESSAGE_LIMIT]
+    text = "\n".join(lines)[:DISCORD_MESSAGE_LIMIT - len(REFUSED_NOTE)]
+    if applied and not plan.ok:
+        text += REFUSED_NOTE
+    return text
