@@ -56,6 +56,7 @@ class Config:
                     "winston": "Winston Gamer",
                 },
                 "timeout": "the pit",
+                "league_participant": "League Participant",
                 "bots_with_draft_access": list(DEFAULT_BOTS_WITH_DRAFT_ACCESS)  # Bot roles granted read+send in every draft channel
             },
             "timezone": "US/Eastern",
@@ -169,6 +170,7 @@ class Config:
                     "winston": "Winston Gamer",
                 },
                 "suspected_bot": "suspected bot",
+                "league_participant": "League Participant",
                 "bots_with_draft_access": list(DEFAULT_BOTS_WITH_DRAFT_ACCESS)  # Bot roles granted read+send in every draft channel
             },
             "timezone": "US/Eastern",
@@ -488,6 +490,11 @@ def migrate_configs():
         # Add timeout role if missing
         if "roles" in config and "timeout" not in config["roles"]:
             config["roles"]["timeout"] = "the pit"
+            updated = True
+
+        # Add the server-wide league role name if missing
+        if "roles" in config and "league_participant" not in config["roles"]:
+            config["roles"]["league_participant"] = "League Participant"
             updated = True
 
         # Add bots_with_draft_access if missing (bot roles auto-granted
