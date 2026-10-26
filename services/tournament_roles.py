@@ -12,6 +12,10 @@ from typing import Any, Iterable, NamedTuple
 
 import discord
 from loguru import logger
+from sqlalchemy import select
+
+from database.db_session import db_session
+from models.tournament import TournamentParticipant
 
 # Discord's cap on a role name. A platform limit, not a product choice.
 DISCORD_ROLE_NAME_LIMIT = 100
@@ -108,6 +112,61 @@ async def create_team_roles(guild: discord.Guild, participants: Iterable[Any]) -
                 logger.warning(f"[team-roles] could not roll back {role}: {e}")
         raise
     return role_ids
+
+
+async def _create_and_store(guild: discord.Guild, target: TeamRoleTarget) -> str | None:
+    """Create one team's role and record it. None if Discord refused."""
+    try:
+        role_ids = await create_team_roles(guild, [target])
+    except discord.HTTPException as e:
+        logger.warning(f"[team-roles] could not create a role for {target.team_name}: {e}")
+        return None
+    # Imported here: tournament_service is the heavier module and nothing else
+    # in this file needs it.
+    from services.tournament_service import store_role_ids
+    await store_role_ids(role_ids)
+    return role_ids[target.id]
+
+
+async def ensure_team_role(guild: discord.Guild, participant_id: int) -> str | None:
+    """Return the live role id for a team, creating, assigning and recording
+    one when it has none or its recorded role is gone from the guild.
+
+    None if the participant no longer exists or Discord refused the creation
+    (logged, never raised): the callers have already committed the change that
+    needs the role, and must not fail because of it.
+    """
+    async with db_session() as session:
+        participant = await session.get(TournamentParticipant, participant_id)
+        if participant is None:
+            return None
+        if participant.role_id and guild.get_role(int(participant.role_id)) is not None:
+            return participant.role_id
+        target = role_target(participant)
+    return await _create_and_store(guild, target)
+
+
+async def ensure_team_roles(guild: discord.Guild, tournament_id: int) -> dict[int, str]:
+    """ensure_team_role for every non-dropped team of a tournament. Returns
+    {participant id: role id} for the roles it created. One team's refusal is
+    logged and skipped; it does not stop the others."""
+    async with db_session() as session:
+        result = await session.execute(
+            select(TournamentParticipant).where(
+                TournamentParticipant.tournament_id == tournament_id,
+                TournamentParticipant.dropped_at.is_(None),
+            )
+        )
+        targets = [
+            role_target(p) for p in result.scalars()
+            if not (p.role_id and guild.get_role(int(p.role_id)) is not None)
+        ]
+    created: dict[int, str] = {}
+    for target in targets:
+        role_id = await _create_and_store(guild, target)
+        if role_id is not None:
+            created[target.id] = role_id
+    return created
 
 
 async def sync_member(guild: discord.Guild, role_id: str | None, user_id: str, *, add: bool) -> bool:
