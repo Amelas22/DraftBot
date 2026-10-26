@@ -1645,9 +1645,8 @@ async def store_role_ids(role_ids: dict[int, str]) -> None:
         for participant_id, role_id in role_ids.items():
             participant = await session.get(TournamentParticipant, participant_id)
             if participant is None:
-                # The participant dropped (with a refund) in the gap between
-                # _create_roles_for_start's read and the money-locked start --
-                # its role was already created and assigned, and now nothing
+                # The participant dropped (with a refund) while its role was
+                # being created -- the role was already created and assigned, and now nothing
                 # will ever record its id. Log it so it can be found by hand;
                 # every other skip in this feature does the same.
                 logger.warning(

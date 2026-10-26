@@ -85,15 +85,14 @@ from services.tournament_service import (
     remove_teammate,
     set_result,
     start_playoff,
-    store_role_ids,
     SwissComplete,
 )
 from services.mtgo_tradebot_client import EVENT_TICKET
 from services import tournament_escrow_service as escrow
 from services import wallet_service
 from services.league_roles import grant_league_roles, release_league_role
-from services.tournament_roles import (create_team_roles, delete_team_roles, ensure_team_role,
-                                       role_target, sync_member)
+from services.tournament_roles import (delete_team_roles, ensure_team_role, ensure_team_roles,
+                                       sync_member)
 
 
 # Registering records only the captain, so every successful registration has to say
@@ -668,94 +667,6 @@ class TournamentCog(commands.Cog):
         Discord failure break the command that changed the roster. Open vs closed is
         derived from the tournament's own status inside the refresh."""
         await refresh_boards(self.bot, [tournament_id])
-
-    async def _create_roles_for_start(self, ctx):
-        """Create a role per paid team, before the tournament starts.
-
-        Returns {participant id: role id}, or raises. Ordered before
-        close_registration_and_seed on purpose: that call commits the start, so
-        a role failure afterwards would mean un-starting a started tournament.
-        Doing it first also skips 42 role creations for a tournament that the
-        cheap refusals here already reject -- though not for every refusal:
-        close_registration_and_seed and _open_manual_schedule have their own,
-        and those still fire after the roles exist, which is what the rollback
-        in `start` is for.
-
-        The participant set read here is NOT authoritative: registration is
-        still open, and creating 42 roles is ~160 sequential Discord calls, so
-        a payment or refund can easily land while this runs.
-        _reconcile_roles_after_start fixes the drift once the money lock has
-        settled the real set.
-
-        The session is deliberately closed before any Discord call -- see
-        role_target -- so a SQLite session is never held open across minutes of
-        API round-trips.
-        """
-        async with db_session() as session:
-            tournament = await get_active_tournament(session, ctx.guild.id)
-            if tournament is None or tournament.status != "registration":
-                return {}
-            paid = [p for p in await list_participants(session, tournament.id)
-                    if p.status == "paid"]
-            if len(paid) < 2:
-                return {}
-            targets = [role_target(p) for p in paid]
-        return await create_team_roles(ctx.guild, targets)
-
-    async def _reconcile_roles_after_start(self, ctx, tournament_id, role_ids):
-        """Settle the roles against the set of teams that actually started.
-
-        _create_roles_for_start reads while registration is still open, so by
-        the time close_registration_and_seed has committed under MONEY_LOCK the
-        truth may have moved: a team that paid during those ~160 Discord calls
-        has no role, and a team that took a refund has one nobody will collect.
-        This runs after the start has committed, against the authoritative set.
-
-        Best-effort by design: the tournament HAS started, so nothing here may
-        raise. Drift that survives is logged with the role ids needed to fix it
-        by hand.
-
-        `role_ids` is what THIS run created, and it is not redundant with the
-        database: if store_role_ids failed a moment ago, every team reads as
-        role-less while its role already exists in the guild. Those two cases
-        need opposite treatment, which is why both are consulted.
-        """
-        try:
-            async with db_session() as session:
-                paid = [p for p in await list_participants(session, tournament_id)
-                        if p.status == "paid"]
-                unroled = {p.id: role_target(p) for p in paid if not p.role_id}
-                paid_ids = {p.id for p in paid}
-            stranded = [r for pid, r in role_ids.items() if pid not in paid_ids and r]
-            if stranded:
-                logger.info(f"[team-roles] tournament {tournament_id}: dropping "
-                            f"{len(stranded)} role(s) for teams that did not start")
-                await delete_team_roles(ctx.guild, stranded)
-            # A role this run already created, whose id merely failed to
-            # persist, is RE-RECORDED -- never re-created. Creating it again
-            # would leave every team holding two real roles, with the first set
-            # recorded nowhere, so /tournament finish would never delete them:
-            # 42 teams would burn 84 of the guild's 250 slots and strand half.
-            unrecorded = {pid: r for pid, r in role_ids.items()
-                          if r and pid in unroled}
-            if unrecorded:
-                logger.info(f"[team-roles] tournament {tournament_id}: re-recording "
-                            f"{len(unrecorded)} role id(s) that did not persist")
-                await store_role_ids(unrecorded)
-            missing = [t for pid, t in unroled.items() if pid not in role_ids]
-            if missing:
-                logger.info(f"[team-roles] tournament {tournament_id}: creating "
-                            f"{len(missing)} role(s) for teams that paid during start")
-                created = await create_team_roles(ctx.guild, missing)
-                # Logged BEFORE the write, so the ids survive even if recording
-                # them is what fails -- otherwise the roles are real, assigned,
-                # and named nowhere.
-                logger.info(f"[team-roles] tournament {tournament_id}: created {created}")
-                await store_role_ids(created)
-        except Exception:
-            logger.exception(
-                f"[team-roles] could not reconcile roles for tournament "
-                f"{tournament_id}; teams may be missing a role or holding a stale one")
 
     @tournament.command(name="enable", description="Admin: enable tournament commands on this server")
     @has_bot_manager_role()
@@ -1337,47 +1248,17 @@ class TournamentCog(commands.Cog):
             return
         await ctx.defer()
         try:
-            role_ids = await self._create_roles_for_start(ctx)
-        except discord.HTTPException as e:
-            # discord.Forbidden (missing "Manage Roles") is a subclass of this.
-            # Scoped to only this call: a Discord failure from a LATER step
-            # (posting the schedule, refreshing the board, ...) must keep
-            # propagating to py-cord's on_error instead of being misreported
-            # here as a role-creation failure.
-            await ctx.followup.send(f"❌ Could not create team roles: {e}", ephemeral=True)
-            return
-        try:
-            try:
-                res = await escrow.close_registration_and_seed(ctx.guild.id, random.Random())
-            except Exception:
-                # The start did not happen, so the roles must not survive it.
-                # A failure in the rollback itself must not replace the
-                # exception below (e.g. "already started") with an
-                # unrelated transport error, so it's logged, not raised.
-                try:
-                    await delete_team_roles(ctx.guild, role_ids.values())
-                except Exception:
-                    logger.exception(
-                        f"[team-roles] could not roll back roles "
-                        f"{list(role_ids.values())} after a failed start in guild "
-                        f"{ctx.guild.id}"
-                    )
-                raise
-            try:
-                await store_role_ids(role_ids)
-            except Exception:
-                # The tournament HAS started at this point (that transaction
-                # already committed) -- the roles are real and already
-                # assigned to players, so they must NOT be deleted to tidy a
-                # bookkeeping gap. Log for manual recovery and keep going.
-                logger.exception(
-                    f"[team-roles] tournament {res['tournament_id']} started but role "
-                    f"ids {role_ids} were not persisted; recover by hand"
-                )
-            await self._reconcile_roles_after_start(
-                ctx, res["tournament_id"], role_ids)
+            res = await escrow.close_registration_and_seed(ctx.guild.id, random.Random())
             tournament_id = res["tournament_id"]
             logger.info(f"Tournament {tournament_id} started in guild {ctx.guild.id} by {ctx.author.id}")
+            # Teams get their role at sign-up; this only fills the gaps (a
+            # refused create, a role deleted by hand). The tournament has
+            # started, so nothing here may keep it from finishing the start.
+            try:
+                await ensure_team_roles(ctx.guild, tournament_id)
+            except Exception:
+                logger.exception(
+                    f"[team-roles] could not fill missing roles for tournament {tournament_id}")
             await self._refresh_board(tournament_id)
             pot_line = f" 🏦 Prize pool: **{res['pot']} tix**." if res["fee"] > 0 else ""
             play = self._destination(ctx, PAIRINGS.setting)

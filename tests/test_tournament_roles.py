@@ -461,9 +461,8 @@ async def test_store_role_ids_persists_and_is_readable_from_a_fresh_session(test
 
 @pytest.mark.asyncio
 async def test_store_role_ids_logs_and_skips_a_participant_that_has_vanished(test_db):
-    """A team can drop (with a refund) in the gap between _create_roles_for_start's
-    read and the money-locked start -- its role was already created and
-    assigned, and store_role_ids finds no row to record it against. It must
+    """A team can drop (with a refund) while its role is being created --
+    the role was already created and assigned, and store_role_ids finds no row to record it against. It must
     not raise (the other, real ids in the same call still need to be saved),
     but the skip must be logged like every other skip in this feature."""
     with _route_store_role_ids_at(test_db), \

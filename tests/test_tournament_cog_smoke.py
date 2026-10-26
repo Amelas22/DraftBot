@@ -157,13 +157,10 @@ async def test_start_freezes_the_board():
     ctx = _ctx()
 
     res = {"tournament_id": 1, "name": "Cup", "pot": 0, "fee": 0}
-    # start() now opens a session for role creation before anything else --
-    # without _registration_open() this hits the real drafts.db on disk (or,
-    # on a fresh checkout with no such file, raises OperationalError).
-    with _registration_open(), \
+    with patch("cogs.tournament_commands.tournament_enabled", return_value=True), \
          patch("cogs.tournament_commands.escrow.close_registration_and_seed",
                AsyncMock(return_value=res)), \
-         patch("cogs.tournament_commands.create_team_roles",
+         patch("cogs.tournament_commands.ensure_team_roles",
                AsyncMock(return_value={})):
         await TournamentCog.start.callback(cog, ctx)
 
@@ -368,105 +365,77 @@ def _roster_command_open(participant):
     return stack
 
 
-def _registration_open(paid_teams=2, pending_teams=0):
-    """Patch what `start` reads before it touches Discord: the feature gate
-    (`tournament_enabled`) and the two reads `_create_roles_for_start` makes
-    (`get_active_tournament`, `list_participants`) -- so the command reaches
-    Discord instead of hitting the real database.
-
-    `pending_teams` seeds extra participants with status="pending" alongside
-    the `paid_teams` paid ones, so a test can assert the paid-only filter
-    actually filters (`_registration_open()` with no pending teams cannot
-    distinguish "filtered" from "didn't need to").
-    """
-    stack = ExitStack()
-    stack.enter_context(patch("cogs.tournament_commands.tournament_enabled",
-                              return_value=True))
-    stack.enter_context(patch("cogs.tournament_commands.db_session",
-                              lambda: _NullSession()))
-    stack.enter_context(patch("cogs.tournament_commands.get_active_tournament",
-                              AsyncMock(return_value=SimpleNamespace(
-                                  id=1, status="registration"))))
-    # role_id is read by _reconcile_roles_after_start; "already has one" is
-    # the no-drift case, which is what most tests want.
-    participants = [
-        SimpleNamespace(id=i, status="paid", team_name=f"T{i}",
-                        captain_user_id=str(100 + i), roster_user_ids=[],
-                        role_id=str(500 + i))
-        for i in range(paid_teams)
-    ] + [
-        SimpleNamespace(id=1000 + i, status="pending", team_name=f"P{i}",
-                        captain_user_id=str(900 + i), roster_user_ids=[],
-                        role_id=None)
-        for i in range(pending_teams)
-    ]
-    stack.enter_context(patch("cogs.tournament_commands.list_participants",
-                              AsyncMock(return_value=participants)))
-    return stack
-
-
-@pytest.mark.asyncio
-async def test_start_creates_a_role_per_team_and_stores_the_ids():
+async def _start_with_real_roles(cog, ctx, tournament_id):
     from cogs.tournament_commands import TournamentCog
 
-    cog = TournamentCog(MagicMock())
-    # As in test_start_freezes_the_board: this test is about role creation, not
-    # the rest of start()'s tail, so the board/schedule/standings posts are
-    # stubbed out rather than run for real against a fake session.
-    cog._refresh_board = AsyncMock()
-    cog._post_schedule = AsyncMock()
-    cog._post_standings = AsyncMock()
-    ctx = _ctx()
-    with _registration_open(), \
+    res = {"tournament_id": tournament_id, "name": "Cup", "fee": 0, "pot": 0}
+    with patch("cogs.tournament_commands.tournament_enabled", return_value=True), \
          patch("cogs.tournament_commands.escrow.close_registration_and_seed",
-               AsyncMock(return_value={"tournament_id": 1, "name": "Cup", "fee": 0, "pot": 0})), \
-         patch("cogs.tournament_commands.create_team_roles",
-               AsyncMock(return_value={7: "555"})) as mk, \
-         patch("cogs.tournament_commands.store_role_ids", AsyncMock()) as store:
+               AsyncMock(return_value=res)):
         await TournamentCog.start.callback(cog, ctx)
 
-    mk.assert_awaited_once()
-    # Not just "some call happened": the ids create_team_roles returned must be
-    # the exact ids handed to store_role_ids, or the persistence half of this
-    # feature could silently drop or scramble them.
-    store.assert_awaited_once_with(mk.return_value)
 
-
-@pytest.mark.asyncio
-async def test_start_only_creates_roles_for_paid_teams():
-    """Mirrors start_tournament's own eligibility rule (status == "paid" in
-    services/tournament_service.py): a pending team must not get a real
-    Discord role handed to players who never entered."""
+def _start_cog():
     from cogs.tournament_commands import TournamentCog
 
     cog = TournamentCog(MagicMock())
     cog._refresh_board = AsyncMock()
     cog._post_schedule = AsyncMock()
     cog._post_standings = AsyncMock()
-    ctx = _ctx()
-    with _registration_open(paid_teams=2, pending_teams=1), \
-         patch("cogs.tournament_commands.escrow.close_registration_and_seed",
-               AsyncMock(return_value={"tournament_id": 1, "name": "Cup", "fee": 0, "pot": 0})), \
-         patch("cogs.tournament_commands.create_team_roles",
-               AsyncMock(return_value={})) as mk, \
-         patch("cogs.tournament_commands.store_role_ids", AsyncMock()):
-        await TournamentCog.start.callback(cog, ctx)
+    return cog
 
-    passed = list(mk.await_args.args[1])
-    assert len(passed) == 2
-    # _create_roles_for_start hands over TeamRoleTarget snapshots rather than
-    # ORM participants (so the session can close before the Discord calls), and
-    # a snapshot deliberately carries no status -- the paid-only filter is
-    # therefore observed through which teams arrived, not through their status.
-    assert {t.team_name for t in passed} == {"T0", "T1"}
+
+def _role_guild(ctx):
+    """ctx.guild whose create_role hands out ids and whose members are all gone."""
+    made = []
+
+    async def create_role(name, **kwargs):
+        role = MagicMock()
+        role.id = 9000 + len(made)
+        made.append(role)
+        return role
+
+    ctx.guild.create_role = AsyncMock(side_effect=create_role)
+    ctx.guild.get_member = MagicMock(return_value=None)
+    ctx.guild.get_role = MagicMock(return_value=MagicMock())
+    return made
+
+
+@pytest.mark.asyncio
+async def test_start_fills_a_team_without_a_role_and_leaves_others_alone(test_db):  # noqa: F811
+    t_id = await _started_swiss([("Alpha", "456"), ("Bravo", "457")], extra_teams=0)
+    await _set_role_id(t_id, "Alpha", "555")
+    cog = _start_cog()
+    ctx = _ctx()
+    made = _role_guild(ctx)
+
+    await _start_with_real_roles(cog, ctx, t_id)
+
+    assert ctx.guild.create_role.await_count == 1
+    assert await _role_id_of(t_id, "Alpha") == "555"
+    assert await _role_id_of(t_id, "Bravo") == str(made[0].id)
+
+
+@pytest.mark.asyncio
+async def test_start_survives_role_creation_failing(test_db):  # noqa: F811
+    t_id = await _started_swiss([("Alpha", "456"), ("Bravo", "457")], extra_teams=0)
+    cog = _start_cog()
+    ctx = _ctx()
+    ctx.guild.create_role = AsyncMock(side_effect=RuntimeError("discord boom"))
+
+    await _start_with_real_roles(cog, ctx, t_id)
+
+    cog._refresh_board.assert_awaited_once_with(t_id)
+    cog._post_schedule.assert_awaited_once()
+    cog._post_standings.assert_awaited_once()
+    assert "has started" in ctx.followup.send.await_args_list[-1].args[0]
 
 
 @pytest.mark.asyncio
 async def test_start_closes_its_session_before_calling_discord():
-    """42 roles is ~160 sequential Discord calls. Holding a SQLite session open
-    across them blocks every other writer for the duration -- which is the same
-    hazard the completion path documents 350 lines away. A mocked session
-    cannot show this, so this test uses one that reports its real state."""
+    """Filling roles is many sequential Discord calls. Holding a SQLite session
+    open across them blocks every other writer for the duration. A mocked
+    session cannot show this, so this test uses one that reports its real state."""
     from cogs.tournament_commands import TournamentCog
 
     open_sessions = []
@@ -486,296 +455,25 @@ async def test_start_closes_its_session_before_calling_discord():
 
     was_open_during_discord = []
 
-    async def _create(guild, targets):
+    async def _ensure(guild, tournament_id):
         was_open_during_discord.append(
             any(not sess.closed for sess in open_sessions))
         return {}
 
-    cog = TournamentCog(MagicMock())
-    cog._refresh_board = AsyncMock()
-    cog._post_schedule = AsyncMock()
-    cog._post_standings = AsyncMock()
+    cog = _start_cog()
     ctx = _ctx()
+    res = {"tournament_id": 1, "name": "Cup", "fee": 0, "pot": 0}
 
-    with _registration_open(paid_teams=2) as stack, \
+    with patch("cogs.tournament_commands.tournament_enabled", return_value=True), \
+         patch("cogs.tournament_commands.db_session", lambda: _WatchedSession()), \
          patch("cogs.tournament_commands.escrow.close_registration_and_seed",
-               AsyncMock(return_value={"tournament_id": 1, "name": "Cup", "fee": 0, "pot": 0})), \
-         patch("cogs.tournament_commands.create_team_roles", _create), \
-         patch("cogs.tournament_commands.store_role_ids", AsyncMock()):
-        stack.enter_context(patch("cogs.tournament_commands.db_session",
-                                  lambda: _WatchedSession()))
+               AsyncMock(return_value=res)), \
+         patch("cogs.tournament_commands.ensure_team_roles", _ensure):
         await TournamentCog.start.callback(cog, ctx)
 
-    assert was_open_during_discord, "create_team_roles was never reached"
+    assert was_open_during_discord, "ensure_team_roles was never reached"
     assert not any(was_open_during_discord), (
         "a database session was still open while creating roles on Discord")
-
-
-@pytest.mark.asyncio
-async def test_start_gives_a_role_to_a_team_that_paid_while_it_was_running():
-    """Creating 42 roles is ~160 sequential Discord calls with registration
-    still OPEN, so a payment landing mid-run is ordinary, not exotic. That team
-    is in the started tournament but has no role, and nothing later would give
-    it one -- it would go the whole event untagged in every match room."""
-    from cogs.tournament_commands import TournamentCog
-
-    cog = TournamentCog(MagicMock())
-    cog._refresh_board = AsyncMock()
-    cog._post_schedule = AsyncMock()
-    cog._post_standings = AsyncMock()
-    ctx = _ctx()
-    latecomer = SimpleNamespace(id=7, status="paid", team_name="Late",
-                                captain_user_id="777", roster_user_ids=[],
-                                role_id=None)
-
-    with _registration_open(paid_teams=2) as stack, \
-         patch("cogs.tournament_commands.escrow.close_registration_and_seed",
-               AsyncMock(return_value={"tournament_id": 1, "name": "Cup", "fee": 0, "pot": 0})), \
-         patch("cogs.tournament_commands.create_team_roles",
-               AsyncMock(return_value={0: "500", 1: "501"})) as mk, \
-         patch("cogs.tournament_commands.store_role_ids", AsyncMock()):
-        # The authoritative post-lock read sees one more paid team than the
-        # pre-lock one did.
-        stack.enter_context(patch(
-            "cogs.tournament_commands.list_participants",
-            AsyncMock(side_effect=[
-                [SimpleNamespace(id=i, status="paid", team_name=f"T{i}",
-                                 captain_user_id=str(100 + i), roster_user_ids=[],
-                                 role_id=str(500 + i)) for i in range(2)],
-                [SimpleNamespace(id=i, status="paid", team_name=f"T{i}",
-                                 captain_user_id=str(100 + i), roster_user_ids=[],
-                                 role_id=str(500 + i)) for i in range(2)] + [latecomer],
-            ])))
-        await TournamentCog.start.callback(cog, ctx)
-
-    assert mk.await_count == 2, "the latecomer never got a role created"
-    assert [t.team_name for t in mk.await_args.args[1]] == ["Late"]
-
-
-@pytest.mark.asyncio
-async def test_start_takes_back_a_role_from_a_team_that_dropped_while_it_was_running():
-    """The mirror case: a refund during those same ~160 calls leaves a real
-    role behind for a team that is not in the tournament."""
-    from cogs.tournament_commands import TournamentCog
-
-    cog = TournamentCog(MagicMock())
-    cog._refresh_board = AsyncMock()
-    cog._post_schedule = AsyncMock()
-    cog._post_standings = AsyncMock()
-    ctx = _ctx()
-
-    with _registration_open(paid_teams=2) as stack, \
-         patch("cogs.tournament_commands.escrow.close_registration_and_seed",
-               AsyncMock(return_value={"tournament_id": 1, "name": "Cup", "fee": 0, "pot": 0})), \
-         patch("cogs.tournament_commands.create_team_roles",
-               AsyncMock(return_value={0: "500", 1: "501"})), \
-         patch("cogs.tournament_commands.store_role_ids", AsyncMock()), \
-         patch("cogs.tournament_commands.delete_team_roles",
-               AsyncMock(return_value={"501"})) as gone:
-        stack.enter_context(patch(
-            "cogs.tournament_commands.list_participants",
-            AsyncMock(side_effect=[
-                [SimpleNamespace(id=i, status="paid", team_name=f"T{i}",
-                                 captain_user_id=str(100 + i), roster_user_ids=[],
-                                 role_id=str(500 + i)) for i in range(2)],
-                # Team 1 took a refund; only team 0 actually started.
-                [SimpleNamespace(id=0, status="paid", team_name="T0",
-                                 captain_user_id="100", roster_user_ids=[],
-                                 role_id="500")],
-            ])))
-        await TournamentCog.start.callback(cog, ctx)
-
-    gone.assert_awaited_once()
-    assert list(gone.await_args.args[1]) == ["501"]
-
-
-@pytest.mark.asyncio
-async def test_roles_created_during_reconcile_are_logged_even_if_recording_them_fails():
-    """The reconcile's own write can fail too. Those roles are real and already
-    assigned to players, so if their ids reach neither the database nor the log
-    they are unrecoverable -- nothing left in the system names them, and
-    /tournament finish deletes by stored id."""
-    from cogs.tournament_commands import TournamentCog
-
-    cog = TournamentCog(MagicMock())
-    cog._refresh_board = AsyncMock()
-    cog._post_schedule = AsyncMock()
-    cog._post_standings = AsyncMock()
-    ctx = _ctx()
-    latecomer = SimpleNamespace(id=7, status="paid", team_name="Late",
-                                captain_user_id="777", roster_user_ids=[], role_id=None)
-    seated = [SimpleNamespace(id=i, status="paid", team_name=f"T{i}",
-                              captain_user_id=str(100 + i), roster_user_ids=[],
-                              role_id=str(500 + i)) for i in range(2)]
-
-    with _registration_open(paid_teams=2) as stack, \
-         patch("cogs.tournament_commands.escrow.close_registration_and_seed",
-               AsyncMock(return_value={"tournament_id": 1, "name": "Cup", "fee": 0, "pot": 0})), \
-         patch("cogs.tournament_commands.create_team_roles",
-               AsyncMock(side_effect=[{0: "500", 1: "501"}, {7: "507"}])), \
-         patch("cogs.tournament_commands.store_role_ids",
-               AsyncMock(side_effect=[None, RuntimeError("db blipped")])), \
-         patch("cogs.tournament_commands.logger") as log:
-        stack.enter_context(patch(
-            "cogs.tournament_commands.list_participants",
-            AsyncMock(side_effect=[seated, seated + [latecomer]])))
-        await TournamentCog.start.callback(cog, ctx)
-
-    logged = " ".join(str(c) for c in log.info.call_args_list)
-    assert "507" in logged, ("the role created for the latecomer was never named in the "
-                             "log, and its id reached nothing else either")
-
-
-@pytest.mark.asyncio
-async def test_a_failed_role_id_write_is_re_recorded_not_re_created():
-    """store_role_ids failing leaves every team reading as role-less while its
-    role already exists in the guild. Creating again there would be strictly
-    worse than the bookkeeping gap it replaces: 42 teams would hold two real
-    roles each, burning 84 of the guild's 250 slots, and the first 42 would be
-    recorded nowhere -- so /tournament finish would never delete them."""
-    from cogs.tournament_commands import TournamentCog
-
-    cog = TournamentCog(MagicMock())
-    cog._refresh_board = AsyncMock()
-    cog._post_schedule = AsyncMock()
-    cog._post_standings = AsyncMock()
-    ctx = _ctx()
-    # The write fails once; the reconcile's retry is allowed to succeed, so the
-    # test can tell "re-recorded" apart from "gave up".
-    store = AsyncMock(side_effect=[RuntimeError("db blipped"), None])
-    started = [SimpleNamespace(id=i, status="paid", team_name=f"T{i}",
-                               captain_user_id=str(100 + i), roster_user_ids=[],
-                               role_id=None)          # <- the write did not land
-               for i in range(2)]
-
-    with _registration_open(paid_teams=2) as stack, \
-         patch("cogs.tournament_commands.escrow.close_registration_and_seed",
-               AsyncMock(return_value={"tournament_id": 1, "name": "Cup", "fee": 0, "pot": 0})), \
-         patch("cogs.tournament_commands.create_team_roles",
-               AsyncMock(return_value={0: "500", 1: "501"})) as mk, \
-         patch("cogs.tournament_commands.delete_team_roles",
-               AsyncMock(return_value=set())) as gone, \
-         patch("cogs.tournament_commands.store_role_ids", store):
-        stack.enter_context(patch(
-            "cogs.tournament_commands.list_participants",
-            AsyncMock(side_effect=[
-                [SimpleNamespace(id=i, status="paid", team_name=f"T{i}",
-                                 captain_user_id=str(100 + i), roster_user_ids=[],
-                                 role_id=None) for i in range(2)],
-                started,
-            ])))
-        await TournamentCog.start.callback(cog, ctx)
-
-    assert mk.await_count == 1, "the roles were created a second time"
-    assert store.await_count == 2, "the failed write was not retried"
-    assert store.await_args.args[0] == {0: "500", 1: "501"}, (
-        "the retry did not re-record the ids this run already created")
-    gone.assert_not_awaited()  # never tidy real roles off a live tournament
-
-
-@pytest.mark.asyncio
-async def test_start_survives_role_ids_failing_to_persist():
-    """The tournament has already committed as started, so a store_role_ids
-    failure must never take the command down with it -- the roles are real and
-    assigned, and only the bookkeeping is missing."""
-    from cogs.tournament_commands import TournamentCog
-
-    cog = TournamentCog(MagicMock())
-    cog._refresh_board = AsyncMock()
-    cog._post_schedule = AsyncMock()
-    cog._post_standings = AsyncMock()
-    ctx = _ctx()
-
-    with _registration_open(paid_teams=2), \
-         patch("cogs.tournament_commands.escrow.close_registration_and_seed",
-               AsyncMock(return_value={"tournament_id": 1, "name": "Cup", "fee": 0, "pot": 0})), \
-         patch("cogs.tournament_commands.create_team_roles",
-               AsyncMock(return_value={0: "500", 1: "501"})), \
-         patch("cogs.tournament_commands.delete_team_roles", AsyncMock(return_value=set())) as gone, \
-         patch("cogs.tournament_commands.store_role_ids",
-               AsyncMock(side_effect=RuntimeError("db gone"))):
-        await TournamentCog.start.callback(cog, ctx)
-
-    sent = " ".join(str(c) for c in ctx.followup.send.await_args_list)
-    assert "has started" in sent, "the start must still be announced"
-    gone.assert_not_awaited()  # never tidy real roles off a live tournament
-
-
-@pytest.mark.asyncio
-async def test_start_deletes_the_roles_it_just_made_if_the_start_fails():
-    """The Discord half of a rollback is not free: close_registration_and_seed
-    raising after roles exist must delete them explicitly, or real roles --
-    and the player role-assignments that come with them -- are stranded with
-    nothing recording their ids."""
-    from cogs.tournament_commands import TournamentCog
-
-    cog = TournamentCog(MagicMock())
-    ctx = _ctx()
-    with _registration_open(), \
-         patch("cogs.tournament_commands.create_team_roles",
-               AsyncMock(return_value={7: "555", 8: "556"})), \
-         patch("cogs.tournament_commands.escrow.close_registration_and_seed",
-               AsyncMock(side_effect=ValueError("'Cup' has already started."))), \
-         patch("cogs.tournament_commands.delete_team_roles", AsyncMock()) as delete, \
-         patch("cogs.tournament_commands.store_role_ids", AsyncMock()) as store:
-        await TournamentCog.start.callback(cog, ctx)
-
-    assert list(delete.await_args.args[1]) == ["555", "556"]
-    store.assert_not_awaited()         # never reached: the start failed first
-    sent = ctx.followup.send.call_args.args[0]
-    assert "already started" in sent   # the TO still sees the real reason
-
-
-@pytest.mark.asyncio
-async def test_start_refuses_when_roles_cannot_be_created():
-    """Failing at start is far cheaper than discovering it when the first match
-    room opens. create_team_roles is mocked here (its own rollback is Task 2's
-    to test), so this only checks that a failure from it stops the start and
-    reaches the TO -- not that anything gets unwound."""
-    import discord
-    from cogs.tournament_commands import TournamentCog
-
-    cog = TournamentCog(MagicMock())
-    ctx = _ctx()
-    with _registration_open(), \
-         patch("cogs.tournament_commands.create_team_roles",
-               AsyncMock(side_effect=discord.Forbidden(MagicMock(status=403), "Missing Permissions"))), \
-         patch("cogs.tournament_commands.escrow.close_registration_and_seed",
-               AsyncMock()) as seed:
-        await TournamentCog.start.callback(cog, ctx)
-
-    seed.assert_not_awaited()          # the tournament never started
-    sent = " ".join(str(c) for c in ctx.followup.send.await_args_list)
-    assert "role" in sent.lower()
-
-
-@pytest.mark.asyncio
-async def test_start_does_not_misreport_a_post_start_discord_failure_as_a_role_failure():
-    """Regression (review round 1): the HTTPException handler used to wrap the
-    whole try body, so a Discord failure from _post_schedule -- which only
-    runs AFTER close_registration_and_seed has committed the start -- was
-    reported to the TO as "Could not create team roles" and swallowed instead
-    of reaching py-cord's on_error. The handler must be scoped to
-    _create_roles_for_start alone."""
-    import discord
-    from cogs.tournament_commands import TournamentCog
-
-    cog = TournamentCog(MagicMock())
-    cog._refresh_board = AsyncMock()
-    cog._post_schedule = AsyncMock(side_effect=discord.Forbidden(MagicMock(status=403), "Missing Access"))
-    cog._post_standings = AsyncMock()
-    ctx = _ctx()
-    with _registration_open(), \
-         patch("cogs.tournament_commands.escrow.close_registration_and_seed",
-               AsyncMock(return_value={"tournament_id": 1, "name": "Cup", "fee": 0, "pot": 0})), \
-         patch("cogs.tournament_commands.create_team_roles",
-               AsyncMock(return_value={})), \
-         patch("cogs.tournament_commands.store_role_ids", AsyncMock()):
-        with pytest.raises(discord.Forbidden):
-            await TournamentCog.start.callback(cog, ctx)
-
-    sent = " ".join(str(c) for c in ctx.followup.send.await_args_list)
-    assert "team roles" not in sent.lower()
 
 
 @pytest.mark.asyncio
