@@ -6,6 +6,13 @@ import discord
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def scheduler_on():
+    """Team drafts only run where the scheduler is turned on."""
+    with patch("config.scheduler_enabled", return_value=True):
+        yield
+
+
 def make_ctx(channel):
     ctx = MagicMock()
     ctx.channel = channel
@@ -92,3 +99,21 @@ async def test_a_match_thread_never_asks_the_team_draft_lookup():
 
     lookup.assert_not_awaited()
     assert view.call_args.kwargs["session_details_overrides"] == overrides
+
+
+@pytest.mark.asyncio
+async def test_premade_draft_in_a_team_draft_thread_is_refused_while_the_flag_is_off():
+    from cogs.draft_commands import DraftCommands
+
+    ctx = make_ctx(team_draft_thread())
+    with patch("cogs.draft_commands.db_session", fake_session), \
+         patch("match_control_view.match_room_context", AsyncMock(return_value=None)), \
+         patch("team_draft_view.team_draft_room_context",
+               AsyncMock(return_value=(3, {"team_draft_id": 3}, None))), \
+         patch("config.scheduler_enabled", return_value=False), \
+         patch("cogs.draft_commands.CubeDraftSelectionView") as view:
+        await DraftCommands.premade_draft.callback(DraftCommands(MagicMock()), ctx)
+
+    view.assert_not_called()
+    ctx.response.send_message.assert_awaited_once_with(
+        "Team drafts aren't turned on in this server.", ephemeral=True)

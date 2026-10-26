@@ -53,6 +53,13 @@ FIND_A_TEAM = ChannelSpec(
     # Players talk here; the board is sticky, so it stays at the bottom anyway.
     read_only=False,
 )
+SET_TEAM_DRAFT = ChannelSpec(
+    setting="default_team_draft_channel_id",
+    name="set-team-draft",
+    topic="Setting up a draft between two teams? Press Set up a team draft on the board at the bottom.",
+    # Each matchup's thread hangs off this channel; the board is sticky.
+    read_only=False,
+)
 
 
 def resolve_channel(guild, config, setting):

@@ -447,6 +447,27 @@ class LfgBoardStickyStrategy(StickyStrategy):
         remember_rendered(new_message)
 
 
+TEAM_DRAFT_BOARD_VIEW_TYPE = "team_draft_board"
+
+
+class TeamDraftBoardStickyStrategy(StickyStrategy):
+    """Keeps the Set up a team draft board below the matchup threads' "started a
+    thread" lines in #set-team-draft while the server's scheduler flag is on.
+    Turning the flag off ends the sticky; the board stays put."""
+
+    async def validate_state(self, sticky_message: Message, session: AsyncSession) -> bool:
+        from config import scheduler_enabled
+
+        return scheduler_enabled(sticky_message.guild_id)
+
+    async def generate_content(
+        self, sticky_message: Message, bot: discord.Client, session: AsyncSession
+    ) -> Tuple[str, Optional[discord.Embed], Optional[discord.ui.View], Dict[str, Any]]:
+        from team_draft_wizard import TeamDraftBoardView, board_embed
+
+        return sticky_message.content, board_embed(), TeamDraftBoardView(), sticky_message.view_metadata
+
+
 def get_sticky_strategy(view_metadata: Dict[str, Any]) -> StickyStrategy:
     """Factory method to get the appropriate strategy."""
     view_type = view_metadata.get("view_type", "draft")
@@ -457,6 +478,8 @@ def get_sticky_strategy(view_metadata: Dict[str, Any]) -> StickyStrategy:
         return TournamentBoardStickyStrategy()
     elif view_type == LFG_BOARD_VIEW_TYPE:
         return LfgBoardStickyStrategy()
+    elif view_type == TEAM_DRAFT_BOARD_VIEW_TYPE:
+        return TeamDraftBoardStickyStrategy()
     elif view_type == LIBRARY_PANEL_VIEW_TYPE:
         return LibraryPanelStickyStrategy()
     elif view_type == "draft" or view_type == "quiz":

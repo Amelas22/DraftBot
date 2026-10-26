@@ -13,6 +13,7 @@ from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config import scheduler_enabled
 from database.db_session import db_session
 from helpers.matchup import (
     Booking,
@@ -33,6 +34,9 @@ if TYPE_CHECKING:
     from cube_views.pack_options import BaseCubeSelectionView
 
 GONE = "This team draft no longer exists."
+# The one answer every team-draft entry point gives in a server without the
+# scheduler (board, wizard, /team_draft_board, Start draft, /premade_draft).
+NOT_ENABLED = "Team drafts aren't turned on in this server."
 DELETED_ROLE = "deleted role"
 
 
@@ -231,6 +235,9 @@ async def refresh_team_draft_control(bot: discord.Client, team_draft_id: int) ->
 
 async def start_team_draft(interaction: discord.Interaction, team_draft_id: int) -> None:
     """Start draft button: the pre-named cube picker, or why a draft can't start."""
+    if interaction.guild_id is None or not scheduler_enabled(str(interaction.guild_id)):
+        await interaction.response.send_message(NOT_ENABLED, ephemeral=True)
+        return
     async with db_session() as session:
         facts = await team_draft_facts(session, team_draft_id, interaction.guild)
     if facts is None:

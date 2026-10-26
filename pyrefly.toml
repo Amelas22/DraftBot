@@ -97,6 +97,8 @@ project-includes = [
     "cogs/lfg_cog.py",
     "services/league_roles.py",
     "services/team_draft.py",
+    "team_draft_wizard.py",
+    "cogs/team_draft_cog.py",
 ]
 
 # SQLAlchemy 1.x-style Column() declarations type column attributes as Column[T]

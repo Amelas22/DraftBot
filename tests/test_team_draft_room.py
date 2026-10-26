@@ -17,6 +17,13 @@ ROLES = {111: "Team Garruk"}
 MEMBERS = {201: "Ash", 202: "Bo", 300: "Organiser"}
 
 
+@pytest.fixture(autouse=True)
+def scheduler_on():
+    """Team drafts only run where the scheduler is turned on."""
+    with patch("team_draft_view.scheduler_enabled", return_value=True):
+        yield
+
+
 def make_guild(roles=ROLES, members=MEMBERS):
     guild = MagicMock()
     guild.id = 1

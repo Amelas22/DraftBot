@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -98,6 +98,11 @@ async def create_team_draft(
     session.add(team_draft)
     await session.flush()
     return team_draft
+
+
+async def delete_team_draft(session: AsyncSession, team_draft_id: int) -> None:
+    """Remove a matchup whose thread never opened. The caller commits."""
+    await session.execute(delete(TeamDraft).where(TeamDraft.id == team_draft_id))
 
 
 async def set_room(

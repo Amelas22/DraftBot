@@ -84,7 +84,8 @@ class DraftCommands(commands.Cog):
                 )
                 context = None
             if context is None:
-                from team_draft_view import team_draft_room_context
+                from config import scheduler_enabled
+                from team_draft_view import NOT_ENABLED, team_draft_room_context
                 try:
                     async with db_session() as session:
                         context = await team_draft_room_context(
@@ -97,6 +98,9 @@ class DraftCommands(commands.Cog):
                         "falling back to the ordinary /premade_draft flow"
                     )
                     context = None
+                if context is not None and not scheduler_enabled(str(ctx.guild.id)):
+                    await ctx.response.send_message(NOT_ENABLED, ephemeral=True)
+                    return
             if context is not None:
                 # A match or team draft thread names its own teams, so the modal never asks —
                 # there is no wrong name to type, and draft side A is side A.
