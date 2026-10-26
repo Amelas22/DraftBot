@@ -18,13 +18,12 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 
 import discord
-from discord.types.components import SelectMenu as SelectMenuPayload
 from loguru import logger
 from typing_extensions import override
 
 from database.db_session import db_session
 from helpers.money_gate import gate_serve, linked_username
-from helpers.utils import not_none, ui_button
+from helpers.utils import PrefilledSelect, not_none, ui_button
 from models.mtgo_account import MtgoAccount
 from models.tournament import Tournament, TournamentParticipant
 from notification_service import send_dm
@@ -222,24 +221,12 @@ async def lfg_defaults(guild_id: str, captain_id: str) -> list[str]:
         return await full_team_member_ids(session, guild_id, captain_id)
 
 
-class PrefilledUserSelect(discord.ui.Select[Any]):
-    """A member picker that can open with members already chosen.
-
-    py-cord 2.6.1 has no ``default_values``, so it is added to the component payload
-    here; Discord renders those members as picked."""
+class PrefilledUserSelect(PrefilledSelect):
+    """A member picker that can open with members already chosen."""
 
     def __init__(self, defaults: list[str], **kwargs: Any) -> None:
-        super().__init__(discord.ComponentType.user_select, **kwargs)
-        self.defaults = defaults
-
-    @override
-    def to_component_dict(self) -> SelectMenuPayload:
-        payload = super().to_component_dict()
-        if self.defaults:
-            # The payload TypedDict predates default_values; Discord accepts the key.
-            cast(dict[str, Any], payload)["default_values"] = [
-                {"id": uid, "type": "user"} for uid in self.defaults]
-        return payload
+        super().__init__(discord.ComponentType.user_select,
+                         [{"id": uid, "type": "user"} for uid in defaults], **kwargs)
 
 
 def _pick(values: list[Any], captain_id: str) -> tuple[list[str], list[str]]:

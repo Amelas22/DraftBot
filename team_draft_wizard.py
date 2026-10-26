@@ -11,17 +11,16 @@ Nothing is written before Create. Create checks the two sides
 """
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, Literal, cast
+from typing import Any, Callable, Literal
 
 import discord
-from discord.types.components import SelectMenu as SelectMenuPayload
 from loguru import logger
 from typing_extensions import override
 
 from config import scheduler_enabled
 from database.db_session import db_session
 from helpers.matchup import Side, matchup_name, side_label
-from helpers.utils import DISCORD_THREAD_NAME_LIMIT, not_none, ui_button
+from helpers.utils import DISCORD_THREAD_NAME_LIMIT, PrefilledSelect, not_none, ui_button
 from services.team_draft import (
     MAX_PICKS, Picks, check_sides, create_team_draft, delete_team_draft)
 from team_draft_view import NOT_ENABLED, open_team_draft_room
@@ -125,24 +124,11 @@ async def start_setup(interaction: discord.Interaction) -> None:
 
 # --- Steps 1 and 2: the sides -----------------------------------------------------
 
-class PrefilledMentionableSelect(discord.ui.Select[Any]):
-    """A roles-and-members picker that can open with picks already chosen.
-
-    py-cord 2.6.1 has no ``default_values``, so it is added to the component
-    payload here (as register_team_wizard.PrefilledUserSelect does for members);
-    each default is ``{"id": ..., "type": "user" | "role"}``."""
+class PrefilledMentionableSelect(PrefilledSelect):
+    """A roles-and-members picker that can open with picks already chosen."""
 
     def __init__(self, defaults: list[dict[str, str]], **kwargs: Any) -> None:
-        super().__init__(discord.ComponentType.mentionable_select, **kwargs)
-        self.defaults = defaults
-
-    @override
-    def to_component_dict(self) -> SelectMenuPayload:
-        payload = super().to_component_dict()
-        if self.defaults:
-            # The payload TypedDict predates default_values; Discord accepts the key.
-            cast(dict[str, Any], payload)["default_values"] = self.defaults
-        return payload
+        super().__init__(discord.ComponentType.mentionable_select, defaults, **kwargs)
 
 
 def _defaults(side: Side | None) -> list[dict[str, str]]:

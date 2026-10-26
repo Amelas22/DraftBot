@@ -1,7 +1,9 @@
-from typing import Any, Callable, Iterable, TypeVar
+from typing import Any, Callable, Iterable, TypeVar, cast
 
 import discord
+from discord.types.components import SelectMenu as SelectMenuPayload
 from loguru import logger
+from typing_extensions import override
 
 _T = TypeVar("_T")
 
@@ -111,6 +113,27 @@ DEFAULT_THUMBNAIL = "https://cdn.discordapp.com/attachments/1186757246936424558/
 def get_cube_thumbnail_url(cube_name: str | None) -> str:
     """Get the thumbnail URL for a given cube name."""
     return CUBE_THUMBNAILS.get(cube_name or "", DEFAULT_THUMBNAIL)
+
+class PrefilledSelect(discord.ui.Select[Any]):
+    """A user, role or mentionable picker that can open with picks already chosen.
+
+    py-cord 2.6.1 has no ``default_values``, so it is added to the component
+    payload here; Discord renders those picks as chosen. Each default is
+    ``{"id": ..., "type": "user" | "role"}``."""
+
+    def __init__(self, select_type: discord.ComponentType,
+                 defaults: list[dict[str, str]], **kwargs: Any) -> None:
+        super().__init__(select_type, **kwargs)
+        self.defaults = defaults
+
+    @override
+    def to_component_dict(self) -> SelectMenuPayload:
+        payload = super().to_component_dict()
+        if self.defaults:
+            # The payload TypedDict predates default_values; Discord accepts the key.
+            cast(dict[str, Any], payload)["default_values"] = self.defaults
+        return payload
+
 
 def ui_button(
     *,
