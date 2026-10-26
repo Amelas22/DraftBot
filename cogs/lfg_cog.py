@@ -5,12 +5,13 @@ from typing import Any
 import discord
 from discord.ext import commands, tasks
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing_extensions import override
 
 from config import get_config, scheduler_enabled, update_setting
 from database.db_session import db_session
+from helpers.display_names import plain_text
 from helpers.tournament_channels import FIND_A_TEAM, ensure_channel
 from helpers.utils import as_messageable, not_none, ui_button
 from services.scheduler_links import issue_link
@@ -33,18 +34,13 @@ DESCRIPTION_MAX = 4096  # Discord's limit on an embed description
 MORE_RESERVE = 64  # room kept for the "...and N more" line
 
 
-def _safe(text: str) -> str:
-    """Player-typed text as plain words: no formatting, links or pings."""
-    return discord.utils.escape_mentions(discord.utils.escape_markdown(text, ignore_links=False))
-
-
 def _team_block(team: BoardTeam) -> str:
-    lines = [f"**{_safe(team.captain_name)}'s team** · {team.filled}/{team.size} · "
+    lines = [f"**{plain_text(team.captain_name)}'s team** · {team.filled}/{team.size} · "
              f"needs {team.size - team.filled}"]
     if team.others:
-        lines.append(f"with {_safe(', '.join(team.others))}")
+        lines.append(f"with {plain_text(', '.join(team.others))}")
     if team.note:
-        lines.append(f"*{_safe(team.note)}*")
+        lines.append(f"*{plain_text(team.note)}*")
     return "\n".join(lines)
 
 
@@ -162,24 +158,46 @@ async def current_board_embed(session: AsyncSession, guild_id: str) -> discord.E
 
 
 async def refresh_lfg_board(bot: discord.Client, guild_id: str) -> None:
-    """Redraw the server's board in place when its open teams have changed."""
-    from database.message_management import LFG_BOARD_VIEW_TYPE, Message
+    """Redraw the server's board in place when its open teams have changed.
 
+    Only the board in the server's configured find-a-team channel counts; one
+    left behind in a deleted channel is not this loop's to chase. A board whose
+    message or channel is gone stops being sticky, and the next tournament to
+    open registration posts a fresh one.
+    """
+    from database.message_management import LFG_BOARD_VIEW_TYPE, fetch_sticky_message
+
+    channel_id = (get_config(guild_id).get("tournament") or {}).get(FIND_A_TEAM.setting)
+    if not channel_id:
+        return
     async with db_session() as session:
-        stickies = (await session.execute(
-            select(Message).filter_by(guild_id=guild_id, is_sticky=True))).scalars()
-        board = next((m for m in stickies
-                      if (m.view_metadata or {}).get("view_type") == LFG_BOARD_VIEW_TYPE), None)
-        if board is None:
+        board = await fetch_sticky_message(str(channel_id), session)
+        if board is None or (board.view_metadata or {}).get("view_type") != LFG_BOARD_VIEW_TYPE:
             return
-        channel_id, message_id = str(board.channel_id), str(board.message_id)
+        message_id = str(board.message_id)
         embed = await current_board_embed(session, guild_id)
     if embed.description is None or _rendered.get(message_id) == embed.description:
         return
-    channel = as_messageable(await bot.fetch_channel(int(channel_id)))
-    message = await channel.fetch_message(int(message_id))
+    try:
+        channel = as_messageable(bot.get_channel(int(channel_id))
+                                 or await bot.fetch_channel(int(channel_id)))
+        message = await channel.fetch_message(int(message_id))
+    except discord.NotFound:
+        await _drop_board(str(channel_id), message_id)
+        return
     await message.edit(embed=embed)
     _rendered[message_id] = embed.description
+
+
+async def _drop_board(channel_id: str, message_id: str) -> None:
+    from database.message_management import Message
+
+    async with db_session() as session:
+        await session.execute(delete(Message).where(
+            Message.channel_id == channel_id, Message.message_id == message_id))
+        await session.commit()
+    logger.info("lfg: the board {} in channel {} is gone; it is no longer sticky",
+                message_id, channel_id)
 
 
 async def ensure_lfg_board(bot: discord.Client, guild: discord.Guild,

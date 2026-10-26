@@ -123,3 +123,8 @@ def test_a_board_too_long_for_discord_ends_with_a_count_of_the_rest():
     shown = text.count("'s team**")
     assert text.endswith(f"…and {40 - shown} more on the website.")
     assert 0 < shown < 40
+
+
+def test_a_note_on_several_lines_stays_one_line_and_cannot_make_a_heading():
+    text = lfg_cog.board_embed([_team(1, note="hi\n# JOIN NOW\n\n- me")]).description
+    assert text.endswith("*hi # JOIN NOW - me*")

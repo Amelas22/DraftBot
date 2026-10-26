@@ -174,8 +174,15 @@ def _refresh_bot(board):
     channel = MagicMock(spec=discord.TextChannel)  # refresh narrows the fetched channel
     channel.fetch_message = AsyncMock(return_value=board)
     bot = MagicMock()
+    bot.get_channel = MagicMock(return_value=None)
     bot.fetch_channel = AsyncMock(return_value=channel)
     return bot
+
+
+def _board_channel(channel_id="777"):
+    """The server's configured find-a-team channel, as ensure_lfg_board records it."""
+    return patch.object(lfg_cog, "get_config",
+                        return_value={"tournament": {"default_lfg_channel_id": channel_id}})
 
 
 @pytest.mark.asyncio
@@ -186,6 +193,11 @@ async def test_the_board_is_edited_in_place_only_when_its_list_changes(test_db):
     bot = _refresh_bot(board)
     lfg_cog.forget_rendered_boards()
 
+    with _board_channel():
+        await _refresh_three_times(bot, board)
+
+
+async def _refresh_three_times(bot, board):
     await lfg_cog.refresh_lfg_board(bot, "1")
     assert lfg_cog.NO_TEAMS in board.edit.await_args.kwargs["embed"].description
     await lfg_cog.refresh_lfg_board(bot, "1")
@@ -195,6 +207,43 @@ async def test_the_board_is_edited_in_place_only_when_its_list_changes(test_db):
     await lfg_cog.refresh_lfg_board(bot, "1")
     assert board.edit.await_count == 2
     assert "**Rook's team**" in board.edit.await_args.kwargs["embed"].description
+
+
+@pytest.mark.asyncio
+async def test_a_board_left_in_an_old_channel_is_not_the_one_refreshed(test_db):  # noqa: F811
+    async with db_session() as session:
+        session.add(Message(guild_id="1", channel_id="555", message_id="500", content="",
+                            view_metadata={"view_type": "lfg_board"}, is_sticky=True,
+                            message_count=0, last_activity=0.0, last_update_time=0.0))
+    await _make_sticky(view_type="lfg_board")
+    board = _discord_message(900, _channel())
+    board.edit = AsyncMock()
+    bot = _refresh_bot(board)
+    lfg_cog.forget_rendered_boards()
+
+    with _board_channel("777"):
+        await lfg_cog.refresh_lfg_board(bot, "1")
+
+    bot.fetch_channel.assert_awaited_once_with(777)
+    board.edit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_deleted_board_stops_being_refreshed(test_db):  # noqa: F811
+    await _make_sticky(view_type="lfg_board")
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.fetch_message = AsyncMock(side_effect=discord.NotFound(MagicMock(status=404), "gone"))
+    bot = MagicMock()
+    bot.get_channel = MagicMock(return_value=None)
+    bot.fetch_channel = AsyncMock(return_value=channel)
+    lfg_cog.forget_rendered_boards()
+
+    with _board_channel():
+        await lfg_cog.refresh_lfg_board(bot, "1")
+        assert await _sticky_rows() == []
+        await lfg_cog.refresh_lfg_board(bot, "1")
+
+    channel.fetch_message.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -215,7 +264,8 @@ async def test_a_reposted_board_is_not_edited_again_for_the_same_list(test_db): 
     with patch("config.scheduler_enabled", return_value=True):
         assert await _force_repost(bot) == StickyUpdateResult.SUCCESS
 
-    await lfg_cog.refresh_lfg_board(bot, "1")
+    with _board_channel():
+        await lfg_cog.refresh_lfg_board(bot, "1")
 
     new.edit.assert_not_awaited()
 
@@ -224,5 +274,8 @@ async def test_a_reposted_board_is_not_edited_again_for_the_same_list(test_db): 
 async def test_no_board_means_nothing_to_refresh(test_db):  # noqa: F811
     bot = MagicMock()
     bot.fetch_channel = AsyncMock()
-    await lfg_cog.refresh_lfg_board(bot, "1")
+    with _board_channel():
+        await lfg_cog.refresh_lfg_board(bot, "1")
+    with patch.object(lfg_cog, "get_config", return_value={}):
+        await lfg_cog.refresh_lfg_board(bot, "1")
     bot.fetch_channel.assert_not_awaited()
