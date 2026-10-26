@@ -75,6 +75,7 @@ main.wide { max-width: 1080px; }
 .card[aria-pressed="true"] { border-color: var(--accent); }
 .card .row { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
 .card .note { font-size: 13px; overflow-wrap: anywhere; }
+.card .members { font-size: 13px; overflow-wrap: anywhere; }
 .fit { font-weight: 800; color: var(--accent); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .meta { color: var(--muted); font-size: 13px; }
 .tag { font-weight: 700; color: var(--fg); }

@@ -5,7 +5,7 @@ import {
   fitTeam, rankTeams, halfHourFloor, onOtherTeam, joinState, noteError, refusalText, actionErrorText,
   cellText, declinedText, joinNote, modeAfterSelect, shadeLevel, teamName, MULTI_TEAM_WARNING, NETWORK_FAILED,
   isFull, requestsFor, myTeams, requestHeading, slotsText, createSync, windowStart, noteDrafts,
-  CLOSE_CONFIRM, leaveConfirm,
+  CLOSE_CONFIRM, leaveConfirm, membersText,
 } from "../js/teams.js";
 import { decodeCells, usualCellOf, CELLS } from "../js/week.js";
 import { LinkExpired, NeedsUpdate, NEEDS_UPDATE } from "../js/api.js";
@@ -141,6 +141,13 @@ test("shadeLevel: 0 for nobody, 6 for everyone, rising in between", () => {
 
 test("teamName", () => {
   assert.equal(teamName(team("101")), "Rook's team");
+});
+
+test("membersText names everyone on the team but the captain, the viewer as you", () => {
+  assert.equal(membersText(team("101"), state.me.user), "with Wren");
+  assert.equal(membersText(team("102"), state.me.user), "");
+  const three = { ...team("101"), members: [...team("101").members, { user: state.me.user, name: "Ben" }, { user: "9", name: "Ash" }] };
+  assert.equal(membersText(three, state.me.user), "with Wren, you and Ash");
 });
 
 const captain = fx("teams-captain.json");
