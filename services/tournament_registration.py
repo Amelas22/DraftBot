@@ -10,11 +10,10 @@ differently (a command says "try /tournament register again", the wizard says
 do is disagree about what registering means.
 """
 from dataclasses import dataclass, field, replace
-from typing import Any, Literal
+from typing import Literal
 
 import discord
 from loguru import logger
-from sqlalchemy import func, select
 
 from database.db_session import db_session
 from helpers.display_names import get_display_name
@@ -71,23 +70,16 @@ class RosterAdd:
     role_synced: bool = True
 
 
-async def check_team_name(session: Any, guild: discord.Guild, tournament_id: int,
-                          team_name: str) -> None:
-    """Raise ValueError if a NEW team may not take ``team_name``: its role would
-    share a name with a role the bot looks up by name (see role_name_clash).
+def check_team_name(guild: discord.Guild, team_name: str, own_role_id: str | None) -> None:
+    """Raise ValueError if ``team_name``'s role would share a name with a role the
+    bot looks up by name (see role_name_clash).
 
-    A team already registered in this tournament under that name passes -- its
-    own role carries the name, and a pending captain re-registers to pay.
+    Call it right after register_team, inside the same session, so a refusal
+    rolls back whatever that wrote. ``own_role_id`` is the recorded role of the
+    team register_team found (None for a new team): the one excused clash, since
+    a pending captain re-registers to pay under the name their role carries.
     """
-    if role_name_clash(guild, team_name) is None:
-        return
-    existing = await session.execute(
-        select(TournamentParticipant.id).where(
-            TournamentParticipant.tournament_id == tournament_id,
-            func.lower(TournamentParticipant.team_name) == team_name.strip().lower(),
-        )
-    )
-    if existing.first() is None:
+    if role_name_clash(guild, team_name, own_role_id) is not None:
         raise ValueError(TEAM_NAME_TAKEN.format(name=team_name.strip()))
 
 
@@ -126,9 +118,9 @@ async def _register_row(bot: discord.Bot, guild: discord.Guild | None, guild_id:
             tournament = await session.get(Tournament, tournament_id)
             t_name = tournament.name if tournament is not None else ""
             fee = (tournament.entry_fee or 0) if tournament is not None else 0
-            if guild is not None:
-                await check_team_name(session, guild, tournament_id, team_name)
             participant, created = await register_team(session, tournament_id, team_name, captain_id)
+            if guild is not None:
+                check_team_name(guild, team_name, None if created else participant.role_id)
             p_id, p_name = participant.id, participant.team_name
             p_captain, p_status = participant.captain_user_id, participant.status
     except ValueError as e:

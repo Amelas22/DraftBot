@@ -1085,8 +1085,9 @@ class TournamentCog(commands.Cog):
                 if tournament is None:
                     await ctx.followup.send("There is no tournament accepting registrations right now.", ephemeral=True)
                     return
-                await check_team_name(session, ctx.guild, tournament.id, team)
                 participant, created = await register_team(session, tournament.id, team, captain.id)
+                # Before comp: a refused name rolls back the registration above.
+                check_team_name(ctx.guild, team, None if created else participant.role_id)
                 # Admin add is a comp: paid with no escrow, so it's seed-eligible even in a
                 # paid tournament. Same transaction as the registration, so a crash can't
                 # leave the team registered-but-pending. The captain isn't billed.

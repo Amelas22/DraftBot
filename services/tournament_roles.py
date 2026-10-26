@@ -15,6 +15,7 @@ import discord
 from loguru import logger
 from sqlalchemy import select
 
+from config import get_config
 from database.db_session import db_session
 from helpers.permissions import get_manager_role_names
 from models.tournament import TournamentParticipant
@@ -55,22 +56,30 @@ def team_role_name(team_name: str) -> str:
     return team_name[:DISCORD_ROLE_NAME_LIMIT]
 
 
-def role_name_clash(guild: discord.Guild, team_name: str) -> str | None:
+def role_name_clash(guild: discord.Guild, team_name: str,
+                    own_role_id: str | None = None) -> str | None:
     """The role name a team called ``team_name`` would share, or None.
 
     Roles are found by NAME across the bot -- a manager name grants bot-manager
-    (helpers/permissions.py), ``roles.admin`` and League Participant / Active are
-    looked up by name -- and a team role is just the team's name, handed out at
-    sign-up. So it must not equal, case-insensitively, any role already in the
-    guild, nor a name the bot treats as special even before that role exists.
+    (helpers/permissions.py), ``roles.admin`` sees draft rooms
+    (helpers/draft_rooms.py), League Participant / Active are looked up by name
+    -- and a team role is just the team's name, handed out at sign-up. So it
+    must not equal, case-insensitively, any role already in the guild, nor one
+    of those configured names even before that role exists.
+
+    ``own_role_id`` is the team's own recorded role, which carries its name and
+    is not a clash. A configured name is never excused.
     """
     # Imported here: league_roles imports this module.
     from services.league_roles import active_role_name, league_participant_name
 
     wanted = team_role_name(team_name.strip()).strip().casefold()
-    reserved = [role.name for role in guild.roles]
+    reserved = [role.name for role in guild.roles
+                if own_role_id is None or str(role.id) != str(own_role_id)]
+    admin = get_config(guild.id).get("roles", {}).get("admin")
     reserved += [*sorted(get_manager_role_names(guild.id)),
-                 league_participant_name(guild.id), active_role_name(guild.id)]
+                 league_participant_name(guild.id), active_role_name(guild.id),
+                 *([admin] if isinstance(admin, str) else [])]
     return next((name for name in reserved if name.strip().casefold() == wanted), None)
 
 
