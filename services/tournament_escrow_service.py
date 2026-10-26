@@ -28,8 +28,8 @@ from models.tournament import Tournament, TournamentParticipant
 from models.wallet_tx import TIX, WalletTx
 from services import wallet_service
 from services.wallet_service import prize_wallet_id
-from services.tournament_service import (get_active_tournament, list_participants,
-                                         remove_team, start_tournament)
+from services.tournament_service import (find_participant_by_name, get_active_tournament,
+                                         list_participants, remove_team, start_tournament)
 
 
 # How many unpaid team names the start refusal spells out before summarising the rest.
@@ -410,10 +410,18 @@ async def drop_with_refund(tournament_id: int, team_name: str) -> dict:
     transaction (so the participant delete and the refund can never half-apply — a team
     can't end up removed with its fee stuck in the pot). Registration phase only.
 
-    Returns {team_name, refunded}. Raises ValueError like tournament_service.remove_team
+    Returns {team_name, refunded, role_id, user_ids}: the team's role and its captain +
+    roster, read before the removal deletes them, so the caller can take the roles back
+    once this has committed. Raises ValueError like tournament_service.remove_team
     (which owns the removal rules; this only adds the refund)."""
     async with wallet_service.MONEY_LOCK:
         async with db_session() as session:
+            role_id, user_ids = None, []
+            existing = await find_participant_by_name(session, tournament_id, team_name)
+            if existing is not None:  # else remove_team raises the ValueError
+                role_id = existing.role_id
+                user_ids = [str(existing.captain_user_id),
+                            *map(str, existing.roster_user_ids)]
             p = await remove_team(session, tournament_id, team_name)
             tournament = await session.get(Tournament, tournament_id)
             guild_id = str(tournament.guild_id)
@@ -422,7 +430,8 @@ async def drop_with_refund(tournament_id: int, team_name: str) -> dict:
             refunded = await refund_entry(session, guild_id, tournament_id, p)
             logger.info(f"escrow: dropped '{dropped_name}' from tournament {tournament_id} "
                         f"(refunded {refunded})")
-            result = {"team_name": dropped_name, "refunded": refunded}
+            result = {"team_name": dropped_name, "refunded": refunded,
+                      "role_id": role_id, "user_ids": user_ids}
 
     # AFTER the lock (see execute_payout): settling reaches settle_debt_from_wallet, which
     # takes MONEY_LOCK and it is not reentrant, and DMs are network I/O. Neither belongs

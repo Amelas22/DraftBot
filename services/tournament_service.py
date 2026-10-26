@@ -306,9 +306,10 @@ async def register_team(session, tournament_id, team_name, captain_user_id):
         )
 
     # Find or create the persistent Team identity (case-insensitive, like
-    # register_team_to_db in session.py, but on the caller's session).
+    # register_team_to_db in session.py, but on the caller's session). lower()
+    # on both sides: SQLite's is ASCII-only, so Python's would never match "Équipe".
     normalized = team_name.strip()
-    stmt = select(Team).where(func.lower(Team.TeamName) == normalized.lower())
+    stmt = select(Team).where(func.lower(Team.TeamName) == func.lower(normalized))
     team = (await session.execute(stmt)).scalars().first()
     if team is None:
         team = Team(TeamName=normalized)
@@ -1645,9 +1646,8 @@ async def store_role_ids(role_ids: dict[int, str]) -> None:
         for participant_id, role_id in role_ids.items():
             participant = await session.get(TournamentParticipant, participant_id)
             if participant is None:
-                # The participant dropped (with a refund) in the gap between
-                # _create_roles_for_start's read and the money-locked start --
-                # its role was already created and assigned, and now nothing
+                # The participant dropped (with a refund) while its role was
+                # being created -- the role was already created and assigned, and now nothing
                 # will ever record its id. Log it so it can be found by hand;
                 # every other skip in this feature does the same.
                 logger.warning(

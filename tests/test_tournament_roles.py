@@ -1,14 +1,16 @@
 """Tournament team roles: naming, creation with rollback, sync, deletion."""
+import asyncio
 import os
 import tempfile
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 import pytest
 import pytest_asyncio
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -18,6 +20,8 @@ from services.tournament_service import store_role_ids
 from services.tournament_roles import (
     create_team_roles,
     delete_team_roles,
+    ensure_team_role,
+    ensure_team_roles,
     sync_member,
     team_role_name,
 )
@@ -66,7 +70,7 @@ def _guild(create_fails_on=None, present_user_ids=()):
     created = []
 
     async def create_role(name, **kwargs):
-        if name == create_fails_on:
+        if create_fails_on is not None and name == team_role_name(create_fails_on):
             raise discord.Forbidden(MagicMock(status=403), "Missing Permissions")
         role = MagicMock()
         role.id = 1000 + len(created)
@@ -87,11 +91,18 @@ def _guild(create_fails_on=None, present_user_ids=()):
     guild.created = created
     guild.members = members
     guild.get_member = MagicMock(side_effect=lambda uid: members.get(uid))
+    # Any role id resolves (a created role, else a stub) unless a test makes
+    # it vanish by adding its id to guild.vanished_role_ids.
+    guild.vanished_role_ids = set()
+    guild.get_role = MagicMock(side_effect=lambda rid: None if rid in guild.vanished_role_ids
+                               else next((r for r in created if r.id == rid), MagicMock()))
     return guild
 
 
-def test_role_name_is_the_team_name():
-    assert team_role_name("Alpha Squad") == "Alpha Squad"
+def test_role_name_is_the_team_name_with_a_prefix():
+    # The prefix keeps a team role from reading as any role the bot finds by
+    # name: a team called "Bot Manager" gets "Team Bot Manager", not bot-manager.
+    assert team_role_name("Alpha Squad") == "Team Alpha Squad"
 
 
 def test_role_name_is_clipped_to_discords_limit():
@@ -99,8 +110,8 @@ def test_role_name_is_clipped_to_discords_limit():
 
 
 def test_role_name_of_exactly_the_limit_is_untouched():
-    name = "y" * 100
-    assert team_role_name(name) == name
+    name = "y" * 95
+    assert team_role_name(name) == "Team " + name
 
 
 @pytest.mark.asyncio
@@ -109,7 +120,7 @@ async def test_create_team_roles_returns_a_role_per_participant():
     parts = [_participant(1, "Alpha", 10), _participant(2, "Bravo", 20)]
     out = await create_team_roles(guild, parts)
     assert set(out) == {1, 2}
-    assert [r.name for r in guild.created] == ["Alpha", "Bravo"]
+    assert [r.name for r in guild.created] == ["Team Alpha", "Team Bravo"]
     # mentionable is the whole point: a role nobody can mention cannot pull
     # anyone into a thread.
     assert guild.create_role.await_args_list[0].kwargs["mentionable"] is True
@@ -452,9 +463,8 @@ async def test_store_role_ids_persists_and_is_readable_from_a_fresh_session(test
 
 @pytest.mark.asyncio
 async def test_store_role_ids_logs_and_skips_a_participant_that_has_vanished(test_db):
-    """A team can drop (with a refund) in the gap between _create_roles_for_start's
-    read and the money-locked start -- its role was already created and
-    assigned, and store_role_ids finds no row to record it against. It must
+    """A team can drop (with a refund) while its role is being created --
+    the role was already created and assigned, and store_role_ids finds no row to record it against. It must
     not raise (the other, real ids in the same call still need to be saved),
     but the skip must be logged like every other skip in this feature."""
     with _route_store_role_ids_at(test_db), \
@@ -464,3 +474,167 @@ async def test_store_role_ids_logs_and_skips_a_participant_that_has_vanished(tes
     mock_logger.warning.assert_called_once()
     logged = str(mock_logger.warning.call_args.args[0])
     assert "999999" in logged and "555" in logged
+
+
+def _route_roles_at(test_db):
+    """ensure_team_role(s) read through tournament_roles.db_session and write
+    through tournament_service.db_session; point both at this fixture."""
+    @asynccontextmanager
+    async def fake_db_session():
+        async with test_db() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    stack = ExitStack()
+    stack.enter_context(patch("services.tournament_roles.db_session", fake_db_session))
+    stack.enter_context(patch("services.tournament_service.db_session", fake_db_session))
+    return stack
+
+
+async def _seed_team(test_db, name="Alpha", captain="10", roster=("200",),
+                     dropped=False, role_id=None, tournament_id=None):
+    async with test_db() as session:
+        if tournament_id is None:
+            tournament = Tournament(guild_id="g1", name="Cup", total_rounds=3)
+            session.add(tournament)
+            await session.flush()
+            tournament_id = tournament.id
+        team_id = (await session.execute(select(func.count(TournamentParticipant.id)))).scalar_one() + 1
+        participant = TournamentParticipant(
+            tournament_id=tournament_id, team_id=team_id, team_name=name,
+            captain_user_id=captain, role_id=role_id,
+        )
+        if dropped:
+            participant.dropped_at = datetime(2026, 1, 1)
+        session.add(participant)
+        await session.flush()
+        for uid in roster:
+            session.add(TournamentTeamMember(
+                participant_id=participant.id, user_id=uid, display_name="p"))
+        await session.commit()
+        return tournament_id, participant.id
+
+
+async def _stored_role_id(test_db, participant_id):
+    async with test_db() as session:
+        return (await session.get(TournamentParticipant, participant_id)).role_id
+
+
+@pytest.mark.asyncio
+async def test_ensure_creates_assigns_and_stores_a_role(test_db):
+    _, pid = await _seed_team(test_db)
+    guild = _guild(present_user_ids=[10, 200])
+    with _route_roles_at(test_db):
+        role_id = await ensure_team_role(guild, pid)
+    assert role_id == str(guild.created[0].id)
+    assert await _stored_role_id(test_db, pid) == role_id
+    guild.members[10].add_roles.assert_awaited_once_with(guild.created[0])
+    guild.members[200].add_roles.assert_awaited_once_with(guild.created[0])
+
+
+@pytest.mark.asyncio
+async def test_ensure_is_a_no_op_when_the_role_exists(test_db):
+    _, pid = await _seed_team(test_db)
+    guild = _guild(present_user_ids=[10, 200])
+    with _route_roles_at(test_db):
+        first = await ensure_team_role(guild, pid)
+        second = await ensure_team_role(guild, pid)
+    assert second == first
+    assert guild.create_role.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_vanished_role_is_recreated_once(test_db):
+    _, pid = await _seed_team(test_db, role_id="999")
+    guild = _guild(present_user_ids=[10, 200])
+    guild.vanished_role_ids.add(999)
+    with _route_roles_at(test_db):
+        new_id = await ensure_team_role(guild, pid)
+        again = await ensure_team_role(guild, pid)
+    assert guild.create_role.await_count == 1
+    assert again == new_id
+    assert await _stored_role_id(test_db, pid) == new_id
+
+
+@pytest.mark.asyncio
+async def test_ensure_returns_none_for_a_participant_that_does_not_exist(test_db):
+    guild = _guild()
+    with _route_roles_at(test_db):
+        assert await ensure_team_role(guild, 424242) is None
+    guild.create_role.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ensure_team_roles_skips_dropped_teams(test_db):
+    tid, live = await _seed_team(test_db, name="Live")
+    _, dropped = await _seed_team(test_db, name="Gone", dropped=True, tournament_id=tid)
+    guild = _guild()
+    with _route_roles_at(test_db):
+        created = await ensure_team_roles(guild, tid)
+    assert set(created) == {live}
+    assert await _stored_role_id(test_db, dropped) is None
+
+
+@pytest.mark.asyncio
+async def test_ensure_team_roles_one_refusal_does_not_stop_the_others(test_db):
+    tid, bad = await _seed_team(test_db, name="Bad")
+    _, good = await _seed_team(test_db, name="Good", tournament_id=tid)
+    guild = _guild(create_fails_on="Bad")
+    with _route_roles_at(test_db):
+        created = await ensure_team_roles(guild, tid)
+    assert set(created) == {good}
+    assert await _stored_role_id(test_db, bad) is None
+
+
+@pytest.mark.asyncio
+async def test_ensure_survives_a_refused_create(test_db):
+    _, pid = await _seed_team(test_db)
+    guild = _guild(create_fails_on="Alpha")
+    with _route_roles_at(test_db):
+        assert await ensure_team_role(guild, pid) is None
+    assert await _stored_role_id(test_db, pid) is None
+
+
+@pytest.mark.asyncio
+async def test_concurrent_ensures_create_one_role(test_db):
+    _, pid = await _seed_team(test_db)
+    guild = _guild(present_user_ids=[10, 200])
+    inner = guild.create_role.side_effect
+
+    async def slow_create(name, **kwargs):
+        await asyncio.sleep(0)
+        return await inner(name, **kwargs)
+
+    guild.create_role = AsyncMock(side_effect=slow_create)
+    with _route_roles_at(test_db):
+        a, b = await asyncio.gather(ensure_team_role(guild, pid), ensure_team_role(guild, pid))
+    assert guild.create_role.await_count == 1
+    assert a == b is not None
+
+
+@pytest.mark.asyncio
+async def test_ensure_refuses_a_dropped_team(test_db):
+    _, pid = await _seed_team(test_db, dropped=True)
+    guild = _guild()
+    with _route_roles_at(test_db):
+        assert await ensure_team_role(guild, pid) is None
+    guild.create_role.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ensure_refuses_to_create_a_clashing_role(test_db):
+    _, pid = await _seed_team(test_db, name="mod")
+    guild = _guild(present_user_ids=[10, 200])
+    guild.id = "g1"
+    guild.roles = [SimpleNamespace(id=1, name="Team Mod")]
+    with _route_roles_at(test_db), \
+            patch("helpers.permissions.get_config", return_value={}), \
+            patch("services.league_roles.get_config", return_value={}), \
+            patch("services.tournament_roles.logger") as log:
+        assert await ensure_team_role(guild, pid) is None
+    guild.create_role.assert_not_awaited()
+    assert await _stored_role_id(test_db, pid) is None
+    assert "[team-roles]" in log.warning.call_args.args[0]

@@ -8,10 +8,17 @@ guild state, and every function takes the guild it is reconciling.
 A role's lifetime is one tournament. The largest real event had 42 teams and a
 guild caps at 250 roles, so roles are given back when the tournament ends.
 """
+import asyncio
 from typing import Any, Iterable, NamedTuple
 
 import discord
 from loguru import logger
+from sqlalchemy import select
+
+from config import get_config
+from database.db_session import db_session
+from helpers.permissions import get_manager_role_names
+from models.tournament import TournamentParticipant
 
 # Discord's cap on a role name. A platform limit, not a product choice.
 DISCORD_ROLE_NAME_LIMIT = 100
@@ -42,11 +49,38 @@ def role_target(participant: Any) -> TeamRoleTarget:
     )
 
 
+TEAM_ROLE_PREFIX = "Team "
+
+
 def team_role_name(team_name: str) -> str:
-    """The role name for a team. Clipped to Discord's limit; names are not
+    """The role name for a team: the team's name behind TEAM_ROLE_PREFIX, so it
+    can never read as a role the bot looks up by name (a team called "Bot
+    Manager" gets "Team Bot Manager"). Clipped to Discord's limit; names are not
     made unique, because two concurrent tournaments may each have an "Alpha"
     and the id -- not the name -- is what we store and delete by."""
-    return team_name[:DISCORD_ROLE_NAME_LIMIT]
+    return f"{TEAM_ROLE_PREFIX}{team_name}"[:DISCORD_ROLE_NAME_LIMIT]
+
+
+def role_name_clash(guild: discord.Guild, team_name: str) -> str | None:
+    """The role name a team called ``team_name`` would share, or None.
+
+    Roles are found by NAME across the bot -- a manager name grants bot-manager
+    (helpers/permissions.py), ``roles.admin`` sees draft rooms
+    (helpers/draft_rooms.py), League Participant / Active are looked up by name.
+    The prefix keeps a team role clear of those in practice; this is the check
+    that it really is: no case-insensitive match with any role already in the
+    guild, nor with one of those configured names even before that role exists.
+    """
+    # Imported here: league_roles imports this module.
+    from services.league_roles import active_role_name, league_participant_name
+
+    wanted = team_role_name(team_name.strip()).strip().casefold()
+    reserved = [role.name for role in guild.roles]
+    admin = get_config(guild.id).get("roles", {}).get("admin")
+    reserved += [*sorted(get_manager_role_names(guild.id)),
+                 league_participant_name(guild.id), active_role_name(guild.id),
+                 *([admin] if isinstance(admin, str) else [])]
+    return next((name for name in reserved if name.strip().casefold() == wanted), None)
 
 
 async def _assign(guild: discord.Guild, role: discord.Role, user_id: str) -> bool:
@@ -108,6 +142,74 @@ async def create_team_roles(guild: discord.Guild, participants: Iterable[Any]) -
                 logger.warning(f"[team-roles] could not roll back {role}: {e}")
         raise
     return role_ids
+
+
+# One lock per participant: a sign-up and /tournament start can both ask for the
+# same team's role at once, and without this each would create its own.
+_ensure_locks: dict[int, asyncio.Lock] = {}
+
+
+async def _ensure(guild: discord.Guild, participant_id: int) -> tuple[str | None, bool]:
+    """(role id, whether this call created it). The stored id is re-read under
+    the lock, so a caller that waited sees the role the first one made."""
+    lock = _ensure_locks.setdefault(participant_id, asyncio.Lock())
+    async with lock:
+        async with db_session() as session:
+            participant = await session.get(TournamentParticipant, participant_id)
+            if participant is None or participant.dropped_at is not None:
+                return None, False
+            if participant.role_id and guild.get_role(int(participant.role_id)) is not None:
+                return participant.role_id, False
+            target = role_target(participant)
+        clash = role_name_clash(guild, target.team_name)
+        if clash is not None:
+            # Only when the guild already has a role called "Team <name>": never
+            # hand a team a role that reads as someone else's.
+            logger.warning(f"[team-roles] not creating a role for {target.team_name}: "
+                           f"the name is taken by role '{clash}'")
+            return None, False
+        try:
+            role_ids = await create_team_roles(guild, [target])
+        except discord.HTTPException as e:
+            logger.warning(f"[team-roles] could not create a role for {target.team_name}: {e}")
+            return None, False
+        # Imported here: tournament_service is the heavier module and nothing
+        # else in this file needs it.
+        from services.tournament_service import store_role_ids
+        await store_role_ids(role_ids)
+        return role_ids[target.id], True
+
+
+async def ensure_team_role(guild: discord.Guild, participant_id: int) -> str | None:
+    """Return the live role id for a team, creating, assigning and recording
+    one when it has none or its recorded role is gone from the guild.
+
+    None if the participant no longer exists, has dropped, its name clashes
+    with a role (see role_name_clash), or Discord refused the creation (logged,
+    never raised): the callers have already committed the change that needs the
+    role, and must not fail because of it.
+    """
+    return (await _ensure(guild, participant_id))[0]
+
+
+async def ensure_team_roles(guild: discord.Guild, tournament_id: int) -> dict[int, str]:
+    """ensure_team_role for every non-dropped team of a tournament. Returns
+    {participant id: role id} for the roles it created. One team's refusal is
+    logged and skipped; it does not stop the others."""
+    async with db_session() as session:
+        result = await session.execute(
+            select(TournamentParticipant.id).where(
+                TournamentParticipant.tournament_id == tournament_id,
+                TournamentParticipant.dropped_at.is_(None),
+            )
+        )
+        participant_ids = list(result.scalars())
+    created: dict[int, str] = {}
+    for participant_id in participant_ids:
+        role_id, was_created = await _ensure(guild, participant_id)
+        if was_created and role_id is not None:
+            created[participant_id] = role_id
+    return created
 
 
 async def sync_member(guild: discord.Guild, role_id: str | None, user_id: str, *, add: bool) -> bool:

@@ -175,6 +175,21 @@ async def test_register_team_is_idempotent(test_db):
 
 
 @pytest.mark.asyncio
+async def test_register_team_finds_a_non_ascii_team_again(test_db):
+    async with test_db() as session:
+        tournament = await create_tournament(session, "g1", "Spring", 3)
+        await session.commit()
+
+        first, _ = await register_team(session, tournament.id, "Équipe", "42")
+        await session.commit()
+        second, created = await register_team(session, tournament.id, "Équipe", "42")
+        await session.commit()
+
+        assert created is False
+        assert second.id == first.id
+
+
+@pytest.mark.asyncio
 async def test_register_team_rejected_outside_registration(test_db):
     async with test_db() as session:
         tournament = await create_tournament(session, "g1", "Spring", 3)

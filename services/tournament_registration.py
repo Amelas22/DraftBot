@@ -20,7 +20,8 @@ from helpers.display_names import get_display_name
 from models.tournament import Tournament, TournamentParticipant
 from services import tournament_escrow_service as escrow
 from services.tournament_formatter import refresh_boards
-from services.tournament_roles import sync_member
+from services.league_roles import grant_league_roles
+from services.tournament_roles import ensure_team_role, sync_member
 from services.tournament_service import add_teammate, other_teams_for_user, register_team
 
 
@@ -41,6 +42,9 @@ class RegisterOutcome:
       pending         -- the wallet was short by ``deficit``; the spot is held.
       hold_failed     -- a pending row exists but the escrow hold failed (``error``).
       refused         -- nothing was registered (``error`` says why).
+
+    ``roles_synced`` is False when the team's role or the captain's League
+    Participant / Active roles could not be given; the registration stands.
     """
     kind: RegisterKind
     team_name: str = ""
@@ -51,6 +55,7 @@ class RegisterOutcome:
     deficit: int = 0
     available: int = 0
     error: str = ""
+    roles_synced: bool = True
 
 
 @dataclass
@@ -64,6 +69,24 @@ class RosterAdd:
 
 async def register_captain(bot: discord.Bot, guild_id: str, tournament_id: int,
                            captain_id: str, team_name: str) -> RegisterOutcome:
+    """Register a team (see ``_register_row``) and, for every outcome that left a
+    team behind, give it its role and the captain League Participant and Active.
+    A role the bot could not give is reported in ``roles_synced``, never raised:
+    the registration has already committed."""
+    guild = bot.get_guild(int(guild_id))
+    out = await _register_row(bot, guild_id, tournament_id, captain_id, team_name)
+    if out.participant_id is None or out.kind in ("refused", "not_captain"):
+        return out
+    if guild is None:
+        logger.info(f"Guild {guild_id} not visible; no roles given for team '{out.team_name}'")
+        return replace(out, roles_synced=False)
+    role_id = await ensure_team_role(guild, out.participant_id)
+    league_ok = await grant_league_roles(guild, [out.captain_id])
+    return replace(out, roles_synced=role_id is not None and league_ok)
+
+
+async def _register_row(bot: discord.Bot, guild_id: str, tournament_id: int,
+                        captain_id: str, team_name: str) -> RegisterOutcome:
     """Register ``team_name`` with ``captain_id`` as captain, paying a fee from their
     wallet when there is one. The caller has already checked that a paid tournament's
     money stack is up and that the captain is linked to MTGO.
@@ -126,7 +149,7 @@ async def add_roster_members(bot: discord.Bot, guild: discord.Guild, participant
         participant = await session.get(TournamentParticipant, participant_id)
         if participant is None:
             raise ValueError("That team is no longer registered.")
-        t_id, role_id = participant.tournament_id, participant.role_id
+        t_id = participant.tournament_id
         # Checked up front, not left to add_teammate: its SAVEPOINT commits each row
         # on SQLite, so a refusal mid-list would leave the earlier members added.
         captain = next((m for m in members if str(m.id) == participant.captain_user_id), None)
@@ -146,6 +169,11 @@ async def add_roster_members(bot: discord.Bot, guild: discord.Guild, participant
     # Discord round-trip here would hold this write session's SQLite connection open.
     if adds:
         await refresh_boards(bot, [t_id])
+    # ensure_team_role gives a role it creates to the roster as committed above; a
+    # role that already existed still has to reach the members added just now.
+    role_id = await ensure_team_role(guild, participant_id)
     for add in adds:
-        add.role_synced = await sync_member(guild, role_id, add.user_id, add=True)
+        team_ok = role_id is not None and await sync_member(guild, role_id, add.user_id, add=True)
+        league_ok = await grant_league_roles(guild, [add.user_id])
+        add.role_synced = team_ok and league_ok
     return adds
