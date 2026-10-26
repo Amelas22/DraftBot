@@ -91,7 +91,7 @@ from services.tournament_service import (
 from services.mtgo_tradebot_client import EVENT_TICKET
 from services import tournament_escrow_service as escrow
 from services import wallet_service
-from services.league_roles import grant_league_roles
+from services.league_roles import grant_league_roles, release_league_role
 from services.tournament_roles import (create_team_roles, delete_team_roles, ensure_team_role,
                                        role_target, sync_member)
 
@@ -102,6 +102,8 @@ from services.tournament_roles import (create_team_roles, delete_team_roles, ens
 ROSTER_PROMPT = ("Now add your teammates with `/tournament add_teammate @player` "
                  "— one command per player.")
 ROLES_WARNING = "\n⚠️ Couldn't give every role — check that the bot's own role sits above them."
+TAKE_BACK_WARNING = ("\n⚠️ Couldn't take back every role — check that the bot's own role "
+                     "sits above them.")
 
 
 def tournament_enabled(guild_id):
@@ -1131,6 +1133,10 @@ class TournamentCog(commands.Cog):
             # because AsyncSessionLocal sets expire_on_commit=False, so the
             # role_id captured above survives past the commit.
             synced = await sync_member(ctx.guild, role_id, str(player.id), add=False)
+            # After the removal committed, so they no longer read as live here;
+            # still live on another team, they keep League Participant.
+            released = await release_league_role(ctx.guild, [str(player.id)])
+            synced = synced and released
 
         if not removed:
             await ctx.followup.send(
@@ -1208,7 +1214,12 @@ class TournamentCog(commands.Cog):
         refunded = res.get("refunded", 0)
         note = f" Entry fee ({refunded} tix) refunded to the captain's wallet." if refunded else ""
         await self._refresh_board(t_id)
-        await ctx.followup.send(f"✅ **{res['team_name']}** removed.{note}", ephemeral=True)
+        # The delete committed inside drop_with_refund, so the players no longer
+        # read as live; one still on another team keeps League Participant.
+        warning = "" if await self._take_back_roles(
+            ctx.guild, res["role_id"], res["user_ids"]) else TAKE_BACK_WARNING
+        await ctx.followup.send(
+            f"✅ **{res['team_name']}** removed.{note}{warning}", ephemeral=True)
 
     @tournament.command(
         name="drop_team",
@@ -1249,6 +1260,11 @@ class TournamentCog(commands.Cog):
 
             t_id = tournament.id
             name = participant.team_name
+            # Snapshot for the role work after the session closes.
+            role_id = participant.role_id
+            member_ids = [str(participant.captain_user_id),
+                          *map(str, participant.roster_user_ids)]
+            participant_id = participant.id
             round_number = tournament.current_round
             last_round = tournament.total_rounds
             # Read it before the block closes and commits: the note below turns on
@@ -1267,6 +1283,11 @@ class TournamentCog(commands.Cog):
         # standings embed, and those are what the room is actually reading.
         await self._refresh_board(t_id)
         await update_standings_message(self.bot, t_id)
+        # The drop committed when the session closed, so these players no longer
+        # read as live on this team.
+        roles_ok = await self._take_back_roles(
+            ctx.guild, role_id, member_ids, participant_id=participant_id)
+        warning = "" if roles_ok else TAKE_BACK_WARNING
         note = ""
         if match_open:
             note = (f" Their round {round_number} match (#{open_match_id}) still needs a "
@@ -1278,7 +1299,7 @@ class TournamentCog(commands.Cog):
                 else "Swiss is over, so they will not be paired again.")
         await ctx.followup.send(
             f"✅ **{name}** dropped. {when} Their results stay in the standings, "
-            f"but they forfeit any prize — the entry fee stays in the pot.{note}",
+            f"but they forfeit any prize — the entry fee stays in the pot.{note}{warning}",
             ephemeral=True)
 
     @tournament.command(name="add_match", description="Admin: author a match for a manual-format tournament")
@@ -1471,19 +1492,45 @@ class TournamentCog(commands.Cog):
         return (f"🏁 **{tournament_name}** (#{tournament_id}) is complete! "
                 f"{champ_text}{payout_hint}")
 
+    async def _take_back_roles(self, guild, role_id, user_ids, *, participant_id=None):
+        """Delete one team's role, forget its id (when ``participant_id`` says whose
+        it is and Discord confirms the role gone), then release League Participant
+        from the team's players who are live on no team. Call after the change that
+        made them non-live has committed. True iff nothing failed; never raises."""
+        try:
+            ok = True
+            if role_id:
+                gone = await delete_team_roles(guild, [role_id])
+                if role_id in gone:
+                    if participant_id is not None:
+                        async with db_session() as session:
+                            participant = await session.get(TournamentParticipant,
+                                                            participant_id)
+                            if participant is not None:
+                                participant.role_id = None
+                else:
+                    ok = False
+            return await release_league_role(guild, user_ids) and ok
+        except Exception:
+            logger.exception(f"[team-roles] could not take back the roles of {user_ids}")
+            return False
+
     async def _drop_team_roles(self, guild, tournament_id):
         """Delete a finished tournament's team roles, and clear role_id only
         for the ones actually confirmed gone.
 
-        Called from BOTH completion paths -- /tournament finish and next_round
-        past the final. Never raises: a tournament is over either way, and a
+        Called from every completion path -- /tournament finish, next_round
+        past the final, and the bracket final. Also takes League Participant
+        from the players who are on no other live team. Never raises: a tournament is over either way, and a
         role that outlives it costs a slot against the guild's 250-role cap,
         not correctness.
         """
         try:
             async with db_session() as session:
-                role_ids = [p.role_id
-                            for p in await list_participants(session, tournament_id)]
+                participants = await list_participants(session, tournament_id)
+                role_ids = [p.role_id for p in participants]
+                member_ids = {str(uid) for p in participants
+                              for uid in (p.captain_user_id, *p.roster_user_ids)}
             # Delete the real roles BEFORE forgetting their ids. delete_team_roles
             # reports back exactly which ids are now gone (deleted, or already
             # absent) -- a role Discord refuses to delete (its role moved above
@@ -1500,6 +1547,10 @@ class TournamentCog(commands.Cog):
                 for participant in await list_participants(session, tournament_id):
                     if participant.role_id in gone:
                         participant.role_id = None
+            # After the tournament was marked completed (every caller does that
+            # first), so nobody here reads as live on it any more; a player
+            # still on a team in another live tournament keeps the role.
+            await release_league_role(guild, member_ids)
         except Exception:
             logger.exception(
                 f"[team-roles] cleanup failed for tournament {tournament_id}")

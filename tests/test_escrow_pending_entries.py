@@ -11,7 +11,8 @@ from sqlalchemy import select
 
 from conftest import test_db  # noqa: F401  (fixture)
 from database.db_session import db_session
-from models.tournament import Tournament, TournamentParticipant, TournamentRound
+from models.tournament import (Tournament, TournamentParticipant, TournamentRound,
+                               TournamentTeamMember)
 from models.wallet_tx import WalletTx
 from services import tournament_escrow_service as escrow
 from services import wallet_service
@@ -112,6 +113,21 @@ async def test_dropping_a_team_refunds_the_fee_out_of_the_pot(test_db):  # noqa:
     assert await wallet_service.get_balance(GUILD, CAPTAIN) == 2  # whole again
     assert await escrow.prize_pool(GUILD, t_id) == 0
     assert await _status(p_id) is None  # participant removed
+
+
+@pytest.mark.asyncio
+async def test_drop_with_refund_reports_the_role_and_players(test_db):  # noqa: F811
+    t_id, p_id = await _paid_tournament(fee=2, team="Droppers")
+    async with db_session() as session:
+        p = await session.get(TournamentParticipant, p_id)
+        p.role_id = "555"
+        session.add(TournamentTeamMember(participant_id=p_id, user_id="mate1",
+                                         display_name="Mate"))
+
+    res = await escrow.drop_with_refund(t_id, "Droppers")
+
+    assert res["role_id"] == "555"
+    assert sorted(res["user_ids"]) == sorted([CAPTAIN, "mate1"])
 
 
 @pytest.mark.asyncio
