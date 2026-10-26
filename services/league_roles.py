@@ -112,11 +112,11 @@ async def release_league_role(guild: discord.Guild, user_ids: Iterable[str]) -> 
     call. A member who left the guild, or never held the role, is success.
     """
     user_ids = list(user_ids)
+    role = league_participant_role(guild)
+    if role is None or not user_ids:
+        return True
     async with db_session() as session:
         live = await live_member_ids(session, guild.id)
-    role = league_participant_role(guild)
-    if role is None:
-        return True
     ok = True
     for user_id in user_ids:
         if str(user_id) in live:

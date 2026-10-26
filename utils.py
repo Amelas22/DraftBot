@@ -3443,7 +3443,7 @@ async def get_formatted_bet_outcomes(session_id, sign_ups, winning_team_ids):
             return formatted_lines, total_stake
 
 
-async def _sweep_guild(bot, guild) -> list[str]:
+async def _sweep_guild(guild) -> list[str]:
     """Remove the Active role from one guild's inactive players and post the
     mod-chat summary. Returns the display names of the players it removed."""
     guild_id = str(guild.id)
@@ -3557,6 +3557,6 @@ async def check_inactive_players_task(bot):
         try:
             logger.info("Running inactive players check")
             for guild in bot.guilds:
-                await _sweep_guild(bot, guild)
+                await _sweep_guild(guild)
         except Exception as e:
             logger.exception(f"check_inactive_players_task pass failed: {e}")

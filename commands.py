@@ -3,14 +3,14 @@ import aiocron
 import pytz
 import asyncio
 from session import  Team, AsyncSessionLocal, Match, WeeklyLimit, DraftSession
-from sqlalchemy import select, not_, or_
+from sqlalchemy import select, not_
 from datetime import datetime, timedelta
 from collections import Counter
 from player_stats import get_player_statistics, create_stats_embed
 from stats_display import get_stats_embed_for_player
 from loguru import logger
 from discord.ext import commands
-from helpers.display_names import get_display_name, get_display_name_by_id
+from helpers.display_names import get_display_name_by_id
 from models.match import MatchResult
 from helpers.trophy_deck_links import session_trophy_links, render_grouped_trophy_decks
 from helpers.permissions import has_bot_manager_role
@@ -380,7 +380,7 @@ async def scheduled_posts(bot):
     async def run_inactive_check(bot):
         """Run the inactive player check logic"""
         for guild in bot.guilds:
-            await _sweep_guild(bot, guild)
+            await _sweep_guild(guild)
 
 async def post_standings(interaction):
     time = datetime.now()

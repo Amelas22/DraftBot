@@ -232,7 +232,7 @@ async def test_inactivity_sweep_skips_live_tournament_players(test_db):
     sink = logger.add(messages.append, level="INFO")
     try:
         with patch("config.get_config", return_value=cfg):
-            removed = await _sweep_guild(MagicMock(), guild)
+            removed = await _sweep_guild(guild)
     finally:
         logger.remove(sink)
 
