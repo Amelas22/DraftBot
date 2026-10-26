@@ -545,6 +545,46 @@ async def reconcile_registered(session: AsyncSession, guild_id: str, now: dateti
     return notices
 
 
+@dataclass(frozen=True)
+class BoardTeam:
+    """A team the Discord board lists: still short of players and taking requests."""
+
+    team_id: str
+    captain_name: str
+    others: tuple[str, ...]  # members other than the captain, in joining order
+    size: int
+    note: str
+
+    @property
+    def filled(self) -> int:
+        return 1 + len(self.others)
+
+
+async def board_teams(session: AsyncSession, guild_id: str) -> list[BoardTeam]:
+    """The open teams a player could still ask to join, oldest first."""
+    teams = (
+        await session.execute(
+            select(LfgTeam)
+            .where(LfgTeam.guild_id == guild_id, LfgTeam.status == "open",
+                   LfgTeam.taking_requests.is_(True))
+            .order_by(LfgTeam.created_utc, LfgTeam.id)
+        )
+    ).scalars()
+    out: list[BoardTeam] = []
+    for team in teams:
+        members = await _current_members(session, int(team.id))
+        if len(members) >= int(team.size):
+            continue
+        out.append(BoardTeam(
+            team_id=str(team.id),
+            captain_name=_name_of(members, str(team.captain_id)),
+            others=tuple(str(m.display_name) for m in members if m.user_id != team.captain_id),
+            size=int(team.size),
+            note=str(team.note),
+        ))
+    return out
+
+
 def _cells_b64(week: UsualWeek | None) -> str | None:
     if week is None:
         return None

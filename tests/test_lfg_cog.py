@@ -5,6 +5,7 @@ import discord
 import pytest
 
 from cogs import lfg_cog
+from services.team_finder import BoardTeam
 
 NOW = datetime(2026, 10, 23, tzinfo=timezone.utc)
 
@@ -82,3 +83,48 @@ async def test_reconcile_loop_survives_a_failing_guild():
             patch.object(lfg_cog, "run_reconcile", new=run):
         await lfg_cog.LfgCog.reconcile_loop.coro(cog)
     assert calls == ["2"]
+
+
+def _team(n=1, others=(), size=3, note=""):
+    return BoardTeam(team_id=str(n), captain_name=f"Cap{n}", others=tuple(others), size=size, note=note)
+
+
+def test_the_board_says_when_no_team_is_open():
+    text = lfg_cog.board_embed([]).description
+    assert text.startswith(lfg_cog.BOARD_TEXT)
+    assert text.endswith("No open teams yet. Press **Find a team** to open one.")
+
+
+def test_the_board_lists_each_open_team_with_its_members_and_note():
+    text = lfg_cog.board_embed([
+        _team(1, others=("Ben",), note="Evenings ET"),
+        _team(2, size=4),
+    ]).description
+    assert text == (
+        f"{lfg_cog.BOARD_TEXT}\n\n**Open teams**\n"
+        "**Cap1's team** · 2/3 · needs 1\nwith Ben\n*Evenings ET*\n\n"
+        "**Cap2's team** · 1/4 · needs 3"
+    )
+
+
+def test_names_and_notes_cannot_format_or_ping():
+    text = lfg_cog.board_embed([
+        BoardTeam(team_id="1", captain_name="**evil**", others=("@everyone",), size=3, note="_x_ <@123>"),
+    ]).description
+    assert "\\*\\*evil\\*\\*'s team" in text
+    assert "@everyone" not in text.replace("@​everyone", "")
+    assert "\\_x\\_" in text
+
+
+def test_a_board_too_long_for_discord_ends_with_a_count_of_the_rest():
+    teams = [_team(n, others=("x" * 100,), note="y" * 200) for n in range(40)]
+    text = lfg_cog.board_embed(teams).description
+    assert len(text) <= 4096
+    shown = text.count("'s team**")
+    assert text.endswith(f"…and {40 - shown} more on the website.")
+    assert 0 < shown < 40
+
+
+def test_a_note_on_several_lines_stays_one_line_and_cannot_make_a_heading():
+    text = lfg_cog.board_embed([_team(1, note="hi\n# JOIN NOW\n\n- me")]).description
+    assert text.endswith("*hi # JOIN NOW - me*")

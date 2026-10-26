@@ -5,13 +5,17 @@ from typing import Any
 import discord
 from discord.ext import commands, tasks
 from loguru import logger
+from sqlalchemy import delete
+from sqlalchemy.ext.asyncio import AsyncSession
 from typing_extensions import override
 
 from config import get_config, scheduler_enabled, update_setting
 from database.db_session import db_session
+from helpers.display_names import plain_text
 from helpers.tournament_channels import FIND_A_TEAM, ensure_channel
-from helpers.utils import not_none, ui_button
+from helpers.utils import as_messageable, not_none, ui_button
 from services.scheduler_links import issue_link
+from services.team_finder import BoardTeam, board_teams
 from services.team_finder_sync import run_reconcile
 
 NOT_ENABLED = "Find a team isn't turned on in this server."
@@ -24,9 +28,38 @@ BOARD_TEXT = ("Looking for teammates for the next tournament? Press **Find a tea
               "ask to join one, or open your own.")
 
 
-def board_embed() -> discord.Embed:
-    """The Find a team board, as first posted and as the sticky manager reposts it."""
-    return discord.Embed(title=BOARD_TITLE, description=BOARD_TEXT, color=discord.Color.green())
+NO_TEAMS = "No open teams yet. Press **Find a team** to open one."
+OPEN_TEAMS = "**Open teams**"
+DESCRIPTION_MAX = 4096  # Discord's limit on an embed description
+MORE_RESERVE = 64  # room kept for the "...and N more" line
+
+
+def _team_block(team: BoardTeam) -> str:
+    lines = [f"**{plain_text(team.captain_name)}'s team** · {team.filled}/{team.size} · "
+             f"needs {team.size - team.filled}"]
+    if team.others:
+        lines.append(f"with {plain_text(', '.join(team.others))}")
+    if team.note:
+        lines.append(f"*{plain_text(team.note)}*")
+    return "\n".join(lines)
+
+
+def board_text(teams: list[BoardTeam]) -> str:
+    """The board's description: the intro, then every open team that fits."""
+    if not teams:
+        return f"{BOARD_TEXT}\n\n{NO_TEAMS}"
+    text = f"{BOARD_TEXT}\n\n{OPEN_TEAMS}"
+    for shown, team in enumerate(teams):
+        block = _team_block(team)
+        if len(text) + len(block) + 2 > DESCRIPTION_MAX - MORE_RESERVE:
+            return f"{text}\n\n…and {len(teams) - shown} more on the website."
+        text += ("\n" if shown == 0 else "\n\n") + block
+    return text
+
+
+def board_embed(teams: list[BoardTeam]) -> discord.Embed:
+    """The Find a team board, as first posted, refreshed and reposted by the sticky manager."""
+    return discord.Embed(title=BOARD_TITLE, description=board_text(teams), color=discord.Color.green())
 
 
 async def lfg_reply(guild_id: str, user_id: str,
@@ -90,6 +123,10 @@ class LfgCog(commands.Cog):
                 await run_reconcile(self.bot, guild_id)
             except Exception:
                 logger.exception("lfg: reconcile failed for guild {}", guild_id)
+            try:
+                await refresh_lfg_board(self.bot, guild_id)
+            except Exception:
+                logger.exception("lfg: couldn't refresh the board for guild {}", guild_id)
 
     @reconcile_loop.before_loop
     async def _before_reconcile(self) -> None:
@@ -99,6 +136,68 @@ class LfgCog(commands.Cog):
     async def lfg(self, ctx: discord.ApplicationContext) -> None:
         await _respond(not_none(ctx.interaction))
 
+
+
+# The description each board message was last drawn with, by message id, so the
+# minute loop edits a board only when its list of teams has changed.
+_rendered: dict[str, str] = {}
+
+
+def forget_rendered_boards() -> None:
+    _rendered.clear()
+
+
+def remember_rendered(message: discord.Message) -> None:
+    """Note what a freshly sent board shows, so the loop doesn't redraw it."""
+    if message.embeds and message.embeds[0].description:
+        _rendered[str(message.id)] = message.embeds[0].description
+
+
+async def current_board_embed(session: AsyncSession, guild_id: str) -> discord.Embed:
+    return board_embed(await board_teams(session, guild_id))
+
+
+async def refresh_lfg_board(bot: discord.Client, guild_id: str) -> None:
+    """Redraw the server's board in place when its open teams have changed.
+
+    Only the board in the server's configured find-a-team channel counts; one
+    left behind in a deleted channel is not this loop's to chase. A board whose
+    message or channel is gone stops being sticky, and the next tournament to
+    open registration posts a fresh one.
+    """
+    from database.message_management import LFG_BOARD_VIEW_TYPE, fetch_sticky_message
+
+    channel_id = (get_config(guild_id).get("tournament") or {}).get(FIND_A_TEAM.setting)
+    if not channel_id:
+        return
+    async with db_session() as session:
+        board = await fetch_sticky_message(str(channel_id), session)
+        if board is None or (board.view_metadata or {}).get("view_type") != LFG_BOARD_VIEW_TYPE:
+            return
+        message_id = str(board.message_id)
+        embed = await current_board_embed(session, guild_id)
+    if embed.description is None or _rendered.get(message_id) == embed.description:
+        return
+    try:
+        channel = as_messageable(bot.get_channel(int(channel_id))
+                                 or await bot.fetch_channel(int(channel_id)))
+        message = await channel.fetch_message(int(message_id))
+    except discord.NotFound:
+        await _drop_board(str(channel_id), message_id)
+        return
+    await message.edit(embed=embed)
+    _rendered[message_id] = embed.description
+
+
+async def _drop_board(channel_id: str, message_id: str) -> None:
+    from database.message_management import Message
+
+    async with db_session() as session:
+        await session.execute(delete(Message).where(
+            Message.channel_id == channel_id, Message.message_id == message_id))
+        await session.commit()
+    logger.info("lfg: the board {} in channel {} is gone; it is no longer sticky",
+                message_id, channel_id)
 
 
 async def ensure_lfg_board(bot: discord.Client, guild: discord.Guild,
@@ -122,7 +221,10 @@ async def ensure_lfg_board(bot: discord.Client, guild: discord.Guild,
         existing = await fetch_sticky_message(channel_id, session)
     if existing is not None and (existing.view_metadata or {}).get("view_type") == LFG_BOARD_VIEW_TYPE:
         return
-    message = await channel.send(embed=board_embed(), view=LfgBoardView())
+    async with db_session() as session:
+        embed = await current_board_embed(session, guild_id)
+    message = await channel.send(embed=embed, view=LfgBoardView())
+    remember_rendered(message)
     await make_message_sticky(guild_id, channel_id, message, None, bot,
                               view_metadata={"view_type": LFG_BOARD_VIEW_TYPE})
     logger.info("lfg: posted the Find a team board in channel {}", channel_id)

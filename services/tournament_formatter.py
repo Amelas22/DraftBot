@@ -12,6 +12,7 @@ from loguru import logger
 from sqlalchemy import func, select
 
 from database.db_session import db_session
+from helpers.display_names import plain_text
 from models.tournament import (
     BRACKET_STAGES,
     STAGE_PLAY_IN,
@@ -315,11 +316,7 @@ def _who(user_id, names):
     name = names.get(user_id)
     if not name:
         return f"<@{user_id}>"
-    # Links are escaped too: a name like "https://x.y/**z" would otherwise leave a
-    # stray ** that bolds every team after it. A name typed as "<@123>" must read as
-    # text, not as someone else's mention.
-    return discord.utils.escape_mentions(
-        discord.utils.escape_markdown(name[:NAME_CHARS], ignore_links=False))
+    return plain_text(name[:NAME_CHARS])
 
 
 def _team_line(index, participant, fee, members, names):

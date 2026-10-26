@@ -434,14 +434,17 @@ class LfgBoardStickyStrategy(StickyStrategy):
     async def generate_content(
         self, sticky_message: Message, bot: discord.Client, session: AsyncSession
     ) -> Tuple[str, Optional[discord.Embed], Optional[discord.ui.View], Dict[str, Any]]:
-        from cogs.lfg_cog import LfgBoardView, board_embed
+        from cogs.lfg_cog import LfgBoardView, current_board_embed
 
-        return sticky_message.content, board_embed(), LfgBoardView(), sticky_message.view_metadata
+        embed = await current_board_embed(session, sticky_message.guild_id)
+        return sticky_message.content, embed, LfgBoardView(), sticky_message.view_metadata
 
     async def on_update_success(
         self, sticky_message: Message, new_message: discord.Message, bot: discord.Client, session: AsyncSession
     ) -> None:
-        pass
+        from cogs.lfg_cog import remember_rendered
+
+        remember_rendered(new_message)
 
 
 def get_sticky_strategy(view_metadata: Dict[str, Any]) -> StickyStrategy:

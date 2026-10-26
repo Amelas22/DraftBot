@@ -11,6 +11,18 @@ from typing import Iterable, Optional
 from leaderboard_config import CROWN_ICONS
 
 
+def plain_text(text: str) -> str:
+    """Player-typed text that reads as plain words in a message or embed.
+
+    Line breaks collapse to spaces, so a line can never start a heading or a
+    list. Markdown is escaped, links included: a name like "https://x.y/**z"
+    would otherwise leave a stray ** that bolds everything after it. A name
+    typed as "<@123>" or "@everyone" reads as text, not a mention.
+    """
+    return discord.utils.escape_mentions(
+        discord.utils.escape_markdown(" ".join(text.split()), ignore_links=False))
+
+
 def get_crown_icon(member: discord.Member, guild: Optional[discord.Guild]) -> str:
     """
     Get crown icon for a member based on their crown roles.
