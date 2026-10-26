@@ -49,6 +49,7 @@ project-includes = [
     "helpers/utils.py",
     "helpers/view_dispatch_guard.py",
     "match_control_view.py",
+    "team_draft_view.py",
     "ready_check.py",
     "database/retry.py",
     "services/stake_funding.py",

@@ -83,10 +83,24 @@ class DraftCommands(commands.Cog):
                     "falling back to the ordinary /premade_draft flow"
                 )
                 context = None
+            if context is None:
+                from team_draft_view import team_draft_room_context
+                try:
+                    async with db_session() as session:
+                        context = await team_draft_room_context(
+                            session, ctx.channel.id, ctx.guild)
+                except Exception:
+                    # Same rule as the match lookup above: never break an
+                    # ordinary draft over it.
+                    logger.exception(
+                        f"team_draft_room_context failed for thread {ctx.channel.id}; "
+                        "falling back to the ordinary /premade_draft flow"
+                    )
+                    context = None
             if context is not None:
-                # A match thread names its own teams, so the modal never asks —
-                # there is no wrong name to type, and draft side A is match side A.
-                _match_id, overrides, block = context
+                # A match or team draft thread names its own teams, so the modal never asks —
+                # there is no wrong name to type, and draft side A is side A.
+                _room_id, overrides, block = context
                 if block is not None:
                     await ctx.response.send_message(block, ephemeral=True)
                     return

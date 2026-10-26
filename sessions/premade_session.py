@@ -20,6 +20,10 @@ class PremadeSession(BaseSession):
 
     async def create_draft_session(self, interaction, bot):
         """Use base class method to handle the creation of the draft session."""
+        team_draft_id = getattr(self.session_details, "team_draft_id", None)
+        if team_draft_id is not None:
+            await self._create_for_team_draft(interaction, bot, team_draft_id)
+            return
         match_id = getattr(self.session_details, "tournament_match_id", None)
         if match_id is not None:
             # This is the guard for the common case (one picker open at a time), but
@@ -105,6 +109,47 @@ class PremadeSession(BaseSession):
         except Exception as e:
             from loguru import logger
             logger.error(f"premade tournament nudge failed: {e}")
+
+    async def _create_for_team_draft(self, interaction, bot, team_draft_id):
+        """A draft launched from a team draft thread: one per matchup, ever.
+
+        The claim is a single UPDATE committed before anything is created or
+        posted, so of two pickers submitted at once exactly one gets through;
+        the other is told where the winner's lobby is. If creating the draft
+        then fails, the matchup is freed again so Start draft still works.
+        """
+        from loguru import logger
+
+        from database.db_session import db_session
+        from helpers.matchup import STARTED, launch_block
+        from services.team_draft import claim_draft, release_draft
+        import team_draft_view
+
+        session_id = self.session_details.session_id
+        async with db_session() as session:
+            claimed = await claim_draft(session, team_draft_id, session_id)
+        if not claimed:
+            async with db_session() as session:
+                facts = await team_draft_view.team_draft_facts(
+                    session, team_draft_id, interaction.guild)
+            reason = (team_draft_view.GONE if facts is None
+                      else launch_block(STARTED, facts.lobby_link))
+            await interaction.response.send_message(reason, ephemeral=True)
+            return
+        try:
+            await super().create_draft_session(interaction, bot)
+        except Exception:
+            try:
+                async with db_session() as session:
+                    await release_draft(session, team_draft_id, session_id)
+            except Exception:
+                logger.exception(
+                    f"Could not free team draft {team_draft_id} after its draft failed")
+            raise
+        try:
+            await team_draft_view.refresh_team_draft_control(interaction.client, team_draft_id)
+        except Exception as e:
+            logger.error(f"team draft control refresh failed: {e}")
 
     def _create_embed_content(self):
         """Create an embed message for a premade draft session."""
