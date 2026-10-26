@@ -209,6 +209,7 @@ async def _change(
     if version != seen_version:
         return BookingChange(False, "changed", None, old_aware, name, version)
     if start_utc is not None:
+        start_utc = start_utc.astimezone(timezone.utc)
         if start_utc.minute % 30 or start_utc.second or start_utc.microsecond:
             return BookingChange(False, "bad_input", old_aware, None, name, version)
         if start_utc < now:
@@ -241,7 +242,7 @@ async def _change(
         cur_start, cur_version, now_started = now_row
         code = "started" if now_started else "changed"
         return BookingChange(False, code, None, _aware(cur_start), name, cur_version)
-    return BookingChange(True, None, old_aware, None if start_utc is None else start_utc.astimezone(timezone.utc), name, seen_version + 1)
+    return BookingChange(True, None, old_aware, start_utc, name, seen_version + 1)
 
 
 async def book(

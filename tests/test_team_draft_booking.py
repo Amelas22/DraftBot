@@ -183,3 +183,11 @@ async def test_losing_the_conditional_update_reports_changed_with_the_winner(tes
     loser = await _book(td_id, start=START + timedelta(hours=1), seen=0, user="u2", name="Bob")
     assert (loser.ok, loser.code, loser.new, loser.version) == (False, "changed", START, 1)
     assert (await _row(td_id))[1:] == ("u1", "Ann", 1)
+
+
+@pytest.mark.asyncio
+async def test_bad_input_when_only_utc_is_off_the_half_hour(test_db):  # noqa: F811
+    td_id = await _make()
+    nepal = timezone(timedelta(hours=5, minutes=45))
+    assert (await _book(td_id, start=datetime(2026, 10, 28, 21, 30, tzinfo=nepal))).code == "bad_input"
+    assert (await _row(td_id))[3] == 0
