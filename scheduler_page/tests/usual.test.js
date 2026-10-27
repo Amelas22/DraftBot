@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { applyStroke, toFile, loadWeek, saveFailedMessage, actionButtons } from "../js/usual.js";
+import { applyStroke, toFile, loadWeek, saveFailedMessage, actionButtons, editWeekLabel } from "../js/usual.js";
 import { decodeCells } from "../js/week.js";
 import { NeedsUpdate } from "../js/api.js";
 
@@ -61,4 +61,14 @@ test("save failures say what went wrong", () => {
 test("actionButtons offers Back to teams only when there is somewhere to go back to", () => {
   assert.deepEqual(actionButtons(undefined), ["Save", "Clear"]);
   assert.deepEqual(actionButtons(() => {}), ["Save", "Clear", "Back to teams"]);
+});
+
+test("actionButtons names the page the back button returns to", () => {
+  assert.deepEqual(actionButtons(() => {}, "Back to the matchup"), ["Save", "Clear", "Back to the matchup"]);
+  assert.deepEqual(actionButtons(undefined, "Back to the matchup"), ["Save", "Clear"]);
+});
+
+test("editWeekLabel offers to set a week nobody has painted yet, else to edit it", () => {
+  assert.equal(editWeekLabel(null), "Set my usual week");
+  assert.equal(editWeekLabel({ zone: "Europe/London", cells: "" }), "Edit my usual week");
 });

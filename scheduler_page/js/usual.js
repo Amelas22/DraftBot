@@ -58,12 +58,25 @@ const cellLabel = (i) => {
   return `${DAYS[d]} ${hourLabel(hh).replace(" ", ":" + mm + " ")}`;
 };
 
-// The editor's bottom buttons: Back to teams appears only when the caller can take the user back.
-export const actionButtons = (onBack) => ["Save", "Clear", ...(onBack ? ["Back to teams"] : [])];
+// The editor's bottom buttons: the back button appears only when the caller can take the user back.
+export const actionButtons = (onBack, backLabel = "Back to teams") => ["Save", "Clear", ...(onBack ? [backLabel] : [])];
+
+// The button another page offers for opening the editor: null is a week never saved.
+export const editWeekLabel = (usualDoc) => (usualDoc === null ? "Set my usual week" : "Edit my usual week");
+
+// A page's way into the editor and back. dispose stops the page's timers and listeners before the editor takes
+// over; show(doc, status) draws the page again, with the saved week and "Saved." or with the old week on Back.
+export function weekEditing(root, api, { now, backLabel, dispose, show }) {
+  return (doc) => {
+    dispose();
+    root.classList.remove("wide");
+    return mountUsual(root, api, { now, backLabel, onSaved: (saved) => show(saved, "Saved."), onBack: () => show(doc, "") });
+  };
+}
 
 // deps: { now?: () => Date, zones?: string[], defaultZone?: string, intro?: string, onSaved?: (doc) => void,
-//         onBack?: () => void }
-// With onBack the editor also offers Back to teams, leaving without saving.
+//         onBack?: () => void, backLabel?: string }
+// With onBack the editor also offers a back button (backLabel, else Back to teams), leaving without saving.
 // With onSaved the editor is a step in another flow: a save says "Saved." and hands the saved file on.
 export async function mountUsual(root, api, deps = {}) {
   const onSaved = deps.onSaved;
@@ -91,9 +104,8 @@ export async function mountUsual(root, api, deps = {}) {
   const status = el("p", { class: "status", role: "status", "aria-live": "polite" });
   const save = el("button", { type: "button", class: "primary", text: "Save" });
   const clear = el("button", { type: "button", class: "secondary", text: "Clear" });
-  const back = actionButtons(deps.onBack).includes("Back to teams")
-    ? el("button", { type: "button", class: "secondary", text: "Back to teams" })
-    : null;
+  const backLabel = actionButtons(deps.onBack, deps.backLabel)[2];
+  const back = backLabel ? el("button", { type: "button", class: "secondary", text: backLabel }) : null;
   if (back) back.addEventListener("click", () => deps.onBack());
 
   // Day tabs: only visible under 480px (CSS), where one day fills the screen.

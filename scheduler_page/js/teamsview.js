@@ -3,7 +3,7 @@
 // decision lives in teams.js; this file only draws and wires.
 import { LinkExpired, NeedsUpdate, checkDoc } from "./api.js";
 import { decodeCells } from "./week.js";
-import { mountUsual } from "./usual.js";
+import { mountUsual, weekEditing } from "./usual.js";
 import { mountHeatmap, formatCell } from "./grid.js";
 import { appBar } from "./appbar.js";
 import { el } from "./dom.js";
@@ -45,11 +45,7 @@ export async function mountTeams(root, api, deps = {}) {
   });
   // The list's refresh loop and listeners are disposed before the editor takes the page; showList registers
   // them afresh when the list comes back.
-  const editWeek = (doc) => {
-    controller.dispose();
-    root.classList.remove("wide");
-    return mountUsual(root, api, { now, onSaved: (saved) => list(saved, "Saved."), onBack: () => list(doc, "") });
-  };
+  const editWeek = weekEditing(root, api, { now, dispose: controller.dispose, show: list });
   if (usual === null) {
     await mountUsual(root, api, { now, intro: PAINT_FIRST, onSaved: (doc) => list(doc, "Saved.") });
     return controller;

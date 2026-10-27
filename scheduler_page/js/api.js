@@ -80,7 +80,7 @@ export function createFixtureApi(name, fetchFn = fetch) {
     if (!res.ok) throw await failure(res);
     return res.json();
   };
-  if (name === "team-draft") return teamDraftFixtureApi(read);
+  if (Object.hasOwn(TEAM_DRAFT_FIXTURES, name)) return teamDraftFixtureApi(read, TEAM_DRAFT_FIXTURES[name]);
   if (Object.hasOwn(TEAMS_FIXTURES, name)) return teamsFixtureApi(read, TEAMS_FIXTURES[name]);
   const refuse = () => { throw new Error("fixtures are read only"); };
   return {
@@ -207,15 +207,24 @@ function teamsFixtureApi(read, { file, usualFile, name }) {
   };
 }
 
-// `#fixture=team-draft`: Ben, on a link for Rook's team vs Ash's team. The window starts at the current half
-// hour so cells are bookable whenever the page is opened; book and clear change an in-memory booking and bump its
-// version, answering like the server.
-function teamDraftFixtureApi(read) {
+// `#fixture=team-draft`: Ben, on a link for Rook's team vs Ash's team. `#fixture=team-draft-new`: Fern, on the
+// same link, who has never painted a usual week. The window starts at the current half hour so cells are bookable
+// whenever the page is opened; book and clear change an in-memory booking and bump its version, answering like the
+// server. A saved week shows up as the viewer's row, as the server's next read would have it.
+const TEAM_DRAFT_FIXTURES = {
+  "team-draft": { user: null, usualFile: "fixtures/usual-week.json" },
+  "team-draft-new": { user: "900000000000000023", usualFile: null },
+};
+
+function teamDraftFixtureApi(read, { user: viewer, usualFile }) {
   let state = null;
+  let week;
   const load = async () => {
     if (!state) {
       state = await read("fixtures/team-draft.json");
+      if (viewer) state.me.user = viewer;
       state.window.start_utc = isoSeconds(new Date(Math.floor(Date.now() / CELL_MS) * CELL_MS));
+      week = usualFile ? await read(usualFile) : null;
     }
     return state;
   };
@@ -248,8 +257,15 @@ function teamDraftFixtureApi(read) {
   return {
     fixture: true,
     me: async () => { await load(); return { user: user(), guild: "fixture", view: "team_draft", exp: null }; },
-    getUsual: () => read("fixtures/usual-week.json"),
-    putUsual: async (doc) => doc,
+    getUsual: async () => { await load(); return structuredClone(week); },
+    putUsual: async (doc) => {
+      await load();
+      week = structuredClone(doc);
+      for (const p of state.sides.flatMap((s) => s.people)) {
+        if (p.user === user()) { p.zone = doc.zone; p.cells = doc.cells; }
+      }
+      return doc;
+    },
     get: async (path) => {
       if (path !== "/api/team-draft") throw new Error(`no fixture for ${path}`);
       return structuredClone(await load());
