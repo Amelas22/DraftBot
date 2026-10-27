@@ -1,6 +1,7 @@
 // Team draft, the view: the two sides, one heatmap of when they are free together with the good start times
-// marked, Book / Move / Clear for the matchup's time, and a way to paint or edit the viewer's own usual week. Every
-// decision lives in teamdraft.js; this file only draws and wires.
+// marked, Book / Move / Clear for the matchup's time, and a way to paint or edit the viewer's own usual week. Pressing a
+// side or a player leaves them out of the grid until pressed again. Every decision lives in teamdraft.js; this file
+// only draws and wires.
 import { LinkExpired, checkDoc } from "./api.js";
 import { CELLS, CELL_MS, addCells, isoSeconds } from "./week.js";
 import { mountHeatmap, formatCell } from "./grid.js";
@@ -10,12 +11,16 @@ import { el } from "./dom.js";
 import { expiredMessage } from "./messages.js";
 import { plural } from "./words.js";
 import { actionErrorText, createSync, shadeLevel } from "./teams.js";
-import { FORMAT, bookable, bookingLine, freeBySide, goodStarts, refusalText, shiftSelection } from "./teamdraft.js";
+import {
+  FORMAT, bookable, bookingLine, countText, freeBySide, goodStarts, refusalText, shiftSelection, sideCounts, toggleSide,
+  togglePerson, withoutPeople,
+} from "./teamdraft.js";
 
 const PATH = "/api/team-draft";
 const ACTIONS_PATH = "/api/team-draft/actions";
 const REFRESH_MS = 30000;
-const HOVER_HINT = "Hover or tap a half-hour to see who's free. Tap a time to pick it.";
+const HOVER_HINT = "Hover or tap a half-hour to see who's free on each side. Tap a time to pick it.";
+const TOGGLE_HINT = "Tap a team or a player to leave them out of the grid; tap again to bring them back.";
 const NO_WEEK = "no usual week set";
 const BACK = "Back to the matchup";
 
@@ -64,6 +69,8 @@ async function showMatchup(root, api, usualDoc, now, cleanups, notice, firstStat
   let freeSides = [];
   let good = new Set();
   let selected = null;
+  // User ids the viewer has switched off; kept across refreshes.
+  let off = new Set();
 
   const heading = el("h1");
   const ledeEl = el("p", { class: "lede" });
@@ -81,9 +88,10 @@ async function showMatchup(root, api, usualDoc, now, cleanups, notice, firstStat
   const pane = el("section", { class: "pane", "aria-label": "Pick a time" }, heatBox, legend, readout, actions, status);
 
   const open = () => state.matchup.state === "open";
-  const people = () => state.sides.flatMap((s) => s.people);
-  const total = () => people().length;
-  const freeCount = (j) => freeSides.reduce((n, side) => n + side.reduce((m, free) => m + (free.has(j) ? 1 : 0), 0), 0);
+  const shown = () => withoutPeople(state, off);
+  const everyone = () => state.sides.flatMap((s) => s.people);
+  const total = () => shown().sides.reduce((n, s) => n + s.people.length, 0);
+  const freeCount = (j) => sideCounts(freeSides, j).reduce((a, b) => a + b, 0);
   const bookedCell = () => {
     if (!state.booking.start_utc) return null;
     const j = (Date.parse(state.booking.start_utc) - startUtc.getTime()) / CELL_MS;
@@ -93,8 +101,7 @@ async function showMatchup(root, api, usualDoc, now, cleanups, notice, firstStat
   const draftCells = () => state.rules.draft_cells;
 
   const label = (j) => {
-    const n = freeCount(j);
-    const notes = [`${n} of ${total()} free`];
+    const notes = [`${countText(sideCounts(freeSides, j))} free`];
     if (good.has(j)) notes.push("good start");
     if (j === bookedCell()) notes.push("booked");
     return `${formatCell(startUtc, zone, j)}: ${notes.join(", ")}`;
@@ -119,14 +126,26 @@ async function showMatchup(root, api, usualDoc, now, cleanups, notice, firstStat
   });
   let heat = makeHeat();
 
+  const toggle = (next) => { off = next; render(); };
+  // A toggle chip: the tick is decoration, so it stays out of the button's name; aria-pressed carries the state.
+  const chip = (name, on) => el("button", { type: "button", class: `toggle${on ? "" : " off"}`, "aria-pressed": String(on) },
+    el("span", { class: "tick", "aria-hidden": "true", text: "✓ " }), name);
   const renderSides = () => {
-    sidesBox.replaceChildren(...state.sides.map((side) => el("section", { class: "side", "aria-label": side.label },
-      el("h2", { text: side.label }),
-      el("ul", {}, ...side.people.map((p) => {
-        const li = el("li", { text: p.name });
-        if (!p.cells || !p.zone) li.append(el("span", { class: "noweek", text: ` (${NO_WEEK})` }));
-        return li;
-      })))));
+    sidesBox.replaceChildren(el("p", { class: "togglehint", text: TOGGLE_HINT }), ...state.sides.map((side) => {
+      const sideOn = side.people.some((p) => !off.has(p.user));
+      const head = chip(side.label, sideOn);
+      head.addEventListener("click", () => toggle(toggleSide(off, side)));
+      return el("section", { class: "side", "aria-label": side.label },
+        el("h2", {}, head),
+        el("ul", {}, ...side.people.map((p) => {
+          const on = !off.has(p.user);
+          const b = chip(p.name, on);
+          b.addEventListener("click", () => toggle(togglePerson(off, p.user)));
+          const li = el("li", {}, b);
+          if (!p.cells || !p.zone) li.append(el("span", { class: "noweek", text: ` (${NO_WEEK})` }));
+          return li;
+        })));
+    }));
   };
 
   const renderLegend = () => {
@@ -151,8 +170,8 @@ async function showMatchup(root, api, usualDoc, now, cleanups, notice, firstStat
     bookLine.textContent = bookingLine(state, zone);
     threadLink.hidden = !state.matchup.thread_url;
     if (state.matchup.thread_url) threadLink.href = state.matchup.thread_url;
-    freeSides = freeBySide(state, startUtc);
-    good = goodStarts(state, startUtc);
+    freeSides = freeBySide(shown(), startUtc);
+    good = goodStarts(shown(), startUtc);
     ledeEl.textContent = ledeText();
     renderSides();
     renderLegend();
@@ -162,8 +181,9 @@ async function showMatchup(root, api, usualDoc, now, cleanups, notice, firstStat
 
   const ledeText = () => {
     const where = `Times in ${zone.replaceAll("_", " ")}.`;
-    if (!open()) return `This draft has started. ${where}`;
-    return `${plural(good.size, "good start")} in the next 7 days, outlined on the grid. ${where}`;
+    const showing = total() < everyone().length ? ` Showing ${total()} of ${everyone().length} players.` : "";
+    if (!open()) return `This draft has started. ${where}${showing}`;
+    return `${plural(good.size, "good start")} in the next 7 days, outlined on the grid. ${where}${showing}`;
   };
 
   // A finished action (or a failed one) unlocks refreshes again.

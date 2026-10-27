@@ -8,6 +8,35 @@ export const FORMAT = "draftbot.scheduler.team_draft";
 // Per side, per person (in the document's order): the window cells they are free in.
 export const freeBySide = (state, startUtc) => state.sides.map((side) => side.people.map((p) => memberFree(p, startUtc)));
 
+// How many are free in cell j on each side, from freeBySide's sets, first side first.
+export const sideCounts = (freeSides, j) => freeSides.map((side) => side.reduce((n, free) => n + (free.has(j) ? 1 : 0), 0));
+
+// A cell's counts as the page shows them, side by side: "3–2".
+export const countText = (counts) => counts.join("–");
+
+// The matchup as the viewer has it switched on: the same state with the people in `off` (user ids) left out of
+// every side, so the heatmap, counts and good starts cover only who is still shown.
+export const withoutPeople = (state, off) => ({
+  ...state,
+  sides: state.sides.map((side) => ({ ...side, people: side.people.filter((p) => !off.has(p.user)) })),
+});
+
+// Pressing a side: switch all of it off, or all of it back on when it is already all off. Returns a new set.
+export function toggleSide(off, side) {
+  const users = side.people.map((p) => p.user);
+  const next = new Set(off);
+  if (users.every((u) => off.has(u))) users.forEach((u) => next.delete(u));
+  else users.forEach((u) => next.add(u));
+  return next;
+}
+
+// Pressing a person: switch them off or back on. Returns a new set.
+export function togglePerson(off, user) {
+  const next = new Set(off);
+  if (!next.delete(user)) next.add(user);
+  return next;
+}
+
 // Window cells j where, on both sides, at least min(min_per_side, side size) people are free in every one of
 // j .. j + draft_cells - 1. A draft that would run past the window's end never qualifies.
 export function goodStarts(state, startUtc) {

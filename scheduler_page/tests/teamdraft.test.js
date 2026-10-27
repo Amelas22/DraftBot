@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { FORMAT, freeBySide, goodStarts, bookable, bookingLine, refusalText, shiftSelection } from "../js/teamdraft.js";
+import {
+  FORMAT, freeBySide, goodStarts, bookable, bookingLine, refusalText, shiftSelection, sideCounts, countText, withoutPeople,
+  toggleSide, togglePerson,
+} from "../js/teamdraft.js";
 import { decodeCells, encodeCells, usualCellOf, CELLS } from "../js/week.js";
 
 const fx = (n) => JSON.parse(readFileSync(new URL(`../fixtures/${n}`, import.meta.url)));
@@ -114,4 +117,48 @@ test("shiftSelection keeps the picked time when the window start moves", () => {
   assert.equal(shiftSelection(2, t0, later(120)), null);
   assert.equal(shiftSelection(null, t0, later(30)), null);
   assert.equal(shiftSelection(CELLS - 1, later(30), t0), null, "a pick pushed past the window's end is dropped");
+});
+
+test("countText reads side by side, first side first", () => {
+  assert.equal(countText([3, 2]), "3–2");
+  assert.equal(countText([0, 0]), "0–0");
+});
+
+test("sideCounts counts who is free in a cell on each side", () => {
+  const free = [[new Set([1, 2]), new Set([2])], [new Set([2]), new Set(), new Set([1])]];
+  assert.deepEqual(sideCounts(free, 2), [2, 1]);
+  assert.deepEqual(sideCounts(free, 1), [1, 1]);
+  assert.deepEqual(sideCounts(free, 0), [0, 0]);
+});
+
+test("withoutPeople drops the switched-off people from every side and leaves the rest alone", () => {
+  const evening = daily(range(40, 46));
+  const s = doc([person("a", "UTC", evening), person("b", "UTC", null)], [person("c", "UTC", evening), person("d", "UTC", evening)]);
+  const out = withoutPeople(s, new Set(["b", "d"]));
+  assert.deepEqual(out.sides.map((side) => side.people.map((p) => p.user)), [["a"], ["c"]]);
+  assert.deepEqual(s.sides.map((side) => side.people.length), [2, 2]);
+  assert.equal(out.booking, s.booking);
+});
+
+test("switching off a week-less player lets their side's good starts come back", () => {
+  const evening = daily(range(40, 46));
+  const s = doc([person("a", "UTC", evening), person("b", "UTC", null)], [person("c", "UTC", evening), person("d", "UTC", evening)]);
+  assert.equal(goodStarts(s, start).size, 0);
+  const shown = withoutPeople(s, new Set(["b"]));
+  assert.ok(goodStarts(shown, start).size > 0);
+  assert.deepEqual(goodStarts(shown, start), expectedGood(shown));
+});
+
+test("toggleSide switches a whole side off, or back on once all of it is off", () => {
+  const side = { label: "A", people: [person("a", "UTC", null), person("b", "UTC", null)] };
+  assert.deepEqual([...toggleSide(new Set(["x"]), side)].sort(), ["a", "b", "x"]);
+  assert.deepEqual([...toggleSide(new Set(["a"]), side)].sort(), ["a", "b"]);
+  assert.deepEqual([...toggleSide(new Set(["a", "b", "x"]), side)], ["x"]);
+});
+
+test("togglePerson flips one person and returns a new set", () => {
+  const off = new Set(["a"]);
+  assert.deepEqual([...togglePerson(off, "b")].sort(), ["a", "b"]);
+  assert.deepEqual([...togglePerson(off, "a")], []);
+  assert.deepEqual([...off], ["a"]);
 });
