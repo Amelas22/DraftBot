@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { applyStroke, toFile, loadWeek, saveFailedMessage } from "../js/usual.js";
+import { applyStroke, toFile, loadWeek, saveFailedMessage, actionButtons } from "../js/usual.js";
 import { decodeCells } from "../js/week.js";
 import { NeedsUpdate } from "../js/api.js";
 
@@ -56,4 +56,9 @@ test("save failures say what went wrong", () => {
   assert.equal(saveFailedMessage(err("not_enabled")), "Find a team is turned off in this server right now.");
   assert.equal(saveFailedMessage(err("bad_input")), "Could not save. Check your connection and press Save again.");
   assert.equal(saveFailedMessage(new TypeError("fetch failed")), "Could not save. Check your connection and press Save again.");
+});
+
+test("actionButtons offers Back to teams only when there is somewhere to go back to", () => {
+  assert.deepEqual(actionButtons(undefined), ["Save", "Clear"]);
+  assert.deepEqual(actionButtons(() => {}), ["Save", "Clear", "Back to teams"]);
 });

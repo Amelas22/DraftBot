@@ -58,7 +58,12 @@ const cellLabel = (i) => {
   return `${DAYS[d]} ${hourLabel(hh).replace(" ", ":" + mm + " ")}`;
 };
 
-// deps: { now?: () => Date, zones?: string[], defaultZone?: string, intro?: string, onSaved?: (doc) => void }
+// The editor's bottom buttons: Back to teams appears only when the caller can take the user back.
+export const actionButtons = (onBack) => ["Save", "Clear", ...(onBack ? ["Back to teams"] : [])];
+
+// deps: { now?: () => Date, zones?: string[], defaultZone?: string, intro?: string, onSaved?: (doc) => void,
+//         onBack?: () => void }
+// With onBack the editor also offers Back to teams, leaving without saving.
 // With onSaved the editor is a step in another flow: a save says "Saved." and hands the saved file on.
 export async function mountUsual(root, api, deps = {}) {
   const onSaved = deps.onSaved;
@@ -86,6 +91,10 @@ export async function mountUsual(root, api, deps = {}) {
   const status = el("p", { class: "status", role: "status", "aria-live": "polite" });
   const save = el("button", { type: "button", class: "primary", text: "Save" });
   const clear = el("button", { type: "button", class: "secondary", text: "Clear" });
+  const back = actionButtons(deps.onBack).includes("Back to teams")
+    ? el("button", { type: "button", class: "secondary", text: "Back to teams" })
+    : null;
+  if (back) back.addEventListener("click", () => deps.onBack());
 
   // Day tabs: only visible under 480px (CSS), where one day fills the screen.
   const tabs = el("div", { class: "daytabs", role: "tablist", "aria-label": "Day" });
@@ -208,7 +217,7 @@ export async function mountUsual(root, api, deps = {}) {
     el("p", { class: "lede", text: "Drag or tap to paint the half-hours you can usually draft. Times are local to the zone below. Drag again over painted cells to erase." }),
     el("label", { class: "zonerow", for: "zone" }, "Time zone ", select),
     tabs, el("p", { class: "touchhint", text: "Drag on the grid to paint. Drag the times on the left to scroll." }), grid,
-    el("div", { class: "actions" }, save, clear),
+    el("div", { class: "actions" }, save, clear, ...(back ? [back] : [])),
     status,
   );
   setDay(0);
