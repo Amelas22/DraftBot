@@ -423,6 +423,24 @@ def apply_library_field(embed: Any, line: "Optional[str]") -> None:
         embed.remove_field(index)
 
 
+async def _reserved_since(session_id: Any) -> "Optional[int]":
+    """When this draft took the library's copy, as a Unix time, if it still
+    holds it. Raises LibraryLineUnknown when that can't be read: a board must
+    not claim a hold it did not check, nor drop one it has."""
+    from models.draft_session import DraftSession
+    from services.library_reservation import still_reserved
+
+    try:
+        draft = await DraftSession.get_by_session_id(str(session_id))
+        if draft is None or not await still_reserved(draft):
+            return None
+    except Exception:
+        logger.opt(exception=True).warning(
+            "signup board: could not read the reservation of {}", session_id)
+        raise LibraryLineUnknown(str(session_id)) from None
+    return int(draft.library_reserved_at.timestamp())
+
+
 async def _library_signup_line(cube_id, guild_id,
                                session_id: Any = None) -> "Optional[str]":
     """The board's library line, without the link.
@@ -528,21 +546,29 @@ async def _library_signup_line(cube_id, guild_id,
     # keeps the line it has always had.
     lead = ("Library available, no cards needed" if library.kind == RENTAL
             else "No cards needed")
+    # "Available" read the same whether the copy was free or already held for
+    # this queue, so nobody could tell a hold had been taken. The time shows
+    # it is a live hold, not a stale board.
+    since = (await _reserved_since(session_id)
+             if library.kind == RENTAL and session_id is not None else None)
+    if since is not None:
+        lead = f"Library reserved for this queue <t:{since}:R>, no cards needed"
+    mark = "🔒" if since is not None else ("🆓" if most == 0 else "🏛️")
 
     if most == 0:
-        return (f"🆓 **{lead}** — borrow your deck from the library "
+        return (f"{mark} **{lead}** — borrow your deck from the library "
                 f"free.{who}")
 
     # Says the hold comes back, because that is the part that decides
     # whether somebody can afford to play: 100 tix they get back is a very
     # different proposition from 100 tix spent.
     if least == most:
-        return (f"🏛️ **{lead}** — borrow your deck for a "
+        return (f"{mark} **{lead}** — borrow your deck for a "
                 f"**{most} tix** hold, refunded when you return it.{who}")
     # Both figures, because the board is one message for the whole room and
     # cannot know which applies to the reader. Naming only the lower would
     # promise a price to the very people about to be asked for the higher one;
     # naming only the higher would put off members who will never pay it.
-    return (f"🏛️ **{lead}** — borrow your deck for a "
+    return (f"{mark} **{lead}** — borrow your deck for a "
             f"**{least}–{most} tix** hold, refunded when you return it. "
             f"Members pay {least}.{who}")

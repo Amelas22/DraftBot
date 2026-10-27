@@ -329,23 +329,52 @@ async def test_the_board_points_a_new_queue_at_the_one_holding_it(lounge):
     assert "in use" in note.lower() and "/chan/msg-q1" in note, note
 
 
-async def test_a_queue_holding_the_copy_still_reads_covered_on_its_own_board(lounge):
+async def test_a_queue_holding_the_copy_says_so_on_its_own_board(lounge):
     """Its own reservation is the copy it is about to use, not one taken from it:
-    the holder's board keeps the covered line, and another queue's board points
-    at the holder."""
+    the holder's board says the copy is reserved for it, and since when, and
+    another queue's board points at the holder."""
     from cube_views.pack_options import library_signup_check
 
     await _borrower(ANN, BEN)
     await _queue("q1", [ANN])
     await _queue("q2", [BEN])
     assert (await resv.reserve("q1")).status == "reserved"
+    since = int((await _row("q1")).library_reserved_at.timestamp())
 
     own = await library_signup_check(CUBE, GUILD, session_id="q1")
     other = await library_signup_check(CUBE, GUILD, session_id="q2")
 
-    assert own is not None and "library available" in own.lower(), own
+    assert own is not None and "reserved for this queue" in own.lower(), own
+    assert f"<t:{since}:R>" in own, own
+    assert "library available" not in own.lower(), own
     assert "another queue" not in own, own
     assert "in use" in other.lower() and "/chan/msg-q1" in other, other
+
+
+async def test_a_queue_that_let_the_copy_go_reads_available_again(lounge):
+    """Released is for good: the board stops claiming a hold it no longer has."""
+    from cube_views.pack_options import library_signup_check
+
+    await _borrower(ANN)
+    await _queue("q1", [ANN])
+    assert (await resv.reserve("q1")).status == "reserved"
+    assert await resv.release_player("q1", ANN)
+
+    own = await library_signup_check(CUBE, GUILD, session_id="q1")
+
+    assert own is not None and "library available" in own.lower(), own
+    assert "reserved for this queue" not in own.lower(), own
+
+
+async def test_a_free_copy_reads_available_before_anyone_reserves_it(lounge):
+    from cube_views.pack_options import library_signup_check
+
+    await _queue("q1", [])
+
+    own = await library_signup_check(CUBE, GUILD, session_id="q1")
+
+    assert own is not None and "library available" in own.lower(), own
+    assert "reserved for this queue" not in own.lower(), own
 
 
 async def test_a_long_draft_keeps_the_whole_cube_until_its_decks_exist(lounge):
