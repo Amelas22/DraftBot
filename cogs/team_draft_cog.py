@@ -22,18 +22,21 @@ NO_GUILD = "Use this in a server."
 async def ensure_team_draft_board(
     bot: discord.Client, guild: discord.Guild,
     category: discord.CategoryChannel | None = None,
+    chosen: discord.TextChannel | None = None,
 ) -> tuple[Any, bool]:
     """(the set-team-draft channel, whether a board was posted just now).
 
-    The channel is found or created like the tournament channels; a board
-    that's already sticky there isn't posted again.
+    ``chosen`` wins when given; otherwise the channel is found or created like
+    the tournament channels. A board that's already sticky there isn't posted
+    again.
     """
     # Local import: message_management pulls in views, which is heavy and cyclic here.
     from database.message_management import (
         TEAM_DRAFT_BOARD_VIEW_TYPE, fetch_sticky_message, make_message_sticky)
 
     guild_id = str(guild.id)
-    channel, _created = await ensure_channel(guild, get_config(guild_id), SET_TEAM_DRAFT, category)
+    channel, _created = await ensure_channel(
+        guild, get_config(guild_id), SET_TEAM_DRAFT, category, chosen)
     update_setting(guild_id, f"tournament.{SET_TEAM_DRAFT.setting}", str(channel.id))
     channel_id = str(channel.id)
     async with db_session() as session:
@@ -64,11 +67,14 @@ class TeamDraftCog(commands.Cog):
             await ctx.respond(NOT_ENABLED, ephemeral=True)
             return
         await ctx.defer(ephemeral=True)
-        # A new channel goes in the category the command was run from, like
-        # the tournament channels.
-        category = ctx.channel.category if isinstance(ctx.channel, discord.TextChannel) else None
+        # The board goes in the channel the command was run from: a server
+        # that already has a room for this names it by running the command
+        # there, whatever the room is called. From a thread or anywhere else,
+        # a new channel goes in that category, like the tournament channels.
+        here = ctx.channel if isinstance(ctx.channel, discord.TextChannel) else None
+        category = here.category if here is not None else None
         try:
-            channel, posted = await ensure_team_draft_board(self.bot, guild, category)
+            channel, posted = await ensure_team_draft_board(self.bot, guild, category, here)
         except discord.HTTPException as e:
             logger.warning(f"team draft: couldn't set up the board in guild {guild.id}: {e}")
             await ctx.followup.send(f"Couldn't set up #{SET_TEAM_DRAFT.name}: {e}", ephemeral=True)
