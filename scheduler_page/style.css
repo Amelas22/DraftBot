@@ -148,9 +148,20 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 .sides { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
 .side { background: var(--surface); border-radius: 12px; padding: 12px; min-width: 0; }
 .side h2 { margin: 0 0 6px; font-size: 15px; font-weight: 800; }
-.side ul { margin: 0; padding-left: 18px; }
-.side li { overflow-wrap: anywhere; }
+.side ul { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.side li { display: inline-flex; align-items: center; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
 .noweek { color: var(--muted); font-size: 13px; }
+.side .toggle {
+  min-height: 32px; padding: 3px 12px; border: 2px solid var(--accent); border-radius: 999px;
+  background: var(--chip); color: var(--fg); font: inherit; font-weight: 700; cursor: pointer;
+}
+.side h2 .toggle { font-weight: 800; }
+.side .tick { color: var(--accent); }
+.side .toggle.off .tick { display: none; }
+.side .toggle:hover { border-color: var(--h6); }
+.side .toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.side .toggle.off { background: transparent; border-style: dashed; border-color: var(--line); color: var(--muted); text-decoration: line-through; }
+.togglehint { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 13px; }
 .hcell.good { outline: 2px solid var(--fg); outline-offset: -2px; }
 .hcell.booked { box-shadow: inset 0 0 0 3px var(--warn); }
 .hcell.picked { outline: 3px solid var(--accent); outline-offset: -1px; z-index: 1; }
