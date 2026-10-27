@@ -110,8 +110,21 @@ class PremadeSession(BaseSession):
         """Create an embed message for a premade draft session."""
         session_details = self.session_details
         # Remove the cube from the title since it's now in its own field
-        title = f"Premade Team Draft Queue - Started <t:{session_details.draft_start_time}:R>"
+        # The fee is only enforced when someone presses a team button, so the
+        # panel says so first: otherwise a refusal is the first anyone hears.
+        fee = getattr(session_details, "entry_fee", None) or 0
+        tag = f" - {fee} tix entry" if fee else ""
+        title = f"Premade Team Draft Queue{tag} - Started <t:{session_details.draft_start_time}:R>"
+        fee_note = ""
+        if fee:
+            fee_note = (
+                f"\n**Entry fee: {fee} tix**\n"
+                f"Joining a team takes **{fee} tix** from your wallet. Leaving your "
+                "team refunds it. The winning team gets back double. Teams must be "
+                "even before they can be created.\n"
+            )
         description = (
+            f"{fee_note}"
             "\n**How to use bot**:\n"
             "1. Click Team A or Team B to join that team. Enter the Draftmancer link. Draftmancer host still has to update settings and import from CubeCobra.\n"
             "2. When all teams are joined, push Ready Check. Once everyone is ready, push Generate Seating Order.\n"
@@ -121,7 +134,9 @@ class PremadeSession(BaseSession):
             "6. Chat channels will automatically close around five hours after the /startdraft command was used."
             f"{self.get_common_description()}"
         )
-        embed = discord.Embed(title=title, description=description, color=discord.Color.blue())
+        # Gold, like a prize pool queue: a draft that costs tix looks it.
+        color = discord.Color.gold() if fee else discord.Color.blue()
+        embed = discord.Embed(title=title, description=description, color=color)
         return embed
 
     def _add_signup_fields(self, embed):
