@@ -39,6 +39,7 @@ from .mtgo_job import MtgoJob
 from .wallet_tx import WalletTx
 from .scheduler import PlayerAvailability, SchedulerLink
 from .team_finder import LfgAction, LfgRequest, LfgTeam, LfgTeamMember
+from .team_draft import TeamDraft, TeamDraftAction
 
 # Export all models
 __all__ = [
@@ -96,4 +97,6 @@ __all__ = [
     'LfgTeamMember',
     'LfgRequest',
     'LfgAction',
+    'TeamDraft',
+    'TeamDraftAction',
 ]

@@ -1,0 +1,75 @@
+{
+  "format": "draftbot.scheduler.team_draft",
+  "version": 1,
+  "matchup": {
+    "id": "700000000000000001",
+    "name": "Rook's team vs Ash's team",
+    "thread_url": "https://discord.com/channels/1/2",
+    "state": "open"
+  },
+  "window": {
+    "start_utc": "2026-10-26T04:00:00Z",
+    "cell_minutes": 30,
+    "cells": 336
+  },
+  "rules": {
+    "min_per_side": 2,
+    "draft_cells": 2
+  },
+  "sides": [
+    {
+      "label": "Rook's team",
+      "people": [
+        {
+          "user": "900000000000000002",
+          "name": "Ben",
+          "zone": "America/New_York",
+          "cells": "AAAAAAAAAAAAAAD8AAAAAAD8AAAAAAD8AAAAAAD8AAAAAAD8AAAAAAD8"
+        },
+        {
+          "user": "900000000000000011",
+          "name": "Rook",
+          "zone": "America/New_York",
+          "cells": "AAAAAAP8AAAAAAP8AAAAAAP8AAAAAAP8AAAAAAP8AAAAAAP8AAAAAAP8"
+        },
+        {
+          "user": "900000000000000012",
+          "name": "Wren",
+          "zone": "America/Chicago",
+          "cells": "AAAAAAAAAAAAAA/wAAAAAA/wAAAAAA/wAAAAAA/wAAAAAA/wAAAAAA/w"
+        }
+      ]
+    },
+    {
+      "label": "Ash's team",
+      "people": [
+        {
+          "user": "900000000000000021",
+          "name": "Ash",
+          "zone": "America/New_York",
+          "cells": "AAAAAAAAAAAAAAD/AAAAAAD/AAAAAAD/AAAAAAD/AAAAAAD/AAAAAAD/"
+        },
+        {
+          "user": "900000000000000022",
+          "name": "Pike",
+          "zone": "America/New_York",
+          "cells": "AAAAAAAAAAAAAAA8AAAAAAA8AAAAAAA8AAAAAAAAAAAAAAA8AAAAAAA8"
+        },
+        {
+          "user": "900000000000000023",
+          "name": "Fern",
+          "zone": null,
+          "cells": null
+        }
+      ]
+    }
+  ],
+  "booking": {
+    "start_utc": null,
+    "by_name": null,
+    "version": 0
+  },
+  "me": {
+    "user": "900000000000000002"
+  }
+}

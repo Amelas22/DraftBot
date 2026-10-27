@@ -5,13 +5,21 @@ from datetime import datetime, timezone
 
 from aiohttp import web
 
+from helpers.matchup import Roster
 from services.scheduler_links import LinkIdentity
+from services.team_draft import BookingChange
 from services.team_finder import Notice
 
 IDENTITY = "scheduler_identity"  # request key holding the LinkIdentity
 NOW: web.AppKey[Callable[[], datetime]] = web.AppKey("now")
 NOTIFY: web.AppKey[Callable[[Notice, str], Awaitable[bool]]] = web.AppKey("notify")
 DISPLAY_NAME: web.AppKey[Callable[[str, str], Awaitable[str]]] = web.AppKey("display_name")
+# (guild id, team draft id) -> both sides as the guild has them now.
+SIDE_PEOPLE: web.AppKey[Callable[[str, int], Awaitable[tuple[Roster, Roster]]]] = web.AppKey(
+    "side_people"
+)
+# (team draft id, committed change) -> post it in the matchup's thread.
+ANNOUNCE: web.AppKey[Callable[[int, BookingChange], Awaitable[None]]] = web.AppKey("announce")
 
 
 def utc_now() -> datetime:
@@ -20,6 +28,13 @@ def utc_now() -> datetime:
 
 def error(status: int, code: str) -> web.Response:
     return web.json_response({"error": code}, status=status)
+
+
+def view_refused(request: web.Request, view: str) -> web.Response | None:
+    """A 403 when the request's link was issued for another page, else None."""
+    if identity(request).view != view:
+        return error(403, "wrong_view")
+    return None
 
 
 def identity(request: web.Request) -> LinkIdentity:

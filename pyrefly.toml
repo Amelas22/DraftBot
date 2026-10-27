@@ -18,9 +18,11 @@ project-includes = [
     "cogs/scheduler_web_cog.py",
     "models/scheduler.py",
     "models/team_finder.py",
+    "models/team_draft.py",
     "services/team_finder.py",
     "services/team_finder_sync.py",
     "services/scheduler_teams_api.py",
+    "services/scheduler_team_draft_api.py",
     "helpers/signup_board.py",
     "services/library_reminders.py",
     "cogs/server_draft_stats.py",
@@ -40,6 +42,7 @@ project-includes = [
     "services/draft_table_publisher.py",
     "services/league_site_data.py",
     "helpers/match_control.py",
+    "helpers/matchup.py",
     "helpers/opponent_threads.py",
     "helpers/scryfall_oracle.py",
     "helpers/team_names.py",
@@ -47,6 +50,7 @@ project-includes = [
     "helpers/utils.py",
     "helpers/view_dispatch_guard.py",
     "match_control_view.py",
+    "team_draft_view.py",
     "ready_check.py",
     "database/retry.py",
     "services/stake_funding.py",
@@ -93,6 +97,9 @@ project-includes = [
     "cogs/settings_commands.py",
     "cogs/lfg_cog.py",
     "services/league_roles.py",
+    "services/team_draft.py",
+    "team_draft_wizard.py",
+    "cogs/team_draft_cog.py",
 ]
 
 # SQLAlchemy 1.x-style Column() declarations type column attributes as Column[T]

@@ -1,5 +1,7 @@
 // The page's only door to the bot: a JSON API on the same origin, authorised by the link token. No DOM;
 // fetch is injectable for tests.
+import { CELL_MS, isoSeconds } from "./week.js";
+
 export class LinkExpired extends Error {
   constructor(message = "link expired") { super(message); this.name = "LinkExpired"; }
 }
@@ -78,6 +80,7 @@ export function createFixtureApi(name, fetchFn = fetch) {
     if (!res.ok) throw await failure(res);
     return res.json();
   };
+  if (name === "team-draft") return teamDraftFixtureApi(read);
   if (Object.hasOwn(TEAMS_FIXTURES, name)) return teamsFixtureApi(read, TEAMS_FIXTURES[name]);
   const refuse = () => { throw new Error("fixtures are read only"); };
   return {
@@ -200,6 +203,60 @@ function teamsFixtureApi(read, { file, usualFile, name }) {
     post: async (path, body) => {
       if (path !== "/api/teams/actions") throw new Error(`no fixture for ${path}`);
       return structuredClone(await act(body));
+    },
+  };
+}
+
+// `#fixture=team-draft`: Ben, on a link for Rook's team vs Ash's team. The window starts at the current half
+// hour so cells are bookable whenever the page is opened; book and clear change an in-memory booking and bump its
+// version, answering like the server.
+function teamDraftFixtureApi(read) {
+  let state = null;
+  const load = async () => {
+    if (!state) {
+      state = await read("fixtures/team-draft.json");
+      state.window.start_utc = isoSeconds(new Date(Math.floor(Date.now() / CELL_MS) * CELL_MS));
+    }
+    return state;
+  };
+  const user = () => state.me.user;
+  const answer = (code) => structuredClone({ ok: code === null, code, state });
+
+  async function act(body) {
+    await load();
+    const booking = state.booking;
+    if (state.matchup.state !== "open") return answer("started");
+    if (body.seen_version !== booking.version) return answer("changed");
+    if (body.kind === "book") {
+      const at = Date.parse(body.start_utc);
+      const first = Date.parse(state.window.start_utc);
+      if (at < Date.now()) return answer("past");
+      if (at >= first + state.window.cells * CELL_MS) return answer("out_of_window");
+      booking.start_utc = body.start_utc;
+      booking.by_name = state.sides.flatMap((s) => s.people).find((p) => p.user === user())?.name ?? null;
+    } else if (body.kind === "clear") {
+      if (booking.start_utc === null) return answer("not_booked");
+      booking.start_utc = null;
+      booking.by_name = null;
+    } else {
+      return answer("bad_input");
+    }
+    booking.version += 1;
+    return answer(null);
+  }
+
+  return {
+    fixture: true,
+    me: async () => { await load(); return { user: user(), guild: "fixture", view: "team_draft", exp: null }; },
+    getUsual: () => read("fixtures/usual-week.json"),
+    putUsual: async (doc) => doc,
+    get: async (path) => {
+      if (path !== "/api/team-draft") throw new Error(`no fixture for ${path}`);
+      return structuredClone(await load());
+    },
+    post: async (path, body) => {
+      if (path !== "/api/team-draft/actions") throw new Error(`no fixture for ${path}`);
+      return act(body);
     },
   };
 }

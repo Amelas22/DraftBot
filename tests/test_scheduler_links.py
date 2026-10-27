@@ -61,3 +61,18 @@ async def test_resolve_token_valid_expired_removed_unknown(test_db):
         row = (await session.execute(select(SchedulerLink))).scalar_one()
         row.removed_utc = datetime(2026, 10, 23)
     assert await resolve_token(token, NOW) is None
+
+
+@pytest.mark.asyncio
+async def test_a_link_carries_its_subject(test_db):
+    url = await issue_link("u", "g", "team_draft", NOW, subject="42")
+    found = await resolve_token(url.split("#")[1], NOW)
+    assert found is not None
+    assert (found.view, found.subject) == ("team_draft", "42")
+
+
+@pytest.mark.asyncio
+async def test_a_link_without_a_subject_resolves_to_none(test_db):
+    url = await issue_link("u", "g", "lfg", NOW)
+    found = await resolve_token(url.split("#")[1], NOW)
+    assert found is not None and found.subject is None

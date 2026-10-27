@@ -20,6 +20,10 @@ class PremadeSession(BaseSession):
 
     async def create_draft_session(self, interaction, bot):
         """Use base class method to handle the creation of the draft session."""
+        team_draft_id = getattr(self.session_details, "team_draft_id", None)
+        if team_draft_id is not None:
+            await self._create_for_team_draft(interaction, bot, team_draft_id)
+            return
         match_id = getattr(self.session_details, "tournament_match_id", None)
         if match_id is not None:
             # This is the guard for the common case (one picker open at a time), but
@@ -105,6 +109,64 @@ class PremadeSession(BaseSession):
         except Exception as e:
             from loguru import logger
             logger.error(f"premade tournament nudge failed: {e}")
+
+    async def _create_for_team_draft(self, interaction, bot, team_draft_id):
+        """A draft launched from a team draft thread: one per matchup, ever.
+
+        The claim is a single UPDATE committed before anything is created or
+        posted, so of two pickers submitted at once exactly one gets through;
+        the other is told where the winner's lobby is. If creating the draft
+        then fails, the matchup is freed again so Start draft still works.
+        """
+        from loguru import logger
+
+        from database.db_session import db_session
+        from helpers.matchup import SETTING_UP, launch_block
+        from services.team_draft import claim_draft, release_draft
+        import team_draft_view
+
+        session_id = self.session_details.session_id
+        async with db_session() as session:
+            claimed = await claim_draft(session, team_draft_id, session_id)
+        if not claimed:
+            async with db_session() as session:
+                facts = await team_draft_view.team_draft_facts(
+                    session, team_draft_id, interaction.guild)
+            # A matchup freed again in between reads as being set up: whoever
+            # holds it next is, and Start draft will say so either way.
+            reason = (team_draft_view.GONE if facts is None
+                      else launch_block(facts.state, facts.lobby_link)
+                      or launch_block(SETTING_UP, None))
+            await interaction.response.send_message(reason, ephemeral=True)
+            return
+        try:
+            await super().create_draft_session(interaction, bot)
+        except Exception:
+            # Free the matchup only if no draft row was saved. The base create
+            # commits the row and posts the lobby before steps that can still
+            # raise; freeing then would let a second draft start beside a live one.
+            try:
+                from sqlalchemy import select
+
+                from models.draft_session import DraftSession
+                async with db_session() as session:
+                    saved = (await session.execute(
+                        select(DraftSession.id).where(DraftSession.session_id == session_id)
+                    )).first() is not None
+                    if not saved:
+                        await release_draft(session, team_draft_id, session_id)
+                if saved:
+                    logger.error(
+                        f"Draft {session_id} for team draft {team_draft_id} failed after "
+                        "it was saved; keeping the matchup claimed")
+            except Exception:
+                logger.exception(
+                    f"Could not free team draft {team_draft_id} after its draft failed")
+            raise
+        try:
+            await team_draft_view.refresh_team_draft_control(interaction.client, team_draft_id)
+        except Exception as e:
+            logger.error(f"team draft control refresh failed: {e}")
 
     def _create_embed_content(self):
         """Create an embed message for a premade draft session."""

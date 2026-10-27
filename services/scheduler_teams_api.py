@@ -11,7 +11,7 @@ from database.db_session import db_session
 from models.team_finder import LfgAction
 from services import team_finder
 from services.availability import naive_utc
-from services.scheduler_http import DISPLAY_NAME, NOTIFY, NOW, error, identity, read_body
+from services.scheduler_http import DISPLAY_NAME, NOTIFY, NOW, error, identity, read_body, view_refused
 from services.team_finder import ActionResult, teams_state
 
 MAX_ACTION_BYTES = 4096
@@ -73,15 +73,9 @@ async def _state(guild_id: str, user_id: str) -> dict[str, object]:
         return await teams_state(session, guild_id, user_id)
 
 
-def _view_refused(request: web.Request) -> web.Response | None:
-    if identity(request).view != VIEW:
-        return error(403, "wrong_view")
-    return None
-
-
 @routes.get("/api/teams")
 async def get_teams(request: web.Request) -> web.Response:
-    if (refused := _view_refused(request)) is not None:
+    if (refused := view_refused(request, VIEW)) is not None:
         return refused
     who = identity(request)
     return web.json_response(await _state(who.guild_id, who.user_id))
@@ -95,7 +89,7 @@ async def _reply(ok: bool, code: str | None, guild_id: str, user_id: str) -> web
 
 @routes.post("/api/teams/actions")
 async def post_action(request: web.Request) -> web.Response:
-    if (refused := _view_refused(request)) is not None:
+    if (refused := view_refused(request, VIEW)) is not None:
         return refused
     raw = await read_body(request, MAX_ACTION_BYTES)
     if raw is None:

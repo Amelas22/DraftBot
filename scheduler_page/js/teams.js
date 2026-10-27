@@ -26,7 +26,7 @@ export const membersText = (team, viewer) => {
 };
 
 // A member without a saved week (cells null) is never free.
-const memberFree = (m, startUtc) => (m.cells && m.zone ? windowCells(m.zone, decodeCells(m.cells), startUtc) : new Set());
+export const memberFree = (m, startUtc) => (m.cells && m.zone ? windowCells(m.zone, decodeCells(m.cells), startUtc) : new Set());
 
 // people: [{ user, name, free }]; overlap = cells where every person is free.
 function groupFit(people) {

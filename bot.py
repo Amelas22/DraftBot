@@ -144,6 +144,14 @@ async def main():
         bot.add_view(LfgBoardView())
         from register_team_wizard import RegisterTeamView
         bot.add_view(RegisterTeamView())
+        from team_draft_wizard import TeamDraftBoardView
+        bot.add_view(TeamDraftBoardView())
+        try:
+            from team_draft_view import re_register_team_draft_views
+            await re_register_team_draft_views(bot)
+        except Exception:
+            # Those threads' Start draft buttons stay dead until the next restart.
+            logger.exception("Error re-registering team draft views")
         from livedrafts import re_register_live_drafts
         await re_register_live_drafts(bot)
         # As a task, not awaited: this one fetches a Discord message per recent

@@ -5,24 +5,23 @@ sends a DM. The caller commits, then sends the returned notices.
 """
 
 import asyncio
-import base64
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.scheduler import PlayerAvailability
 from models.team_finder import LfgRequest, LfgTeam, LfgTeamMember
 from models.tournament import TournamentParticipant, TournamentTeamMember
 from services.availability import (
     CELL_MINUTES,
     UsualWeek,
-    cells_from_bytes,
-    cells_to_bytes,
+    cells_b64,
+    floor_half_hour,
     iso_z,
     naive_utc,
+    usual_weeks,
     window_cells,
 )
 from services.tournament_service import get_active_tournament
@@ -58,11 +57,6 @@ def _refuse(code: str) -> ActionResult:
     return ActionResult(ok=False, code=code)
 
 
-def _floor_half_hour(moment: datetime) -> datetime:
-    utc = moment.astimezone(timezone.utc)
-    return utc.replace(minute=utc.minute - utc.minute % CELL_MINUTES, second=0, microsecond=0)
-
-
 def overlap_hours(weeks: list[UsualWeek | None], start_utc: datetime) -> float:
     """Hours in the next 7 days in which every week is free; a None week is never free."""
     if not weeks:
@@ -80,20 +74,6 @@ def _hours_text(hours: float) -> str:
     rounded = round(hours * 2) / 2
     number = str(int(rounded)) if rounded == int(rounded) else f"{rounded:.1f}"
     return f"{number} hour" if rounded == 1 else f"{number} hours"
-
-
-async def _weeks(session: AsyncSession, users: list[str]) -> dict[str, UsualWeek]:
-    if not users:
-        return {}
-    rows = (
-        await session.execute(
-            select(PlayerAvailability).where(PlayerAvailability.user_id.in_(users))
-        )
-    ).scalars()
-    return {
-        str(r.user_id): UsualWeek(zone=str(r.zone), cells=cells_from_bytes(bytes(r.cells)))
-        for r in rows
-    }
 
 
 async def _current_members(session: AsyncSession, team_id: int) -> list[LfgTeamMember]:
@@ -266,10 +246,10 @@ async def request_join(
     if recent is not None:
         return ActionResult(ok=True)
 
-    weeks = await _weeks(session, [user_id] + [str(m.user_id) for m in members])
+    weeks = await usual_weeks(session, [user_id] + [str(m.user_id) for m in members])
     hours = overlap_hours(
         [weeks.get(user_id)] + [weeks.get(str(m.user_id)) for m in members],
-        _floor_half_hour(now),
+        floor_half_hour(now),
     )
     captain = next((m for m in members if m.user_id == team.captain_id), None)
     captain_name = str(captain.display_name) if captain else str(team.captain_id)
@@ -585,12 +565,6 @@ async def board_teams(session: AsyncSession, guild_id: str) -> list[BoardTeam]:
     return out
 
 
-def _cells_b64(week: UsualWeek | None) -> str | None:
-    if week is None:
-        return None
-    return base64.b64encode(cells_to_bytes(week.cells)).decode("ascii")
-
-
 async def teams_state(session: AsyncSession, guild_id: str, user_id: str) -> dict[str, object]:
     """The ``draftbot.scheduler.teams`` v1 body as seen by ``user_id``."""
     teams = list(
@@ -603,7 +577,7 @@ async def teams_state(session: AsyncSession, guild_id: str, user_id: str) -> dic
         ).scalars()
     )
     members = {int(t.id): await _current_members(session, int(t.id)) for t in teams}
-    weeks = await _weeks(
+    weeks = await usual_weeks(
         session,
         sorted({str(m.user_id) for ms in members.values() for m in ms}),
     )
@@ -630,7 +604,7 @@ async def teams_state(session: AsyncSession, guild_id: str, user_id: str) -> dic
                         "user": str(m.user_id),
                         "name": str(m.display_name),
                         "zone": w.zone if (w := weeks.get(str(m.user_id))) else None,
-                        "cells": _cells_b64(weeks.get(str(m.user_id))),
+                        "cells": cells_b64(weeks.get(str(m.user_id))),
                     }
                     for m in ms
                 ],
@@ -666,7 +640,7 @@ async def teams_state(session: AsyncSession, guild_id: str, user_id: str) -> dic
                 )
             ).scalars()
         )
-        req_weeks = await _weeks(session, sorted({str(r.user_id) for r in pending}))
+        req_weeks = await usual_weeks(session, sorted({str(r.user_id) for r in pending}))
         for tid in captained:
             incoming[str(tid)] = [
                 {
@@ -674,7 +648,7 @@ async def teams_state(session: AsyncSession, guild_id: str, user_id: str) -> dic
                     "name": str(r.display_name),
                     "note": str(r.note),
                     "zone": w.zone if (w := req_weeks.get(str(r.user_id))) else None,
-                    "cells": _cells_b64(req_weeks.get(str(r.user_id))),
+                    "cells": cells_b64(req_weeks.get(str(r.user_id))),
                     "requested_at": iso_z(r.created_utc),
                 }
                 for r in pending

@@ -859,6 +859,8 @@ async def release_draft_pool(guild_id: str, session_id: str, reason: str, *,
     refund at a time left a pool half-released -- and the inactive-queue reaper
     deletes the row right after, stranding whatever was still held.
     """
+    freed: list[int | None] = []    # the team-draft matchup a deleted draft held
+
     async def release(session: AsyncSession) -> dict[str, int]:
         # Read inside the transaction, under the lock: an entry revised between
         # an outside read and the lock would have its stale amount refused.
@@ -870,10 +872,14 @@ async def release_draft_pool(guild_id: str, session_id: str, reason: str, *,
         if delete_draft:
             from sqlalchemy import select
             from models.draft_session import DraftSession
+            from services.team_draft import release_deleted_draft
             row = (await session.execute(select(DraftSession).where(
                 DraftSession.session_id == session_id))).scalar_one_or_none()
             if row is not None:
                 await session.delete(row)    # the ORM delete, as callers did before
+                # A draft deleted before it ran frees its team-draft matchup,
+                # in the same transaction, so no matchup outlives its draft.
+                freed.append(await release_deleted_draft(session, session_id))
         return held
 
     try:
@@ -889,6 +895,10 @@ async def release_draft_pool(guild_id: str, session_id: str, reason: str, *,
         logger.info(f"draft pool {session_id}: released {sum(refunded.values())} "
                     f"to {len(refunded)} players ({reason})")
     await check_pool(guild_id, session_id)
+    # The last attempt's result: a retried transaction appends again.
+    if freed and freed[-1] is not None:
+        from team_draft_view import refresh_freed_team_draft
+        await refresh_freed_team_draft(freed[-1])
     return {"refunded": refunded}
 
 
