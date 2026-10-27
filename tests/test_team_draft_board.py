@@ -155,3 +155,28 @@ async def test_the_board_button_has_a_stable_custom_id():
     assert view.timeout is None
     assert view.setup_button.custom_id == "team_draft:setup"
     assert view.setup_button.label == "Set up a team draft"
+
+
+@pytest.mark.asyncio
+async def test_the_board_goes_in_the_channel_the_command_was_run_in(test_db):  # noqa: F811
+    """Run from a room of the server's own choosing, the board goes there, not
+    into a new #set-team-draft beside it."""
+    import discord
+
+    here = MagicMock(spec=discord.TextChannel)
+    here.id = 555
+    here.category = MagicMock(spec=discord.CategoryChannel)
+    found = AsyncMock(return_value=(here, False))
+    here.send = AsyncMock(return_value=_discord_message(901, here))
+    ctx = _ctx()
+    ctx.channel = here
+    cog = team_draft_cog.TeamDraftCog(MagicMock())
+    with patch.object(team_draft_cog, "scheduler_enabled", return_value=True), \
+            patch.object(team_draft_cog, "get_config", return_value={}), \
+            patch.object(team_draft_cog, "update_setting") as update, \
+            patch.object(team_draft_cog, "ensure_channel", new=found):
+        await team_draft_cog.TeamDraftCog.team_draft_board.callback(cog, ctx)
+
+    assert found.await_args.args[4] is here
+    update.assert_called_once_with("1", "tournament.default_team_draft_channel_id", "555")
+    here.send.assert_awaited_once()
