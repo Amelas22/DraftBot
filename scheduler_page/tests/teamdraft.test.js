@@ -2,10 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  FORMAT, freeBySide, goodStarts, bookable, bookingLine, refusalText, shiftSelection, sideCounts, countText, withoutPeople,
-  toggleSide, togglePerson,
+  FORMAT, bookable, bookingLine, countText, freeBySide, freeRuns, refusalText, shiftSelection, sideCounts, toggleSide,
+  togglePerson, withoutPeople,
 } from "../js/teamdraft.js";
-import { decodeCells, encodeCells, usualCellOf, CELLS } from "../js/week.js";
+import { encodeCells, CELLS } from "../js/week.js";
 
 const fx = (n) => JSON.parse(readFileSync(new URL(`../fixtures/${n}`, import.meta.url)));
 const base = fx("team-draft.json");
@@ -16,27 +16,7 @@ const range = (a, b) => Array.from({ length: b - a }, (_, i) => a + i);
 const daily = (cells) => new Set(range(0, 7).flatMap((d) => cells.map((c) => d * 48 + c)));
 const doc = (a, b, extra = {}) => ({ ...base, ...extra, sides: [{ label: "A", people: a }, { label: "B", people: b }] });
 
-// Independent expected value: walk the window and test each person's local cell.
-function expectedGood(state, need = (side) => Math.min(state.rules.min_per_side, side.people.length)) {
-  const out = new Set();
-  const free = (p, j) => p.cells !== null && decodeCells(p.cells).has(usualCellOf(new Date(start.getTime() + j * 1800000), p.zone));
-  for (let j = 0; j + state.rules.draft_cells <= CELLS; j++) {
-    const ok = state.sides.every((side) => {
-      const n = side.people.filter((p) => range(j, j + state.rules.draft_cells).every((k) => free(p, k))).length;
-      return n >= need(side);
-    });
-    if (ok) out.add(j);
-  }
-  return out;
-}
-
 test("FORMAT", () => assert.equal(FORMAT, "draftbot.scheduler.team_draft"));
-
-test("goodStarts matches an independent count on the fixture", () => {
-  const want = expectedGood(base);
-  assert.ok(want.size > 0);
-  assert.deepEqual(goodStarts(base, start), want);
-});
 
 test("freeBySide gives one set per person, in order; no week is never free", () => {
   const free = freeBySide(base, start);
@@ -44,37 +24,6 @@ test("freeBySide gives one set per person, in order; no week is never free", () 
   const noWeek = base.sides.flatMap((s, i) => s.people.map((p, k) => [p, free[i][k]])).filter(([p]) => p.cells === null);
   assert.ok(noWeek.length > 0);
   for (const [, f] of noWeek) assert.equal(f.size, 0);
-});
-
-test("a one-person side needs only that person", () => {
-  const evening = daily(range(40, 46));
-  const s = doc([person("a", "UTC", evening)], [person("b", "UTC", evening)]);
-  assert.deepEqual(goodStarts(s, start), expectedGood(s));
-  assert.ok(goodStarts(s, start).size > 0);
-});
-
-test("a side with a week-less person still needs min_per_side when it is big enough", () => {
-  const evening = daily(range(40, 46));
-  const s = doc([person("a", "UTC", evening), person("b", "UTC", null)], [person("c", "UTC", evening), person("d", "UTC", evening)]);
-  assert.equal(goodStarts(s, start).size, 0);
-});
-
-test("a cell needs every draft cell free", () => {
-  // Only local cells 40 and 41 are free: starts at 40 work, 41 does not (41+1 = 42 is busy).
-  const s = doc([person("a", "UTC", daily([40, 41]))], [person("b", "UTC", daily([40, 41]))]);
-  const good = goodStarts(s, start);
-  for (const j of good) assert.equal(usualCellOf(new Date(start.getTime() + j * 1800000), "UTC") % 48, 40);
-  assert.ok(good.size > 0);
-  assert.deepEqual(good, expectedGood(s));
-});
-
-test("the last cell of the window cannot start a draft", () => {
-  const all = daily(range(0, 48));
-  const s = doc([person("a", "UTC", all)], [person("b", "UTC", all)]);
-  const good = goodStarts(s, start);
-  assert.ok(good.has(CELLS - 2));
-  assert.ok(!good.has(CELLS - 1));
-  assert.equal(good.size, CELLS - 1);
 });
 
 test("bookable: future, inside the window, matchup open", () => {
@@ -140,15 +89,6 @@ test("withoutPeople drops the switched-off people from every side and leaves the
   assert.equal(out.booking, s.booking);
 });
 
-test("switching off a week-less player lets their side's good starts come back", () => {
-  const evening = daily(range(40, 46));
-  const s = doc([person("a", "UTC", evening), person("b", "UTC", null)], [person("c", "UTC", evening), person("d", "UTC", evening)]);
-  assert.equal(goodStarts(s, start).size, 0);
-  const shown = withoutPeople(s, new Set(["b"]));
-  assert.ok(goodStarts(shown, start).size > 0);
-  assert.deepEqual(goodStarts(shown, start), expectedGood(shown));
-});
-
 test("toggleSide switches a whole side off, or back on once all of it is off", () => {
   const side = { label: "A", people: [person("a", "UTC", null), person("b", "UTC", null)] };
   assert.deepEqual([...toggleSide(new Set(["x"]), side)].sort(), ["a", "b", "x"]);
@@ -161,4 +101,37 @@ test("togglePerson flips one person and returns a new set", () => {
   assert.deepEqual([...togglePerson(off, "b")].sort(), ["a", "b"]);
   assert.deepEqual([...togglePerson(off, "a")], []);
   assert.deepEqual([...off], ["a"]);
+});
+
+// Two sides of free-cell sets, from per-person [first, last] cell ranges.
+const sidesOf = (...sides) => sides.map((people) => people.map(([a, b]) => new Set(range(a, b + 1))));
+const runAt = (runs, j) => runs[j] && [runs[j].first, runs[j].last];
+
+test("freeRuns: the same people free over several cells is one run", () => {
+  const runs = freeRuns(sidesOf([[10, 12]], [[10, 12]]), new Set([0]));
+  assert.deepEqual([runAt(runs, 10), runAt(runs, 11), runAt(runs, 12)], [[true, false], [false, false], [false, true]]);
+  assert.equal(runs[9], null);
+  assert.equal(runs[13], null);
+  assert.equal(runs.length, CELLS);
+});
+
+test("freeRuns: a new person in, or someone gone, starts a new run even when the counts stay the same", () => {
+  // Side A rotates every cell (one person leaves as another arrives); side B stays put.
+  const runs = freeRuns(sidesOf([[10, 10], [11, 11], [12, 12]], [[10, 12]]), new Set([0]));
+  for (const j of [10, 11, 12]) assert.deepEqual(runAt(runs, j), [true, true]);
+});
+
+test("freeRuns: a change on either side splits the run", () => {
+  const runs = freeRuns(sidesOf([[10, 13]], [[10, 11], [12, 13]]), new Set([0]));
+  assert.deepEqual([runAt(runs, 11), runAt(runs, 12)], [[false, true], [true, false]]);
+});
+
+test("freeRuns: a run stops at the end of a day column", () => {
+  const runs = freeRuns(sidesOf([[10, 13]], [[10, 13]]), new Set([0, 12]));
+  assert.deepEqual([runAt(runs, 11), runAt(runs, 12)], [[false, true], [true, false]]);
+});
+
+test("freeRuns: nobody free is never a run", () => {
+  assert.ok(freeRuns(sidesOf([[1, 1]], []), new Set([0])).every((r, j) => (j === 1 ? r !== null : r === null)));
+  assert.ok(freeRuns(sidesOf([], []), new Set([0])).every((r) => r === null));
 });

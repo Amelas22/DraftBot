@@ -1,18 +1,17 @@
-// Team draft, the view: the two sides, one heatmap of when they are free together with the good start times
-// marked, Book / Move / Clear for the matchup's time, and a way to paint or edit the viewer's own usual week. Pressing a
+// Team draft, the view: the two sides, one heatmap of when they are free together with each run of the same people
+// boxed and its counts written once, Book / Move / Clear for the matchup's time, and a way to paint or edit the viewer's own usual week. Pressing a
 // side or a player leaves them out of the grid until pressed again. Every decision lives in teamdraft.js; this file
 // only draws and wires.
 import { LinkExpired, checkDoc } from "./api.js";
 import { CELLS, CELL_MS, addCells, isoSeconds } from "./week.js";
-import { mountHeatmap, formatCell } from "./grid.js";
+import { mountHeatmap, formatCell, layoutWindow } from "./grid.js";
 import { appBar } from "./appbar.js";
 import { editWeekLabel, weekEditing } from "./usual.js";
 import { el } from "./dom.js";
 import { expiredMessage } from "./messages.js";
-import { plural } from "./words.js";
 import { actionErrorText, createSync, shadeLevel } from "./teams.js";
 import {
-  FORMAT, bookable, bookingLine, countText, freeBySide, goodStarts, refusalText, shiftSelection, sideCounts, toggleSide,
+  FORMAT, bookable, bookingLine, countText, freeBySide, freeRuns, refusalText, shiftSelection, sideCounts, toggleSide,
   togglePerson, withoutPeople,
 } from "./teamdraft.js";
 
@@ -67,7 +66,7 @@ async function showMatchup(root, api, usualDoc, now, cleanups, notice, firstStat
   let startUtc = new Date(state.window.start_utc);
   const sync = createSync();
   let freeSides = [];
-  let good = new Set();
+  let runs = [];
   let selected = null;
   // User ids the viewer has switched off; kept across refreshes.
   let off = new Set();
@@ -102,20 +101,20 @@ async function showMatchup(root, api, usualDoc, now, cleanups, notice, firstStat
 
   const label = (j) => {
     const notes = [`${countText(sideCounts(freeSides, j))} free`];
-    if (good.has(j)) notes.push("good start");
     if (j === bookedCell()) notes.push("booked");
     return `${formatCell(startUtc, zone, j)}: ${notes.join(", ")}`;
   };
   const cellClass = (j) => {
     const booked = bookedCell();
     const classes = [`s${shadeLevel(freeCount(j), Math.max(1, total()))}`];
-    if (good.has(j)) classes.push("good");
+    const run = runs[j];
+    if (run) classes.push("run", ...(run.first ? ["rfirst"] : []), ...(run.last ? ["rlast"] : []));
     if (booked !== null && j >= booked && j < booked + draftCells()) classes.push("booked");
     if (j === selected) classes.push("picked");
     return classes.join(" ");
   };
   const makeHeat = () => mountHeatmap(heatBox, {
-    startUtc, zone, cellClass, cellLabel: label,
+    startUtc, zone, cellClass, cellLabel: label, cellText: (j) => (runs[j]?.first ? countText(sideCounts(freeSides, j)) : ""),
     onPick: (j) => {
       selected = open() && bookable(j, state, now(), startUtc) ? j : null;
       readout.textContent = label(j);
@@ -148,11 +147,13 @@ async function showMatchup(root, api, usualDoc, now, cleanups, notice, firstStat
     }));
   };
 
+  // A key and its words, kept together when the legend wraps on a narrow screen.
+  const keyItem = (kind, text) => el("span", { class: "keyitem" }, el("i", { class: `key ${kind}` }), el("span", { text }));
   const renderLegend = () => {
     const swatches = [];
     for (let n = 0; n <= total(); n++) swatches.push(el("i", { class: `s${shadeLevel(n, Math.max(1, total()))}` }));
     legend.replaceChildren(el("span", { text: "nobody" }), ...swatches, el("span", { text: `all ${total()} free` }),
-      el("i", { class: "key good" }), el("span", { text: "good start" }), el("i", { class: "key booked" }), el("span", { text: "booked" }));
+      keyItem("run", "same people throughout"), keyItem("booked", "booked"));
   };
 
   function renderActions() {
@@ -171,7 +172,7 @@ async function showMatchup(root, api, usualDoc, now, cleanups, notice, firstStat
     threadLink.hidden = !state.matchup.thread_url;
     if (state.matchup.thread_url) threadLink.href = state.matchup.thread_url;
     freeSides = freeBySide(shown(), startUtc);
-    good = goodStarts(shown(), startUtc);
+    runs = freeRuns(freeSides, new Set(layoutWindow(startUtc, zone).map((d) => d.cells[0].j)));
     ledeEl.textContent = ledeText();
     renderSides();
     renderLegend();
@@ -183,7 +184,7 @@ async function showMatchup(root, api, usualDoc, now, cleanups, notice, firstStat
     const where = `Times in ${zone.replaceAll("_", " ")}.`;
     const showing = total() < everyone().length ? ` Showing ${total()} of ${everyone().length} players.` : "";
     if (!open()) return `This draft has started. ${where}${showing}`;
-    return `${plural(good.size, "good start")} in the next 7 days, outlined on the grid. ${where}${showing}`;
+    return `Each box is a stretch when the same people stay free, with how many on each side at its top. ${where}${showing}`;
   };
 
   // A finished action (or a failed one) unlocks refreshes again.

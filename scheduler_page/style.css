@@ -59,7 +59,7 @@ button:disabled { opacity: .6; cursor: default; }
 .seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-fg); }
 
 /* Legend: a ramp of swatches from least to most */
-.legend { display: flex; gap: 3px; align-items: center; margin-top: 8px; font-size: 11px; color: var(--muted); }
+.legend { display: flex; flex-wrap: wrap; gap: 3px; row-gap: 6px; align-items: center; margin-top: 8px; font-size: 11px; color: var(--muted); }
 .legend i { width: 16px; height: 9px; border-radius: 2px; display: inline-block; }
 
 /* Find a team: wide two-column layout (rail of teams, one grid pane) */
@@ -99,6 +99,9 @@ textarea { font: inherit; width: 100%; border: 2px solid var(--line); border-rad
 .hcell { height: 13px; padding: 0; border: 0; border-radius: 2px; background: var(--empty); }
 button.hcell { cursor: pointer; }
 .hcell.gap { background: transparent; }
+/* A grid with numbers in its cells (team draft: "3–2"): dark text on the light shades, light on the dark ones */
+.counted .hcell { font: 700 10px/13px var(--font); color: var(--fg); text-align: center; white-space: nowrap; }
+.counted .hcell.s4, .counted .hcell.s5, .counted .hcell.s6 { color: var(--accent-fg); }
 .hcell:focus-visible { outline-offset: 0; z-index: 1; }
 .s0 { background: var(--empty); } .s1 { background: var(--h1); } .s2 { background: var(--h2); } .s3 { background: var(--h3); }
 .s4 { background: var(--h4); } .s5 { background: var(--h5); } .s6 { background: var(--h6); }
@@ -137,12 +140,13 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
   .grid[data-active="4"] .day[data-day="4"], .grid[data-active="5"] .day[data-day="5"],
   .grid[data-active="6"] .day[data-day="6"] { display: flex; }
   .cell, .hour, .hcell { height: 24px; line-height: 24px; }
+  .counted .hcell { font-size: 13px; line-height: 24px; }
   .dayname { display: none; }
   .hours::before { display: none; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; scroll-behavior: auto !important; } }
 
-/* Team draft: the two sides, the booking line and the shared heatmap with good starts outlined */
+/* Team draft: the two sides, the booking line and the shared heatmap with runs of the same people boxed */
 .bookline { margin: 0 0 8px; font-weight: 800; }
 .threadlink { display: inline-block; margin-bottom: 10px; color: var(--accent); font-weight: 700; }
 .sides { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
@@ -162,11 +166,22 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 .side .toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .side .toggle.off { background: transparent; border-style: dashed; border-color: var(--line); color: var(--muted); text-decoration: line-through; }
 .togglehint { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 13px; }
-.hcell.good { outline: 2px solid var(--fg); outline-offset: -2px; }
-.hcell.booked { box-shadow: inset 0 0 0 3px var(--warn); }
+/* A run's box: sides on every cell, a top on its first and a bottom on its last, and the 2px gap between its
+   cells filled in so the box reads as one piece. Booked is an outline, so it shows on top of a box. */
+.counted .hcell { position: relative; }
+.hcell.run { --box: var(--fg); border-radius: 0; box-shadow: inset 2px 0 0 var(--box), inset -2px 0 0 var(--box); }
+.hcell.run.rfirst { border-radius: 5px 5px 0 0; box-shadow: inset 2px 0 0 var(--box), inset -2px 0 0 var(--box), inset 0 2px 0 var(--box); }
+.hcell.run.rlast { border-radius: 0 0 5px 5px; box-shadow: inset 2px 0 0 var(--box), inset -2px 0 0 var(--box), inset 0 -2px 0 var(--box); }
+.hcell.run.rfirst.rlast { border-radius: 5px; box-shadow: inset 0 0 0 2px var(--box); }
+.hcell.run:not(.rlast)::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: -2px; height: 2px;
+  background: inherit; box-shadow: inset 2px 0 0 var(--box), inset -2px 0 0 var(--box);
+}
+.hcell.booked { outline: 3px solid var(--warn); outline-offset: -3px; z-index: 1; }
 .hcell.picked { outline: 3px solid var(--accent); outline-offset: -1px; z-index: 1; }
 .legend .key { width: 12px; height: 12px; margin-left: 8px; background: var(--empty); }
-.legend .key.good { outline: 2px solid var(--fg); outline-offset: -2px; }
-.legend .key.booked { box-shadow: inset 0 0 0 3px var(--warn); }
+.legend .keyitem { display: inline-flex; align-items: center; gap: 3px; padding: 0; white-space: nowrap; }
+.legend .key.run { border-radius: 4px; box-shadow: inset 0 0 0 2px var(--fg); }
+.legend .key.booked { outline: 3px solid var(--warn); outline-offset: -3px; }
 .pane .actions { margin: 0; flex-wrap: wrap; }
 @media (max-width: 479px) { .sides { grid-template-columns: 1fr; } }
