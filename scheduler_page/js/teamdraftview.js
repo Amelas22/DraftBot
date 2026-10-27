@@ -1,10 +1,11 @@
 // Team draft, the view: the two sides, one heatmap of when they are free together with the good start times
-// marked, and Book / Move / Clear for the matchup's time. Every decision lives in teamdraft.js; this file only
-// draws and wires.
+// marked, Book / Move / Clear for the matchup's time, and a way to paint or edit the viewer's own usual week. Every
+// decision lives in teamdraft.js; this file only draws and wires.
 import { LinkExpired, checkDoc } from "./api.js";
 import { CELLS, CELL_MS, addCells, isoSeconds } from "./week.js";
 import { mountHeatmap, formatCell } from "./grid.js";
 import { appBar } from "./appbar.js";
+import { editWeekLabel, weekEditing } from "./usual.js";
 import { el } from "./dom.js";
 import { expiredMessage } from "./messages.js";
 import { plural } from "./words.js";
@@ -16,6 +17,7 @@ const ACTIONS_PATH = "/api/team-draft/actions";
 const REFRESH_MS = 30000;
 const HOVER_HINT = "Hover or tap a half-hour to see who's free. Tap a time to pick it.";
 const NO_WEEK = "no usual week set";
+const BACK = "Back to the matchup";
 
 // deps: { now?: () => Date }. Returns { dispose } which stops the refresh timer.
 export async function mountTeamDraft(root, api, deps = {}) {
@@ -24,17 +26,38 @@ export async function mountTeamDraft(root, api, deps = {}) {
   const controller = { dispose: () => { while (cleanups.length) cleanups.pop()(); } };
   const notice = (text) => { controller.dispose(); root.classList.remove("wide"); root.replaceChildren(el("p", { class: "notice", text })); };
 
+  // The matchup's refresh loop and listeners are disposed before the editor takes the page; show registers them
+  // afresh when the matchup comes back, refetched so the viewer's new week is in it.
+  const show = (usualDoc, firstStatus) => showMatchup(root, api, usualDoc, now, cleanups, notice, firstStatus, editWeek)
+    .catch((e) => {
+      if (e instanceof LinkExpired) notice(expiredMessage());
+      else { console.error(e); notice(actionErrorText(e)); }
+    });
+  const editWeek = weekEditing(root, api, { now, backLabel: BACK, dispose: controller.dispose, show });
+
   root.replaceChildren(el("p", { class: "status", text: "Loading…" }));
-  let zone;
-  let state;
+  let usual;
   try {
-    // Times are shown in the viewer's usual-week zone, else the browser's.
-    zone = (await api.getUsual())?.zone || Intl.DateTimeFormat().resolvedOptions().timeZone;
-    state = checkDoc(await api.get(PATH), FORMAT);
+    usual = await api.getUsual();
   } catch (e) {
     if (e instanceof LinkExpired) { notice(expiredMessage()); return controller; }
     throw e;
   }
+  await showMatchup(root, api, usual, now, cleanups, notice, "", editWeek);
+  return controller;
+}
+
+async function showMatchup(root, api, usualDoc, now, cleanups, notice, firstStatus, editWeek) {
+  root.replaceChildren(el("p", { class: "status", text: "Loading…" }));
+  let state;
+  try {
+    state = checkDoc(await api.get(PATH), FORMAT);
+  } catch (e) {
+    if (e instanceof LinkExpired) return notice(expiredMessage());
+    throw e;
+  }
+  // Times are shown in the viewer's usual-week zone, else the browser's.
+  const zone = usualDoc?.zone || Intl.DateTimeFormat().resolvedOptions().timeZone;
 
   let startUtc = new Date(state.window.start_utc);
   const sync = createSync();
@@ -54,7 +77,7 @@ export async function mountTeamDraft(root, api, deps = {}) {
   const moveBtn = el("button", { type: "button", class: "primary", text: "Move here" });
   const clearBtn = el("button", { type: "button", class: "secondary", text: "Clear" });
   const actions = el("div", { class: "actions" }, bookBtn, moveBtn, clearBtn);
-  const status = el("p", { class: "status", role: "status", "aria-live": "polite" });
+  const status = el("p", { class: "status", role: "status", "aria-live": "polite", text: firstStatus });
   const pane = el("section", { class: "pane", "aria-label": "Pick a time" }, heatBox, legend, readout, actions, status);
 
   const open = () => state.matchup.state === "open";
@@ -195,8 +218,13 @@ export async function mountTeamDraft(root, api, deps = {}) {
   document.addEventListener("visibilitychange", onVisible);
   cleanups.push(() => clearInterval(timer), () => document.removeEventListener("visibilitychange", onVisible));
 
+  const bar = appBar("Team draft");
+  bar.classList.add("withaction");
+  const editBtn = el("button", { type: "button", class: "secondary small", text: editWeekLabel(usualDoc) });
+  editBtn.addEventListener("click", () => { editWeek(usualDoc); });
+  bar.append(editBtn);
+
   root.classList.add("wide");
-  root.replaceChildren(appBar("Team draft"), heading, ledeEl, bookLine, threadLink, sidesBox, pane);
+  root.replaceChildren(bar, heading, ledeEl, bookLine, threadLink, sidesBox, pane);
   render();
-  return controller;
 }

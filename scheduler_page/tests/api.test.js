@@ -269,6 +269,17 @@ test("the team-draft fixture is a team_draft link with the viewer's week and an 
   assert.equal(state.booking.start_utc, null);
 });
 
+test("the team-draft-new fixture is Fern, who has no week until she saves one, then shows it on her row", async () => {
+  const api = createFixtureApi("team-draft-new", diskFetch());
+  assert.equal((await api.me()).user, "900000000000000023");
+  assert.equal(await api.getUsual(), null);
+  const doc = { format: "draftbot.scheduler.usual_week", version: 1, zone: "Europe/London", cells: "AAAA", saved_at: "2026-10-27T14:00:00Z" };
+  await api.putUsual(doc);
+  assert.equal((await api.getUsual()).zone, "Europe/London");
+  const fern = (await api.get("/api/team-draft")).sides.flatMap((s) => s.people).find((p) => p.user === "900000000000000023");
+  assert.deepEqual([fern.zone, fern.cells], ["Europe/London", "AAAA"]);
+});
+
 test("the team-draft fixture's window starts at the current half hour, so cells can be booked", async () => {
   const api = createFixtureApi("team-draft", diskFetch());
   const { window } = await api.get("/api/team-draft");
