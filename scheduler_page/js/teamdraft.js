@@ -1,5 +1,5 @@
-// Team draft, the decisions: when both sides have enough people free to draft, whether a cell can be booked, and
-// what the booking and a refusal say. No DOM; the view draws it.
+// Team draft, the decisions: who is free when on each side, the runs of time the same people stay free, whether a
+// cell can be booked, and what the booking and a refusal say. No DOM; the view draws it.
 import { CELLS, CELL_MS, addCells } from "./week.js";
 import { memberFree } from "./teams.js";
 
@@ -15,11 +15,22 @@ export const sideCounts = (freeSides, j) => freeSides.map((side) => side.reduce(
 export const countText = (counts) => counts.join("–");
 
 // The matchup as the viewer has it switched on: the same state with the people in `off` (user ids) left out of
-// every side, so the heatmap, counts and good starts cover only who is still shown.
+// every side, so the heatmap, counts and runs cover only who is still shown.
 export const withoutPeople = (state, off) => ({
   ...state,
   sides: state.sides.map((side) => ({ ...side, people: side.people.filter((p) => !off.has(p.user)) })),
 });
+
+// Runs: stretches of cells where exactly the same people are free, on both sides, with at least one of them. Per window
+// cell, null when nobody is free, else { first, last }: whether the cell opens or closes its run. A run never crosses
+// into a new day column (columnStarts: the cells that begin one), since the grid draws each day separately.
+export function freeRuns(freeSides, columnStarts) {
+  const people = freeSides.flat();
+  const who = (j) => people.map((free) => (free.has(j) ? "1" : "0")).join("");
+  const keys = Array.from({ length: CELLS }, (_, j) => who(j));
+  const joined = (j) => j > 0 && !columnStarts.has(j) && keys[j - 1] === keys[j];
+  return keys.map((k, j) => (k.includes("1") ? { first: !joined(j), last: j === CELLS - 1 || !joined(j + 1) } : null));
+}
 
 // Pressing a side: switch all of it off, or all of it back on when it is already all off. Returns a new set.
 export function toggleSide(off, side) {
@@ -35,27 +46,6 @@ export function togglePerson(off, user) {
   const next = new Set(off);
   if (!next.delete(user)) next.add(user);
   return next;
-}
-
-// Window cells j where, on both sides, at least min(min_per_side, side size) people are free in every one of
-// j .. j + draft_cells - 1. A draft that would run past the window's end never qualifies.
-export function goodStarts(state, startUtc) {
-  const { min_per_side: minPerSide, draft_cells: draftCells } = state.rules;
-  const sides = freeBySide(state, startUtc).map((people) => ({ people, need: Math.min(minPerSide, people.length) }));
-  const good = new Set();
-  for (let j = 0; j + draftCells <= CELLS; j++) {
-    const enough = sides.every(({ people, need }) => {
-      let n = 0;
-      for (const free of people) {
-        let all = true;
-        for (let k = j; k < j + draftCells && all; k++) all = free.has(k);
-        if (all) n++;
-      }
-      return n >= need;
-    });
-    if (enough) good.add(j);
-  }
-  return good;
 }
 
 // Cell j may be booked when it is in the window, not yet started, and the matchup is still open.

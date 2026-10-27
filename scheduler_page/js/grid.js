@@ -58,7 +58,7 @@ export const hourLabel = (h) => `${h % 12 === 0 ? 12 : h % 12} ${h < 12 ? "AM" :
 // opts: { startUtc, zone, cellClass(j) -> string, cellLabel(j) -> string, onPick?(j), onHover?(j | null) }
 // onPick makes cells buttons (tap or Enter); onHover follows the pointer and keyboard focus.
 export function mountHeatmap(container, opts) {
-  const { startUtc, zone, cellClass, cellLabel, onPick, onHover } = opts;
+  const { startUtc, zone, cellClass, cellLabel, cellText, onPick, onHover } = opts;
   const days = layoutWindow(startUtc, zone);
 
   const tabs = el("div", { class: "daytabs", role: "tablist", "aria-label": "Day" });
@@ -73,7 +73,7 @@ export function mountHeatmap(container, opts) {
     tabButtons.forEach((b, i) => b.setAttribute("aria-selected", String(i === day)));
   };
 
-  const grid = el("div", { class: "grid heat", role: "grid", "aria-label": `Next 7 days, half-hour cells, times in ${zone.replaceAll("_", " ")}` });
+  const grid = el("div", { class: cellText ? "grid heat counted" : "grid heat", role: "grid", "aria-label": `Next 7 days, half-hour cells, times in ${zone.replaceAll("_", " ")}` });
   const hours = el("div", { class: "col hours", "aria-hidden": "true" });
   for (let h = 0; h < 48; h++) hours.append(el("div", { class: "hour", text: h % 2 === 0 ? hourLabel(h / 2) : "" }));
   grid.append(hours);
@@ -100,6 +100,8 @@ export function mountHeatmap(container, opts) {
       if (n.className !== cls) n.className = cls;
       const label = cellLabel(j);
       if (n.title !== label) { n.title = label; n.setAttribute("aria-label", label); }
+      // Shown text only; the aria-label above is what a screen reader reads.
+      if (cellText) { const t = cellText(j); if (n.textContent !== t) n.textContent = t; }
     }
   };
 
