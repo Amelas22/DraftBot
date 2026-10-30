@@ -167,3 +167,59 @@ async def test_an_ordinary_draft_is_still_announced(test_db):
     channel.send.assert_awaited_once()
     assert "Looking for Drafters" in channel.send.await_args.kwargs["content"]
     assert result == "4242"
+
+
+@pytest.mark.asyncio
+async def test_the_first_announcement_pings_only_the_session_role(test_db):
+    """The role mention is a deliberate ping; a cube or team name in the same
+    message must not be able to widen it to other roles or @everyone."""
+    from unittest.mock import patch
+    from database.message_management import DraftStickyStrategy
+
+    await _seed_draft("d-2", "random")
+    guild, channel = _guild_with_channel()
+    role = MagicMock(id=777, mention="<@&777>")
+
+    with patch("database.message_management._get_guild", AsyncMock(return_value=guild)), \
+         patch("database.message_management.find_notification_channel",
+               AsyncMock(return_value=channel)), \
+         patch("database.message_management.find_session_role",
+               AsyncMock(return_value=role)):
+        await DraftStickyStrategy()._post_or_update_notification(
+            MagicMock(), _sticky("d-2"))
+
+    kwargs = channel.send.await_args.kwargs
+    assert kwargs["content"].startswith("<@&777> ")
+    mentions = kwargs["allowed_mentions"].to_dict()
+    assert mentions["roles"] == [777]
+    assert "roles" not in mentions["parse"]
+    assert "everyone" not in mentions["parse"]
+
+
+@pytest.mark.asyncio
+async def test_an_existing_announcement_is_edited_without_a_role_ping(test_db):
+    """An edit never notifies, so the update path adds no mention and sends nothing."""
+    from unittest.mock import patch
+    from database.message_management import DraftStickyStrategy
+
+    await _seed_draft("d-3", "random")
+    guild, channel = _guild_with_channel()
+    existing = MagicMock()
+    existing.edit = AsyncMock()
+    channel.fetch_message = AsyncMock(return_value=existing)
+    sticky = _sticky("d-3")
+    sticky.notification_message_id = "4242"
+    role = MagicMock(id=777, mention="<@&777>")
+
+    with patch("database.message_management._get_guild", AsyncMock(return_value=guild)), \
+         patch("database.message_management.find_notification_channel",
+               AsyncMock(return_value=channel)), \
+         patch("database.message_management.find_session_role",
+               AsyncMock(return_value=role)):
+        result = await DraftStickyStrategy()._post_or_update_notification(
+            MagicMock(), sticky)
+
+    channel.send.assert_not_awaited()
+    existing.edit.assert_awaited_once()
+    assert "<@&" not in existing.edit.await_args.kwargs["content"]
+    assert result == "4242"
