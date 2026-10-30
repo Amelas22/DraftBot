@@ -2,6 +2,7 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import discord
 import pytest
 from sqlalchemy import func, select
 
@@ -222,7 +223,26 @@ async def test_sync_roles_apply_names_a_team_it_could_not_fix(test_db):
     assert plan.unfixed == ["Mod"]
     text = format_role_sync(plan, True)
     assert "**Teams still without a role** (1): **Mod**" in text
-    assert "Team <name>" in text
+    assert '**Mod** — role "Team Mod" already exists' in text
+    assert "refused" not in text
+
+
+@pytest.mark.asyncio
+async def test_sync_roles_apply_says_discord_refused_when_nothing_clashes(test_db):
+    t_id = await _registering(["Mod"])
+    guild = MagicMock()
+    guild.id = GUILD_ID
+    guild.roles = []
+    guild.get_role = MagicMock(return_value=None)
+    guild.create_role = AsyncMock(side_effect=discord.Forbidden(MagicMock(status=403), "no"))
+    guild.members = []
+    with patch("helpers.permissions.get_config", return_value={}), \
+         patch("services.league_roles.get_config", return_value={}):
+        plan = await apply_role_sync(guild)
+    assert plan.unfixed == ["Mod"]
+    text = format_role_sync(plan, True)
+    assert "**Mod** — Discord refused to create it" in text
+    assert "already exists" not in text
 
 
 def test_format_does_not_mention_unfixed_on_a_dry_run_or_when_empty():
