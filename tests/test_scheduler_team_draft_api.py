@@ -17,6 +17,7 @@ from models.tournament import Tournament
 from services.availability import UsualWeek, save_usual_week
 from services.scheduler_links import issue_link
 from services.scheduler_web import build_app
+from services import team_draft
 from services.team_draft import Picks, create_team_draft
 
 NOW = datetime(2026, 10, 26, 12, 10, tzinfo=timezone.utc)
@@ -182,6 +183,26 @@ async def test_book_returns_new_state_and_announces_once(client, announce):
     body = await resp.json()
     assert (body["ok"], body["state"]["booking"]["start_utc"]) == (True, None)
     assert announce.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_a_replays_reply_is_built_outside_the_write_lock(test_db):
+    """Building the reply can wait on Discord for names; no other booking may wait with it."""
+    held = []
+
+    async def side_people(guild_id, team_draft_id):
+        held.append(team_draft.WRITE_LOCK.locked())
+        return ROSTERS
+
+    team_draft_id = await seed()
+    headers = await _auth(team_draft_id)
+    action = str(uuid.uuid4())
+    async with TestClient(TestServer(make_app(side_people=side_people))) as client:
+        for _ in range(2):
+            resp = await _act(client, headers, action_id=action, kind="book", start_utc=START, seen_version=0)
+            assert resp.status == 200
+
+    assert held == [False, False]
 
 
 @pytest.mark.asyncio

@@ -6,6 +6,8 @@ fails is logged and never fails the booking.
 """
 import json
 import uuid
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -136,15 +138,20 @@ async def _state(request: web.Request, team_draft_id: int) -> dict[str, object] 
     return await build_state(request, who, matchup, booking, rosters)
 
 
-@routes.get("/api/team-draft")
-async def get_team_draft(request: web.Request) -> web.Response:
-    if (refused := view_refused(request, VIEW)) is not None:
+async def serve_state(request: web.Request, link: "LinkSubject") -> web.Response:
+    """GET for a link view: its subject's state, or 404 once the subject is gone."""
+    if (refused := view_refused(request, link.view)) is not None:
         return refused
-    team_draft_id = subject_id(identity(request))
-    state = None if team_draft_id is None else await _state(request, team_draft_id)
+    subject = subject_id(identity(request))
+    state = None if subject is None else await link.state(request, subject)
     if state is None:
         return error(404, "gone")
     return web.json_response(state)
+
+
+@routes.get("/api/team-draft")
+async def get_team_draft(request: web.Request) -> web.Response:
+    return await serve_state(request, TEAM_DRAFT)
 
 
 def start_utc_of(body: dict[str, Any]) -> datetime:
@@ -177,16 +184,30 @@ def parse_action(body: object) -> tuple[str, str, datetime | None, int]:
     raise BadInput
 
 
-async def _reply(request: web.Request, team_draft_id: int, ok: bool, code: str | None) -> web.Response:
-    state = await _state(request, team_draft_id)
+@dataclass(frozen=True)
+class LinkSubject:
+    """What a link view books, and how. Both views share one action ledger,
+    told apart by ``key``: an action id recorded for one never replays as the other."""
+    view: str
+    key: str  # the subject id's name in an action's stored result
+    label: str  # how the log names one subject
+    exists: Callable[[AsyncSession, str, int], Awaitable[bool]]  # (session, guild_id, subject)
+    book: Callable[[AsyncSession, int, str, str, datetime, int, datetime], Awaitable[BookingChange]]
+    clear: Callable[[AsyncSession, int, str, str, int, datetime], Awaitable[BookingChange]]
+    state: Callable[[web.Request, int], Awaitable[dict[str, object] | None]]
+    announce: web.AppKey[Callable[[int, BookingChange], Awaitable[None]]]
+
+
+async def _reply(request: web.Request, link: LinkSubject, subject: int, ok: bool, code: str | None) -> web.Response:
+    state = await link.state(request, subject)
     if state is None:
         return error(404, "gone")
     return web.json_response({"ok": ok, "code": code, "state": state})
 
 
-@routes.post("/api/team-draft/actions")
-async def post_action(request: web.Request) -> web.Response:
-    if (refused := view_refused(request, VIEW)) is not None:
+async def serve_action(request: web.Request, link: LinkSubject) -> web.Response:
+    """POST for a link view: book or clear its subject's time, once per action id."""
+    if (refused := view_refused(request, link.view)) is not None:
         return refused
     raw = await read_body(request, MAX_ACTION_BYTES)
     if raw is None:
@@ -197,45 +218,66 @@ async def post_action(request: web.Request) -> web.Response:
         return error(400, "bad_input")
 
     who = identity(request)
-    team_draft_id = subject_id(who)
-    if team_draft_id is None:
+    subject = subject_id(who)
+    if subject is None:
         return error(404, "gone")
     async with db_session() as session:
-        if await _matchup(session, team_draft_id, who.guild_id) is None:
+        if not await link.exists(session, who.guild_id, subject):
             return error(404, "gone")
     now: datetime = request.app[NOW]()
     name = await request.app[DISPLAY_NAME](who.guild_id, who.user_id)
 
+    # Only the database work holds the lock; the reply and the announcement
+    # may wait on Discord, and every other booking would wait with them.
     async with team_draft.WRITE_LOCK:
         async with db_session() as session:
             seen = await session.get(TeamDraftAction, action_id)
             if seen is not None:
                 stored = json.loads(str(seen.result_json))
-                if seen.user_id != who.user_id or stored.get("team_draft_id") != team_draft_id:
+                if seen.user_id != who.user_id or stored.get(link.key) != subject:
                     return error(400, "bad_input")
-                return await _reply(request, team_draft_id, bool(stored["ok"]), stored["code"])
-            change: BookingChange = (
-                await team_draft.book(
-                    session, team_draft_id, who.user_id, name, start_utc, seen_version, now
+                change, result = None, (bool(stored["ok"]), stored["code"])
+            else:
+                change = (
+                    await link.book(session, subject, who.user_id, name, start_utc, seen_version, now)
+                    if start_utc is not None
+                    else await link.clear(session, subject, who.user_id, name, seen_version, now)
                 )
-                if start_utc is not None
-                else await team_draft.clear(session, team_draft_id, who.user_id, name, seen_version, now)
-            )
-            session.add(
-                TeamDraftAction(
-                    action_id=action_id,
-                    user_id=who.user_id,
-                    result_json=json.dumps(
-                        {"ok": change.ok, "code": change.code, "team_draft_id": team_draft_id}
-                    ),
-                    done_utc=naive_utc(now),
+                result = change.ok, change.code
+                session.add(
+                    TeamDraftAction(
+                        action_id=action_id,
+                        user_id=who.user_id,
+                        result_json=json.dumps({"ok": change.ok, "code": change.code, link.key: subject}),
+                        done_utc=naive_utc(now),
+                    )
                 )
-            )
-            await session.commit()
+                await session.commit()
 
-    if change.ok:
+    if change is not None and change.ok:
         try:
-            await request.app[ANNOUNCE](team_draft_id, change)
+            await request.app[link.announce](subject, change)
         except Exception:  # an announcement must never fail the committed booking
-            logger.exception(f"Team draft {team_draft_id}: announcing the {kind} raised")
-    return await _reply(request, team_draft_id, change.ok, change.code)
+            logger.exception(f"{link.label} {subject}: announcing the {kind} raised")
+    return await _reply(request, link, subject, *result)
+
+
+async def _team_draft_exists(session: AsyncSession, guild_id: str, team_draft_id: int) -> bool:
+    return await _matchup(session, team_draft_id, guild_id) is not None
+
+
+TEAM_DRAFT = LinkSubject(
+    view=VIEW,
+    key="team_draft_id",
+    label="Team draft",
+    exists=_team_draft_exists,
+    book=team_draft.book,
+    clear=team_draft.clear,
+    state=_state,
+    announce=ANNOUNCE,
+)
+
+
+@routes.post("/api/team-draft/actions")
+async def post_action(request: web.Request) -> web.Response:
+    return await serve_action(request, TEAM_DRAFT)
