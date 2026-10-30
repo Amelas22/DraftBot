@@ -68,6 +68,16 @@ def discord_time(start_utc: datetime) -> str:
     return f"<t:{ts}:F> (<t:{ts}:R>)"
 
 
+def booking_line(booking: Booking) -> str:
+    """The control message's time line: the booked time, or a nudge to book one."""
+    if booking.start_utc is None:
+        return "No time booked yet — press **Find a time**."
+    when = f"Draft time: {discord_time(booking.start_utc)}"
+    if booking.by_name:
+        when += f" — booked by {booking.by_name}"
+    return when
+
+
 def matchup_state(has_draft: bool) -> str:
     return STARTED if has_draft else OPEN
 
@@ -92,13 +102,7 @@ def render_matchup_control(
         f"{a.mentions()} vs {b.mentions()}",
         f"Set up by {set_up_by}.",
     ]
-    if booking.start_utc is not None:
-        when = f"Draft time: {discord_time(booking.start_utc)}"
-        if booking.by_name:
-            when += f" — booked by {booking.by_name}"
-        lines.append(when)
-    else:
-        lines.append("No time booked yet — press **Find a time**.")
+    lines.append(booking_line(booking))
     if state == SETTING_UP:
         lines.append("⏳ Draft being set up…")
     elif state == STARTED:

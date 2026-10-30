@@ -24,7 +24,7 @@ from helpers.match_control import (
     match_tag,
     render_pairing_line,
 )
-from helpers.matchup import Roster, assign_people
+from helpers.matchup import Booking, Roster, assign_people
 from helpers.mentions import pings
 from helpers.pin_helpers import safe_pin
 from helpers.utils import (
@@ -191,6 +191,7 @@ def control_body_and_view(
         lobby_link=lobby_link(draft),
         result=(match.team_a_wins, match.team_b_wins),
         role_mentions=role_mentions,
+        booking=Booking(match.booked_start_utc, match.booked_by_name),
     )
     return body, (MatchControlView(match.id) if state == SCHEDULING else None)
 

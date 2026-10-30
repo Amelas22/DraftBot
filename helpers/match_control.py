@@ -5,6 +5,8 @@ the control message can show are plain functions, so they are unit-testable
 directly. All I/O around them lives in match_control_view.py.
 """
 
+from helpers.matchup import Booking, booking_line
+
 SCHEDULING = "scheduling"
 DRAFTING = "drafting"
 RECORDED = "recorded"
@@ -47,8 +49,13 @@ def render_match_control(
     lobby_link: str | None = None,
     result: tuple[int, int] | None = None,
     role_mentions: tuple[str | None, str | None] | None = None,
+    booking: Booking | None = None,
 ) -> str:
     """Body text of the control message for a match in ``state``.
+
+    ``booking`` is the draft time the teams booked: scheduling always shows a
+    time line (or the nudge to book one), drafting only once a time is set,
+    and a recorded match drops it.
 
     ``match_label`` is match_tag(id, round name), the name rendered by
     tournament_formatter.round_name -- this module stays free of the database
@@ -60,6 +67,7 @@ def render_match_control(
     would explain the gap.
     """
     header = f"**{match_label} — {a_name} vs {b_name}**"
+    booking = booking or Booking(None, None)
     if state == RECORDED:
         assert result is not None, "result required when state is RECORDED"
         a_wins, b_wins = result
@@ -69,8 +77,13 @@ def render_match_control(
             body = f"{header}\n🟢 Draft in progress — [jump to the lobby]({lobby_link})"
         else:
             body = f"{header}\n🟢 Draft in progress."
+        if booking.start_utc is not None:
+            body += f"\n{booking_line(booking)}"
     else:
-        body = f"{header}\nNot started yet. Hit **Start draft** when both teams are ready."
+        body = (
+            f"{header}\n{booking_line(booking)}\n"
+            "Not started yet. Hit **Start draft** when both teams are ready."
+        )
     if role_mentions and all(role_mentions):
         body = f"<@&{role_mentions[0]}> <@&{role_mentions[1]}>\n" + body
     return body
