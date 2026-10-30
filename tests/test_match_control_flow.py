@@ -251,10 +251,12 @@ async def test_create_match_room_mentions_both_team_roles(patched_db):
 
     body = thread.send.call_args.kwargs["content"]
     assert "<@&111>" in body and "<@&222>" in body
-    # roles=True is what turns the pill into a real mention: it notifies both
-    # teams and adds their members to the thread.
+    # Naming the two roles is what turns the pill into a real mention: it
+    # notifies both teams and adds their members to the thread, and a role id
+    # smuggled in through a team name stays a pill.
     allowed_mentions = thread.send.call_args.kwargs["allowed_mentions"]
-    assert allowed_mentions.roles is True
+    assert allowed_mentions.to_dict()["roles"] == [111, 222]
+    assert "roles" not in allowed_mentions.to_dict()["parse"]
     # everyone=False is the only thing standing between a team name containing
     # "@everyone" and a guild-wide ping: register_team only strips whitespace.
     assert allowed_mentions.everyone is False
@@ -270,10 +272,10 @@ async def test_control_message_permits_role_mentions_without_a_view():
 
     thread = make_thread()
     with patch("match_control_view.safe_pin", AsyncMock()):
-        await _resolve_control_message(thread, None, "body", None)
+        await _resolve_control_message(thread, None, "body", None, role_ids=("111",))
 
     allowed_mentions = thread.send.call_args.kwargs["allowed_mentions"]
-    assert allowed_mentions.roles is True
+    assert allowed_mentions.to_dict()["roles"] == [111]
     assert allowed_mentions.everyone is False
 
 

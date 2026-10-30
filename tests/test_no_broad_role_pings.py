@@ -7,8 +7,6 @@ role must name it with helpers.mentions.pings(roles=[...]).
 import ast
 from pathlib import Path
 
-import pytest
-
 REPO = Path(__file__).resolve().parent.parent
 SKIP_DIRS = {".claude", "alembic", "scripts", "tests", ".git", ".superpowers"}
 
@@ -45,8 +43,6 @@ def _broad_sites(path: Path) -> list[tuple[int, str]]:
     return sites
 
 
-# Task 2 converts the remaining sites to helpers.mentions.pings and drops this.
-@pytest.mark.xfail(strict=True, reason="Task 2")
 def test_no_broad_allowed_mentions():
     offenders = []
     for path in sorted(REPO.rglob("*.py")):

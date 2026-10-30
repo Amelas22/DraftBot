@@ -28,6 +28,7 @@ from helpers.matchup import (
     render_matchup_control,
     side_label,
 )
+from helpers.mentions import pings
 from helpers.pin_helpers import safe_pin
 from helpers.utils import (
     DISCORD_THREAD_NAME_LIMIT,
@@ -217,11 +218,11 @@ async def open_team_draft_room(
         return None
 
     try:
-        # roles=True is load-bearing: without it the role mentions notify
+        # Naming the roles is load-bearing: without it the role mentions notify
         # nobody and add nobody to the thread.
         control = await thread.send(
             content=body, view=view,
-            allowed_mentions=discord.AllowedMentions(everyone=False, roles=True, users=True))
+            allowed_mentions=pings(roles=facts.a.role_ids + facts.b.role_ids))
     except discord.HTTPException as e:
         logger.warning(
             f"Created a thread for team draft {team_draft_id} but could not post its "
@@ -323,7 +324,7 @@ async def announce_booking(bot: discord.Client, team_draft_id: int, change: Book
     try:
         await as_messageable(channel).send(
             content=content,
-            allowed_mentions=discord.AllowedMentions(everyone=False, roles=True, users=True))
+            allowed_mentions=pings(roles=facts.a.role_ids + facts.b.role_ids))
     except discord.HTTPException as e:
         logger.warning(f"Could not announce the booking for team draft {team_draft_id}: {e}")
     # Read again after the send: another booking may have committed during it,

@@ -5,6 +5,7 @@ cog, the premade session hook, utils.py and views.py can all import it without
 an import cycle through cogs/. The message body itself is rendered by
 helpers/match_control.py, which stays free of Discord imports.
 """
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Callable, Coroutine, cast
 
 import discord
@@ -22,6 +23,7 @@ from helpers.match_control import (
     match_tag,
     render_pairing_line,
 )
+from helpers.mentions import pings
 from helpers.pin_helpers import safe_pin
 from helpers.utils import DISCORD_THREAD_NAME_LIMIT, THREAD_ARCHIVE_MAX_MINUTES, as_messageable
 from models.draft_session import DraftSession
@@ -199,7 +201,8 @@ class MatchControlView(discord.ui.View):
 
 
 async def _resolve_control_message(
-    thread: discord.Thread, control_id: "str | None", body: str, view: "MatchControlView | None"
+    thread: discord.Thread, control_id: "str | None", body: str, view: "MatchControlView | None",
+    role_ids: Iterable[str] = (),
 ) -> discord.Message:
     """The pinned control message, editing an existing one or posting a new one."""
     if control_id:
@@ -210,10 +213,11 @@ async def _resolve_control_message(
         except discord.NotFound:
             logger.warning(
                 f"Control message {control_id} missing in thread {thread.id}; reposting")
-    # roles=True is load-bearing: without it Discord renders the role mention
-    # as a plain pill, notifies nobody, and adds nobody to the thread -- the
-    # entire point of tagging both teams' roles in the body above.
-    allowed_mentions = discord.AllowedMentions(everyone=False, roles=True, users=True)
+    # Naming the roles is load-bearing: without it Discord renders the role
+    # mention as a plain pill, notifies nobody, and adds nobody to the thread
+    # -- the entire point of tagging both teams' roles in the body above. Only
+    # these roles: a team name can contain any other role mention.
+    allowed_mentions = pings(roles=role_ids)
     # Messageable.send's view overloads don't accept an explicit None (only a
     # real View or the omitted-argument default), even though py-cord treats
     # a falsy view as "no view" at runtime.
@@ -266,7 +270,10 @@ async def create_match_room(message: discord.Message, match_id: int) -> discord.
         return None
 
     try:
-        control = await _resolve_control_message(thread, None, body, view)
+        control = await _resolve_control_message(
+            thread, None, body, view,
+            role_ids=[r for r in (roles.get(match.team_a_participant_id),
+                                  roles.get(match.team_b_participant_id)) if r])
     except discord.HTTPException as e:
         logger.warning(
             f"Created a thread for match {match_id} but could not post its control "

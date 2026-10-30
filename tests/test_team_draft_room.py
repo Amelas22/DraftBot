@@ -94,7 +94,8 @@ async def test_opening_a_room_tags_both_sides_pins_and_records_it(test_db):
     assert "<@&111>" in sent["content"] and "<@201>" in sent["content"] and "<@202>" in sent["content"]
     assert "Set up by Organiser." in sent["content"]
     assert sent["allowed_mentions"].everyone is False
-    assert sent["allowed_mentions"].roles is True
+    assert sent["allowed_mentions"].to_dict()["roles"] == [111]
+    assert "roles" not in sent["allowed_mentions"].to_dict()["parse"]
     assert sent["allowed_mentions"].users is True
     assert isinstance(sent["view"], TeamDraftControlView)
     control.pin.assert_awaited_once()
@@ -561,7 +562,9 @@ async def test_announce_posts_in_the_thread_then_refreshes(test_db):
     assert sent["content"] == booking_announcement("Bo", None, change.new, facts.a, facts.b)
     assert sent["content"].startswith("<@&111> <@201> <@202>\n")
     mentions = sent["allowed_mentions"]
-    assert (mentions.everyone, mentions.roles, mentions.users) == (False, True, True)
+    assert (mentions.everyone, mentions.users) == (False, True)
+    assert mentions.to_dict()["roles"] == [111]
+    assert "roles" not in mentions.to_dict()["parse"]
     refresh.assert_awaited_once_with(bot, team_draft_id)
     assert order == ["send", "refresh"]
 
