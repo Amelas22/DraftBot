@@ -7,6 +7,7 @@ helpers/match_control.py, which stays free of Discord imports.
 """
 import asyncio
 from collections.abc import Iterable
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Coroutine, cast
 
 import discord
@@ -14,6 +15,7 @@ from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config import scheduler_enabled
 from database.db_session import db_session
 from helpers.match_control import (
     SCHEDULING,
@@ -24,7 +26,14 @@ from helpers.match_control import (
     match_tag,
     render_pairing_line,
 )
-from helpers.matchup import Booking, Roster, assign_people
+from helpers.matchup import (
+    MATCH_SCHEDULING_NOT_ENABLED,
+    TIME_LINK_FAILED,
+    TIME_LINK_INTRO,
+    Booking,
+    Roster,
+    assign_people,
+)
 from helpers.mentions import pings
 from helpers.pin_helpers import safe_pin
 from helpers.utils import (
@@ -32,6 +41,7 @@ from helpers.utils import (
     THREAD_ARCHIVE_MAX_MINUTES,
     as_messageable,
     is_bot,
+    not_none,
     resolve_display_name,
 )
 from models.draft_session import DraftSession
@@ -43,6 +53,7 @@ from models.tournament import (
     TournamentTeamMember,
 )
 from services.match_booking import schedulable_match
+from services.scheduler_links import issue_link
 from services.tournament_formatter import round_name
 
 if TYPE_CHECKING:
@@ -229,27 +240,58 @@ def cube_picker_for_match(guild_id: int | None, match_id: int, a_name: str,
     )
 
 
+Press = Callable[[discord.Interaction, int], Coroutine[Any, Any, None]]
+
+
 class MatchControlView(discord.ui.View):
-    """Persistent 'Start draft' button on a match's control message."""
+    """Persistent 'Find a time' and 'Start draft' buttons on a match's control message."""
 
     def __init__(self, match_id: int) -> None:
         super().__init__(timeout=None)
+        self._add(match_id, "Find a time", discord.ButtonStyle.secondary,
+                  f"tournament_find_time:{match_id}", find_a_time_for_match)
+        self._add(match_id, "Start draft", discord.ButtonStyle.primary,
+                  f"tournament_start_draft:{match_id}", start_match_draft)
+
+    def _add(self, match_id: int, label: str, style: discord.ButtonStyle,
+             custom_id: str, press: Press) -> None:
         button: discord.ui.Button[Any] = discord.ui.Button(
-            label="Start draft",
-            style=discord.ButtonStyle.primary,
-            custom_id=f"tournament_start_draft:{match_id}",
-        )
+            label=label, style=style, custom_id=custom_id)
         # discord.ui.Item.callback is declared on the class as an unbound method
         # (self, interaction), so pyrefly sees the attribute type as still
         # expecting `self` even though py-cord calls it bound at dispatch time.
-        button.callback = self._make_callback(match_id)  # pyrefly: ignore [bad-assignment]
+        button.callback = self._make_callback(match_id, press)  # pyrefly: ignore [bad-assignment]
         self.add_item(button)
 
     @staticmethod
-    def _make_callback(match_id: int) -> Callable[[discord.Interaction], Coroutine[Any, Any, None]]:
+    def _make_callback(
+        match_id: int, press: Press
+    ) -> Callable[[discord.Interaction], Coroutine[Any, Any, None]]:
         async def callback(interaction: discord.Interaction) -> None:
-            await start_match_draft(interaction, match_id)
+            await press(interaction, match_id)
         return callback
+
+
+async def find_a_time_for_match(interaction: discord.Interaction, match_id: int) -> None:
+    """Find a time button: the presser's own 7-day draftbot.fyi link to this match.
+
+    Open to anyone who can see the room; the page itself decides what a
+    non-participant may do.
+    """
+    if interaction.guild_id is None or not scheduler_enabled(str(interaction.guild_id)):
+        await interaction.response.send_message(MATCH_SCHEDULING_NOT_ENABLED, ephemeral=True)
+        return
+    user_id = str(not_none(interaction.user).id)
+    try:
+        url = await issue_link(user_id, str(interaction.guild_id), "tournament_match",
+                               datetime.now(timezone.utc), subject=str(match_id))
+    except Exception:
+        logger.exception(f"Match {match_id}: couldn't issue a link for {user_id}")
+        await interaction.response.send_message(TIME_LINK_FAILED, ephemeral=True)
+        return
+    view = discord.ui.View()
+    view.add_item(discord.ui.Button(label="Open Find a time", url=url))
+    await interaction.response.send_message(TIME_LINK_INTRO, view=view, ephemeral=True)
 
 
 async def _resolve_control_message(

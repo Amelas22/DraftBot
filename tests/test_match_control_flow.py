@@ -376,3 +376,75 @@ async def test_refresh_updates_the_pairing_message_with_the_result(patched_db):
     # A pairing message posted before this task's switchover can still carry a
     # dead ▶ Play button; the rewrite must strip it, not just replace the text.
     assert pairing.edit.call_args.kwargs["view"] is None
+
+
+@pytest.mark.asyncio
+async def test_match_control_view_buttons():
+    import discord
+    from match_control_view import MatchControlView
+
+    view = MatchControlView(135)
+    assert [(b.label, b.style, b.custom_id) for b in view.children] == [
+        ("Find a time", discord.ButtonStyle.secondary, "tournament_find_time:135"),
+        ("Start draft", discord.ButtonStyle.primary, "tournament_start_draft:135"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_find_a_time_sends_an_ephemeral_link_to_anyone():
+    from datetime import datetime
+    from helpers.matchup import TIME_LINK_INTRO
+    from match_control_view import find_a_time_for_match
+
+    interaction = make_interaction(make_thread())
+    interaction.user.id = 4242  # on neither roster
+    with patch("match_control_view.scheduler_enabled", return_value=True), \
+            patch("match_control_view.issue_link",
+                  AsyncMock(return_value="https://draftbot.fyi/x")) as issue:
+        await find_a_time_for_match(interaction, 135)
+
+    args, kwargs = issue.call_args
+    assert args[:3] == ("4242", "1", "tournament_match")
+    assert isinstance(args[3], datetime)
+    assert kwargs == {"subject": "135"}
+    call = interaction.response.send_message.call_args
+    assert call.args[0] == TIME_LINK_INTRO
+    assert call.kwargs["ephemeral"] is True
+    (button,) = call.kwargs["view"].children
+    assert (button.label, button.url) == ("Open Find a time", "https://draftbot.fyi/x")
+
+
+@pytest.mark.asyncio
+async def test_find_a_time_refuses_when_scheduler_is_off():
+    from helpers.matchup import MATCH_SCHEDULING_NOT_ENABLED
+    from match_control_view import find_a_time_for_match
+
+    interaction = make_interaction(make_thread())
+    with patch("match_control_view.scheduler_enabled", return_value=False), \
+            patch("match_control_view.issue_link", AsyncMock()) as issue:
+        await find_a_time_for_match(interaction, 135)
+
+    issue.assert_not_awaited()
+    interaction.response.send_message.assert_awaited_once_with(
+        MATCH_SCHEDULING_NOT_ENABLED, ephemeral=True)
+
+
+@pytest.mark.asyncio
+async def test_find_a_time_reports_a_failed_link():
+    from helpers.matchup import TIME_LINK_FAILED
+    from match_control_view import find_a_time_for_match
+
+    interaction = make_interaction(make_thread())
+    with patch("match_control_view.scheduler_enabled", return_value=True), \
+            patch("match_control_view.issue_link", AsyncMock(side_effect=RuntimeError("down"))):
+        await find_a_time_for_match(interaction, 135)
+
+    interaction.response.send_message.assert_awaited_once_with(TIME_LINK_FAILED, ephemeral=True)
+
+
+def test_team_draft_view_still_exposes_the_shared_copy():
+    import team_draft_view
+    from helpers import matchup
+
+    for name in ("NOT_ENABLED", "TIME_LINK_INTRO", "TIME_LINK_FAILED"):
+        assert getattr(team_draft_view, name) == getattr(matchup, name)

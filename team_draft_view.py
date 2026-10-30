@@ -20,6 +20,9 @@ from helpers.matchup import (
     OPEN,
     Booking,
     Roster,
+    NOT_ENABLED,
+    TIME_LINK_FAILED,
+    TIME_LINK_INTRO,
     Side,
     assign_people,
     booking_announcement,
@@ -49,13 +52,7 @@ if TYPE_CHECKING:
     from cube_views.pack_options import BaseCubeSelectionView
 
 GONE = "This team draft no longer exists."
-# The one answer every team-draft entry point gives in a server without the
-# scheduler (board, wizard, /team_draft_board, Start draft, /premade_draft).
-NOT_ENABLED = "Team drafts aren't turned on in this server."
 DELETED_ROLE = "deleted role"
-TIME_LINK_INTRO = ("See both sides' usual weeks side by side and book a time that suits "
-                   "everyone. The link works for 7 days.")
-TIME_LINK_FAILED = "Couldn't make your link just now. Try again in a minute."
 
 
 @dataclass(frozen=True)
