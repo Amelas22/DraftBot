@@ -7,10 +7,13 @@ from unittest.mock import AsyncMock
 import pytest
 import pytest_asyncio
 from aiohttp.test_utils import TestClient, TestServer
+from sqlalchemy import update
 
+from conftest import seed_tournament_match
 from database.db_session import db_session
 from helpers.matchup import Roster
 from models.team_draft import TeamDraft
+from models.tournament import Tournament
 from services.availability import UsualWeek, save_usual_week
 from services.scheduler_links import issue_link
 from services.scheduler_web import build_app
@@ -193,6 +196,41 @@ async def test_a_replay_by_another_user_is_bad_input(client):
 
     assert resp.status == 400
     assert await resp.json() == {"error": "bad_input"}
+
+
+@pytest.mark.asyncio
+async def test_a_match_action_id_replayed_here_is_bad_input(test_db):
+    async def display_name(guild_id, user_id):
+        return "name" + user_id
+
+    async def rosters(guild_id, ref):
+        return ROSTERS
+
+    app = build_app(now=lambda: NOW, display_name=display_name, side_people=rosters,
+                    match_people=rosters, announce=AsyncMock(), match_announce=AsyncMock(),
+                    enabled=lambda g: True)
+    team_draft_id = await seed()
+    async with db_session() as s:
+        match = await seed_tournament_match(s, thread_id="901")
+        await s.execute(update(Tournament).values(guild_id=GUILD))
+        match_id = match.id
+    action = str(uuid.uuid4())
+    match_url = await issue_link("101", GUILD, "tournament_match", NOW, subject=str(match_id))
+    async with TestClient(TestServer(app)) as client:
+        booked = await client.post(
+            "/api/tournament-match/actions",
+            data=json.dumps(dict(action_id=action, kind="book", start_utc=START, seen_version=0)),
+            headers={"Authorization": "Bearer " + match_url.split("#")[1]})
+        assert booked.status == 200
+
+        resp = await _act(client, await _auth(team_draft_id, user="101"), action_id=action,
+                          kind="book", start_utc=START, seen_version=0)
+        status, body = resp.status, await resp.json()
+
+    assert (status, body) == (400, {"error": "bad_input"})
+    async with db_session() as s:
+        draft = await s.get(TeamDraft, team_draft_id)
+        assert (draft.booked_start_utc, draft.booked_by_name) == (None, None)
 
 
 @pytest.mark.asyncio
