@@ -28,7 +28,7 @@ async def _state(request: web.Request, match_id: int) -> dict[str, object] | Non
         current = await MatchStore(match_id).current(session)
         if found is None or current is None:
             return None
-        row = found[0]
+        row = found.match
         thread_id, booked_by = row.thread_id, row.booked_by_name
     rosters = await request.app[MATCH_PEOPLE](who.guild_id, match_id)
     if rosters is None:

@@ -6,6 +6,7 @@ accepting one. Every function takes the caller's session; none commits.
 """
 
 from datetime import datetime
+from typing import NamedTuple
 
 from sqlalchemy import exists, select, update
 from sqlalchemy.engine import CursorResult
@@ -20,14 +21,20 @@ def _has_draft(match_id: int):
     return exists().where(DraftSession.tournament_match_id == match_id)
 
 
-async def schedulable_match(
-    session: AsyncSession, guild_id: str, match_id: int
-) -> tuple[TournamentMatch, TournamentParticipant, TournamentParticipant] | None:
+class Schedulable(NamedTuple):
+    match: TournamentMatch
+    a: TournamentParticipant
+    b: TournamentParticipant
+    guild_id: str  # the match's tournament's guild
+
+
+async def schedulable_match(session: AsyncSession, guild_id: str | None, match_id: int) -> Schedulable | None:
     """The match and its two teams, only if it can be scheduled from ``guild_id``.
 
     None when the match is gone, a bye, still waiting on a side, or belongs to a
-    tournament of another guild. Reads the database only, so it is safe to call
-    before anything that talks to Discord.
+    tournament of another guild. ``guild_id`` None skips that last check, for a
+    caller that already trusts the match id. Reads the database only, so it is
+    safe to call before anything that talks to Discord.
     """
     row = (
         await session.execute(
@@ -42,7 +49,7 @@ async def schedulable_match(
     match, tournament_guild = row
     if (
         match.is_bye
-        or str(tournament_guild) != guild_id
+        or (guild_id is not None and str(tournament_guild) != guild_id)
         or match.team_a_participant_id is None
         or match.team_b_participant_id is None
     ):
@@ -53,7 +60,7 @@ async def schedulable_match(
     )).scalars()}
     if ids[0] not in found or ids[1] not in found:
         return None
-    return match, found[ids[0]], found[ids[1]]
+    return Schedulable(match, found[ids[0]], found[ids[1]], str(tournament_guild))
 
 
 class MatchStore:

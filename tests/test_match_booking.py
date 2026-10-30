@@ -129,3 +129,16 @@ async def test_two_sessions_on_one_version_exactly_one_wins(test_db):  # noqa: F
     assert first.ok
     assert (second.ok, second.code) == (False, "changed")
     assert (await _row(match_id))[1:] == ("u1", "Ann", 1)
+
+
+@pytest.mark.asyncio
+async def test_schedulable_match_names_its_guild_and_checks_it_only_when_asked(test_db):  # noqa: F811
+    from services.match_booking import schedulable_match
+
+    match_id = await _make()
+    async with db_session() as s:
+        trusted = await schedulable_match(s, None, match_id)
+        assert trusted is not None
+        assert (trusted.match.id, trusted.a.id) == (match_id, trusted.match.team_a_participant_id)
+        assert await schedulable_match(s, trusted.guild_id, match_id) == trusted
+        assert await schedulable_match(s, trusted.guild_id + "0", match_id) is None

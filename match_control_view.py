@@ -116,7 +116,7 @@ async def match_side_rosters(
         found = await schedulable_match(session, guild_id, match_id)
         if found is None:
             return None
-        parts = found[1:]
+        parts = (found.a, found.b)
         members = (await session.execute(
             select(TournamentTeamMember)
             .where(TournamentTeamMember.participant_id.in_([part.id for part in parts]))
@@ -600,22 +600,13 @@ async def _announcement_targets(
     One short session, closed before the caller talks to Discord.
     """
     async with db_session() as session:
-        row = (await session.execute(
-            select(TournamentMatch, Tournament.guild_id)
-            .join(TournamentRound, TournamentMatch.round_id == TournamentRound.id)
-            .join(Tournament, TournamentRound.tournament_id == Tournament.id)
-            .where(TournamentMatch.id == match_id)
-        )).first()
-        if row is None:
-            return None
-        match, guild_id = row
-        found = await schedulable_match(session, str(guild_id), match_id)
+        found = await schedulable_match(session, None, match_id)
         if found is None:
             return None
         sides = [(str(p.team_name), None if p.role_id is None else str(p.role_id))
-                 for p in found[1:]]
-        thread_id = None if match.thread_id is None else str(match.thread_id)
-        return str(guild_id), thread_id, sides
+                 for p in (found.a, found.b)]
+        thread_id = None if found.match.thread_id is None else str(found.match.thread_id)
+        return found.guild_id, thread_id, sides
 
 
 async def announce_match_booking(bot: discord.Client, match_id: int, change: BookingChange) -> None:
