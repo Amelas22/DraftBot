@@ -143,6 +143,16 @@ class RoleSyncPlan:
     unfixed_why: dict[str, str] = field(default_factory=dict)  # team name -> reason
 
 
+async def active_tournament_id(guild_id: str | int, *, registering: bool = False) -> int | None:
+    """The guild's active tournament's id; with ``registering``, only while it
+    is still taking registrations."""
+    async with db_session() as session:
+        tournament = await get_active_tournament(session, guild_id)
+    if tournament is None or (registering and tournament.status != "registration"):
+        return None
+    return tournament.id
+
+
 def missing_roles_text(names: list[str], then: str = "run this again") -> str:
     """The refusal a command gives while teams lack their role."""
     shown = ", ".join(f"**{n}**" for n in names[:SYNC_LIST_LIMIT])
@@ -159,8 +169,7 @@ async def plan_role_sync(guild: discord.Guild) -> RoleSyncPlan:
     """
     async with db_session() as session:
         live = await live_member_ids(session, guild.id)
-        tournament = await get_active_tournament(session, guild.id)
-        tournament_id = tournament.id if tournament is not None else None
+    tournament_id = await active_tournament_id(guild.id)
 
     missing = await teams_missing_role(guild, tournament_id) if tournament_id is not None else []
 
@@ -191,9 +200,7 @@ def _unfixed_reason(guild: discord.Guild, team_name: str) -> str:
 async def apply_role_sync(guild: discord.Guild) -> RoleSyncPlan:
     """Make the changes plan_role_sync describes. Returns the plan acted on."""
     plan = await plan_role_sync(guild)
-    async with db_session() as session:
-        tournament = await get_active_tournament(session, guild.id)
-        tournament_id = tournament.id if tournament is not None else None
+    tournament_id = await active_tournament_id(guild.id)
     ok = True
     if tournament_id is not None:
         created = await ensure_team_roles(guild, tournament_id)

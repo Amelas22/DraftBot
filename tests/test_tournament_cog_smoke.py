@@ -161,8 +161,7 @@ async def test_start_freezes_the_board():
          patch("cogs.tournament_commands.escrow.close_registration_and_seed",
                AsyncMock(return_value=res)), \
          patch("cogs.tournament_commands.db_session", lambda: _NullSession()), \
-         patch("cogs.tournament_commands.get_active_tournament",
-               AsyncMock(return_value=MagicMock(id=1, status="active"))), \
+         patch("cogs.tournament_commands.active_tournament_id", AsyncMock(return_value=None)), \
          patch("cogs.tournament_commands.teams_missing_role", AsyncMock(return_value=[])), \
          patch("cogs.tournament_commands.ensure_team_roles",
                AsyncMock(return_value={})):
@@ -471,8 +470,7 @@ async def test_start_closes_its_session_before_calling_discord():
 
     with patch("cogs.tournament_commands.tournament_enabled", return_value=True), \
          patch("cogs.tournament_commands.db_session", lambda: _WatchedSession()), \
-         patch("cogs.tournament_commands.get_active_tournament",
-               AsyncMock(return_value=MagicMock(id=1, status="active"))), \
+         patch("cogs.tournament_commands.active_tournament_id", AsyncMock(return_value=None)), \
          patch("cogs.tournament_commands.teams_missing_role", AsyncMock(return_value=[])), \
          patch("cogs.tournament_commands.escrow.close_registration_and_seed",
                AsyncMock(return_value=res)), \

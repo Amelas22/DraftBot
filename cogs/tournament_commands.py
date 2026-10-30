@@ -90,7 +90,7 @@ from services.tournament_service import (
 from services.mtgo_tradebot_client import EVENT_TICKET
 from services import tournament_escrow_service as escrow
 from services import wallet_service
-from services.league_roles import (apply_role_sync, format_role_sync, grant_league_roles,
+from services.league_roles import (active_tournament_id, apply_role_sync, format_role_sync, grant_league_roles,
                                     SYNC_LIST_LIMIT, missing_roles_text, plan_role_sync,
                                     release_league_role, teams_missing_role)
 from services.tournament_roles import (clashing_teams, delete_team_roles, ensure_team_role,
@@ -1248,15 +1248,30 @@ class TournamentCog(commands.Cog):
         has a team without a working Discord role. Pairing a round or opening
         a room for such a team would leave its players out of their room.
         No active tournament is not a refusal: the command says so itself."""
-        async with db_session() as session:
-            tournament = await get_active_tournament(session, ctx.guild.id)
-            tournament_id = tournament.id if tournament is not None else None
+        tournament_id = await active_tournament_id(ctx.guild.id)
         if tournament_id is None:
             return False
         names = await teams_missing_role(ctx.guild, tournament_id)
         if not names:
             return False
         await ctx.followup.send(missing_roles_text(names), ephemeral=True)
+        return True
+
+    async def _refuse_role_clashes(self, ctx) -> bool:
+        """Tell the TO (privately) and return True when a registering team
+        cannot be given its role because the name is taken. The start cannot
+        be undone, so it is refused while registration is still open."""
+        registering_id = await active_tournament_id(ctx.guild.id, registering=True)
+        clashes = await clashing_teams(ctx.guild, registering_id) if registering_id is not None else []
+        if not clashes:
+            return False
+        listed = ", ".join(f"**{team}** (role \"{role}\")" for team, role in clashes[:SYNC_LIST_LIMIT])
+        more = f", and {len(clashes) - SYNC_LIST_LIMIT} more" if len(clashes) > SYNC_LIST_LIMIT else ""
+        await ctx.followup.send(
+            f"❌ A \"Team <name>\" role for these teams can't be created because "
+            f"the name is already taken: {listed}{more}. Rename or remove the "
+            f"clashing role (or rename the team), then run `/tournament start` "
+            f"again. Registration is still open.", ephemeral=True)
         return True
 
     @tournament.command(name="start", description="Admin: close registration and open the schedule")
@@ -1266,25 +1281,8 @@ class TournamentCog(commands.Cog):
             return
         await ctx.defer()
         try:
-            # A team whose role name is taken cannot be given one, and the
-            # start cannot be undone: refuse while registration is still open.
-            async with db_session() as session:
-                registering = await get_active_tournament(session, ctx.guild.id)
-                registering_id = (registering.id if registering is not None
-                                  and registering.status == "registration" else None)
-            if registering_id is not None:
-                clashes = await clashing_teams(ctx.guild, registering_id)
-                if clashes:
-                    listed = ", ".join(f"**{team}** (role \"{role}\")"
-                                       for team, role in clashes[:SYNC_LIST_LIMIT])
-                    more = (f", and {len(clashes) - SYNC_LIST_LIMIT} more"
-                            if len(clashes) > SYNC_LIST_LIMIT else "")
-                    await ctx.followup.send(
-                        f"❌ A \"Team <name>\" role for these teams can't be created because "
-                        f"the name is already taken: {listed}{more}. Rename or remove the "
-                        f"clashing role (or rename the team), then run `/tournament start` "
-                        f"again. Registration is still open.", ephemeral=True)
-                    return
+            if await self._refuse_role_clashes(ctx):
+                return
             res = await escrow.close_registration_and_seed(ctx.guild.id, random.Random())
             tournament_id = res["tournament_id"]
             logger.info(f"Tournament {tournament_id} started in guild {ctx.guild.id} by {ctx.author.id}")
