@@ -270,3 +270,18 @@ async def test_malformed_bodies_are_bad_input(client):
                  dict(kind="clear", seen_version="0")):
         resp = await _act(client, headers, **body)
         assert resp.status == 400
+
+
+@pytest.mark.asyncio
+async def test_another_guilds_match_is_refused_by_the_api_not_the_hook(client, announce):
+    # The default stub would hand back rosters for any match.
+    match_id = await seed()
+    headers = await _auth(match_id, guild="333")
+
+    assert (await client.get("/api/tournament-match", headers=headers)).status == 404
+    resp = await _act(client, headers, kind="book", start_utc=START, seen_version=0)
+    assert resp.status == 404
+    assert await resp.json() == {"error": "gone"}
+    announce.assert_not_awaited()
+    async with db_session() as s:
+        assert (await s.get(TournamentMatch, match_id)).booking_version == 0

@@ -12,12 +12,46 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.draft_session import DraftSession
-from models.tournament import TournamentMatch
+from models.tournament import Tournament, TournamentMatch, TournamentParticipant, TournamentRound
 from services.booking import BookingChange, change
 
 
 def _has_draft(match_id: int):
     return exists().where(DraftSession.tournament_match_id == match_id)
+
+
+async def schedulable_match(
+    session: AsyncSession, guild_id: str, match_id: int
+) -> tuple[TournamentMatch, TournamentParticipant, TournamentParticipant] | None:
+    """The match and its two teams, only if it can be scheduled from ``guild_id``.
+
+    None when the match is gone, a bye, still waiting on a side, or belongs to a
+    tournament of another guild. Reads the database only, so it is safe to call
+    before anything that talks to Discord.
+    """
+    row = (
+        await session.execute(
+            select(TournamentMatch, Tournament.guild_id)
+            .join(TournamentRound, TournamentMatch.round_id == TournamentRound.id)
+            .join(Tournament, TournamentRound.tournament_id == Tournament.id)
+            .where(TournamentMatch.id == match_id)
+        )
+    ).first()
+    if row is None:
+        return None
+    match, tournament_guild = row
+    if (
+        match.is_bye
+        or str(tournament_guild) != guild_id
+        or match.team_a_participant_id is None
+        or match.team_b_participant_id is None
+    ):
+        return None
+    part_a = await session.get(TournamentParticipant, match.team_a_participant_id)
+    part_b = await session.get(TournamentParticipant, match.team_b_participant_id)
+    if part_a is None or part_b is None:
+        return None
+    return match, part_a, part_b
 
 
 class MatchStore:

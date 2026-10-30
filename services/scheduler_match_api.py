@@ -17,7 +17,7 @@ from models.tournament import TournamentMatch
 from services import team_draft
 from services.availability import naive_utc
 from services.booking import BookingChange
-from services.match_booking import MatchStore, book_match, clear_match
+from services.match_booking import MatchStore, book_match, clear_match, schedulable_match
 from services.scheduler_http import (
     DISPLAY_NAME,
     MATCH_ANNOUNCE,
@@ -45,6 +45,9 @@ routes = web.RouteTableDef()
 async def _state(request: web.Request, match_id: int) -> dict[str, object] | None:
     """The ``draftbot.scheduler.team_draft`` v1 body for a match, or None if it has no two sides."""
     who = identity(request)
+    async with db_session() as session:
+        if await schedulable_match(session, who.guild_id, match_id) is None:
+            return None
     rosters = await request.app[MATCH_PEOPLE](who.guild_id, match_id)
     if rosters is None:
         return None
@@ -99,8 +102,11 @@ async def post_action(request: web.Request) -> web.Response:
 
     who = identity(request)
     match_id = subject_id(who)
-    if match_id is None or await request.app[MATCH_PEOPLE](who.guild_id, match_id) is None:
+    if match_id is None:
         return error(404, "gone")
+    async with db_session() as session:
+        if await schedulable_match(session, who.guild_id, match_id) is None:
+            return error(404, "gone")
     now: datetime = request.app[NOW]()
     name = await request.app[DISPLAY_NAME](who.guild_id, who.user_id)
 

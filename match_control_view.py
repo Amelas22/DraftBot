@@ -41,6 +41,7 @@ from models.tournament import (
     TournamentRound,
     TournamentTeamMember,
 )
+from services.match_booking import schedulable_match
 from services.tournament_formatter import round_name
 
 if TYPE_CHECKING:
@@ -95,22 +96,10 @@ async def match_side_rosters(
     """
     guild = bot.get_guild(int(guild_id))
     async with db_session() as session:
-        row = (await session.execute(
-            select(TournamentMatch, Tournament.guild_id)
-            .join(TournamentRound, TournamentMatch.round_id == TournamentRound.id)
-            .join(Tournament, TournamentRound.tournament_id == Tournament.id)
-            .where(TournamentMatch.id == match_id)
-        )).first()
-        if row is None:
+        found = await schedulable_match(session, guild_id, match_id)
+        if found is None:
             return None
-        match, tournament_guild = row
-        if (match.is_bye or str(tournament_guild) != guild_id
-                or match.team_a_participant_id is None or match.team_b_participant_id is None):
-            return None
-        parts = [await session.get(TournamentParticipant, pid)
-                 for pid in (match.team_a_participant_id, match.team_b_participant_id)]
-        if parts[0] is None or parts[1] is None:
-            return None
+        parts = found[1:]
         sides: list[tuple[str, list[tuple[str, str | None]]]] = []
         for part in parts:
             members = (await session.execute(
