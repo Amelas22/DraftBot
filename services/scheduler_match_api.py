@@ -13,7 +13,6 @@ from loguru import logger
 from database.db_session import db_session
 from helpers.matchup import matchup_state
 from models.team_draft import TeamDraftAction
-from models.tournament import TournamentMatch
 from services import team_draft
 from services.availability import naive_utc
 from services.booking import BookingChange
@@ -45,28 +44,25 @@ routes = web.RouteTableDef()
 async def _state(request: web.Request, match_id: int) -> dict[str, object] | None:
     """The ``draftbot.scheduler.team_draft`` v1 body for a match, or None if it has no two sides."""
     who = identity(request)
+    # One read of the match's own row; the sides' names come from Discord after.
     async with db_session() as session:
-        if await schedulable_match(session, who.guild_id, match_id) is None:
+        found = await schedulable_match(session, who.guild_id, match_id)
+        current = await MatchStore(match_id).current(session)
+        if found is None or current is None:
             return None
+        row = found[0]
+        thread_id, booked_by = row.thread_id, row.booked_by_name
     rosters = await request.app[MATCH_PEOPLE](who.guild_id, match_id)
     if rosters is None:
         return None
-    async with db_session() as session:
-        current = await MatchStore(match_id).current(session)
-        row = await session.get(TournamentMatch, match_id)
-        if current is None or row is None:
-            return None
-        start, version, started = current
-        thread_url = (
-            f"https://discord.com/channels/{who.guild_id}/{row.thread_id}" if row.thread_id else None
-        )
-        matchup: dict[str, object] = {
-            "id": match_id,
-            "name": f"{rosters[0].label} vs {rosters[1].label}",
-            "thread_url": thread_url,
-            "state": matchup_state(started),
-        }
-        booking = booking_doc(start, row.booked_by_name, version)
+    start, version, started = current
+    matchup: dict[str, object] = {
+        "id": match_id,
+        "name": f"{rosters[0].label} vs {rosters[1].label}",
+        "thread_url": f"https://discord.com/channels/{who.guild_id}/{thread_id}" if thread_id else None,
+        "state": matchup_state(started),
+    }
+    booking = booking_doc(start, booked_by, version)
     return await build_state(request, who, matchup, booking, rosters)
 
 
