@@ -92,9 +92,9 @@ from services import tournament_escrow_service as escrow
 from services import wallet_service
 from services.league_roles import (active_tournament_id, apply_role_sync, format_role_sync, grant_league_roles,
                                     SYNC_LIST_LIMIT, missing_roles_text, plan_role_sync,
-                                    release_league_role, teams_missing_role)
+                                    release_league_role)
 from services.tournament_roles import (clashing_teams, delete_team_roles, ensure_team_role,
-                                       ensure_team_roles, sync_member)
+                                       ensure_team_roles, sync_member, teams_missing_role)
 
 
 # Registering records only the captain, so every successful registration has to say

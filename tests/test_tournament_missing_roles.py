@@ -9,9 +9,8 @@ from sqlalchemy import func, select
 from cogs.tournament_commands import TournamentCog
 from database.db_session import db_session
 from models.tournament import Tournament, TournamentMatch, TournamentRound
-from services.league_roles import (
-    RoleSyncPlan, apply_role_sync, format_role_sync, missing_roles_text, teams_missing_role,
-)
+from services.league_roles import RoleSyncPlan, apply_role_sync, format_role_sync, missing_roles_text
+from services.tournament_roles import teams_missing_role
 from services.tournament_service import (
     create_tournament, find_participant_by_name, register_team, store_role_ids,
 )
