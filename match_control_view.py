@@ -7,15 +7,13 @@ helpers/match_control.py, which stays free of Discord imports.
 """
 import asyncio
 from collections.abc import Iterable
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Callable, Coroutine, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import discord
 from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config import scheduler_enabled
 from database.db_session import db_session
 from helpers.match_control import (
     SCHEDULING,
@@ -28,14 +26,13 @@ from helpers.match_control import (
 )
 from helpers.matchup import (
     MATCH_SCHEDULING_NOT_ENABLED,
-    TIME_LINK_FAILED,
-    TIME_LINK_INTRO,
     Booking,
     Roster,
     Side,
     assign_people,
     booking_announcement,
 )
+from helpers.booking_room import add_press_button, post_announcement, send_time_link
 from helpers.mentions import pings
 from helpers.pin_helpers import safe_pin
 from helpers.utils import (
@@ -43,8 +40,6 @@ from helpers.utils import (
     THREAD_ARCHIVE_MAX_MINUTES,
     as_messageable,
     is_bot,
-    not_none,
-    reach_thread,
     resolve_display_name,
 )
 from models.draft_session import DraftSession
@@ -57,7 +52,6 @@ from models.tournament import (
 )
 from services.booking import BookingChange
 from services.match_booking import schedulable_match
-from services.scheduler_links import issue_link
 from services.scheduler_match_api import VIEW as TIME_LINK_VIEW
 from services.tournament_formatter import round_name
 
@@ -245,36 +239,15 @@ def cube_picker_for_match(guild_id: int | None, match_id: int, a_name: str,
     )
 
 
-Press = Callable[[discord.Interaction, int], Coroutine[Any, Any, None]]
-
-
 class MatchControlView(discord.ui.View):
     """Persistent 'Find a time' and 'Start draft' buttons on a match's control message."""
 
     def __init__(self, match_id: int) -> None:
         super().__init__(timeout=None)
-        self._add(match_id, "Find a time", discord.ButtonStyle.secondary,
-                  f"tournament_find_time:{match_id}", find_a_time_for_match)
-        self._add(match_id, "Start draft", discord.ButtonStyle.primary,
-                  f"tournament_start_draft:{match_id}", start_match_draft)
-
-    def _add(self, match_id: int, label: str, style: discord.ButtonStyle,
-             custom_id: str, press: Press) -> None:
-        button: discord.ui.Button[Any] = discord.ui.Button(
-            label=label, style=style, custom_id=custom_id)
-        # discord.ui.Item.callback is declared on the class as an unbound method
-        # (self, interaction), so pyrefly sees the attribute type as still
-        # expecting `self` even though py-cord calls it bound at dispatch time.
-        button.callback = self._make_callback(match_id, press)  # pyrefly: ignore [bad-assignment]
-        self.add_item(button)
-
-    @staticmethod
-    def _make_callback(
-        match_id: int, press: Press
-    ) -> Callable[[discord.Interaction], Coroutine[Any, Any, None]]:
-        async def callback(interaction: discord.Interaction) -> None:
-            await press(interaction, match_id)
-        return callback
+        add_press_button(self, match_id, "Find a time", discord.ButtonStyle.secondary,
+                         f"tournament_find_time:{match_id}", find_a_time_for_match)
+        add_press_button(self, match_id, "Start draft", discord.ButtonStyle.primary,
+                         f"tournament_start_draft:{match_id}", start_match_draft)
 
 
 async def find_a_time_for_match(interaction: discord.Interaction, match_id: int) -> None:
@@ -283,20 +256,7 @@ async def find_a_time_for_match(interaction: discord.Interaction, match_id: int)
     Open to anyone who can see the room; the page itself decides what a
     non-participant may do.
     """
-    if interaction.guild_id is None or not scheduler_enabled(str(interaction.guild_id)):
-        await interaction.response.send_message(MATCH_SCHEDULING_NOT_ENABLED, ephemeral=True)
-        return
-    user_id = str(not_none(interaction.user).id)
-    try:
-        url = await issue_link(user_id, str(interaction.guild_id), TIME_LINK_VIEW,
-                               datetime.now(timezone.utc), subject=str(match_id))
-    except Exception:
-        logger.exception(f"Match {match_id}: couldn't issue a link for {user_id}")
-        await interaction.response.send_message(TIME_LINK_FAILED, ephemeral=True)
-        return
-    view = discord.ui.View()
-    view.add_item(discord.ui.Button(label="Open Find a time", url=url))
-    await interaction.response.send_message(TIME_LINK_INTRO, view=view, ephemeral=True)
+    await send_time_link(interaction, TIME_LINK_VIEW, match_id, MATCH_SCHEDULING_NOT_ENABLED, f"Match {match_id}")
 
 
 async def _resolve_control_message(
@@ -629,31 +589,20 @@ async def announce_match_booking(bot: discord.Client, match_id: int, change: Boo
         if not thread_id:
             return
         guild = bot.get_guild(int(guild_id))
-        present = [role_id if role_id is not None and guild is not None
-                   and guild.get_role(int(role_id)) is not None else None
-                   for _name, role_id in teams]
-        people = await match_side_rosters(bot, guild_id, match_id) if None in present else None
-        sides: list[Side] = []
-        fallback_users: list[str] = []
-        for i, ((name, _role), role_id) in enumerate(zip(teams, present)):
-            if role_id is not None:
-                sides.append(Side(name, (role_id,), ()))
-                continue
-            user_ids = tuple(u for u, _n in people[i].people) if people is not None else ()
-            fallback_users.extend(user_ids)
-            sides.append(Side(name, (), user_ids))
-        content = booking_announcement(change.by_name, change.old, change.new, sides[0], sides[1])
-        mentions = pings(roles=[r for r in present if r is not None],
-                         users=fallback_users if None in present else False)
-
-        channel = await reach_thread(bot, int(thread_id))
-        if channel is None:
-            logger.warning(f"Match {match_id} room {thread_id} unreachable; booking not announced")
+        roles = [role_id if role_id is not None and guild is not None
+                 and guild.get_role(int(role_id)) is not None else None
+                 for _name, role_id in teams]
+        rosters = await match_side_rosters(bot, guild_id, match_id) if None in roles else None
+        a, b = (
+            Side(name, (role_id,), ()) if role_id is not None
+            # The role is gone: tag the team's people instead.
+            else Side(name, (), tuple(u for u, _n in rosters[i].people) if rosters is not None else ())
+            for i, ((name, _stored), role_id) in enumerate(zip(teams, roles))
+        )
+        content = booking_announcement(change.by_name, change.old, change.new, a, b)
+        mentions = pings(roles=a.role_ids + b.role_ids, users=list(a.user_ids + b.user_ids) or False)
+        if not await post_announcement(bot, int(thread_id), content, mentions, f"match {match_id}"):
             return
-        try:
-            await as_messageable(channel).send(content=content, allowed_mentions=mentions)
-        except discord.HTTPException as e:
-            logger.warning(f"Could not announce the booking for match {match_id}: {e}")
     except Exception:
         logger.exception(f"Match {match_id}: booking announcement failed")
     # After the send: another booking may have committed during it.

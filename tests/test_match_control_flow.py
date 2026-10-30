@@ -399,8 +399,8 @@ async def test_find_a_time_sends_an_ephemeral_link_to_anyone():
 
     interaction = make_interaction(make_thread())
     interaction.user.id = 4242  # on neither roster
-    with patch("match_control_view.scheduler_enabled", return_value=True), \
-            patch("match_control_view.issue_link",
+    with patch("helpers.booking_room.scheduler_enabled", return_value=True), \
+            patch("helpers.booking_room.issue_link",
                   AsyncMock(return_value="https://draftbot.fyi/x")) as issue:
         await find_a_time_for_match(interaction, 135)
 
@@ -421,8 +421,8 @@ async def test_find_a_time_refuses_when_scheduler_is_off():
     from match_control_view import find_a_time_for_match
 
     interaction = make_interaction(make_thread())
-    with patch("match_control_view.scheduler_enabled", return_value=False), \
-            patch("match_control_view.issue_link", AsyncMock()) as issue:
+    with patch("helpers.booking_room.scheduler_enabled", return_value=False), \
+            patch("helpers.booking_room.issue_link", AsyncMock()) as issue:
         await find_a_time_for_match(interaction, 135)
 
     issue.assert_not_awaited()
@@ -436,8 +436,8 @@ async def test_find_a_time_reports_a_failed_link():
     from match_control_view import find_a_time_for_match
 
     interaction = make_interaction(make_thread())
-    with patch("match_control_view.scheduler_enabled", return_value=True), \
-            patch("match_control_view.issue_link", AsyncMock(side_effect=RuntimeError("down"))):
+    with patch("helpers.booking_room.scheduler_enabled", return_value=True), \
+            patch("helpers.booking_room.issue_link", AsyncMock(side_effect=RuntimeError("down"))):
         await find_a_time_for_match(interaction, 135)
 
     interaction.response.send_message.assert_awaited_once_with(TIME_LINK_FAILED, ephemeral=True)
@@ -447,5 +447,4 @@ def test_team_draft_view_still_exposes_the_shared_copy():
     import team_draft_view
     from helpers import matchup
 
-    for name in ("NOT_ENABLED", "TIME_LINK_INTRO", "TIME_LINK_FAILED"):
-        assert getattr(team_draft_view, name) == getattr(matchup, name)
+    assert team_draft_view.NOT_ENABLED == matchup.NOT_ENABLED

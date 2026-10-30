@@ -20,7 +20,8 @@ MEMBERS = {201: "Ash", 202: "Bo", 300: "Organiser"}
 @pytest.fixture(autouse=True)
 def scheduler_on():
     """Team drafts only run where the scheduler is turned on."""
-    with patch("team_draft_view.scheduler_enabled", return_value=True):
+    with patch("team_draft_view.scheduler_enabled", return_value=True), \
+         patch("helpers.booking_room.scheduler_enabled", return_value=True):
         yield
 
 
@@ -491,7 +492,7 @@ async def test_find_a_time_hands_out_a_link_for_this_matchup(test_db):
     interaction = _press_interaction(make_guild())
     link = AsyncMock(return_value="https://draftbot.fyi/#tok")
 
-    with patch("team_draft_view.issue_link", link):
+    with patch("helpers.booking_room.issue_link", link):
         await _time_button(view).callback(interaction)
 
     args, kwargs = link.await_args
@@ -506,12 +507,13 @@ async def test_find_a_time_hands_out_a_link_for_this_matchup(test_db):
 
 @pytest.mark.asyncio
 async def test_find_a_time_says_so_when_the_link_cannot_be_made(test_db):
-    from team_draft_view import TIME_LINK_FAILED, TeamDraftControlView
+    from helpers.matchup import TIME_LINK_FAILED
+    from team_draft_view import TeamDraftControlView
 
     team_draft_id = await seed_team_draft(thread_id="900", control_message_id="777")
     interaction = _press_interaction(make_guild())
 
-    with patch("team_draft_view.issue_link", AsyncMock(side_effect=RuntimeError("db"))):
+    with patch("helpers.booking_room.issue_link", AsyncMock(side_effect=RuntimeError("db"))):
         await _time_button(TeamDraftControlView(team_draft_id)).callback(interaction)
 
     interaction.response.send_message.assert_awaited_once_with(TIME_LINK_FAILED, ephemeral=True)
@@ -523,8 +525,8 @@ async def test_find_a_time_is_off_where_the_scheduler_is_off(test_db):
 
     interaction = _press_interaction(make_guild())
     link = AsyncMock()
-    with patch("team_draft_view.scheduler_enabled", return_value=False), \
-         patch("team_draft_view.issue_link", link):
+    with patch("helpers.booking_room.scheduler_enabled", return_value=False), \
+         patch("helpers.booking_room.issue_link", link):
         await _time_button(TeamDraftControlView(5)).callback(interaction)
 
     interaction.response.send_message.assert_awaited_once_with(NOT_ENABLED, ephemeral=True)

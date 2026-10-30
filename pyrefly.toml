@@ -50,6 +50,7 @@ project-includes = [
     "helpers/room_regeneration.py",
     "helpers/utils.py",
     "helpers/mentions.py",
+    "helpers/booking_room.py",
     "helpers/view_dispatch_guard.py",
     "match_control_view.py",
     "team_draft_view.py",
