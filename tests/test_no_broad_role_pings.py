@@ -36,11 +36,30 @@ def _broad_sites(path: Path) -> list[tuple[int, str]]:
                     kw.arg in ("roles", "everyone") and _is_true(kw.value)
                     for kw in node.keywords):
                 sites.append((node.lineno, func))
+            # AllowedMentions.all() / discord.AllowedMentions.all()
+            elif (name == "all" and isinstance(callee, ast.Attribute)
+                  and (callee.value.attr if isinstance(callee.value, ast.Attribute)
+                       else callee.value.id if isinstance(callee.value, ast.Name)
+                       else "") == "AllowedMentions"):
+                sites.append((node.lineno, func))
         for child in ast.iter_child_nodes(node):
             visit(child, func)
 
     visit(tree, "")
     return sites
+
+
+def test_detector_flags_all_and_literal_true(tmp_path):
+    src = tmp_path / "bad.py"
+    src.write_text(
+        "import discord\n"
+        "def a():\n    return discord.AllowedMentions.all()\n"
+        "def b():\n    return AllowedMentions.all()\n"
+        "def c():\n    return AllowedMentions(roles=True)\n"
+        "def d():\n    return AllowedMentions(everyone=True)\n"
+        "def ok():\n    return AllowedMentions(roles=[1])\n"
+        "def ok2():\n    return AllowedMentions.none()\n")
+    assert [f for _, f in _broad_sites(src)] == ["a", "b", "c", "d"]
 
 
 def test_no_broad_allowed_mentions():
@@ -53,5 +72,5 @@ def test_no_broad_allowed_mentions():
             if (rel.as_posix(), func) not in ALLOWED:
                 offenders.append(f"{rel.as_posix()}:{line}")
     assert not offenders, (
-        "AllowedMentions with roles=True/everyone=True; use "
+        "AllowedMentions with roles=True/everyone=True/.all(); use "
         "helpers.mentions.pings(roles=[...]): " + ", ".join(offenders))
