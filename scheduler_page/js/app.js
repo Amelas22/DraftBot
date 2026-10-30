@@ -14,6 +14,9 @@ async function main() {
     if (me.view === "usual") return await mountUsual(root, api);
     if (me.view === "lfg") return await mountTeams(root, api);
     if (me.view === "team_draft") return await mountTeamDraft(root, api);
+    if (me.view === "tournament_match") {
+      return await mountTeamDraft(root, api, { paths: { get: "/api/tournament-match", actions: "/api/tournament-match/actions" } });
+    }
     say(NEEDS_UPDATE);
   } catch (e) {
     if (e instanceof LinkExpired) say(expiredMessage());

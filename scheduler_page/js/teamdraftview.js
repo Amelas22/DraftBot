@@ -15,24 +15,24 @@ import {
   togglePerson, withoutPeople,
 } from "./teamdraft.js";
 
-const PATH = "/api/team-draft";
-const ACTIONS_PATH = "/api/team-draft/actions";
+const TEAM_DRAFT_PATHS = { get: "/api/team-draft", actions: "/api/team-draft/actions" };
 const REFRESH_MS = 30000;
 const HOVER_HINT = "Hover or tap a half-hour to see who's free on each side. Tap a time to pick it.";
 const TOGGLE_HINT = "Tap a team or a player to leave them out of the grid; tap again to bring them back.";
 const NO_WEEK = "no usual week set";
 const BACK = "Back to the matchup";
 
-// deps: { now?: () => Date }. Returns { dispose } which stops the refresh timer.
+// deps: { now?: () => Date, paths?: { get, actions } } (paths default to the team-draft API; a match link passes its own). Returns { dispose } which stops the refresh timer.
 export async function mountTeamDraft(root, api, deps = {}) {
   const now = deps.now || (() => new Date());
+  const paths = deps.paths || TEAM_DRAFT_PATHS;
   const cleanups = [];
   const controller = { dispose: () => { while (cleanups.length) cleanups.pop()(); } };
   const notice = (text) => { controller.dispose(); root.classList.remove("wide"); root.replaceChildren(el("p", { class: "notice", text })); };
 
   // The matchup's refresh loop and listeners are disposed before the editor takes the page; show registers them
   // afresh when the matchup comes back, refetched so the viewer's new week is in it.
-  const show = (usualDoc, firstStatus) => showMatchup(root, api, usualDoc, now, cleanups, notice, firstStatus, editWeek)
+  const show = (usualDoc, firstStatus) => showMatchup(root, api, paths, usualDoc, now, cleanups, notice, firstStatus, editWeek)
     .catch((e) => {
       if (e instanceof LinkExpired) notice(expiredMessage());
       else { console.error(e); notice(actionErrorText(e)); }
@@ -47,15 +47,15 @@ export async function mountTeamDraft(root, api, deps = {}) {
     if (e instanceof LinkExpired) { notice(expiredMessage()); return controller; }
     throw e;
   }
-  await showMatchup(root, api, usual, now, cleanups, notice, "", editWeek);
+  await showMatchup(root, api, paths, usual, now, cleanups, notice, "", editWeek);
   return controller;
 }
 
-async function showMatchup(root, api, usualDoc, now, cleanups, notice, firstStatus, editWeek) {
+async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, firstStatus, editWeek) {
   root.replaceChildren(el("p", { class: "status", text: "Loading…" }));
   let state;
   try {
-    state = checkDoc(await api.get(PATH), FORMAT);
+    state = checkDoc(await api.get(paths.get), FORMAT);
   } catch (e) {
     if (e instanceof LinkExpired) return notice(expiredMessage());
     throw e;
@@ -193,7 +193,7 @@ async function showMatchup(root, api, usualDoc, now, cleanups, notice, firstStat
     for (const b of [bookBtn, moveBtn, clearBtn]) b.disabled = true;
     status.textContent = "Sending…";
     try {
-      const r = await api.post(ACTIONS_PATH, { action_id: crypto.randomUUID(), seen_version: state.booking.version, ...body });
+      const r = await api.post(paths.actions, { action_id: crypto.randomUUID(), seen_version: state.booking.version, ...body });
       state = checkDoc(r?.state, FORMAT);
       selected = null;
       render();
@@ -216,7 +216,7 @@ async function showMatchup(root, api, usualDoc, now, cleanups, notice, firstStat
     const ticket = sync.startRefresh();
     if (!ticket) return;
     try {
-      const fresh = checkDoc(await api.get(PATH), FORMAT);
+      const fresh = checkDoc(await api.get(paths.get), FORMAT);
       if (!sync.isCurrent(ticket)) return;
       state = fresh;
       const start = new Date(state.window.start_utc);
