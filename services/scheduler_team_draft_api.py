@@ -18,6 +18,7 @@ from helpers.matchup import Roster, matchup_state
 from models.team_draft import TeamDraft, TeamDraftAction
 from services import team_draft
 from services.availability import CELL_MINUTES, cells_b64, floor_half_hour, iso_z, naive_utc, usual_weeks
+from services.booking import WINDOW_CELLS, BookingChange
 from services.scheduler_http import (
     ANNOUNCE,
     DISPLAY_NAME,
@@ -29,12 +30,7 @@ from services.scheduler_http import (
     view_refused,
 )
 from services.scheduler_links import LinkIdentity
-from services.team_draft import (
-    DRAFT_CELLS,
-    MIN_PER_SIDE,
-    WINDOW_CELLS,
-    BookingChange,
-)
+from services.team_draft import DRAFT_CELLS, MIN_PER_SIDE
 
 MAX_ACTION_BYTES = 1024
 VIEW = "team_draft"

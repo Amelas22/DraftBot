@@ -532,7 +532,7 @@ async def test_find_a_time_is_off_where_the_scheduler_is_off(test_db):
 
 
 def _booking_change(old=None, new=datetime(2026, 10, 28, 19, 30, tzinfo=timezone.utc)):
-    from services.team_draft import BookingChange
+    from services.booking import BookingChange
     return BookingChange(True, None, old, new, "Bo", 1)
 
 

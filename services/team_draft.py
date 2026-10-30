@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.team_draft import TeamDraft
 from services.availability import naive_utc
-from services.booking import WINDOW_CELLS, BookingChange, change  # noqa: F401  (re-exported)
+from services.booking import BookingChange, change
 
 MAX_PICKS = 5
 MAX_SIDE_PEOPLE = 12

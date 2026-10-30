@@ -40,9 +40,10 @@ from helpers.utils import (
 from match_control_view import lobby_link
 from models.draft_session import DraftSession
 from models.team_draft import TeamDraft
+from services.booking import BookingChange
 from services.scheduler_links import issue_link
 from services.scheduler_team_draft_api import VIEW as TIME_LINK_VIEW
-from services.team_draft import BookingChange, by_thread, set_room
+from services.team_draft import by_thread, set_room
 
 if TYPE_CHECKING:
     from cube_views.pack_options import BaseCubeSelectionView

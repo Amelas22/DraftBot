@@ -6,8 +6,8 @@ from datetime import datetime, timezone
 from aiohttp import web
 
 from helpers.matchup import Roster
+from services.booking import BookingChange
 from services.scheduler_links import LinkIdentity
-from services.team_draft import BookingChange
 from services.team_finder import Notice
 
 IDENTITY = "scheduler_identity"  # request key holding the LinkIdentity

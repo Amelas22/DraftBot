@@ -18,6 +18,7 @@ from services.availability import (
     iso_z,
     usual_week_doc,
 )
+from services.booking import BookingChange
 from services.scheduler_http import (
     ANNOUNCE,
     DISPLAY_NAME,
@@ -36,7 +37,6 @@ from services.scheduler_links import resolve_token
 from services.scheduler_match_api import routes as match_routes
 from services.scheduler_team_draft_api import routes as team_draft_routes
 from services.scheduler_teams_api import routes as teams_routes
-from services.team_draft import BookingChange
 from services.team_finder import Notice
 
 TOKEN_LIMIT = 60
