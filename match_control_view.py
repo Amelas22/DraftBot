@@ -283,8 +283,8 @@ async def _resolve_control_message(
 async def create_match_room(message: discord.Message, match_id: int) -> discord.Thread | None:
     """Open a match's room off its pairing message: thread + pinned control message.
 
-    Returns the thread, or None when Discord refuses (typically missing Manage
-    Threads). A failure must not take the round's pairings down with it, so the
+    Returns the thread, or None when a team has no working role or Discord
+    refuses (typically missing Manage Threads). A failure must not take the round's pairings down with it, so the
     caller simply leaves that match's line without a link.
     """
     async with db_session() as session:
@@ -303,11 +303,15 @@ async def create_match_room(message: discord.Message, match_id: int) -> discord.
             .where(TournamentParticipant.id.in_(
                 [match.team_a_participant_id, match.team_b_participant_id]))
         )).all())
-        body, view = control_body_and_view(
-            match, a_name, b_name, name, draft,
-            role_mentions=(roles.get(match.team_a_participant_id),
-                           roles.get(match.team_b_participant_id)),
-        )
+        role_ids = (roles.get(match.team_a_participant_id), roles.get(match.team_b_participant_id))
+        body, view = control_body_and_view(match, a_name, b_name, name, draft, role_mentions=role_ids)
+
+    # A room tags its teams by role; without one a side would never hear of it.
+    # The commands refuse before pairing, but a bracket result opens rooms too.
+    guild = message.guild
+    if guild is None or any(not r or guild.get_role(int(r)) is None for r in role_ids):
+        logger.warning(f"Not opening a room for match {match_id}: a team has no working role")
+        return None
 
     try:
         thread = await message.create_thread(
@@ -323,8 +327,7 @@ async def create_match_room(message: discord.Message, match_id: int) -> discord.
     try:
         control = await _resolve_control_message(
             thread, None, body, view,
-            role_ids=[r for r in (roles.get(match.team_a_participant_id),
-                                  roles.get(match.team_b_participant_id)) if r])
+            role_ids=[r for r in role_ids if r])
     except discord.HTTPException as e:
         logger.warning(
             f"Created a thread for match {match_id} but could not post its control "

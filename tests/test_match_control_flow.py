@@ -200,12 +200,22 @@ async def test_launch_block_for_reports_a_live_draft(patched_db):
     assert "already underway" in block
 
 
+async def _give_roles(session, match, a="111", b="222"):
+    """Both teams hold a role: a room is only opened for teams it can tag."""
+    from models.tournament import TournamentParticipant
+
+    (await session.get(TournamentParticipant, match.team_a_participant_id)).role_id = a
+    (await session.get(TournamentParticipant, match.team_b_participant_id)).role_id = b
+    await session.commit()
+
+
 @pytest.mark.asyncio
 async def test_create_match_room_makes_a_long_lived_thread_and_pins_control(patched_db):
     from match_control_view import create_match_room
 
     async with patched_db() as session:
         match = await seed_tournament_match(session)
+        await _give_roles(session, match)
 
     thread = make_thread()
     message = MagicMock()
@@ -232,15 +242,10 @@ async def test_create_match_room_mentions_both_team_roles(patched_db):
     (see control_body_and_view's docstring), and it must actually reach
     Discord as a real mention -- not just a pill nobody gets notified by."""
     from match_control_view import create_match_room
-    from models.tournament import TournamentParticipant
 
     async with patched_db() as session:
         match = await seed_tournament_match(session)
-        part_a = await session.get(TournamentParticipant, match.team_a_participant_id)
-        part_b = await session.get(TournamentParticipant, match.team_b_participant_id)
-        part_a.role_id = "111"
-        part_b.role_id = "222"
-        await session.commit()
+        await _give_roles(session, match)
 
     thread = make_thread()
     message = MagicMock()
@@ -280,12 +285,32 @@ async def test_control_message_permits_role_mentions_without_a_view():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("b_role, guild_has", [(None, True), ("222", False)])
+async def test_create_match_room_refuses_a_team_without_a_working_role(patched_db, b_role, guild_has):
+    """No role stored, or one the guild has since lost: nobody on that side
+    would be tagged, so no room opens (a bracket result reaches here unguarded)."""
+    from match_control_view import create_match_room
+
+    async with patched_db() as session:
+        match = await seed_tournament_match(session)
+        await _give_roles(session, match, b=b_role)
+
+    message = MagicMock()
+    message.create_thread = AsyncMock(return_value=make_thread())
+    message.guild.get_role = lambda rid: MagicMock() if guild_has or rid == 111 else None
+
+    assert await create_match_room(message, match.id) is None
+    message.create_thread.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_create_match_room_degrades_when_discord_refuses(patched_db):
     import discord as _discord
     from match_control_view import create_match_room
 
     async with patched_db() as session:
         match = await seed_tournament_match(session)
+        await _give_roles(session, match)
 
     message = MagicMock()
     message.create_thread = AsyncMock(
@@ -305,6 +330,7 @@ async def test_create_match_room_cleans_up_when_the_control_message_fails(patche
 
     async with patched_db() as session:
         match = await seed_tournament_match(session)
+        await _give_roles(session, match)
 
     thread = make_thread()
     thread.send = AsyncMock(side_effect=_discord.HTTPException(MagicMock(), "boom"))
