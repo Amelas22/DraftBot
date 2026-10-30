@@ -67,12 +67,12 @@ async def send_then_mention(
     message = await destination.send(plain)
     if mentioned and mentioned != plain:
         try:
-            # Explicit, though the bot sets no global policy today: py-cord falls
-            # back to Client.allowed_mentions when this is omitted, so a global
-            # policy added later would silently stop the mention being PARSED --
-            # and an unparsed mention adds nobody to the thread, which is the only
-            # reason this function exists. Notification is not a risk to weigh
-            # here: an edit does not notify whatever is allowed.
+            # Explicit on purpose: the bot sets a bot-wide SAFE_DEFAULT
+            # (helpers/mentions.py) that parses nothing, and py-cord falls back
+            # to it when this is omitted. The mention must be PARSED here -- an
+            # unparsed mention adds nobody to the thread, which is the only
+            # reason this function exists. Notification is not a risk to weigh:
+            # an edit does not notify whatever is allowed.
             await message.edit(
                 content=mentioned,
                 allowed_mentions=discord.AllowedMentions(
