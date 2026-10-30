@@ -83,6 +83,25 @@ def role_name_clash(guild: discord.Guild, team_name: str) -> str | None:
     return next((name for name in reserved if name.strip().casefold() == wanted), None)
 
 
+async def clashing_teams(guild: discord.Guild, tournament_id: int) -> list[tuple[str, str]]:
+    """(team name, clashing role name) for each non-dropped team of a
+    tournament that has no working role and could not be given one for want of
+    a free name. A team holding its own role is not a clash with it."""
+    async with db_session() as session:
+        result = await session.execute(
+            select(TournamentParticipant.team_name, TournamentParticipant.role_id)
+            .where(
+                TournamentParticipant.tournament_id == tournament_id,
+                TournamentParticipant.dropped_at.is_(None),
+            )
+            .order_by(TournamentParticipant.id)
+        )
+        roleless = [name for name, role_id in result.all()
+                    if not role_id or guild.get_role(int(role_id)) is None]
+    clashes = ((name, role_name_clash(guild, name)) for name in roleless)
+    return [(name, clash) for name, clash in clashes if clash is not None]
+
+
 async def _assign(guild: discord.Guild, role: discord.Role, user_id: str) -> bool:
     """Give `role` to one member, tolerating a member who has left.
 

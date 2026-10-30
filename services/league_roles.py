@@ -139,33 +139,48 @@ class RoleSyncPlan:
     grant: list[str] = field(default_factory=list)
     strip: list[str] = field(default_factory=list)
     ok: bool = True  # False once an applied change was refused by Discord
+    unfixed: list[str] = field(default_factory=list)  # still roleless after an apply
+
+
+async def teams_missing_role(guild: discord.Guild, tournament_id: int) -> list[str]:
+    """Names of a tournament's non-dropped teams with no working Discord role:
+    none stored, or one the guild no longer has. Participant-id order."""
+    async with db_session() as session:
+        result = await session.execute(
+            select(TournamentParticipant.team_name, TournamentParticipant.role_id)
+            .where(
+                TournamentParticipant.tournament_id == tournament_id,
+                TournamentParticipant.dropped_at.is_(None),
+            )
+            .order_by(TournamentParticipant.id)
+        )
+        teams = [(name, role_id) for name, role_id in result.all()]
+    return [
+        name for name, role_id in teams
+        if not role_id or guild.get_role(int(role_id)) is None
+    ]
+
+
+def missing_roles_text(names: list[str], then: str = "run this again") -> str:
+    """The refusal a command gives while teams lack their role."""
+    shown = ", ".join(f"**{n}**" for n in names[:SYNC_LIST_LIMIT])
+    more = f", and {len(names) - SYNC_LIST_LIMIT} more" if len(names) > SYNC_LIST_LIMIT else ""
+    return (f"❌ These teams have no team role: {shown}{more}. "
+            f"Run `/tournament sync_roles apply:True`, then {then}.")
 
 
 async def plan_role_sync(guild: discord.Guild) -> RoleSyncPlan:
     """Work out what brings the guild's tournament roles up to date.
 
-    Makes no Discord writes. The database is read in one session that is
+    Makes no Discord writes. The database is read in short sessions that are
     closed before any guild state is inspected.
     """
     async with db_session() as session:
         live = await live_member_ids(session, guild.id)
         tournament = await get_active_tournament(session, guild.id)
-        teams: list[tuple[str, str | None]] = []
-        if tournament is not None:
-            result = await session.execute(
-                select(TournamentParticipant.team_name, TournamentParticipant.role_id)
-                .where(
-                    TournamentParticipant.tournament_id == tournament.id,
-                    TournamentParticipant.dropped_at.is_(None),
-                )
-                .order_by(TournamentParticipant.id)
-            )
-            teams = [(name, role_id) for name, role_id in result.all()]
+        tournament_id = tournament.id if tournament is not None else None
 
-    teams_missing_role = [
-        name for name, role_id in teams
-        if not role_id or guild.get_role(int(role_id)) is None
-    ]
+    missing = await teams_missing_role(guild, tournament_id) if tournament_id is not None else []
 
     league = league_participant_role(guild)
     active = active_role(guild)
@@ -179,7 +194,7 @@ async def plan_role_sync(guild: discord.Guild) -> RoleSyncPlan:
     strip: list[str] = []
     if league is not None:
         strip = [str(m.id) for m in league.members if str(m.id) not in live]
-    return RoleSyncPlan(teams_missing_role, grant, strip)
+    return RoleSyncPlan(missing, grant, strip)
 
 
 async def apply_role_sync(guild: discord.Guild) -> RoleSyncPlan:
@@ -195,6 +210,8 @@ async def apply_role_sync(guild: discord.Guild) -> RoleSyncPlan:
     ok = await grant_league_roles(guild, plan.grant) and ok
     # Liveness is re-checked here: the plan is older than the Discord calls above.
     ok = await release_league_role(guild, plan.strip) and ok
+    if tournament_id is not None:
+        plan.unfixed = await teams_missing_role(guild, tournament_id)
     plan.ok = ok
     return plan
 
@@ -225,6 +242,9 @@ def format_role_sync(plan: RoleSyncPlan, applied: bool) -> str:
     lines.append(_listing(titles[0], [f"**{n}**" for n in plan.teams_missing_role]))
     lines.append(_listing(titles[1], [f"<@{u}>" for u in plan.grant]))
     lines.append(_listing(titles[2], [f"<@{u}>" for u in plan.strip]))
+    if applied and plan.unfixed:
+        lines.append(_listing("Teams still without a role", [f"**{n}**" for n in plan.unfixed])
+                     + " — a role named \"Team <name>\" already in the server blocks creating it.")
     text = "\n".join(lines)[:DISCORD_MESSAGE_LIMIT - len(REFUSED_NOTE)]
     if applied and not plan.ok:
         text += REFUSED_NOTE

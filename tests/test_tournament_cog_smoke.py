@@ -160,6 +160,10 @@ async def test_start_freezes_the_board():
     with patch("cogs.tournament_commands.tournament_enabled", return_value=True), \
          patch("cogs.tournament_commands.escrow.close_registration_and_seed",
                AsyncMock(return_value=res)), \
+         patch("cogs.tournament_commands.db_session", lambda: _NullSession()), \
+         patch("cogs.tournament_commands.get_active_tournament",
+               AsyncMock(return_value=MagicMock(id=1, status="active"))), \
+         patch("cogs.tournament_commands.teams_missing_role", AsyncMock(return_value=[])), \
          patch("cogs.tournament_commands.ensure_team_roles",
                AsyncMock(return_value={})):
         await TournamentCog.start.callback(cog, ctx)
@@ -428,7 +432,8 @@ async def test_start_survives_role_creation_failing(test_db):  # noqa: F811
     cog._refresh_board.assert_awaited_once_with(t_id)
     cog._post_schedule.assert_awaited_once()
     cog._post_standings.assert_awaited_once()
-    assert "has started" in ctx.followup.send.await_args_list[-1].args[0]
+    sent = [c.args[0] for c in ctx.followup.send.await_args_list]
+    assert any("has started" in text for text in sent)
 
 
 @pytest.mark.asyncio
@@ -466,6 +471,9 @@ async def test_start_closes_its_session_before_calling_discord():
 
     with patch("cogs.tournament_commands.tournament_enabled", return_value=True), \
          patch("cogs.tournament_commands.db_session", lambda: _WatchedSession()), \
+         patch("cogs.tournament_commands.get_active_tournament",
+               AsyncMock(return_value=MagicMock(id=1, status="active"))), \
+         patch("cogs.tournament_commands.teams_missing_role", AsyncMock(return_value=[])), \
          patch("cogs.tournament_commands.escrow.close_registration_and_seed",
                AsyncMock(return_value=res)), \
          patch("cogs.tournament_commands.ensure_team_roles", _ensure):
@@ -544,6 +552,7 @@ async def test_short_field_only_suggests_a_playoff_size_the_option_accepts(eligi
          patch("cogs.tournament_commands.db_session", lambda: _NullSession()), \
          patch("cogs.tournament_commands.get_active_tournament",
                AsyncMock(return_value=tournament)), \
+         patch.object(TournamentCog, "_refuse_missing_roles", AsyncMock(return_value=False)), \
          patch("cogs.tournament_commands._playoff_rounds", AsyncMock(return_value=[])), \
          patch("cogs.tournament_commands.advance_round",
                AsyncMock(side_effect=SwissComplete(4, eligible, eligible >= 4))):
@@ -920,6 +929,7 @@ async def test_completing_via_next_round_also_deletes_the_team_roles():
          patch("cogs.tournament_commands.db_session", lambda: _NullSession()), \
          patch("cogs.tournament_commands.get_active_tournament",
                AsyncMock(return_value=SimpleNamespace(id=1, name="Cup", total_rounds=3))), \
+         patch.object(TournamentCog, "_refuse_missing_roles", AsyncMock(return_value=False)), \
          patch("cogs.tournament_commands._playoff_rounds", AsyncMock(return_value=[])), \
          patch("cogs.tournament_commands.advance_round", AsyncMock(return_value=None)), \
          patch("cogs.tournament_commands.get_final_placement", AsyncMock(return_value=[MagicMock()])), \
@@ -1045,6 +1055,7 @@ async def test_next_round_announces_the_champion_before_dropping_roles():
          patch("cogs.tournament_commands.db_session", lambda: _NullSession()), \
          patch("cogs.tournament_commands.get_active_tournament",
                AsyncMock(return_value=SimpleNamespace(id=1, name="Cup", total_rounds=3))), \
+         patch.object(TournamentCog, "_refuse_missing_roles", AsyncMock(return_value=False)), \
          patch("cogs.tournament_commands._playoff_rounds", AsyncMock(return_value=[])), \
          patch("cogs.tournament_commands.advance_round", AsyncMock(return_value=None)), \
          patch("cogs.tournament_commands.get_final_placement", AsyncMock(return_value=[MagicMock()])), \
