@@ -29,7 +29,10 @@ async def resolve_display_name(
     bot: discord.Client, guild_id: str, user_id: str, snapshot: str | None = None
 ) -> str:
     """The best name for a user: guild display name, the stored ``snapshot``,
-    their global name, and only then the bare id."""
+    their global name, and only then the bare id.
+
+    May ask Discord for a departed member; helpers/display_names.py has the
+    cache-only lookups for rendering names into messages."""
     guild = bot.get_guild(int(guild_id))
     member = guild.get_member(int(user_id)) if guild is not None else None
     if member is not None:
