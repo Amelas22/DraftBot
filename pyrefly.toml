@@ -98,6 +98,7 @@ project-includes = [
     "cogs/settings_commands.py",
     "cogs/lfg_cog.py",
     "services/league_roles.py",
+    "services/booking.py",
     "services/team_draft.py",
     "team_draft_wizard.py",
     "cogs/team_draft_cog.py",

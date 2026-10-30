@@ -169,17 +169,17 @@ async def test_booking_the_same_time_again_is_ok_and_changes_nothing_but_the_boo
 @pytest.mark.asyncio
 async def test_losing_the_conditional_update_reports_changed_with_the_winner(test_db, monkeypatch):  # noqa: F811
     td_id = await _make()
-    real = svc._current
+    real = svc.TeamDraftStore.current
     calls = []
 
-    async def stale_first(session, team_draft_id):
+    async def stale_first(self, session):
         calls.append(1)
         if len(calls) == 1:
             return (None, 0, False)  # the read that preceded the other session's commit
-        return await real(session, team_draft_id)
+        return await real(self, session)
 
     await _book(td_id)  # the winner: version is now 1
-    monkeypatch.setattr(svc, "_current", stale_first)
+    monkeypatch.setattr(svc.TeamDraftStore, "current", stale_first)
     loser = await _book(td_id, start=START + timedelta(hours=1), seen=0, user="u2", name="Bob")
     assert (loser.ok, loser.code, loser.new, loser.version) == (False, "changed", START, 1)
     assert (await _row(td_id))[1:] == ("u1", "Ann", 1)
