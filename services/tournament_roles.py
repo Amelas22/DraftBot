@@ -83,10 +83,9 @@ def role_name_clash(guild: discord.Guild, team_name: str) -> str | None:
     return next((name for name in reserved if name.strip().casefold() == wanted), None)
 
 
-async def clashing_teams(guild: discord.Guild, tournament_id: int) -> list[tuple[str, str]]:
-    """(team name, clashing role name) for each non-dropped team of a
-    tournament that has no working role and could not be given one for want of
-    a free name. A team holding its own role is not a clash with it."""
+async def teams_missing_role(guild: discord.Guild, tournament_id: int) -> list[str]:
+    """Names of a tournament's non-dropped teams with no working Discord role:
+    none stored, or one the guild no longer has. Participant-id order."""
     async with db_session() as session:
         result = await session.execute(
             select(TournamentParticipant.team_name, TournamentParticipant.role_id)
@@ -96,9 +95,18 @@ async def clashing_teams(guild: discord.Guild, tournament_id: int) -> list[tuple
             )
             .order_by(TournamentParticipant.id)
         )
-        roleless = [name for name, role_id in result.all()
-                    if not role_id or guild.get_role(int(role_id)) is None]
-    clashes = ((name, role_name_clash(guild, name)) for name in roleless)
+        teams = [(name, role_id) for name, role_id in result.all()]
+    return [
+        name for name, role_id in teams
+        if not role_id or guild.get_role(int(role_id)) is None
+    ]
+
+
+async def clashing_teams(guild: discord.Guild, tournament_id: int) -> list[tuple[str, str]]:
+    """(team name, clashing role name) for each non-dropped team of a
+    tournament that has no working role and could not be given one for want of
+    a free name. A team holding its own role is not a clash with it."""
+    clashes = ((name, role_name_clash(guild, name)) for name in await teams_missing_role(guild, tournament_id))
     return [(name, clash) for name, clash in clashes if clash is not None]
 
 

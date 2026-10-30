@@ -18,7 +18,7 @@ from sqlalchemy import select
 from config import get_config
 from database.db_session import db_session
 from models.tournament import Tournament, TournamentParticipant, TournamentTeamMember
-from services.tournament_roles import ensure_team_roles, role_name_clash
+from services.tournament_roles import ensure_team_roles, role_name_clash, teams_missing_role
 from services.tournament_service import ACTIVE_STATUSES, get_active_tournament
 
 
@@ -141,25 +141,6 @@ class RoleSyncPlan:
     ok: bool = True  # False once an applied change was refused by Discord
     unfixed: list[str] = field(default_factory=list)  # still roleless after an apply
     unfixed_why: dict[str, str] = field(default_factory=dict)  # team name -> reason
-
-
-async def teams_missing_role(guild: discord.Guild, tournament_id: int) -> list[str]:
-    """Names of a tournament's non-dropped teams with no working Discord role:
-    none stored, or one the guild no longer has. Participant-id order."""
-    async with db_session() as session:
-        result = await session.execute(
-            select(TournamentParticipant.team_name, TournamentParticipant.role_id)
-            .where(
-                TournamentParticipant.tournament_id == tournament_id,
-                TournamentParticipant.dropped_at.is_(None),
-            )
-            .order_by(TournamentParticipant.id)
-        )
-        teams = [(name, role_id) for name, role_id in result.all()]
-    return [
-        name for name, role_id in teams
-        if not role_id or guild.get_role(int(role_id)) is None
-    ]
 
 
 def missing_roles_text(names: list[str], then: str = "run this again") -> str:
