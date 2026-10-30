@@ -23,6 +23,7 @@ project-includes = [
     "services/team_finder_sync.py",
     "services/scheduler_teams_api.py",
     "services/scheduler_team_draft_api.py",
+    "services/scheduler_match_api.py",
     "helpers/signup_board.py",
     "services/library_reminders.py",
     "cogs/server_draft_stats.py",

@@ -34,6 +34,7 @@ from helpers.utils import (
     DISCORD_THREAD_NAME_LIMIT,
     THREAD_ARCHIVE_MAX_MINUTES,
     as_messageable,
+    is_bot,
     not_none,
 )
 from match_control_view import lobby_link
@@ -330,12 +331,6 @@ async def announce_booking(bot: discord.Client, team_draft_id: int, change: Book
     # Read again after the send: another booking may have committed during it,
     # and the control message must show the latest one.
     await refresh_team_draft_control(bot, team_draft_id)
-
-
-def is_bot(guild: discord.Guild | None, user_id: str) -> bool:
-    """Whether ``user_id`` is a bot the guild's cache knows of."""
-    member = guild.get_member(int(user_id)) if guild is not None else None
-    return member is not None and member.bot
 
 
 def role_member_ids(guild: discord.Guild | None, role_id: str) -> list[str] | None:

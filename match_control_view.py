@@ -23,15 +23,23 @@ from helpers.match_control import (
     match_tag,
     render_pairing_line,
 )
+from helpers.matchup import Roster, assign_people
 from helpers.mentions import pings
 from helpers.pin_helpers import safe_pin
-from helpers.utils import DISCORD_THREAD_NAME_LIMIT, THREAD_ARCHIVE_MAX_MINUTES, as_messageable
+from helpers.utils import (
+    DISCORD_THREAD_NAME_LIMIT,
+    THREAD_ARCHIVE_MAX_MINUTES,
+    as_messageable,
+    is_bot,
+    resolve_display_name,
+)
 from models.draft_session import DraftSession
 from models.tournament import (
     Tournament,
     TournamentMatch,
     TournamentParticipant,
     TournamentRound,
+    TournamentTeamMember,
 )
 from services.tournament_formatter import round_name
 
@@ -73,6 +81,60 @@ async def match_facts(
         select(DraftSession).where(DraftSession.tournament_match_id == match_id)
     )).scalars().first()
     return match, part_a.team_name, part_b.team_name, name, draft
+
+
+async def match_side_rosters(
+    bot: discord.Client, guild_id: str, match_id: int
+) -> tuple[Roster, Roster] | None:
+    """Both sides of a tournament match as the scheduler page lists them, or None.
+
+    None when the match is gone, a bye, still waiting on a side, or belongs to a
+    tournament of another guild. A side is its team name; its people are the
+    captain, then the roster in the order they were added. Bots are left out and
+    someone on both rosters is counted once, on side A.
+    """
+    guild = bot.get_guild(int(guild_id))
+    async with db_session() as session:
+        row = (await session.execute(
+            select(TournamentMatch, Tournament.guild_id)
+            .join(TournamentRound, TournamentMatch.round_id == TournamentRound.id)
+            .join(Tournament, TournamentRound.tournament_id == Tournament.id)
+            .where(TournamentMatch.id == match_id)
+        )).first()
+        if row is None:
+            return None
+        match, tournament_guild = row
+        if (match.is_bye or str(tournament_guild) != guild_id
+                or match.team_a_participant_id is None or match.team_b_participant_id is None):
+            return None
+        parts = [await session.get(TournamentParticipant, pid)
+                 for pid in (match.team_a_participant_id, match.team_b_participant_id)]
+        if parts[0] is None or parts[1] is None:
+            return None
+        sides: list[tuple[str, list[tuple[str, str | None]]]] = []
+        for part in parts:
+            members = (await session.execute(
+                select(TournamentTeamMember)
+                .where(TournamentTeamMember.participant_id == part.id)
+                .order_by(TournamentTeamMember.id)
+            )).scalars().all()
+            sides.append((str(part.team_name), [
+                (str(part.captain_user_id), None),
+                *((str(m.user_id), str(m.display_name)) for m in members),
+            ]))
+
+    # Names come after the session closes: a missing member costs a Discord call.
+    a_people, b_people = assign_people(
+        [u for u, _n in sides[0][1] if not is_bot(guild, u)], [],
+        [u for u, _n in sides[1][1] if not is_bot(guild, u)], [],
+    )
+    snapshots = {u: n for _label, people in reversed(sides) for u, n in people if n}
+    rosters = []
+    for (label, _people), ids in zip(sides, (a_people, b_people)):
+        rosters.append(Roster(label, tuple([
+            (u, await resolve_display_name(bot, guild_id, u, snapshots.get(u))) for u in ids
+        ])))
+    return rosters[0], rosters[1]
 
 
 async def pairing_round_name(session: AsyncSession, match_id: int) -> str | None:

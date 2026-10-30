@@ -18,6 +18,13 @@ DISPLAY_NAME: web.AppKey[Callable[[str, str], Awaitable[str]]] = web.AppKey("dis
 SIDE_PEOPLE: web.AppKey[Callable[[str, int], Awaitable[tuple[Roster, Roster]]]] = web.AppKey(
     "side_people"
 )
+# (guild id, match id) -> both sides of a tournament match, or None when it has
+# no two sides to schedule (gone, a bye, another guild's).
+MATCH_PEOPLE: web.AppKey[Callable[[str, int], Awaitable[tuple[Roster, Roster] | None]]] = web.AppKey(
+    "match_people"
+)
+# (match id, committed change) -> post it in the match's thread.
+MATCH_ANNOUNCE: web.AppKey[Callable[[int, BookingChange], Awaitable[None]]] = web.AppKey("match_announce")
 # (team draft id, committed change) -> post it in the matchup's thread.
 ANNOUNCE: web.AppKey[Callable[[int, BookingChange], Awaitable[None]]] = web.AppKey("announce")
 

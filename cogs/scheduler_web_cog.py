@@ -1,7 +1,6 @@
 """Runs the scheduler web app inside the bot process."""
 import asyncio
 
-import discord
 from aiohttp import web
 from discord.ext import commands
 from loguru import logger
@@ -9,6 +8,8 @@ from typing_extensions import override
 
 from config import scheduler_host, scheduler_port
 from helpers.matchup import Roster
+from helpers.utils import resolve_display_name
+from match_control_view import match_side_rosters
 from services.scheduler_web import build_app
 from services.team_draft import BookingChange
 from services.team_finder import Notice
@@ -24,21 +25,16 @@ class SchedulerWebCog(commands.Cog):
         self._start_task = bot.loop.create_task(self._start())
 
     async def _display_name(self, guild_id: str, user_id: str) -> str:
-        guild = self.bot.get_guild(int(guild_id))
-        member = guild.get_member(int(user_id)) if guild is not None else None
-        if member is not None:
-            return member.display_name
-        try:
-            user = await self.bot.fetch_user(int(user_id))
-        except discord.HTTPException:
-            return user_id
-        return user.global_name or user.name
+        return await resolve_display_name(self.bot, guild_id, user_id)
 
     async def _notify(self, notice: Notice, guild_id: str) -> bool:
         return await notify(self.bot, notice, guild_id)
 
     async def _side_people(self, guild_id: str, team_draft_id: int) -> tuple[Roster, Roster]:
         return await side_rosters(self.bot, guild_id, team_draft_id)
+
+    async def _match_people(self, guild_id: str, match_id: int) -> tuple[Roster, Roster] | None:
+        return await match_side_rosters(self.bot, guild_id, match_id)
 
     async def _announce(self, team_draft_id: int, change: BookingChange) -> None:
         await announce_booking(self.bot, team_draft_id, change)
@@ -49,6 +45,7 @@ class SchedulerWebCog(commands.Cog):
             notify=self._notify,
             display_name=self._display_name,
             side_people=self._side_people,
+            match_people=self._match_people,
             announce=self._announce,
         ))
         try:

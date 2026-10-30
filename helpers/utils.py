@@ -19,6 +19,30 @@ def not_none(x: _T | None) -> _T:
     return x
 
 
+def is_bot(guild: discord.Guild | None, user_id: str) -> bool:
+    """Whether ``user_id`` is a bot the guild's cache knows of."""
+    member = guild.get_member(int(user_id)) if guild is not None else None
+    return member is not None and member.bot
+
+
+async def resolve_display_name(
+    bot: discord.Client, guild_id: str, user_id: str, snapshot: str | None = None
+) -> str:
+    """The best name for a user: guild display name, the stored ``snapshot``,
+    their global name, and only then the bare id."""
+    guild = bot.get_guild(int(guild_id))
+    member = guild.get_member(int(user_id)) if guild is not None else None
+    if member is not None:
+        return member.display_name
+    if snapshot:
+        return snapshot
+    try:
+        user = await bot.fetch_user(int(user_id))
+    except discord.HTTPException:
+        return user_id
+    return user.global_name or user.name
+
+
 def as_messageable(channel: object) -> "discord.abc.Messageable":
     """Narrow a ``bot.get_channel`` result to something you can send/fetch on.
 

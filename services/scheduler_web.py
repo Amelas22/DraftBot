@@ -22,6 +22,8 @@ from services.scheduler_http import (
     ANNOUNCE,
     DISPLAY_NAME,
     IDENTITY,
+    MATCH_ANNOUNCE,
+    MATCH_PEOPLE,
     NOTIFY,
     NOW,
     SIDE_PEOPLE,
@@ -31,6 +33,7 @@ from services.scheduler_http import (
     utc_now,
 )
 from services.scheduler_links import resolve_token
+from services.scheduler_match_api import routes as match_routes
 from services.scheduler_team_draft_api import routes as team_draft_routes
 from services.scheduler_teams_api import routes as teams_routes
 from services.team_draft import BookingChange
@@ -233,6 +236,10 @@ async def _nobody(guild_id: str, team_draft_id: int) -> tuple[Roster, Roster]:
     return Roster("Side A", ()), Roster("Side B", ())
 
 
+async def _no_match(guild_id: str, match_id: int) -> tuple[Roster, Roster] | None:
+    return None
+
+
 async def _no_announce(team_draft_id: int, change: BookingChange) -> None:
     return None
 
@@ -246,6 +253,8 @@ def build_app(
     display_name: Callable[[str, str], Awaitable[str]] = _id_as_name,
     side_people: Callable[[str, int], Awaitable[tuple[Roster, Roster]]] = _nobody,
     announce: Callable[[int, BookingChange], Awaitable[None]] = _no_announce,
+    match_people: Callable[[str, int], Awaitable[tuple[Roster, Roster] | None]] = _no_match,
+    match_announce: Callable[[int, BookingChange], Awaitable[None]] = _no_announce,
 ) -> web.Application:
     app = web.Application(middlewares=[auth_middleware])
     app[NOW] = now
@@ -259,7 +268,10 @@ def build_app(
     app[DISPLAY_NAME] = display_name
     app[SIDE_PEOPLE] = side_people
     app[ANNOUNCE] = announce
+    app[MATCH_PEOPLE] = match_people
+    app[MATCH_ANNOUNCE] = match_announce
     app.add_routes(routes)
     app.add_routes(teams_routes)
     app.add_routes(team_draft_routes)
+    app.add_routes(match_routes)
     return app
