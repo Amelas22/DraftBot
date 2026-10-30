@@ -100,6 +100,7 @@ project-includes = [
     "services/league_roles.py",
     "services/booking.py",
     "services/team_draft.py",
+    "services/match_booking.py",
     "team_draft_wizard.py",
     "cogs/team_draft_cog.py",
 ]

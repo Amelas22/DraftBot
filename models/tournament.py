@@ -280,6 +280,12 @@ class TournamentMatch(Base):
     # created before this feature (and any match nobody has opened yet) have none,
     # and the Play button fills it in on first click.
     control_message_id = Column(String(64), nullable=True)
+    # The draft time someone booked for this match (naive UTC), who booked it, and
+    # a counter every change bumps so two writers on one version can't both win.
+    booked_start_utc = Column(DateTime, nullable=True)
+    booked_by = Column(String(64), nullable=True)
+    booked_by_name = Column(String(100), nullable=True)
+    booking_version = Column(Integer, nullable=False, default=0, server_default=text('0'))
 
     def __repr__(self):
         return (f"<TournamentMatch(round_id={self.round_id}, "
