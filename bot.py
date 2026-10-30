@@ -12,6 +12,7 @@ from commands import core_commands, scheduled_posts
 from reconnect_drafts import reconnect_draft_setup_sessions
 from bot_registry import register_bot
 from preference_service import PlayerPreferences
+from helpers.mentions import SAFE_DEFAULT
 
 # Configure loguru for all modules
 logger.remove()  # Remove default handler
@@ -38,9 +39,7 @@ async def load_extensions(bot):
             except Exception as e:
                 logger.error(f"Failed to load extension {filename}: {e}")
 
-async def main():
-    load_dotenv()
-
+def make_bot() -> commands.Bot:
     # Required Intents
     intents = discord.Intents.default()
     intents.messages = True
@@ -49,9 +48,16 @@ async def main():
     intents.members = True
     intents.reactions = True
 
+    # Message text never pings @everyone or a role on its own; a deliberate ping
+    # names its roles via helpers.mentions.pings.
+    return commands.Bot(command_prefix="!", intents=intents, allowed_mentions=SAFE_DEFAULT)
+
+async def main():
+    load_dotenv()
+
     TOKEN = os.getenv("BOT_TOKEN")
 
-    bot = commands.Bot(command_prefix="!", intents=intents)
+    bot = make_bot()
 
     register_bot(bot)
     

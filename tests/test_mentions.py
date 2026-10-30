@@ -15,3 +15,9 @@ def test_pings_names_exact_roles_only():
 def test_pings_can_restrict_users():
     d = pings(roles=[1], users=["5"]).to_dict()
     assert d["users"] == [5] and "users" not in d["parse"]
+
+
+def test_bot_is_built_with_safe_default():
+    from bot import make_bot
+
+    assert make_bot().allowed_mentions.to_dict() == SAFE_DEFAULT.to_dict()
