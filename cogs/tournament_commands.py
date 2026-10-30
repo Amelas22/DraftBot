@@ -17,7 +17,7 @@ from database.db_session import db_session
 from helpers.money_gate import gate_serve, linked_username
 from helpers.permissions import bot_manager_button, has_bot_manager_role, is_bot_manager
 from helpers.pin_helpers import safe_pin
-from helpers.utils import not_none, ui_button
+from helpers.utils import not_none, reach_thread, ui_button
 from notification_service import send_dm
 from services.team_finder_sync import reconcile_after_command
 from services.tournament_registration import add_roster_members, register_captain
@@ -334,13 +334,10 @@ async def open_room_for_posted_match(bot, match_id):
     match, a_name, b_name, stage, _draft = facts
     if not match.pairings_channel_id or not match.pairings_message_id:
         return False
-    channel = bot.get_channel(int(match.pairings_channel_id))
+    channel = await reach_thread(bot, int(match.pairings_channel_id))
     if channel is None:
-        try:
-            channel = await bot.fetch_channel(int(match.pairings_channel_id))
-        except discord.HTTPException as e:
-            logger.warning(f"open_rooms: pairings channel for match {match_id} unreachable: {e}")
-            return False
+        logger.warning(f"open_rooms: pairings channel for match {match_id} unreachable")
+        return False
     try:
         message = await channel.fetch_message(int(match.pairings_message_id))
     except discord.HTTPException as e:

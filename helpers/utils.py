@@ -61,7 +61,7 @@ def as_messageable(channel: object) -> "discord.abc.Messageable":
 
 
 async def reach_thread(bot: discord.Client, thread_id: int) -> object | None:
-    """The thread from the cache, else fetched; None (logged by the caller) if unreachable."""
+    """The thread (or channel) from the cache, else fetched; None (logged by the caller) if unreachable."""
     channel = bot.get_channel(thread_id)
     if channel is not None:
         return channel
