@@ -395,6 +395,7 @@ async def test_find_a_time_sends_an_ephemeral_link_to_anyone():
     from datetime import datetime
     from helpers.matchup import TIME_LINK_INTRO
     from match_control_view import find_a_time_for_match
+    from services.scheduler_match_api import VIEW
 
     interaction = make_interaction(make_thread())
     interaction.user.id = 4242  # on neither roster
@@ -404,7 +405,7 @@ async def test_find_a_time_sends_an_ephemeral_link_to_anyone():
         await find_a_time_for_match(interaction, 135)
 
     args, kwargs = issue.call_args
-    assert args[:3] == ("4242", "1", "tournament_match")
+    assert args[:3] == ("4242", "1", VIEW)
     assert isinstance(args[3], datetime)
     assert kwargs == {"subject": "135"}
     call = interaction.response.send_message.call_args

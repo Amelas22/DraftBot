@@ -32,7 +32,9 @@ from helpers.matchup import (
     TIME_LINK_INTRO,
     Booking,
     Roster,
+    Side,
     assign_people,
+    booking_announcement,
 )
 from helpers.mentions import pings
 from helpers.pin_helpers import safe_pin
@@ -42,6 +44,7 @@ from helpers.utils import (
     as_messageable,
     is_bot,
     not_none,
+    reach_thread,
     resolve_display_name,
 )
 from models.draft_session import DraftSession
@@ -52,8 +55,10 @@ from models.tournament import (
     TournamentRound,
     TournamentTeamMember,
 )
+from services.booking import BookingChange
 from services.match_booking import schedulable_match
 from services.scheduler_links import issue_link
+from services.scheduler_match_api import VIEW as TIME_LINK_VIEW
 from services.tournament_formatter import round_name
 
 if TYPE_CHECKING:
@@ -283,7 +288,7 @@ async def find_a_time_for_match(interaction: discord.Interaction, match_id: int)
         return
     user_id = str(not_none(interaction.user).id)
     try:
-        url = await issue_link(user_id, str(interaction.guild_id), "tournament_match",
+        url = await issue_link(user_id, str(interaction.guild_id), TIME_LINK_VIEW,
                                datetime.now(timezone.utc), subject=str(match_id))
     except Exception:
         logger.exception(f"Match {match_id}: couldn't issue a link for {user_id}")
@@ -585,3 +590,80 @@ async def announce_and_refresh(
     # Facts already fetched above -- the public refresh_match_views would
     # open a second session and fetch them again for the same match.
     await _refresh_match_views_with_facts(bot, match_id, facts)
+
+
+async def _announcement_targets(
+    match_id: int
+) -> tuple[str, str | None, list[tuple[str, str | None]]] | None:
+    """(guild id, thread id, [(team name, role id)] for sides A and B), or None.
+
+    One short session, closed before the caller talks to Discord.
+    """
+    async with db_session() as session:
+        row = (await session.execute(
+            select(TournamentMatch, Tournament.guild_id)
+            .join(TournamentRound, TournamentMatch.round_id == TournamentRound.id)
+            .join(Tournament, TournamentRound.tournament_id == Tournament.id)
+            .where(TournamentMatch.id == match_id)
+        )).first()
+        if row is None:
+            return None
+        match, guild_id = row
+        found = await schedulable_match(session, str(guild_id), match_id)
+        if found is None:
+            return None
+        sides = [(str(p.team_name), None if p.role_id is None else str(p.role_id))
+                 for p in found[1:]]
+        thread_id = None if match.thread_id is None else str(match.thread_id)
+        return str(guild_id), thread_id, sides
+
+
+async def announce_match_booking(bot: discord.Client, match_id: int, change: BookingChange) -> None:
+    """Tag both teams in the match's room with a committed booking change, then
+    re-render the control message. Discord errors are logged, never raised: the
+    booking already stands. Re-booking the time already booked pings nobody;
+    only the control message (its "booked by") is re-rendered.
+
+    A team is tagged by its role; one whose role is gone (a tournament still
+    running without it) is tagged by name through its people instead.
+    """
+    if change.old is not None and change.old == change.new:
+        await safe_refresh_match_views(bot, match_id)
+        return
+    try:
+        targets = await _announcement_targets(match_id)
+        if targets is None:
+            return
+        guild_id, thread_id, teams = targets
+        if not thread_id:
+            return
+        guild = bot.get_guild(int(guild_id))
+        present = [role_id if role_id is not None and guild is not None
+                   and guild.get_role(int(role_id)) is not None else None
+                   for _name, role_id in teams]
+        people = await match_side_rosters(bot, guild_id, match_id) if None in present else None
+        sides: list[Side] = []
+        fallback_users: list[str] = []
+        for i, ((name, _role), role_id) in enumerate(zip(teams, present)):
+            if role_id is not None:
+                sides.append(Side(name, (role_id,), ()))
+                continue
+            user_ids = tuple(u for u, _n in people[i].people) if people is not None else ()
+            fallback_users.extend(user_ids)
+            sides.append(Side(name, (), user_ids))
+        content = booking_announcement(change.by_name, change.old, change.new, sides[0], sides[1])
+        mentions = pings(roles=[r for r in present if r is not None],
+                         users=fallback_users if None in present else False)
+
+        channel = await reach_thread(bot, int(thread_id))
+        if channel is None:
+            logger.warning(f"Match {match_id} room {thread_id} unreachable; booking not announced")
+            return
+        try:
+            await as_messageable(channel).send(content=content, allowed_mentions=mentions)
+        except discord.HTTPException as e:
+            logger.warning(f"Could not announce the booking for match {match_id}: {e}")
+    except Exception:
+        logger.exception(f"Match {match_id}: booking announcement failed")
+    # After the send: another booking may have committed during it.
+    await safe_refresh_match_views(bot, match_id)

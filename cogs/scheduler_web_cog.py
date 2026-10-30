@@ -9,7 +9,7 @@ from typing_extensions import override
 
 from config import scheduler_host, scheduler_port
 from helpers.utils import resolve_display_name
-from match_control_view import match_side_rosters
+from match_control_view import announce_match_booking, match_side_rosters
 from services.scheduler_web import build_app
 from services.team_finder_sync import notify
 from team_draft_view import announce_booking, side_rosters
@@ -31,6 +31,7 @@ class SchedulerWebCog(commands.Cog):
             side_people=partial(side_rosters, bot),
             match_people=partial(match_side_rosters, bot),
             announce=partial(announce_booking, bot),
+            match_announce=partial(announce_match_booking, bot),
         ))
         try:
             await runner.setup()

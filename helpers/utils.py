@@ -60,6 +60,17 @@ def as_messageable(channel: object) -> "discord.abc.Messageable":
     return channel
 
 
+async def reach_thread(bot: discord.Client, thread_id: int) -> object | None:
+    """The thread from the cache, else fetched; None (logged by the caller) if unreachable."""
+    channel = bot.get_channel(thread_id)
+    if channel is not None:
+        return channel
+    try:
+        return await bot.fetch_channel(thread_id)
+    except discord.HTTPException:
+        return None
+
+
 def mention_all(user_ids: Iterable[object] | None, sep: str = " ") -> str:
     """Discord mentions for `user_ids`, joined. "" for an empty or None
     iterable, so callers can branch on the result.

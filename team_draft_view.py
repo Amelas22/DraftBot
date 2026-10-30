@@ -39,6 +39,7 @@ from helpers.utils import (
     as_messageable,
     is_bot,
     not_none,
+    reach_thread,
 )
 from match_control_view import lobby_link
 from models.draft_session import DraftSession
@@ -238,17 +239,6 @@ async def open_team_draft_room(
     return thread
 
 
-async def _reach_thread(bot: discord.Client, thread_id: int) -> object | None:
-    """The thread from the cache, else fetched; None (logged by the caller) if unreachable."""
-    channel = bot.get_channel(thread_id)
-    if channel is not None:
-        return channel
-    try:
-        return await bot.fetch_channel(thread_id)
-    except discord.HTTPException:
-        return None
-
-
 async def _load_facts(bot: discord.Client, team_draft_id: int) -> TeamDraftFacts | None:
     """team_draft_facts named from the matchup's own guild in the bot's cache."""
     async with db_session() as session:
@@ -265,7 +255,7 @@ async def _edit_control(bot: discord.Client, facts: TeamDraftFacts) -> None:
     body, view = _body_and_view(facts)
 
     thread_id, control_id = int(facts.thread_id), int(facts.control_message_id)
-    channel = await _reach_thread(bot, thread_id)
+    channel = await reach_thread(bot, thread_id)
     if channel is None:
         logger.warning(f"Team draft {facts.id} thread {thread_id} unreachable; not refreshed")
         return
@@ -316,7 +306,7 @@ async def announce_booking(bot: discord.Client, team_draft_id: int, change: Book
     content = booking_announcement(change.by_name, change.old, change.new, facts.a, facts.b)
 
     thread_id = int(facts.thread_id)
-    channel = await _reach_thread(bot, thread_id)
+    channel = await reach_thread(bot, thread_id)
     if channel is None:
         logger.warning(f"Team draft {team_draft_id} thread {thread_id} unreachable; booking not announced")
         return
