@@ -5,6 +5,7 @@ cog, the premade session hook, utils.py and views.py can all import it without
 an import cycle through cogs/. The message body itself is rendered by
 helpers/match_control.py, which stays free of Discord imports.
 """
+import asyncio
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Callable, Coroutine, cast
 
@@ -100,17 +101,15 @@ async def match_side_rosters(
         if found is None:
             return None
         parts = found[1:]
-        sides: list[tuple[str, list[tuple[str, str | None]]]] = []
-        for part in parts:
-            members = (await session.execute(
-                select(TournamentTeamMember)
-                .where(TournamentTeamMember.participant_id == part.id)
-                .order_by(TournamentTeamMember.id)
-            )).scalars().all()
-            sides.append((str(part.team_name), [
-                (str(part.captain_user_id), None),
-                *((str(m.user_id), str(m.display_name)) for m in members),
-            ]))
+        members = (await session.execute(
+            select(TournamentTeamMember)
+            .where(TournamentTeamMember.participant_id.in_([part.id for part in parts]))
+            .order_by(TournamentTeamMember.id)
+        )).scalars().all()
+        sides = [(str(part.team_name), [
+            (str(part.captain_user_id), None),
+            *((str(m.user_id), str(m.display_name)) for m in members if m.participant_id == part.id),
+        ]) for part in parts]
 
     # Names come after the session closes: a missing member costs a Discord call.
     a_people, b_people = assign_people(
@@ -118,12 +117,13 @@ async def match_side_rosters(
         [u for u, _n in sides[1][1] if not is_bot(guild, u)], [],
     )
     snapshots = {u: n for _label, people in reversed(sides) for u, n in people if n}
-    rosters = []
-    for (label, _people), ids in zip(sides, (a_people, b_people)):
-        rosters.append(Roster(label, tuple([
-            (u, await resolve_display_name(bot, guild_id, u, snapshots.get(u))) for u in ids
-        ])))
-    return rosters[0], rosters[1]
+
+    async def roster(label: str, ids: list[str]) -> Roster:
+        names = await asyncio.gather(*(resolve_display_name(bot, guild_id, u, snapshots.get(u)) for u in ids))
+        return Roster(label, tuple(zip(ids, names)))
+
+    a, b = await asyncio.gather(roster(sides[0][0], a_people), roster(sides[1][0], b_people))
+    return a, b
 
 
 async def pairing_round_name(session: AsyncSession, match_id: int) -> str | None:

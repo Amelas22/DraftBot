@@ -47,11 +47,13 @@ async def schedulable_match(
         or match.team_b_participant_id is None
     ):
         return None
-    part_a = await session.get(TournamentParticipant, match.team_a_participant_id)
-    part_b = await session.get(TournamentParticipant, match.team_b_participant_id)
-    if part_a is None or part_b is None:
+    ids = (match.team_a_participant_id, match.team_b_participant_id)
+    found = {p.id: p for p in (await session.execute(
+        select(TournamentParticipant).where(TournamentParticipant.id.in_(ids))
+    )).scalars()}
+    if ids[0] not in found or ids[1] not in found:
         return None
-    return match, part_a, part_b
+    return match, found[ids[0]], found[ids[1]]
 
 
 class MatchStore:
