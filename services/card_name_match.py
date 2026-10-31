@@ -50,10 +50,10 @@ def _resolve(key: str, by_key: dict[str, str]) -> str | list[str] | None:
     if len(substring_hits) > 1:
         return substring_hits
 
-    close = difflib.get_close_matches(key, list(by_key), n=len(by_key), cutoff=FUZZY_CUTOFF)
-    if not close:
+    scores = {k: ratio for k in by_key
+              if (ratio := difflib.SequenceMatcher(None, key, k).ratio()) >= FUZZY_CUTOFF}
+    if not scores:
         return None
-    scores = {k: difflib.SequenceMatcher(None, key, k).ratio() for k in close}
     best = max(scores.values())
     tied = sorted(by_key[k] for k, score in scores.items() if best - score <= FUZZY_TIE_MARGIN)
     return tied[0] if len(tied) == 1 else tied
