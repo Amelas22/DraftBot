@@ -437,13 +437,16 @@ async def assign_drafted_decks(session_id: Any) -> int:
 
 async def _taken_from(session_id: Any) -> "set[str]":
     """Who this draft has given a deck that still counts: anything but an offer
-    that lapsed or was turned down. Those two are the only way to have had a
-    deck from it and still be owed one."""
+    that lapsed or was turned down, or a deck they handed back. Those are the
+    ways to have had a deck from it and still be owed one -- a drafter who
+    returned theirs may ask again while they have a match left. Only
+    assign_on_request reads this; the automatic hand-out skips a returned deck
+    by its own check, so a return is never re-offered unasked."""
     async with AsyncSessionLocal() as session:
         rows = await session.scalars(
             select(CardLoan.borrower_id).where(
                 CardLoan.source == loan_source(session_id),
-                CardLoan.state != "expired"))
+                CardLoan.state.notin_(("expired", "returned"))))
         return {str(r) for r in rows.all()}
 
 
