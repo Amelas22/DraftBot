@@ -320,9 +320,15 @@ async def available_now() -> "dict[str, int]":
     return {name: max(0, qty) for name, qty in stock.items()}
 
 
-async def hold_shortfall(guild_id: Any, borrower_id: Any
-                            ) -> "Optional[dict[str, int]]":
+async def hold_shortfall(guild_id: Any, borrower_id: Any,
+                         offering: "Optional[list[dict[str, Any]]]" = None
+                         ) -> "Optional[dict[str, int]]":
     """What borrowing costs here, what the borrower holds, and the gap.
+
+    The cost follows the size of what is SENT, so a borrower who is short on a
+    few named cards is quoted the small hold, not the deck's. `offering` is
+    that trade when the caller has one; otherwise it is whatever the loan
+    would send (collateral_for).
 
     None where there are no figures to quote -- no loan, or a cube with no
     price in this server. That is a refusal, not a price of nothing, and
@@ -335,7 +341,15 @@ async def hold_shortfall(guild_id: Any, borrower_id: Any
     nothing; holding the lock open to narrate is the version that costs.
     """
     loan = await active_loan(borrower_id)
-    hold = await collateral_for(loan, guild_id) if loan else None
+    if loan is None:
+        return None
+    if offering is None:
+        hold = await collateral_for(loan, guild_id)
+    else:
+        library = await library_behind(loan, guild_id)
+        hold = (await hold_for(library, loan.borrower_id,
+                               cards=card_count(offering))
+                if library is not None else None)
     if hold is None:
         return None
     async with db_session() as session:
@@ -370,8 +384,18 @@ async def library_behind(loan: Any, guild_id: Any) -> "Optional[Any]":
     return bound
 
 
+def card_count(cards: "list[dict[str, Any]]") -> int:
+    """Copies in a list of {name, qty} entries -- the size a hold is set by."""
+    return sum(int(c.get("qty") or 0) for c in cards)
+
+
 async def collateral_for(loan: Any, guild_id: Any) -> Optional[int]:
-    """What this deck costs THIS borrower, or None if it cannot be borrowed.
+    """What this loan costs THIS borrower, or None if it cannot be borrowed.
+
+    The figure follows the size of what the loan sends (offered_cards): a trade
+    of a few named cards is held at the small-loan figure, the whole deck at
+    the deck's. An assigned deck with no pending offer sends the deck, so the
+    deck-ready DM keeps quoting the deck hold.
 
     The price belongs to the LIBRARY the cards came from, not to the server. A
     server admin can rewrite `configs/<guild>.json` through the bot's own
@@ -394,7 +418,8 @@ async def collateral_for(loan: Any, guild_id: Any) -> Optional[int]:
     library = await library_behind(loan, guild_id)
     if library is None:
         return None
-    return await hold_for(library, loan.borrower_id)
+    return await hold_for(library, loan.borrower_id,
+                          cards=card_count(loan.offered_cards))
 
 
 async def shortfall(guild_id: Any, cards: "list[dict[str, Any]]",
@@ -782,8 +807,9 @@ async def _dispatch(guild_id: Any, borrower_id: Any, *, from_state: str, to_stat
         # a tiered library's figure depends on the borrower, and reading the
         # column here would quote one number in /library deck and charge
         # another at the trade. Off the library in hand, never a second
-        # lookup that could come back empty and read as free.
-        held = await hold_for(library, borrower_id)
+        # lookup that could come back empty and read as free. Sized by what
+        # is being sent: a few named cards are held at the small figure.
+        held = await hold_for(library, borrower_id, cards=card_count(requested))
         if held is None:
             logger.warning("library: refusing to lend in {} -- no hold for {} "
                            "from {}", guild_id, borrower_id, library_id)
@@ -1391,7 +1417,7 @@ async def _settle_order(loan: Any, kind: str, landed: "list[dict[str, Any]]",
     guild, borrower = loan.guild_id, loan.borrower_id
     scope = wallet_service.library_scope(loan.library_id)
     remaining: "list[dict[str, Any]]" = (
-        await _still_owed(scope, borrower) if kind == "return" and moved else [])
+        await owed_cards(scope, borrower) if kind == "return" and moved else [])
 
     # The money half, BEFORE the claim is written: a crash in between leaves
     # the loan exactly as it was, to be settled again, and set_collateral
@@ -1439,10 +1465,32 @@ async def _settle_order(loan: Any, kind: str, landed: "list[dict[str, Any]]",
     return {"state": "done" if moved else "failed", "detail": detail}
 
 
-async def _still_owed(guild_id: Any, borrower_id: Any) -> "list[dict[str, Any]]":
-    """Cards this borrower still owes the library, from the claim ledger."""
+async def owed_cards(guild_id: Any, borrower_id: Any) -> "list[dict[str, Any]]":
+    """Cards this borrower still owes the library, from the claim ledger.
+
+    `guild_id` is the ledger scope the claim was booked under, which for a
+    library loan is `wallet_service.library_scope(loan.library_id)`. This, not
+    `loan.cards`, is what a collected loan actually moved: `cards` stays the
+    whole drafted pool as the draft record, however few of them crossed.
+    """
     from services import debt_service
     positions = await debt_service.get_open_card_positions(
         str(guild_id), str(borrower_id), wallet_service.HOUSE_MTGO)
     return [{"name": p["card_name"], "qty": -p["net"]}
             for p in positions if p["net"] < 0]
+
+
+async def held_cards(loan: Any) -> "Optional[list[dict[str, Any]]]":
+    """What the claim ledger says this loan's borrower holds, or None when the
+    loan has no library to read it from.
+
+    One odd row (a loan booked before loans carried a library) must not take a
+    whole pass down with it, so the caller falls back to the loan's own list.
+    """
+    try:
+        scope = wallet_service.library_scope(loan.library_id)
+    except ValueError:
+        logger.warning("library: loan {} has no library; falling back to its "
+                       "own card list", loan.id)
+        return None
+    return await owed_cards(scope, loan.borrower_id)

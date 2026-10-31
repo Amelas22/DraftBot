@@ -49,12 +49,26 @@ import services.library_service as libs                          # noqa: E402
 
 
 async def _create(library_id, name, kind, hold, by, replace,
-                  hold_unknown=None, min_drafts=None):
+                  hold_unknown=None, min_drafts=None,
+                  small_hold=None, small_hold_unknown=None):
     if hold_unknown is not None and hold_unknown < hold:
         # The board names the range low-to-high and the cube dropdown quotes the
         # higher figure; a second figure below the first would make both lie.
         print(f"--hold-unknown {hold_unknown} is below --hold {hold}: the higher "
               f"figure is the one asked of non-members. Nothing changed.")
+        return
+    # The small-loan figures as hold_for will read them: each falls back on its
+    # deck counterpart on its own, so `--hold 0 --small-hold 10` alone would
+    # ask a member 10 and a stranger 0. Checked on the effective pair, not on
+    # the flags that happen to be given.
+    member_small = hold if small_hold is None else small_hold
+    stranger_small = (small_hold_unknown if small_hold_unknown is not None
+                      else hold if hold_unknown is None else hold_unknown)
+    if stranger_small < member_small:
+        print(f"The small-loan figure for non-members would be {stranger_small}, "
+              f"below the member figure {member_small}: the higher figure is the "
+              f"one asked of non-members. Pass --small-hold-unknown at or above "
+              f"{member_small}. Nothing changed.")
         return
     async with AsyncSessionLocal() as s:
         row = await s.get(Library, library_id)
@@ -68,6 +82,8 @@ async def _create(library_id, name, kind, hold, by, replace,
             row = Library(id=library_id, name=name, kind=kind,
                           collateral_tix=hold,
                           collateral_tix_untrusted=hold_unknown,
+                          small_loan_tix=small_hold,
+                          small_loan_tix_untrusted=small_hold_unknown,
                           min_drafts_to_borrow=min_drafts,
                           created_by=by)
             s.add(row)
@@ -80,6 +96,9 @@ async def _create(library_id, name, kind, hold, by, replace,
             # --hold-unknown un-tiers a library rather than leaving the old
             # second figure in place where nobody can see it.
             row.collateral_tix_untrusted = hold_unknown
+            # The small-loan figures behave the same: omitted means NULL.
+            row.small_loan_tix = small_hold
+            row.small_loan_tix_untrusted = small_hold_unknown
             # The same for the draft gate: no --min-drafts puts the member
             # list back in sole charge.
             row.min_drafts_to_borrow = min_drafts
@@ -105,8 +124,16 @@ def _terms(library) -> str:
     """
     unknown = library.collateral_tix_untrusted
     if unknown is None or unknown == library.collateral_tix:
-        return str(library.collateral_tix)
-    return f"{library.collateral_tix} known / {unknown} unknown"
+        terms = str(library.collateral_tix)
+    else:
+        terms = f"{library.collateral_tix} known / {unknown} unknown"
+    small, small_unknown = library.small_loan_tix, library.small_loan_tix_untrusted
+    if small is not None or small_unknown is not None:
+        m = library.collateral_tix if small is None else small
+        u = (unknown if unknown is not None else library.collateral_tix) \
+            if small_unknown is None else small_unknown
+        terms += f"; small loans (≤3) {m} known / {u} unknown"
+    return terms
 
 
 async def _list():
@@ -261,6 +288,12 @@ def main():
     p.add_argument("--hold-unknown", type=int, default=None, metavar="TIX",
                    help="asked of a borrower not on the member list; "
                         "omit to charge everyone --hold")
+    p.add_argument("--small-hold", type=int, default=None, metavar="TIX",
+                   help="hold from a member for a loan of 3 cards or fewer; "
+                        "omit to charge --hold")
+    p.add_argument("--small-hold-unknown", type=int, default=None, metavar="TIX",
+                   help="the same, from anyone not on the member list; "
+                        "omit to charge --hold-unknown")
     p.add_argument("--min-drafts", type=int, default=None, metavar="N",
                    help="also lend to non-members with N+ drafts in this "
                         "library's servers; omit for members only")
@@ -306,7 +339,8 @@ def main():
     match a.cmd:
         case "create":
             asyncio.run(_create(a.library, a.name, a.kind, a.hold,
-                                a.by, a.replace, a.hold_unknown, a.min_drafts))
+                                a.by, a.replace, a.hold_unknown, a.min_drafts,
+                                a.small_hold, a.small_hold_unknown))
         case "list":
             asyncio.run(_list())
         case "bind":

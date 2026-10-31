@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import select
 
 from database.db_session import AsyncSessionLocal
 from models.card_loan import CardLoan
@@ -1048,17 +1049,63 @@ async def test_a_declined_deck_is_not_handed_back_by_the_reconciler(
     assert (await _loans())[BOB].state == "expired"
 
 
-async def test_a_deck_already_returned_is_not_handed_out_twice(test_db, library_on):
+async def _set_state(state):
     from sqlalchemy import update
 
-    await _seed()
-    await svc.assign_drafted_decks(SESSION)
     async with AsyncSessionLocal() as s:
         await s.execute(update(CardLoan).where(CardLoan.borrower_id == BOB)
-                        .values(state="returned"))
+                        .values(state=state))
         await s.commit()
 
+
+async def test_a_deck_still_held_is_not_handed_out_twice(test_db, library_on):
+    await _seed()
+    await svc.assign_drafted_decks(SESSION)
+
     assert await svc.assign_on_request(SESSION, BOB) == "already"
+
+
+async def test_a_returned_deck_can_be_asked_for_again(test_db, library_on, monkeypatch):
+    _recording_dm(monkeypatch)
+    await _seed()
+    await svc.assign_drafted_decks(SESSION)
+    await _set_state("returned")
+
+    assert await svc.assign_on_request(SESSION, BOB) == "assigned"
+    async with AsyncSessionLocal() as s:
+        loans = (await s.scalars(select(CardLoan).where(
+            CardLoan.borrower_id == BOB, CardLoan.state == "assigned"))).all()
+    assert len(loans) == 1 and loans[0].claimed_at is not None, "a late request"
+
+
+async def test_a_returned_deck_with_no_match_left_is_over(test_db, library_on):
+    await _seed()
+    await svc.assign_drafted_decks(SESSION)
+    await _set_state("returned")
+    await _reported(SESSION, [(ALICE, "x", False), (BOB, "y", True)])
+
+    assert await svc.assign_on_request(SESSION, BOB) == "over"
+
+
+async def test_a_return_still_in_flight_blocks_asking_again(test_db, library_on):
+    await _seed()
+    await svc.assign_drafted_decks(SESSION)
+    await _set_state("return_pending")
+
+    assert await svc.assign_on_request(SESSION, BOB) in {"already", "busy"}
+    async with AsyncSessionLocal() as s:
+        count = len((await s.scalars(select(CardLoan).where(
+            CardLoan.borrower_id == BOB))).all())
+    assert count == 1
+
+
+async def test_the_reconciler_never_reoffers_a_returned_deck(test_db, library_on):
+    await _seed()
+    await svc.assign_drafted_decks(SESSION)
+    await _set_state("returned")
+
+    assert await svc.assign_drafted_decks(SESSION) == 0
+    assert (await _loans())[BOB].state == "returned"
 
 
 @pytest.mark.parametrize("who,why", [("9999", "not_drafter")])

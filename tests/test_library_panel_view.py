@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from discord.utils import MISSING
 
 from conftest import test_db  # noqa: F401  (fixture)
 from database.db_session import AsyncSessionLocal
@@ -174,7 +175,7 @@ async def test_panel_view_has_fixed_custom_ids():
     borrow = panel_view("borrow")
     assert borrow is not None
     assert [i.custom_id for i in borrow.children] == [
-        "library_panel:borrow", "library_panel:decline"]
+        "library_panel:borrow", "library_panel:some", "library_panel:decline"]
     ret = panel_view("return")
     assert ret is not None
     assert [i.custom_id for i in ret.children] == ["library_panel:return"]
@@ -182,7 +183,8 @@ async def test_panel_view_has_fixed_custom_ids():
     persistent = LibraryPanelView()
     assert persistent.timeout is None
     assert {i.custom_id for i in persistent.children} == {
-        "library_panel:borrow", "library_panel:return", "library_panel:decline"}
+        "library_panel:borrow", "library_panel:return", "library_panel:decline",
+        "library_panel:some"}
 
 
 # --- changing your mind after the draft --------------------------------------
@@ -236,3 +238,197 @@ async def test_nothing_to_turn_down_points_at_return(monkeypatch):
     await mod.decline(caller, "s1")
 
     assert "Return my deck" in caller.send.await_args.args[0]
+
+
+# --- borrowing only some cards -----------------------------------------------
+
+async def test_borrow_mode_shows_some_cards_button():
+    from library_views.panel_view import panel_view
+    borrow = panel_view("borrow")
+    assert borrow is not None
+    assert "library_panel:some" in [i.custom_id for i in borrow.children]
+    ret = panel_view("return")
+    assert ret is not None
+    assert "library_panel:some" not in [i.custom_id for i in ret.children]
+
+
+async def test_the_form_has_three_fields_and_only_the_first_is_required():
+    from library_views.some_cards import SomeCardsModal
+    modal = SomeCardsModal("s1")
+    assert modal.title == "Borrow only some cards"
+    assert [c.label for c in modal.children] == ["Card 1", "Card 2", "Card 3"]
+    assert [c.required for c in modal.children] == [True, False, False]
+    assert all(c.max_length == 141 for c in modal.children)
+
+
+async def test_a_press_opens_the_form_as_the_first_response(test_db, reserved):
+    from library_views.panel_view import LibraryPanelView
+    from library_views.some_cards import SomeCardsModal
+    await _seed()
+    interaction = _interaction(3)
+    interaction.response.send_modal = AsyncMock()
+    await LibraryPanelView().some_button.callback(interaction)
+    interaction.response.defer.assert_not_awaited()
+    interaction.response.send_message.assert_not_awaited()
+    modal = interaction.response.send_modal.await_args.args[0]
+    assert isinstance(modal, SomeCardsModal)
+
+
+async def test_a_refused_press_answers_without_a_modal(test_db, reserved):
+    from library_views.panel_view import LibraryPanelView
+    await _seed(loans=[("3", "draft:other")])
+    interaction = _interaction(3)
+    interaction.response.send_modal = AsyncMock()
+    await LibraryPanelView().some_button.callback(interaction)
+    interaction.response.send_modal.assert_not_awaited()
+    assert "another draft" in _refused(interaction)
+
+
+@pytest.fixture
+def some(monkeypatch):
+    import library_views.some_cards as mod
+    stubs = SimpleNamespace(borrow_some=AsyncMock(), spawned=[])
+
+    def spawn(label, coro):
+        stubs.spawned.append(coro)
+    monkeypatch.setattr(mod, "borrow_some", stubs.borrow_some)
+    monkeypatch.setattr(mod, "spawn_followup", spawn)
+    return stubs
+
+
+def _pressed(user_id=3, message_id=777):
+    """A press on the confirm message, which the modal's followup posted."""
+    interaction = _interaction(user_id)
+    interaction.message = SimpleNamespace(id=message_id)
+    interaction.response.edit_message = AsyncMock()
+    return interaction
+
+
+def _origin():
+    """The modal submission that posted the confirm message."""
+    origin = MagicMock()
+    origin.followup.edit_message = AsyncMock()
+    return origin
+
+
+async def test_cancel_borrows_nothing_and_takes_the_buttons_away(some):
+    from library_views.some_cards import SomeCardsConfirmView
+    view = SomeCardsConfirmView([{"name": "Swamp", "qty": 1}], "s1")
+    interaction = _pressed()
+    await view.cancel.callback(interaction)
+    some.borrow_some.assert_not_called()
+    assert some.spawned == []
+    interaction.response.edit_message.assert_awaited_once_with(
+        content="👌 Nothing borrowed.", view=None)
+    assert view.is_finished()
+
+
+async def test_a_second_cancel_is_a_no_op(some):
+    from library_views.some_cards import SomeCardsConfirmView
+    view = SomeCardsConfirmView([{"name": "Swamp", "qty": 1}], "s1")
+    await view.cancel.callback(_pressed())
+    again = _pressed()
+    await view.cancel.callback(again)
+    again.response.edit_message.assert_not_awaited()
+    again.response.send_message.assert_not_awaited()
+
+
+async def test_confirm_borrows_exactly_the_carried_cards(some):
+    from library_views.some_cards import SomeCardsConfirmView
+    cards = [{"name": "Swamp", "qty": 1}, {"name": "Island", "qty": 2}]
+    origin = _origin()
+    view = SomeCardsConfirmView(cards, "s1", origin=origin)
+    interaction = _pressed()
+    await view.confirm.callback(interaction)
+    assert view.is_finished()
+    assert len(some.spawned) == 1
+    await some.spawned[0]
+    caller, session_id, sent = some.borrow_some.await_args.args
+    assert (caller.user_id, session_id, sent) == (3, "s1", cards)
+    # borrow_some defers; acknowledging here too would make that a second ack.
+    interaction.response.defer.assert_not_awaited()
+    interaction.response.edit_message.assert_not_awaited()
+    # The buttons are taken away through the modal's own webhook, which posted
+    # the message, leaving this press's one response to borrow_some.
+    origin.followup.edit_message.assert_awaited_once_with(777, view=None)
+
+
+async def test_a_second_confirm_is_a_no_op(some):
+    from library_views.some_cards import SomeCardsConfirmView
+    view = SomeCardsConfirmView([{"name": "Swamp", "qty": 1}], "s1", origin=_origin())
+    first, second = _pressed(), _pressed()
+    await view.confirm.callback(first)
+    await view.confirm.callback(second)
+    for coro in some.spawned:
+        await coro
+    assert some.borrow_some.await_count == 1
+    second.response.defer.assert_not_awaited()
+
+
+async def test_a_failed_button_clear_does_not_break_the_borrow(some):
+    import discord
+    from library_views.some_cards import SomeCardsConfirmView
+    origin = _origin()
+    origin.followup.edit_message.side_effect = discord.HTTPException(
+        MagicMock(status=404), "Unknown Message")
+    view = SomeCardsConfirmView([{"name": "Swamp", "qty": 1}], "s1", origin=origin)
+    await view.confirm.callback(_pressed())
+    await some.spawned[0]
+    assert some.borrow_some.await_count == 1
+
+
+async def _submit(monkeypatch, plan, hold=5, loan=None, library=None):
+    import library_views.some_cards as mod
+    monkeypatch.setattr(mod, "match_for_borrow", AsyncMock(return_value=plan))
+    monkeypatch.setattr(mod, "active_loan", AsyncMock(return_value=loan))
+    behind = AsyncMock(return_value=library if library is not None else object())
+    monkeypatch.setattr(mod, "library_behind", behind)
+    held = AsyncMock(return_value=hold)
+    monkeypatch.setattr(mod, "hold_for", held)
+    modal = mod.SomeCardsModal("s1")
+    modal.children[0].value = "swamp"
+    interaction = _interaction(3)
+    await modal.callback(interaction)
+    interaction.behind, interaction.held = behind, held
+    return interaction
+
+
+async def test_the_quote_prices_a_waiting_deck_by_its_own_library(monkeypatch):
+    """The trade charges through library_behind(loan, ...), which prefers the
+    library stamped on the loan; the quote must read the same one."""
+    from services.card_name_match import NameMatch
+    from services.library_loan_actions import SomeCardsPlan
+    match = NameMatch(found=[], unknown=[], ambiguous=[])
+    plan = SomeCardsPlan(available=[{"name": "Swamp", "qty": 1}], reserved=[], match=match)
+    loan, library = SimpleNamespace(library_id="stamped"), object()
+
+    interaction = await _submit(monkeypatch, plan, loan=loan, library=library)
+
+    interaction.behind.assert_awaited_once_with(loan, 99)
+    assert interaction.held.await_args.args[0] is library
+    interaction.behind.reset_mock()
+    interaction = await _submit(monkeypatch, plan, loan=None)
+    interaction.behind.assert_awaited_once_with(None, 99)
+
+
+async def test_a_refusal_from_the_match_is_shown_as_is(monkeypatch):
+    interaction = await _submit(monkeypatch, "nope")
+    interaction.response.defer.assert_awaited_once()
+    assert interaction.followup.send.await_args.args[0] == "nope"
+    assert interaction.followup.send.await_args.kwargs["view"] is MISSING
+
+
+async def test_confirm_is_offered_only_when_something_is_available(monkeypatch):
+    from services.card_name_match import NameMatch
+    from services.library_loan_actions import SomeCardsPlan
+    match = NameMatch(found=[], unknown=["x"], ambiguous=[])
+    empty = SomeCardsPlan(available=[], reserved=[], match=match)
+    interaction = await _submit(monkeypatch, empty)
+    view = interaction.followup.send.await_args.kwargs["view"]
+    assert [i.label for i in view.children] == ["Cancel"]
+
+    full = SomeCardsPlan(available=[{"name": "Swamp", "qty": 1}], reserved=[], match=match)
+    interaction = await _submit(monkeypatch, full)
+    view = interaction.followup.send.await_args.kwargs["view"]
+    assert [i.label for i in view.children] == ["Confirm", "Cancel"]
+    assert "5 tix" in interaction.followup.send.await_args.args[0]
