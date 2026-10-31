@@ -77,6 +77,7 @@ project-includes = [
     "services/library_panel.py",
     "services/library_panel_state.py",
     "library_views/panel_view.py",
+    "library_views/some_cards.py",
     "models/library_member.py",
     "models/card_loan.py",
     "models/mtgo_job.py",

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from discord.utils import MISSING
 
 from conftest import test_db  # noqa: F401  (fixture)
 from database.db_session import AsyncSessionLocal
@@ -174,7 +175,7 @@ async def test_panel_view_has_fixed_custom_ids():
     borrow = panel_view("borrow")
     assert borrow is not None
     assert [i.custom_id for i in borrow.children] == [
-        "library_panel:borrow", "library_panel:decline"]
+        "library_panel:borrow", "library_panel:some", "library_panel:decline"]
     ret = panel_view("return")
     assert ret is not None
     assert [i.custom_id for i in ret.children] == ["library_panel:return"]
@@ -182,7 +183,8 @@ async def test_panel_view_has_fixed_custom_ids():
     persistent = LibraryPanelView()
     assert persistent.timeout is None
     assert {i.custom_id for i in persistent.children} == {
-        "library_panel:borrow", "library_panel:return", "library_panel:decline"}
+        "library_panel:borrow", "library_panel:return", "library_panel:decline",
+        "library_panel:some"}
 
 
 # --- changing your mind after the draft --------------------------------------
@@ -236,3 +238,120 @@ async def test_nothing_to_turn_down_points_at_return(monkeypatch):
     await mod.decline(caller, "s1")
 
     assert "Return my deck" in caller.send.await_args.args[0]
+
+
+# --- borrowing only some cards -----------------------------------------------
+
+async def test_borrow_mode_shows_some_cards_button():
+    from library_views.panel_view import panel_view
+    borrow = panel_view("borrow")
+    assert borrow is not None
+    assert "library_panel:some" in [i.custom_id for i in borrow.children]
+    ret = panel_view("return")
+    assert ret is not None
+    assert "library_panel:some" not in [i.custom_id for i in ret.children]
+
+
+async def test_the_form_has_three_fields_and_only_the_first_is_required():
+    from library_views.some_cards import SomeCardsModal
+    modal = SomeCardsModal("s1")
+    assert modal.title == "Borrow only some cards"
+    assert [c.label for c in modal.children] == ["Card 1", "Card 2", "Card 3"]
+    assert [c.required for c in modal.children] == [True, False, False]
+    assert all(c.max_length == 141 for c in modal.children)
+
+
+async def test_a_press_opens_the_form_as_the_first_response(test_db, reserved):
+    from library_views.panel_view import LibraryPanelView
+    from library_views.some_cards import SomeCardsModal
+    await _seed()
+    interaction = _interaction(3)
+    interaction.response.send_modal = AsyncMock()
+    await LibraryPanelView().some_button.callback(interaction)
+    interaction.response.defer.assert_not_awaited()
+    interaction.response.send_message.assert_not_awaited()
+    modal = interaction.response.send_modal.await_args.args[0]
+    assert isinstance(modal, SomeCardsModal)
+
+
+async def test_a_refused_press_answers_without_a_modal(test_db, reserved):
+    from library_views.panel_view import LibraryPanelView
+    await _seed(loans=[("3", "draft:other")])
+    interaction = _interaction(3)
+    interaction.response.send_modal = AsyncMock()
+    await LibraryPanelView().some_button.callback(interaction)
+    interaction.response.send_modal.assert_not_awaited()
+    assert "another draft" in _refused(interaction)
+
+
+@pytest.fixture
+def some(monkeypatch):
+    import library_views.some_cards as mod
+    stubs = SimpleNamespace(borrow_some=AsyncMock(), spawned=[])
+
+    def spawn(label, coro):
+        stubs.spawned.append(coro)
+    monkeypatch.setattr(mod, "borrow_some", stubs.borrow_some)
+    monkeypatch.setattr(mod, "spawn_followup", spawn)
+    return stubs
+
+
+async def test_cancel_borrows_nothing(some):
+    from library_views.some_cards import SomeCardsConfirmView
+    view = SomeCardsConfirmView([{"name": "Swamp", "qty": 1}], "s1")
+    interaction = _interaction(3)
+    await view.cancel.callback(interaction)
+    some.borrow_some.assert_not_called()
+    assert some.spawned == []
+    assert interaction.response.send_message.await_args.args[0] == "👌 Nothing borrowed."
+    assert view.is_finished()
+
+
+async def test_confirm_borrows_exactly_the_carried_cards(some):
+    from library_views.some_cards import SomeCardsConfirmView
+    cards = [{"name": "Swamp", "qty": 1}, {"name": "Island", "qty": 2}]
+    view = SomeCardsConfirmView(cards, "s1")
+    interaction = _interaction(3)
+    await view.confirm.callback(interaction)
+    assert view.is_finished()
+    assert len(some.spawned) == 1
+    await some.spawned[0]
+    caller, session_id, sent = some.borrow_some.await_args.args
+    assert (caller.user_id, session_id, sent) == (3, "s1", cards)
+    # borrow_some defers; acknowledging here too would make that a second ack.
+    interaction.response.defer.assert_not_awaited()
+
+
+async def _submit(monkeypatch, plan, hold=5):
+    import library_views.some_cards as mod
+    monkeypatch.setattr(mod, "match_for_borrow", AsyncMock(return_value=plan))
+    monkeypatch.setattr(mod, "library_for", AsyncMock(return_value=object()))
+    monkeypatch.setattr(mod, "hold_for", AsyncMock(return_value=hold))
+    modal = mod.SomeCardsModal("s1")
+    modal.children[0].value = "swamp"
+    interaction = _interaction(3)
+    await modal.callback(interaction)
+    return interaction
+
+
+async def test_a_refusal_from_the_match_is_shown_as_is(monkeypatch):
+    interaction = await _submit(monkeypatch, "nope")
+    interaction.response.defer.assert_awaited_once()
+    assert interaction.followup.send.await_args.args[0] == "nope"
+    assert interaction.followup.send.await_args.kwargs["view"] is MISSING
+
+
+async def test_confirm_is_offered_only_when_something_is_available(monkeypatch):
+    from services.card_name_match import NameMatch
+    from services.library_loan_actions import SomeCardsPlan
+    match = NameMatch(found=[], unknown=["x"], ambiguous=[])
+    empty = SomeCardsPlan(available=[], reserved=[], match=match)
+    interaction = await _submit(monkeypatch, empty)
+    view = interaction.followup.send.await_args.kwargs["view"]
+    assert [i.label for i in view.children] == ["Cancel"]
+
+    full = SomeCardsPlan(available=[{"name": "Swamp", "qty": 1}], reserved=[], match=match)
+    interaction = await _submit(monkeypatch, full)
+    view = interaction.followup.send.await_args.kwargs["view"]
+    assert [i.label for i in view.children] == ["Confirm", "Cancel"]
+    assert "5 tix" in interaction.followup.send.await_args.args[0]
