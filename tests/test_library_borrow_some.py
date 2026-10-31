@@ -553,3 +553,22 @@ async def test_a_whole_deck_refusal_keeps_its_own_advice(library, monkeypatch, s
 
 async def _no_figures(*_a, **_k):
     return None
+
+
+async def test_a_dispatch_unknown_loan_is_not_told_it_has_its_deck(library):
+    """A trade we cannot say started is not a deck in hand: the drafter gets
+    the dispatch_unknown advice, not "You already have your deck"."""
+    async with AsyncSessionLocal() as s:
+        s.add(CardLoan(guild_id=GUILD, borrower_id=ALICE, state="dispatch_unknown",
+                       library_id=LIB, cards=[{"name": "Island", "qty": 1}],
+                       source=loan_source(SESSION)))
+        await s.commit()
+
+    said = await actions.match_for_borrow(GUILD, ALICE, SESSION, ["bolt"])
+    assert said == actions.LOAN_MESSAGES["dispatch_unknown"], said
+
+    caller = Caller()
+    await actions.borrow_some(caller, SESSION, TWO)
+    await library.drain()
+    assert caller.said == [actions.LOAN_MESSAGES["dispatch_unknown"]]
+    assert library.sent == []

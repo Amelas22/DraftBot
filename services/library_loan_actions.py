@@ -396,6 +396,10 @@ def _not_this_drafts_offer(loan: Any, session_id: str) -> Optional[str]:
         return None
     if loan.state.endswith("_pending"):
         return loan_said("already_in_flight", "")
+    if loan.state == "dispatch_unknown":
+        # Not "you already have your deck": nobody can say yet whether the
+        # cards moved, and that message would tell them they did.
+        return loan_said("dispatch_unknown", "")
     return loan_said("already_borrowed", "")
 
 
