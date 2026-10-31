@@ -28,12 +28,14 @@ from services.card_lending_service import (
     active_loan,
     borrow_when_free,
     card_lines,
+    decline_offer,
     hold_shortfall,
     library_busy_reason,
     poll_until_settled,
     return_when_free,
     shortfall,
 )
+from services.draft_deck_assignment import assign_on_request, latest_draft_of
 from services.library_access_service import may_borrow, why_not
 from services.library_service import library_id_for
 from services.mtgo_tradebot_client import get_lending_client, max_cards_per_trade
@@ -81,6 +83,24 @@ SETUP_MESSAGES = {
 # nothing to undo. Folding those together would have to pick one wording for
 # both, and the wrong half of every pair would then be telling the player
 # something untrue. (The custody table lives with the deposit commands.)
+# Why a drafter who asked for their deck after the draft was not handed one
+# (draft_deck_assignment.assign_on_request). "not_allowed" is answered by
+# why_not instead, which can say what the library's rule is.
+_CANNOT_COLLECT = "⚠️ The library can't put your deck together for that draft — ask an admin."
+REQUEST_MESSAGES: "dict[str, str]" = {
+    "not_offered": "📭 The library doesn't lend that draft's cube.",
+    "already": "📭 You've already had your deck from that draft.",
+    "over": "📭 Your matches in that draft are done, so the library can't lend you "
+            "its deck any more.",
+    "busy": "📦 You're still holding a library deck from another draft — hand it back "
+            "with `/library return` first.",
+    "no_log": "⏳ That draft's picks aren't in yet — try again in a minute.",
+    "unseatable": _CANNOT_COLLECT,
+    "empty": _CANNOT_COLLECT,
+    "too_large": _CANNOT_COLLECT,
+    "failed": _CANNOT_COLLECT,
+}
+
 LOAN_MESSAGES: "dict[str, str | Callable[[], str]]" = {
     **SETUP_MESSAGES,
     "no_loan": "📭 The library has no deck waiting for you.",
@@ -248,8 +268,33 @@ async def open_if_usable(caller: LibraryCaller) -> Optional[int]:
     return guild_id
 
 
-async def borrow(caller: LibraryCaller) -> None:
-    """Collect the deck the library is holding for this caller."""
+async def _ask_for_deck(caller: LibraryCaller, guild_id: int,
+                        session_id: Optional[str]) -> bool:
+    """For a caller with no deck waiting: ask for their pool from `session_id`,
+    or from the last draft they played in this server. False, having said why,
+    if it was not handed over; True if it was, or if there is no draft to ask
+    about -- the borrow then carries on and says what it always said."""
+    if session_id is None:
+        session_id = await latest_draft_of(guild_id, caller.user_id)
+        if session_id is None:
+            return True
+    outcome = await assign_on_request(session_id, caller.user_id)
+    if outcome == "assigned" or outcome == "not_drafter":
+        return True
+    if outcome == "not_allowed":
+        library_id = await library_id_for(guild_id)
+        await caller.send(await why_not(library_id, caller.user_id))
+    else:
+        await caller.send(REQUEST_MESSAGES.get(outcome, _CANNOT_COLLECT))
+    return False
+
+
+async def borrow(caller: LibraryCaller, session_id: Optional[str] = None) -> None:
+    """Collect the deck the library is holding for this caller -- asking for it
+    first if there is none, so a drafter who said no before the draft, or
+    turned the offer down, can still have it (draft_deck_assignment.
+    assign_on_request). `session_id` is the draft whose panel was pressed;
+    the command asks of the caller's latest draft."""
     guild_id = await open_if_usable(caller)
     if guild_id is None:
         return
@@ -264,6 +309,10 @@ async def borrow(caller: LibraryCaller) -> None:
         await caller.send("📭 This server isn't set up to borrow from a card library.")
         return
     loan = await active_loan(caller.user_id)
+    if loan is None:
+        if not await _ask_for_deck(caller, guild_id, session_id):
+            return
+        loan = await active_loan(caller.user_id)
     if loan is not None:
         library_id = getattr(loan, "library_id", None) or library_id
     if not await may_borrow(library_id, caller.user_id):
@@ -288,6 +337,22 @@ async def borrow(caller: LibraryCaller) -> None:
 
     await _warn_if_busy(caller)
     spawn_followup("card-library borrow", _borrow_when_ready(caller, guild_id))
+
+
+async def decline(caller: LibraryCaller, session_id: str) -> None:
+    """Hand back the deck this draft offered the caller, before collecting it,
+    so its cards go back on the shelf and their loan slot is free now rather
+    than when the offer would have lapsed. Moves no cards, so it needs no
+    serve and opens no trade."""
+    await caller.defer()
+    if await decline_offer(caller.user_id, session_id):
+        await caller.send(
+            "👍 Handed back — those cards are back on the shelf. Changed your mind? "
+            "Press **Borrow my deck** while you still have a match to play.")
+    else:
+        await caller.send(
+            "📭 You have no deck waiting from this draft. If it's on its way to you "
+            "or in your hands already, hand it back with **Return my deck**.")
 
 
 async def return_deck(caller: LibraryCaller) -> None:

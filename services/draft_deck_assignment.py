@@ -447,6 +447,27 @@ async def _taken_from(session_id: Any) -> "set[str]":
         return {str(r) for r in rows.all()}
 
 
+async def latest_draft_of(guild_id: Any, player_id: Any) -> Optional[str]:
+    """The newest draft in this server that the player drafted in, or None.
+
+    What /library borrow asks a deck for when the caller has none waiting:
+    the command names no draft, and the one they mean is the one they just
+    played. Whether it can still lend them anything is assign_on_request's
+    question, not this one's.
+    """
+    async with AsyncSessionLocal() as session:
+        drafts = (await session.execute(
+            select(DraftSession.session_id, DraftSession.sign_ups)
+            .where(DraftSession.guild_id == str(guild_id),
+                   DraftSession.teams_start_time.isnot(None))
+            .order_by(DraftSession.teams_start_time.desc())
+            .limit(20))).all()
+    for session_id, sign_ups in drafts:
+        if str(player_id) in {str(p) for p in (sign_ups or {})}:
+            return str(session_id)
+    return None
+
+
 async def assign_on_request(session_id: Any, player_id: Any) -> str:
     """Hand ONE drafter their pool because they asked for it after the draft.
 
