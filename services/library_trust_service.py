@@ -24,6 +24,7 @@ from loguru import logger
 
 from services.library_access_service import members
 from services.library_service import price_range_of
+from services.library_tournament_exemption import is_exempt
 
 
 async def is_trusted(library_id: Any, player_id: Any) -> bool:
@@ -50,6 +51,8 @@ async def hold_for(library: Any, player_id: Any) -> Optional[int]:
     prices = price_range_of(library)
     if prices is None:
         return None
+    if await is_exempt(library.id, player_id):
+        return 0   # a running tournament lends its players the deck on the house
     least, most = prices
     if least == most or await is_trusted(library.id, player_id):
         return least

@@ -26,6 +26,7 @@ from models.library import Library
 from models.library_member import LibraryMember
 from models.library_server import LibraryServer
 from models.player import PlayerStats
+from services.library_tournament_exemption import exempt_among
 
 
 async def members(library_id: Any) -> "list[str]":
@@ -110,9 +111,12 @@ async def may_borrow_many(library_id: Any,
     listed = set(await members(library_id))
     threshold = await min_drafts(library_id)
     if threshold is None:
-        return set(ids) if not listed else {p for p in ids if p in listed}
-    counts = await drafts_played_many(library_id, [p for p in ids if p not in listed])
-    return {p for p in ids if p in listed or counts.get(p, 0) >= threshold}
+        allowed = set(ids) if not listed else {p for p in ids if p in listed}
+    else:
+        counts = await drafts_played_many(library_id, [p for p in ids if p not in listed])
+        allowed = {p for p in ids if p in listed or counts.get(p, 0) >= threshold}
+    # A running tournament can let its players past both (library_tournament_exemption).
+    return allowed | await exempt_among(library_id, [p for p in ids if p not in allowed])
 
 
 async def may_borrow(library_id: Any, player_id: Any) -> bool:

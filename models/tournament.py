@@ -59,6 +59,14 @@ class Tournament(Base):
     # Every board links to it as another view of the same teams, standings and
     # pairings; None links nothing.
     website_url = Column(String(512), nullable=True)
+    # While this tournament is active, its players borrow from the libraries its
+    # server draws on with no hold and no member/draft gate
+    # (services/library_tournament_exemption). Off unless somebody turns it on,
+    # and only from scripts/library_tool.py, like every other library term: a
+    # server admin can reach anything set from Discord, and a free borrow is the
+    # lowest hold there is.
+    library_exempt = Column(Boolean, nullable=False, default=False,
+                            server_default=text('0'))
 
     def __repr__(self):
         return f"<Tournament(id={self.id}, name={self.name!r}, status={self.status})>"
