@@ -23,6 +23,7 @@ from sqlalchemy import select
 from database.db_session import AsyncSessionLocal
 from helpers.utils import not_none, ui_button
 from library_views.callers import InteractionCaller
+from library_views.some_cards import SomeCardsModal
 from models.draft_session import DraftSession
 from services.card_lending_service import active_loan
 from services.library_loan_actions import borrow, decline, return_deck
@@ -69,7 +70,8 @@ async def _session_for_channel(channel_id: Any) -> Optional[str]:
             .where(DraftSession.draft_chat_channel == str(channel_id)))
 
 
-async def _press(interaction: discord.Interaction, action: Action) -> None:
+async def _press(interaction: discord.Interaction, action: Action,
+                 some: bool = False) -> None:
     # Nothing is deferred here: a refusal is the interaction's one response,
     # and otherwise the flow defers and answers it itself.
     user_id = str(not_none(interaction.user).id)
@@ -80,6 +82,10 @@ async def _press(interaction: discord.Interaction, action: Action) -> None:
     refused = await may_use_panel(session_id, user_id, action)
     if refused is not None:
         await interaction.response.send_message(refused, ephemeral=True)
+        return
+    if some:
+        # The form is the press's one response, so nothing was deferred.
+        await interaction.response.send_modal(SomeCardsModal(session_id))
         return
     caller = InteractionCaller(interaction)
     if action == "borrow":
@@ -103,6 +109,12 @@ class LibraryPanelView(discord.ui.View):
                             interaction: discord.Interaction) -> None:
         await _press(interaction, "borrow")
 
+    @ui_button(label="Borrow only some cards", style=discord.ButtonStyle.secondary,
+               custom_id="library_panel:some")
+    async def some_button(self, button: "discord.ui.Button[Any]",
+                          interaction: discord.Interaction) -> None:
+        await _press(interaction, "borrow", some=True)
+
     @ui_button(label="Return my deck", style=discord.ButtonStyle.success,
                custom_id="library_panel:return")
     async def return_button(self, button: "discord.ui.Button[Any]",
@@ -117,12 +129,14 @@ class LibraryPanelView(discord.ui.View):
 
 
 def panel_view(mode: str) -> Optional[LibraryPanelView]:
-    """The buttons the panel shows in `mode`: Borrow, Return and "I don't
-    need my deck" while decks are going out, Borrow and Return once they are
-    coming back, none when closed."""
-    keep = {"borrow": ("library_panel:borrow", "library_panel:return",
-                       "library_panel:decline"),
-            "return": ("library_panel:borrow", "library_panel:return")}.get(mode)
+    """The buttons the panel shows in `mode`: Borrow, Borrow only some cards,
+    Return and "I don't need my deck" while decks are going out; the same
+    without the decline once they are coming back, so a dead rubber can take
+    a few cards out again; none when closed."""
+    keep = {"borrow": ("library_panel:borrow", "library_panel:some",
+                       "library_panel:return", "library_panel:decline"),
+            "return": ("library_panel:borrow", "library_panel:some",
+                       "library_panel:return")}.get(mode)
     if keep is None:
         return None
     view = LibraryPanelView()
