@@ -1010,6 +1010,7 @@ async def test_a_drafter_who_did_not_agree_can_ask_for_their_deck(test_db, monke
     assert loan.state == "assigned" and loan.source == svc.loan_source(SESSION)
     assert loan.claimed_at is not None, "its claim dates from the asking"
     assert told == [], "they are collecting it now; a 'deck waiting' DM is noise"
+    assert loan.ready_dm_at is not None, "nor from the watchdog's retry sweep"
 
 
 async def test_asking_works_when_nobody_in_the_draft_opted_in(test_db, monkeypatch):
@@ -1104,3 +1105,21 @@ async def test_a_cube_the_library_does_not_offer_is_refused(test_db):
     await _seed()
 
     assert await svc.assign_on_request(SESSION, BOB) == "not_offered"
+
+
+async def test_a_deck_from_this_draft_landing_first_counts_as_handed_over(
+        test_db, library_on, monkeypatch):
+    """The reconciler, or a second press, can hand them this draft's deck
+    between the checks and the write. That is the deck they asked for, not a
+    deck from another draft in the way."""
+    from sqlalchemy.exc import IntegrityError
+
+    await _seed()
+
+    async def lands_first(guild_id, borrower, cards, **kw):
+        await assign_deck(guild_id, borrower, cards, source=kw["source"],
+                          library_id=kw["library_id"])
+        raise IntegrityError("insert", {}, Exception("one active loan"))
+    monkeypatch.setattr(svc, "assign_deck", lands_first)
+
+    assert await svc.assign_on_request(SESSION, BOB) == "assigned"

@@ -71,14 +71,14 @@ async def _press(interaction: discord.Interaction, action: Action) -> None:
     # and otherwise the flow defers and answers it itself.
     user_id = str(not_none(interaction.user).id)
     session_id = await _session_for_channel(interaction.channel_id)
-    refused = (NO_DECK if session_id is None
-               else await may_use_panel(session_id, user_id, action))
+    if session_id is None:
+        await interaction.response.send_message(NO_DECK, ephemeral=True)
+        return
+    refused = await may_use_panel(session_id, user_id, action)
     if refused is not None:
         await interaction.response.send_message(refused, ephemeral=True)
         return
     caller = InteractionCaller(interaction)
-    if session_id is None:   # refused above; narrows for the two calls below
-        return
     if action == "borrow":
         await borrow(caller, session_id)
     elif action == "decline":

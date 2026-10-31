@@ -20,7 +20,7 @@ cards and takes collateral off them for it. So an empty mapping assigns nobody
 anything -- not the subset that could be lined up.
 """
 from datetime import datetime
-from typing import Any, Optional, Sequence
+from typing import Any, Literal, Optional, Sequence
 
 from loguru import logger
 from sqlalchemy import select
@@ -468,7 +468,12 @@ async def latest_draft_of(guild_id: Any, player_id: Any) -> Optional[str]:
     return None
 
 
-async def assign_on_request(session_id: Any, player_id: Any) -> str:
+RequestOutcome = Literal[
+    "assigned", "not_drafter", "not_offered", "already", "over", "busy",
+    "not_allowed", "no_log", "unseatable", "empty", "too_large", "failed"]
+
+
+async def assign_on_request(session_id: Any, player_id: Any) -> RequestOutcome:
     """Hand ONE drafter their pool because they asked for it after the draft.
 
     For somebody who changed their mind: they said no before the draft fired,
@@ -481,7 +486,8 @@ async def assign_on_request(session_id: Any, player_id: Any) -> str:
     The loan is dated from now (CardLoan.claimed_at), not from the draft: a
     queue that reserved the cube since keeps what it reserved, and whatever of
     the pool is spoken for is what /library borrow's "take what's there"
-    offers to leave behind. No "deck waiting" DM: the caller is collecting it.
+    offers to leave behind. No "deck waiting" DM, now or from the watchdog's
+    retry sweep: the caller is collecting it, and was told so.
 
     Returns "assigned", or why not: "not_drafter", "not_offered", "already",
     "over", "busy", "not_allowed", "no_log", "unseatable", "empty",
@@ -522,17 +528,28 @@ async def assign_on_request(session_id: Any, player_id: Any) -> str:
     if too_large(sum(int(c["qty"]) for c in cards)):
         return "too_large"
     try:
-        await assign_deck(guild_id, player, cards, source=loan_source(session_id),
-                          library_id=str(library.id), claimed_at=datetime.now())
+        loan_id = await assign_deck(guild_id, player, cards,
+                                    source=loan_source(session_id),
+                                    library_id=str(library.id),
+                                    claimed_at=datetime.now())
     except IntegrityError:
         # The one-active-loan index: a deck reached them between the check
-        # above and this write.
-        return "busy"
+        # above and this write. From this draft -- the reconciler, or a second
+        # press -- it is the deck they asked for.
+        async with AsyncSessionLocal() as session:
+            held = await session.scalar(select(CardLoan.source).where(
+                CardLoan.borrower_id == player, CardLoan.state.in_(ACTIVE_STATES)))
+        return "assigned" if held == loan_source(session_id) else "busy"
     except Exception:
         logger.opt(exception=True).error(
             "deck assignment: could not assign {}'s pool from {} on request",
             player, session_id)
         return "failed"
+    async with AsyncSessionLocal() as session:
+        loan = await session.get(CardLoan, loan_id)
+        if loan is not None:
+            loan.ready_dm_at = datetime.now()
+            await session.commit()
     logger.info("deck assignment: {} asked for their deck from {} after the draft",
                 player, session_id)
     await _refresh_panel(session_id)

@@ -35,7 +35,9 @@ from services.card_lending_service import (
     return_when_free,
     shortfall,
 )
-from services.draft_deck_assignment import assign_on_request, latest_draft_of
+from services.draft_deck_assignment import (
+    RequestOutcome, assign_on_request, latest_draft_of,
+)
 from services.library_access_service import may_borrow, why_not
 from services.library_service import library_id_for
 from services.mtgo_tradebot_client import get_lending_client, max_cards_per_trade
@@ -77,17 +79,11 @@ SETUP_MESSAGES = {
     "unavailable": "🔌 The card library is unavailable right now. Try again shortly.",
 }
 
-# Two tables, not one, for everything else. The same status means opposite
-# things depending on which way the cards were going: a borrow that never
-# dispatched has a hold to give back, a card deposit that never dispatched has
-# nothing to undo. Folding those together would have to pick one wording for
-# both, and the wrong half of every pair would then be telling the player
-# something untrue. (The custody table lives with the deposit commands.)
 # Why a drafter who asked for their deck after the draft was not handed one
 # (draft_deck_assignment.assign_on_request). "not_allowed" is answered by
 # why_not instead, which can say what the library's rule is.
 _CANNOT_COLLECT = "⚠️ The library can't put your deck together for that draft — ask an admin."
-REQUEST_MESSAGES: "dict[str, str]" = {
+REQUEST_MESSAGES: "dict[RequestOutcome, str]" = {
     "not_offered": "📭 The library doesn't lend that draft's cube.",
     "already": "📭 You've already had your deck from that draft.",
     "over": "📭 Your matches in that draft are done, so the library can't lend you "
@@ -101,6 +97,12 @@ REQUEST_MESSAGES: "dict[str, str]" = {
     "failed": _CANNOT_COLLECT,
 }
 
+# Two tables, not one, for everything else. The same status means opposite
+# things depending on which way the cards were going: a borrow that never
+# dispatched has a hold to give back, a card deposit that never dispatched has
+# nothing to undo. Folding those together would have to pick one wording for
+# both, and the wrong half of every pair would then be telling the player
+# something untrue. (The custody table lives with the deposit commands.)
 LOAN_MESSAGES: "dict[str, str | Callable[[], str]]" = {
     **SETUP_MESSAGES,
     "no_loan": "📭 The library has no deck waiting for you.",
@@ -279,7 +281,7 @@ async def _ask_for_deck(caller: LibraryCaller, guild_id: int,
         if session_id is None:
             return True
     outcome = await assign_on_request(session_id, caller.user_id)
-    if outcome == "assigned" or outcome == "not_drafter":
+    if outcome in ("assigned", "not_drafter"):
         return True
     if outcome == "not_allowed":
         library_id = await library_id_for(guild_id)

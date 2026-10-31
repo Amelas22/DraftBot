@@ -658,15 +658,21 @@ async def decline_offer(borrower_id: Any, session_id: Any) -> bool:
     lapsed. Only an offer: a deck already on its way, or in their hands, goes
     back by /library return. Not final -- they can ask for it again while the
     draft can still use it (draft_deck_assignment.assign_on_request).
+
+    Under the dispatch lock, which a collect holds across its serve call: a
+    decline pressed while the trade is being opened waits for it, finds the
+    deck no longer merely on offer, and says so, rather than reporting it
+    handed back while a trade opens.
     """
-    async with AsyncSessionLocal() as session:
-        offers = list((await session.scalars(select(CardLoan).where(
-            CardLoan.borrower_id == str(borrower_id),
-            CardLoan.source == f"draft:{session_id}",
-            CardLoan.state == "assigned"))).all())
-        if not offers:
-            return False
-        return await _retract(session, offers) > 0
+    async with _DISPATCH_LOCK:
+        async with AsyncSessionLocal() as session:
+            offers = list((await session.scalars(select(CardLoan).where(
+                CardLoan.borrower_id == str(borrower_id),
+                CardLoan.source == f"draft:{session_id}",
+                CardLoan.state == "assigned"))).all())
+            if not offers:
+                return False
+            return await _retract(session, offers) > 0
 
 
 async def active_loan(borrower_id: Any) -> "Optional[CardLoan]":
