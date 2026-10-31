@@ -464,3 +464,92 @@ async def test_a_loan_with_no_library_does_not_break_the_panel(library):
     mine = next(b for b in await borrowers_of(draft) if b.user_id == ALICE)
 
     assert mine.cards == loan.cards
+
+
+# --- a refusal before dispatch points back at the small borrow ----------------
+#
+# On the no-deck path the loan the ask created is taken back straight after, so
+# `/library borrow` would ask for the WHOLE pool -- the opposite of what they
+# pressed. Both paths are pointed at the button they used; only the no-deck
+# path says nothing is held, since a waiting deck still is.
+
+def _refuse_with(monkeypatch, status):
+    async def refused(*_a, **_k):
+        return (status, False)
+
+    monkeypatch.setattr(actions, "borrow_when_free", refused)
+
+
+def _points_back_at_the_small_borrow(text, *, held):
+    assert "**Borrow only some cards** again" in text, text
+    assert "/library borrow" not in text, "that would ask for the whole pool"
+    assert ("Nothing is being held for you" in text) is (not held), text
+
+
+@pytest.mark.parametrize("status", ["short_cards", "not_invited", "short_funds"])
+async def test_a_refused_small_borrow_with_no_deck_points_back_at_it(
+        library, monkeypatch, status):
+    _refuse_with(monkeypatch, status)
+
+    caller = Caller()
+    await actions.borrow_some(caller, SESSION, TWO)
+    await library.drain()
+
+    _points_back_at_the_small_borrow(caller.text, held=False)
+    [loan] = await _alices_loans()
+    assert loan.state == "expired"
+
+
+@pytest.mark.parametrize("status", ["short_cards", "not_invited", "short_funds"])
+async def test_a_refused_small_borrow_with_a_waiting_deck_points_back_at_it(
+        library, monkeypatch, status):
+    assert await assign_on_request(SESSION, ALICE) == "assigned"
+    _refuse_with(monkeypatch, status)
+
+    caller = Caller()
+    await actions.borrow_some(caller, SESSION, TWO)
+    await library.drain()
+
+    _points_back_at_the_small_borrow(caller.text, held=True)
+    loan = await lending_svc.active_loan(ALICE)
+    assert loan is not None and loan.state == "assigned"
+
+
+async def _short_of_the_small_hold(monkeypatch):
+    from models.library import Library
+    async with AsyncSessionLocal() as s:
+        lib = await s.get(Library, LIB)
+        lib.collateral_tix, lib.small_loan_tix_untrusted = 500, 50
+        await s.commit()
+    monkeypatch.setattr(lending_svc, "is_money_server", lambda gid: True)
+
+
+@pytest.mark.parametrize("waiting", [False, True])
+async def test_short_funds_with_figures_points_back_at_the_small_borrow(
+        library, monkeypatch, waiting):
+    await _short_of_the_small_hold(monkeypatch)
+    if waiting:
+        assert await assign_on_request(SESSION, ALICE) == "assigned"
+
+    caller = Caller()
+    await actions.borrow_some(caller, SESSION, TWO)
+    await library.drain()
+
+    assert "**50 tix**" in caller.text, caller.text
+    assert "run the command again" not in caller.text
+    _points_back_at_the_small_borrow(caller.text, held=waiting)
+
+
+@pytest.mark.parametrize("status", ["short_cards", "not_invited", "short_funds"])
+async def test_a_whole_deck_refusal_keeps_its_own_advice(library, monkeypatch, status):
+    _refuse_with(monkeypatch, status)
+    monkeypatch.setattr(actions, "hold_shortfall", _no_figures)
+
+    caller = Caller()
+    await actions._borrow_when_ready(caller, 1)
+
+    assert caller.said == [actions.LOAN_MESSAGES[status]]
+
+
+async def _no_figures(*_a, **_k):
+    return None

@@ -154,7 +154,9 @@ def loan_said(status: str, fallback: str) -> str:
     return text() if callable(text) else text
 
 
-def describe_hold_shortfall(figures: "dict[str, int]") -> str:
+def describe_hold_shortfall(figures: "dict[str, int]", *, what: str = "this deck",
+                            again: str = "run the command again — nothing has been "
+                                         "charged.") -> str:
     """Why the borrow could not be paid for, in the numbers the player needs.
 
     All of them: the hold this deck carries, the week's pass where one is
@@ -163,11 +165,14 @@ def describe_hold_shortfall(figures: "dict[str, int]") -> str:
     is to top up blind and retry until it works -- which is the same dead end
     /library borrow used to be when the library was short of cards.
 
+    `what` and `again` let a small borrow name what it was paying for and the
+    button it was pressed from; "run the command again" would send it to
+    `/library borrow`, which asks for the whole pool.
     """
     cost = f"a **{figures['hold']} tix** hold"
-    return (f"💰 Borrowing this deck needs {cost}, and your wallet has "
+    return (f"💰 Borrowing {what} needs {cost}, and your wallet has "
             f"**{figures['have']}**. Add **{figures['short']}** more with "
-            f"`/wallet` and run the command again — nothing has been charged.")
+            f"`/wallet` and {again}")
 
 
 def describe_shortfall(short: "list[dict[str, Any]]") -> str:
@@ -546,7 +551,8 @@ async def _borrow_some_when_ready(caller: LibraryCaller, guild_id: int,
     # and retracting then would expire a loan with a live trade on it. Left
     # alone, the watchdog settles it and a stale offer lapses as usual.
     await _borrow_when_ready(caller, guild_id, offering=cards,
-                             failed=_failed_nothing_held if asked else _failed_deck_still_waiting)
+                             failed=_failed_nothing_held if asked else _failed_deck_still_waiting,
+                             refused=partial(_small_refusal, held=not asked))
     if asked:
         await decline_offer(caller.user_id, session_id)
 
@@ -559,6 +565,36 @@ def _failed_nothing_held(why: str) -> str:
     return ("❌ The trade didn't complete, so no cards moved and your hold is back. "
             "Nothing is being held for you — press **Borrow only some cards** "
             f"again when you're ready.\n\n{why}")
+
+
+# A refusal before dispatch, worded by the caller: given the status and the hold
+# figures (short_funds only, when the wallet could be read), the line to send,
+# or None for the default.
+Refusal = Callable[[str, "Optional[dict[str, int]]"], Optional[str]]
+
+
+# What a small collect refused before dispatch says, for the statuses whose
+# whole-deck wording sends the drafter to `/library borrow` -- the wrong place
+# for the same reason as above. Pressing the button again re-runs every check,
+# so it shows what is available, or why they are not invited, just as the
+# command would. Any other status is left to LOAN_MESSAGES.
+def _small_refusal(status: str, figures: "Optional[dict[str, int]]", *,
+                   held: bool) -> Optional[str]:
+    nothing_held = "" if held else " Nothing is being held for you."
+    if status == "short_funds":
+        again = ("press **Borrow only some cards** again — nothing has been "
+                 f"charged.{nothing_held}")
+        if figures:
+            return describe_hold_shortfall(figures, what="these cards", again=again)
+        return ("💰 You don't have enough tix to cover the hold on these cards. "
+                f"Top up with `/wallet` and {again}")
+    if status == "short_cards":
+        return (f"📦 The library can no longer cover those cards.{nothing_held} "
+                "Press **Borrow only some cards** again to see what's available.")
+    if status == "not_invited":
+        return (f"🔒 This library doesn't lend to you.{nothing_held} "
+                "Press **Borrow only some cards** again to see why.")
+    return None
 
 
 def _failed_deck_still_waiting(why: str) -> str:
@@ -606,7 +642,8 @@ async def _warn_if_busy(caller: LibraryCaller) -> None:
 
 def _borrow_when_ready(caller: LibraryCaller, guild_id: int,
                        offering: "Optional[list[dict[str, Any]]]" = None,
-                       failed: "Optional[Callable[[str], str]]" = None
+                       failed: "Optional[Callable[[str], str]]" = None,
+                       refused: "Optional[Refusal]" = None
                        ) -> "Awaitable[str]":
     return _trade_when_ready(
         caller, guild_id, partial(borrow_when_free, offering=offering),
@@ -614,14 +651,15 @@ def _borrow_when_ready(caller: LibraryCaller, guild_id: int,
         note="\n⚠️ When you're done, **move these cards into your MTGO trade "
              "binder** before `/library return` — the bot can only take back what's "
              "in your binder.",
-        offering=offering, failed=failed)
+        offering=offering, failed=failed, refused=refused)
 
 
 async def _trade_when_ready(caller: LibraryCaller, guild_id: int,
                             when_free: "Callable[[int, int], Awaitable[tuple[str, bool]]]",
                             verb: str, expect: str, note: str = "",
                             offering: "Optional[list[dict[str, Any]]]" = None,
-                            failed: "Optional[Callable[[str], str]]" = None
+                            failed: "Optional[Callable[[str], str]]" = None,
+                            refused: "Optional[Refusal]" = None
                             ) -> str:
     """Wait for the library's turn, dispatch, then see the trade through.
 
@@ -630,7 +668,9 @@ async def _trade_when_ready(caller: LibraryCaller, guild_id: int,
     `offering` is the cards being sent, so a short-funds answer quotes the hold
     for THAT trade rather than for the whole deck. `failed`, given the serve's
     reason, words a failed trade for a caller whose loan the default wording
-    would misdescribe.
+    would misdescribe. `refused` does the same for a refusal before dispatch:
+    given the status and the hold figures (short_funds only, when readable),
+    it returns the line to send, or None to use the default.
 
     Runs detached so the interaction is not held open for the wait: Discord
     gives a command 15 minutes of followups, but a player staring at a
@@ -642,19 +682,22 @@ async def _trade_when_ready(caller: LibraryCaller, guild_id: int,
         # costs a wallet read, so unlike the static strings this branch can
         # raise -- and a raise here leaves the interaction deferred and
         # never answered, which Discord shows as "did not respond".
+        figures: "Optional[dict[str, int]]" = None
         try:
             figures = await hold_shortfall(guild_id, caller.user_id,
                                            offering=offering)
-            said = (describe_hold_shortfall(figures) if figures
-                    else loan_said(status, status))
         except Exception:
             logger.exception("library: could not read the hold figures for {}",
                              caller.user_id)
-            said = loan_said(status, status)
+        said = ((refused(status, figures) if refused is not None else None)
+                or (describe_hold_shortfall(figures) if figures
+                    else loan_said(status, status)))
         await caller.send(said)
         return status
     if status != "dispatched":
-        await caller.send(loan_said(status, f"⚠️ Couldn't {verb} your deck ({status})."))
+        said = refused(status, None) if refused is not None else None
+        await caller.send(said or loan_said(
+            status, f"⚠️ Couldn't {verb} your deck ({status})."))
         return status
 
     loan = await active_loan(caller.user_id)
