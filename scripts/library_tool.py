@@ -26,6 +26,9 @@ they could repoint their server at.
     pipenv run python scripts/library_tool.py invite lotuslounge 1300917843226787
     pipenv run python scripts/library_tool.py uninvite lotuslounge 1300917843226787
     pipenv run python scripts/library_tool.py open lotuslounge
+
+    # while tournament 4 runs, its players borrow with no hold and no gate
+    pipenv run python scripts/library_tool.py exempt-tournament 4 on
 """
 import argparse
 import asyncio
@@ -40,6 +43,7 @@ from database.db_session import AsyncSessionLocal                # noqa: E402
 from models.library import KINDS, Library                        # noqa: E402
 from models.library_cube import LibraryCube                      # noqa: E402
 from models.library_server import LibraryServer                  # noqa: E402
+from models.tournament import Tournament                         # noqa: E402
 import services.library_access_service as access                 # noqa: E402
 import services.library_service as libs                          # noqa: E402
 
@@ -218,6 +222,31 @@ async def _open(library_id):
     print("   ⚠️  Everyone in its servers may borrow now.")
 
 
+async def _exempt_tournament(tournament_id, on):
+    async with AsyncSessionLocal() as s:
+        t = await s.get(Tournament, int(tournament_id))
+        if t is None:
+            print(f"No tournament {tournament_id}.")
+            return
+        bound = await s.get(LibraryServer, str(t.guild_id))
+        was, t.library_exempt = bool(t.library_exempt), on
+        await s.commit()
+    state = "on" if on else "off"
+    print(f"{t.name} (#{t.id}, guild {t.guild_id}, {t.status}): library exemption "
+          f"{state}{'' if was != on else ' already'}.")
+    if not on:
+        return
+    if bound is None:
+        print("   ⚠️  Its server draws on no library, so there is nothing to exempt from.")
+    else:
+        print(f"   While it is active, its players borrow from {bound.library_id} "
+              f"with no hold and no member/draft gate.")
+    if t.status == "completed":
+        print("   It has completed, so this exempts nobody.")
+    elif t.status != "active":
+        print(f"   It is in {t.status}, so nobody is exempt until it starts.")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -268,6 +297,11 @@ def main():
     p = sub.add_parser("open", help="let everyone in its servers borrow again")
     p.add_argument("library")
 
+    p = sub.add_parser("exempt-tournament",
+                       help="let a running tournament's players borrow free")
+    p.add_argument("tournament", type=int)
+    p.add_argument("state", choices=["on", "off"])
+
     a = ap.parse_args()
     match a.cmd:
         case "create":
@@ -289,6 +323,8 @@ def main():
             asyncio.run(_uninvite(a.library, a.player))
         case "open":
             asyncio.run(_open(a.library))
+        case "exempt-tournament":
+            asyncio.run(_exempt_tournament(a.tournament, a.state == "on"))
 
 
 if __name__ == "__main__":
