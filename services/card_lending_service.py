@@ -320,9 +320,15 @@ async def available_now() -> "dict[str, int]":
     return {name: max(0, qty) for name, qty in stock.items()}
 
 
-async def hold_shortfall(guild_id: Any, borrower_id: Any
-                            ) -> "Optional[dict[str, int]]":
+async def hold_shortfall(guild_id: Any, borrower_id: Any,
+                         offering: "Optional[list[dict[str, Any]]]" = None
+                         ) -> "Optional[dict[str, int]]":
     """What borrowing costs here, what the borrower holds, and the gap.
+
+    The cost follows the size of what is SENT, so a borrower who is short on a
+    few named cards is quoted the small hold, not the deck's. `offering` is
+    that trade when the caller has one; otherwise it is whatever the loan
+    would send (collateral_for).
 
     None where there are no figures to quote -- no loan, or a cube with no
     price in this server. That is a refusal, not a price of nothing, and
@@ -335,7 +341,15 @@ async def hold_shortfall(guild_id: Any, borrower_id: Any
     nothing; holding the lock open to narrate is the version that costs.
     """
     loan = await active_loan(borrower_id)
-    hold = await collateral_for(loan, guild_id) if loan else None
+    if loan is None:
+        return None
+    if offering is None:
+        hold = await collateral_for(loan, guild_id)
+    else:
+        library = await library_behind(loan, guild_id)
+        hold = (await hold_for(library, loan.borrower_id,
+                               cards=_card_count(offering))
+                if library is not None else None)
     if hold is None:
         return None
     async with db_session() as session:
@@ -370,8 +384,18 @@ async def library_behind(loan: Any, guild_id: Any) -> "Optional[Any]":
     return bound
 
 
+def _card_count(cards: "list[dict[str, Any]]") -> int:
+    """Copies in a list of {name, qty} entries -- the size a hold is set by."""
+    return sum(int(c.get("qty") or 0) for c in cards)
+
+
 async def collateral_for(loan: Any, guild_id: Any) -> Optional[int]:
-    """What this deck costs THIS borrower, or None if it cannot be borrowed.
+    """What this loan costs THIS borrower, or None if it cannot be borrowed.
+
+    The figure follows the size of what the loan sends (offered_cards): a trade
+    of a few named cards is held at the small-loan figure, the whole deck at
+    the deck's. An assigned deck with no pending offer sends the deck, so the
+    deck-ready DM keeps quoting the deck hold.
 
     The price belongs to the LIBRARY the cards came from, not to the server. A
     server admin can rewrite `configs/<guild>.json` through the bot's own
@@ -394,7 +418,8 @@ async def collateral_for(loan: Any, guild_id: Any) -> Optional[int]:
     library = await library_behind(loan, guild_id)
     if library is None:
         return None
-    return await hold_for(library, loan.borrower_id)
+    return await hold_for(library, loan.borrower_id,
+                          cards=_card_count(loan.offered_cards))
 
 
 async def shortfall(guild_id: Any, cards: "list[dict[str, Any]]",
@@ -782,8 +807,9 @@ async def _dispatch(guild_id: Any, borrower_id: Any, *, from_state: str, to_stat
         # a tiered library's figure depends on the borrower, and reading the
         # column here would quote one number in /library deck and charge
         # another at the trade. Off the library in hand, never a second
-        # lookup that could come back empty and read as free.
-        held = await hold_for(library, borrower_id)
+        # lookup that could come back empty and read as free. Sized by what
+        # is being sent: a few named cards are held at the small figure.
+        held = await hold_for(library, borrower_id, cards=_card_count(requested))
         if held is None:
             logger.warning("library: refusing to lend in {} -- no hold for {} "
                            "from {}", guild_id, borrower_id, library_id)

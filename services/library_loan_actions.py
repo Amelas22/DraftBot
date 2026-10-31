@@ -379,19 +379,27 @@ async def _warn_if_busy(caller: LibraryCaller) -> None:
 
 def _borrow_when_ready(caller: LibraryCaller, guild_id: int,
                        offering: "Optional[list[dict[str, Any]]]" = None
-                       ) -> "Awaitable[None]":
+                       ) -> "Awaitable[str]":
     return _trade_when_ready(
         caller, guild_id, partial(borrow_when_free, offering=offering),
         "collect", "borrowed",
         note="\n⚠️ When you're done, **move these cards into your MTGO trade "
              "binder** before `/library return` — the bot can only take back what's "
-             "in your binder.")
+             "in your binder.",
+        offering=offering)
 
 
 async def _trade_when_ready(caller: LibraryCaller, guild_id: int,
                             when_free: "Callable[[int, int], Awaitable[tuple[str, bool]]]",
-                            verb: str, expect: str, note: str = "") -> None:
+                            verb: str, expect: str, note: str = "",
+                            offering: "Optional[list[dict[str, Any]]]" = None
+                            ) -> str:
     """Wait for the library's turn, dispatch, then see the trade through.
+
+    Returns the dispatch status ("dispatched", "short_funds", ...) so a caller
+    that cares can tell how it went; one that ignores it is unaffected.
+    `offering` is the cards being sent, so a short-funds answer quotes the hold
+    for THAT trade rather than for the whole deck.
 
     Runs detached so the interaction is not held open for the wait: Discord
     gives a command 15 minutes of followups, but a player staring at a
@@ -404,7 +412,8 @@ async def _trade_when_ready(caller: LibraryCaller, guild_id: int,
         # raise -- and a raise here leaves the interaction deferred and
         # never answered, which Discord shows as "did not respond".
         try:
-            figures = await hold_shortfall(guild_id, caller.user_id)
+            figures = await hold_shortfall(guild_id, caller.user_id,
+                                           offering=offering)
             said = (describe_hold_shortfall(figures) if figures
                     else loan_said(status, status))
         except Exception:
@@ -412,10 +421,10 @@ async def _trade_when_ready(caller: LibraryCaller, guild_id: int,
                              caller.user_id)
             said = loan_said(status, status)
         await caller.send(said)
-        return
+        return status
     if status != "dispatched":
         await caller.send(loan_said(status, f"⚠️ Couldn't {verb} your deck ({status})."))
-        return
+        return status
 
     loan = await active_loan(caller.user_id)
     who = await custodian_name(get_lending_client())
@@ -434,6 +443,7 @@ async def _trade_when_ready(caller: LibraryCaller, guild_id: int,
     outcome, detail = await poll_until_settled(guild_id, caller.user_id, expect,
                                                job_id=job_id)
     await _report_outcome(caller, outcome, expect, detail)
+    return status
 
 
 async def _report_outcome(caller: LibraryCaller, outcome: str, expected: str,
