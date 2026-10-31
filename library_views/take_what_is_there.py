@@ -20,7 +20,7 @@ class TakeWhatIsThereView(discord.ui.View):
     """
 
     def __init__(self, guild_id: int, loan_id: Any,
-                 collect: "Callable[[list[dict[str, Any]]], Awaitable[None]]",
+                 collect: "Callable[[list[dict[str, Any]]], Awaitable[Any]]",
                  timeout: float = 180) -> None:
         super().__init__(timeout=timeout)
         self.guild_id, self.loan_id, self.collect = guild_id, loan_id, collect
