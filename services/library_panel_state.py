@@ -73,7 +73,9 @@ async def _cards_described(loan: CardLoan) -> Any:
             return loan.cards
         held = await owed_cards(scope, loan.borrower_id)
         return held or loan.cards
-    if loan.state == "out_pending":
+    # dispatch_unknown as out_pending: a trade that may have started carries
+    # the offer, not the pool.
+    if loan.state in {"out_pending", "dispatch_unknown"}:
         return loan.offered_cards
     return loan.cards
 

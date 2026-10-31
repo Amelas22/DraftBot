@@ -168,3 +168,14 @@ def test_return_embed_invites_a_dead_rubber_to_borrow_again():
 def test_return_embed_says_nothing_about_borrowing_when_nobody_may():
     embed = return_embed(_who("returned"), None, anyone_may_request=False)
     assert "Borrow my deck" not in embed.description
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["out_pending", "dispatch_unknown"])
+async def test_a_promised_loan_is_described_by_the_cards_on_offer(state):
+    """Both states have a trade that may be moving the pending offer, not the
+    pool; a dispatch_unknown loan of three cards must not read as forty."""
+    pool = [{"name": "Swamp", "qty": 4}, {"name": "Island", "qty": 4}]
+    offer = [{"name": "Swamp", "qty": 1}]
+    loan = CardLoan(state=state, cards=pool, pending_cards=offer)
+    assert await library_panel_state._cards_described(loan) == offer
