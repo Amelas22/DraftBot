@@ -307,7 +307,7 @@ async def test_a_deposit_and_a_loan_do_not_cancel_each_other(test_db, rig):
 
     assert await svc.held_for(OWNER, LIB) == [{"name": "Auramancer", "qty": 2}], \
         "their deposit is still theirs"
-    assert await lending._still_owed(GUILD, OWNER) == [{"name": "Auramancer", "qty": 2}], \
+    assert await lending.owed_cards(GUILD, OWNER) == [{"name": "Auramancer", "qty": 2}], \
         "and they still owe the deck they borrowed"
 
 

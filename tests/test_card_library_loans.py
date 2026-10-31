@@ -240,7 +240,7 @@ async def _owe(card_name):
 
 async def _owed():
     from services import wallet_service
-    return await svc._still_owed(wallet_service.library_scope("lib"), BORROWER)
+    return await svc.owed_cards(wallet_service.library_scope("lib"), BORROWER)
 
 
 async def test_a_return_reported_as_the_twin_retires_a_loan_booked_as_the_counted_name(

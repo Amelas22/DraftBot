@@ -1415,7 +1415,7 @@ async def _settle_loan(client: Any, loan: Any,
             # booked against what the borrower owes: it named nothing, and a
             # crossover printing comes back under whichever of its two names
             # the serve uses, which need not be the one the loan was booked as.
-            owed = await _still_owed(scope, loan.borrower_id) if kind == "return" else None
+            owed = await owed_cards(scope, loan.borrower_id) if kind == "return" else None
             moved = await _items_moved(job or {}, kind, owed)
             await _book_claim(scope, loan.borrower_id, kind, moved, batch.job_id)
             landed.extend(moved)
@@ -1443,7 +1443,7 @@ async def _settle_order(loan: Any, kind: str, landed: "list[dict[str, Any]]",
     guild, borrower = loan.guild_id, loan.borrower_id
     scope = wallet_service.library_scope(loan.library_id)
     remaining: "list[dict[str, Any]]" = (
-        await _still_owed(scope, borrower) if kind == "return" and moved else [])
+        await owed_cards(scope, borrower) if kind == "return" and moved else [])
 
     # The money half, BEFORE the claim is written: a crash in between leaves
     # the loan exactly as it was, to be settled again, and set_collateral
@@ -1491,8 +1491,14 @@ async def _settle_order(loan: Any, kind: str, landed: "list[dict[str, Any]]",
     return {"state": "done" if moved else "failed", "detail": detail}
 
 
-async def _still_owed(guild_id: Any, borrower_id: Any) -> "list[dict[str, Any]]":
-    """Cards this borrower still owes the library, from the claim ledger."""
+async def owed_cards(guild_id: Any, borrower_id: Any) -> "list[dict[str, Any]]":
+    """Cards this borrower still owes the library, from the claim ledger.
+
+    `guild_id` is the ledger scope the claim was booked under, which for a
+    library loan is `wallet_service.library_scope(loan.library_id)`. This, not
+    `loan.cards`, is what a collected loan actually moved: `cards` stays the
+    whole drafted pool as the draft record, however few of them crossed.
+    """
     from services import debt_service
     positions = await debt_service.get_open_card_positions(
         str(guild_id), str(borrower_id), wallet_service.HOUSE_MTGO)
