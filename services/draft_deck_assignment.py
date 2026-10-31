@@ -475,6 +475,55 @@ RequestOutcome = Literal[
     "assigned", "not_drafter", "not_offered", "already", "over", "busy",
     "not_allowed", "no_log", "unseatable", "empty", "too_large", "failed"]
 
+# Why a drafter's pool cannot be read: the subset of RequestOutcome that comes
+# from the log and the seating rather than from the library's rules.
+PoolRefusal = Literal["not_drafter", "no_log", "unseatable"]
+
+
+async def _pool_of(session_id: Any, key: Any, sign_ups: "dict[str, Any]"
+                   ) -> "list[dict[str, Any]] | PoolRefusal":
+    """The pool the drafter seated as `key` would be handed, or why it cannot
+    be read. Writes nothing.
+
+    The one copy of the rule, shared by the request that creates the loan and
+    the matching that runs before it: a name matched against one reading of
+    the pool and then borrowed from another could be a card the loan does not
+    hold, and the dispatch would refuse a trade the drafter was just told was
+    fine. Duplicate display names are refused here exactly as they are when
+    every deck is handed out (see _shared_names).
+    """
+    draft_data = await _draft_log(session_id)
+    if draft_data is None:
+        return "no_log"
+    seat = (None if _shared_names(sign_ups)
+            else map_discord_to_draftmancer(draft_data, sign_ups).get(key))
+    if seat is None:
+        return "unseatable"
+    return await _pool_the_library_can_lend(
+        pool_items(draft_data, seat, name_of=mtgo_name))
+
+
+async def pool_for_request(session_id: Any, player_id: Any
+                           ) -> "list[dict[str, Any]] | PoolRefusal":
+    """What assign_on_request would lend this drafter from this draft, without
+    asking whether it may: no loan is written and no library rule is applied.
+
+    For borrowing a few named cards, whose names are matched BEFORE anything is
+    reserved -- so a drafter who reads the match and cancels is left with no
+    loan, exactly as if they had never pressed the button. The rules that
+    decide whether they may have it run later, in assign_on_request, when they
+    confirm. An empty list is a pool with nothing lendable in it, which the
+    matching reports name by name rather than as a refusal.
+    """
+    meta = await _session_meta(session_id)
+    if meta is None:
+        return "not_drafter"
+    _, sign_ups = meta
+    key = next((k for k in sign_ups if str(k) == str(player_id)), None)
+    if key is None:
+        return "not_drafter"
+    return await _pool_of(session_id, key, sign_ups)
+
 
 async def assign_on_request(session_id: Any, player_id: Any) -> RequestOutcome:
     """Hand ONE drafter their pool because they asked for it after the draft.
@@ -517,15 +566,9 @@ async def assign_on_request(session_id: Any, player_id: Any) -> RequestOutcome:
     if player not in await may_borrow_many(library.id, [player]):
         return "not_allowed"
 
-    draft_data = await _draft_log(session_id)
-    if draft_data is None:
-        return "no_log"
-    seat = (None if _shared_names(sign_ups)
-            else map_discord_to_draftmancer(draft_data, sign_ups).get(key))
-    if seat is None:
-        return "unseatable"
-    cards = await _pool_the_library_can_lend(
-        pool_items(draft_data, seat, name_of=mtgo_name))
+    cards = await _pool_of(session_id, key, sign_ups)
+    if isinstance(cards, str):
+        return cards
     if not cards:
         return "empty"
     if too_large(sum(int(c["qty"]) for c in cards)):
