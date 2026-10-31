@@ -51,9 +51,11 @@ async def hold_for(library: Any, player_id: Any) -> Optional[int]:
     prices = price_range_of(library)
     if prices is None:
         return None
-    if await is_exempt(library.id, player_id):
-        return 0   # a running tournament lends its players the deck on the house
     least, most = prices
+    # Before is_trusted, so an exempt player is never logged as a non-member; and
+    # only where there is a hold to waive.
+    if most and await is_exempt(library.id, player_id):
+        return 0   # a running tournament lends its players the deck on the house
     if least == most or await is_trusted(library.id, player_id):
         return least
     logger.info("library {}: {} is not on its member list, so the "

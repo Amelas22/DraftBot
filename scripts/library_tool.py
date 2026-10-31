@@ -44,7 +44,7 @@ from models.library import KINDS, Library                        # noqa: E402
 from models.library_cube import LibraryCube                      # noqa: E402
 from models.library_server import LibraryServer                  # noqa: E402
 from models.tournament import Tournament                         # noqa: E402
-import services.library_access_service as access                # noqa: E402
+import services.library_access_service as access                 # noqa: E402
 import services.library_service as libs                          # noqa: E402
 
 

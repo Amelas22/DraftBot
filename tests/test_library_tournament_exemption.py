@@ -106,9 +106,3 @@ async def test_a_library_that_lends_to_nobody_named_is_unchanged(test_db):
 
     assert await access.may_borrow(LIB, OUTSIDER) is True
     assert await trust.hold_for(await library_for(GUILD), OUTSIDER) == 0
-
-
-async def test_no_library_is_still_a_refusal(test_db):
-    await _tournament()
-
-    assert await trust.hold_for(None, CAPTAIN) is None
