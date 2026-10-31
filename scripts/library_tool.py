@@ -57,11 +57,18 @@ async def _create(library_id, name, kind, hold, by, replace,
         print(f"--hold-unknown {hold_unknown} is below --hold {hold}: the higher "
               f"figure is the one asked of non-members. Nothing changed.")
         return
+    # The small-loan figures as hold_for will read them: each falls back on its
+    # deck counterpart on its own, so `--hold 0 --small-hold 10` alone would
+    # ask a member 10 and a stranger 0. Checked on the effective pair, not on
+    # the flags that happen to be given.
     member_small = hold if small_hold is None else small_hold
-    if small_hold_unknown is not None and small_hold_unknown < member_small:
-        print(f"--small-hold-unknown {small_hold_unknown} is below the member "
-              f"small-loan figure {member_small}: the higher figure is the one "
-              f"asked of non-members. Nothing changed.")
+    stranger_small = (small_hold_unknown if small_hold_unknown is not None
+                      else hold if hold_unknown is None else hold_unknown)
+    if stranger_small < member_small:
+        print(f"The small-loan figure for non-members would be {stranger_small}, "
+              f"below the member figure {member_small}: the higher figure is the "
+              f"one asked of non-members. Pass --small-hold-unknown at or above "
+              f"{member_small}. Nothing changed.")
         return
     async with AsyncSessionLocal() as s:
         row = await s.get(Library, library_id)
