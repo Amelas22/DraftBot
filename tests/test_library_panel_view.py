@@ -296,22 +296,49 @@ def some(monkeypatch):
     return stubs
 
 
-async def test_cancel_borrows_nothing(some):
+def _pressed(user_id=3, message_id=777):
+    """A press on the confirm message, which the modal's followup posted."""
+    interaction = _interaction(user_id)
+    interaction.message = SimpleNamespace(id=message_id)
+    interaction.response.edit_message = AsyncMock()
+    return interaction
+
+
+def _origin():
+    """The modal submission that posted the confirm message."""
+    origin = MagicMock()
+    origin.followup.edit_message = AsyncMock()
+    return origin
+
+
+async def test_cancel_borrows_nothing_and_takes_the_buttons_away(some):
     from library_views.some_cards import SomeCardsConfirmView
     view = SomeCardsConfirmView([{"name": "Swamp", "qty": 1}], "s1")
-    interaction = _interaction(3)
+    interaction = _pressed()
     await view.cancel.callback(interaction)
     some.borrow_some.assert_not_called()
     assert some.spawned == []
-    assert interaction.response.send_message.await_args.args[0] == "👌 Nothing borrowed."
+    interaction.response.edit_message.assert_awaited_once_with(
+        content="👌 Nothing borrowed.", view=None)
     assert view.is_finished()
+
+
+async def test_a_second_cancel_is_a_no_op(some):
+    from library_views.some_cards import SomeCardsConfirmView
+    view = SomeCardsConfirmView([{"name": "Swamp", "qty": 1}], "s1")
+    await view.cancel.callback(_pressed())
+    again = _pressed()
+    await view.cancel.callback(again)
+    again.response.edit_message.assert_not_awaited()
+    again.response.send_message.assert_not_awaited()
 
 
 async def test_confirm_borrows_exactly_the_carried_cards(some):
     from library_views.some_cards import SomeCardsConfirmView
     cards = [{"name": "Swamp", "qty": 1}, {"name": "Island", "qty": 2}]
-    view = SomeCardsConfirmView(cards, "s1")
-    interaction = _interaction(3)
+    origin = _origin()
+    view = SomeCardsConfirmView(cards, "s1", origin=origin)
+    interaction = _pressed()
     await view.confirm.callback(interaction)
     assert view.is_finished()
     assert len(some.spawned) == 1
@@ -320,18 +347,68 @@ async def test_confirm_borrows_exactly_the_carried_cards(some):
     assert (caller.user_id, session_id, sent) == (3, "s1", cards)
     # borrow_some defers; acknowledging here too would make that a second ack.
     interaction.response.defer.assert_not_awaited()
+    interaction.response.edit_message.assert_not_awaited()
+    # The buttons are taken away through the modal's own webhook, which posted
+    # the message, leaving this press's one response to borrow_some.
+    origin.followup.edit_message.assert_awaited_once_with(777, view=None)
 
 
-async def _submit(monkeypatch, plan, hold=5):
+async def test_a_second_confirm_is_a_no_op(some):
+    from library_views.some_cards import SomeCardsConfirmView
+    view = SomeCardsConfirmView([{"name": "Swamp", "qty": 1}], "s1", origin=_origin())
+    first, second = _pressed(), _pressed()
+    await view.confirm.callback(first)
+    await view.confirm.callback(second)
+    for coro in some.spawned:
+        await coro
+    assert some.borrow_some.await_count == 1
+    second.response.defer.assert_not_awaited()
+
+
+async def test_a_failed_button_clear_does_not_break_the_borrow(some):
+    import discord
+    from library_views.some_cards import SomeCardsConfirmView
+    origin = _origin()
+    origin.followup.edit_message.side_effect = discord.HTTPException(
+        MagicMock(status=404), "Unknown Message")
+    view = SomeCardsConfirmView([{"name": "Swamp", "qty": 1}], "s1", origin=origin)
+    await view.confirm.callback(_pressed())
+    await some.spawned[0]
+    assert some.borrow_some.await_count == 1
+
+
+async def _submit(monkeypatch, plan, hold=5, loan=None, library=None):
     import library_views.some_cards as mod
     monkeypatch.setattr(mod, "match_for_borrow", AsyncMock(return_value=plan))
-    monkeypatch.setattr(mod, "library_for", AsyncMock(return_value=object()))
-    monkeypatch.setattr(mod, "hold_for", AsyncMock(return_value=hold))
+    monkeypatch.setattr(mod, "active_loan", AsyncMock(return_value=loan))
+    behind = AsyncMock(return_value=library if library is not None else object())
+    monkeypatch.setattr(mod, "library_behind", behind)
+    held = AsyncMock(return_value=hold)
+    monkeypatch.setattr(mod, "hold_for", held)
     modal = mod.SomeCardsModal("s1")
     modal.children[0].value = "swamp"
     interaction = _interaction(3)
     await modal.callback(interaction)
+    interaction.behind, interaction.held = behind, held
     return interaction
+
+
+async def test_the_quote_prices_a_waiting_deck_by_its_own_library(monkeypatch):
+    """The trade charges through library_behind(loan, ...), which prefers the
+    library stamped on the loan; the quote must read the same one."""
+    from services.card_name_match import NameMatch
+    from services.library_loan_actions import SomeCardsPlan
+    match = NameMatch(found=[], unknown=[], ambiguous=[])
+    plan = SomeCardsPlan(available=[{"name": "Swamp", "qty": 1}], reserved=[], match=match)
+    loan, library = SimpleNamespace(library_id="stamped"), object()
+
+    interaction = await _submit(monkeypatch, plan, loan=loan, library=library)
+
+    interaction.behind.assert_awaited_once_with(loan, 99)
+    assert interaction.held.await_args.args[0] is library
+    interaction.behind.reset_mock()
+    interaction = await _submit(monkeypatch, plan, loan=None)
+    interaction.behind.assert_awaited_once_with(None, 99)
 
 
 async def test_a_refusal_from_the_match_is_shown_as_is(monkeypatch):
