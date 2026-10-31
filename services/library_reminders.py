@@ -153,7 +153,8 @@ def deck_ready_message(cards: Any, collateral: int) -> str:
     return msg
 
 
-def return_message(loan: Any, decided: bool = False) -> str:
+def return_message(loan: Any, decided: bool = False,
+                   cards: Any = None) -> str:
     """The ask. Says what it is for, because a borrower who has finished a draft
     has no other reason to think about the cards again.
 
@@ -161,9 +162,14 @@ def return_message(loan: Any, decided: bool = False) -> str:
     what this borrower put up, so a library that changed its terms mid-loan
     promised the wrong refund in either direction. /library return states the
     real one at the moment it hands it back, where it cannot be stale.
+
+    `cards` is what the borrower actually holds (the claim ledger's view); the
+    loan's own list is the whole drafted pool, which is more than crossed when
+    they borrowed only some of it. Without it the loan's list is the best
+    available description.
     """
     lead = "Your draft is decided. " if decided else ""
-    return (f"{lead}📦 Please return your borrowed deck — **{deck_summary(loan.cards)}**.\n"
+    return (f"{lead}📦 Please return your borrowed deck — **{deck_summary(cards if cards else loan.cards)}**.\n"
             "Run `/library return` and the library will collect it, and the "
             "hold comes back with it.\n"
             "Other drafters are waiting on those cards.")
@@ -305,6 +311,9 @@ async def send_due_reminders(now: Optional[datetime] = None) -> int:
                         finished_at=mine, played_since_ask=played_since_ask, now=at):
             due.append((loan, state.settled))
 
+    from services import wallet_service
+    from services.card_lending_service import owed_cards
+
     asked = 0
     for loan, decided in due:
         # Re-read immediately before sending. The list was decided up front and
@@ -313,7 +322,10 @@ async def send_due_reminders(now: Optional[datetime] = None) -> int:
         # reads as the library having lost track of its own shelf.
         if not await _still_out(loan.id):
             continue
-        if await _dm(loan, return_message(loan, decided), "return reminder"):
+        held = await owed_cards(wallet_service.library_scope(loan.library_id),
+                                loan.borrower_id)
+        if await _dm(loan, return_message(loan, decided, cards=held),
+                     "return reminder"):
             await _stamp(loan.id, "last_reminded_at", at)
             asked += 1
     if asked:

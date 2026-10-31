@@ -15,6 +15,8 @@ from database.db_session import AsyncSessionLocal
 from models.card_loan import CardLoan
 from models.draft_session import DraftSession
 from services.draft_deck_assignment import loan_source
+from services import wallet_service
+from services.card_lending_service import owed_cards
 from services.library_reminders import deck_summary
 from services.library_reservation import library_users
 
@@ -49,6 +51,25 @@ def _sort_key(b: Borrower) -> tuple[str, str]:
     return (b.name.lower(), b.user_id)
 
 
+async def _cards_described(loan: CardLoan) -> Any:
+    """The cards to describe this loan by: what the borrower has, not the pool.
+
+    `loan.cards` is the whole drafted pool and stays so as the draft record, so
+    a loan that moved three of forty cards would read as forty. Once cards are
+    out, the claim ledger knows what crossed; before they go, the offer does.
+    A ledger with nothing for a borrower who is out (a loan booked before the
+    ledger knew) falls back to the pool, which is what it always said. Only the
+    out states read the ledger, so a panel pays for the people holding cards.
+    """
+    if loan.state in {"borrowed", "return_pending"}:
+        held = await owed_cards(wallet_service.library_scope(loan.library_id),
+                                loan.borrower_id)
+        return held or loan.cards
+    if loan.state == "out_pending":
+        return loan.offered_cards
+    return loan.cards
+
+
 async def borrowers_of(draft: Any) -> list[Borrower]:
     """Everyone the panel lists: the reserved plus anyone with a loan from this
     draft, each with their newest loan, sorted by name."""
@@ -64,7 +85,7 @@ async def borrowers_of(draft: Any) -> list[Borrower]:
         loan = newest.get(uid)
         out.append(Borrower(uid, names.get(uid, f"<@{uid}>"),
                             loan.state if loan else None,
-                            loan.cards if loan else None))
+                            await _cards_described(loan) if loan else None))
     return sorted(out, key=_sort_key)
 
 

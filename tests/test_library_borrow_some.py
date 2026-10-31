@@ -14,6 +14,7 @@ import pytest_asyncio
 
 import services.card_lending_service as lending_svc
 import services.library_loan_actions as actions
+import services.wallet_service as wallet_service
 from conftest import FakeLendingServe, a_library
 from database.db_session import AsyncSessionLocal
 from models.card_loan import CardLoan
@@ -359,3 +360,59 @@ async def test_describe_plan_stays_one_message_however_ambiguous_the_names():
         match=NameMatch(ambiguous=[("x" * 100, many)] * 3, unknown=["y" * 100] * 3))
 
     assert len(actions.describe_plan(plan, 50)) < 2000
+
+
+# --- a collected loan is described by what crossed ----------------------------
+
+THREE = TWO + [{"name": "Brainstorm", "qty": 1}]
+
+
+async def _collected(library, offering):
+    """Alice's loan after the serve moved `offering` to her, settled for real."""
+    from sqlalchemy import select
+    from services.library_panel_state import borrowers_of
+    caller = Caller()
+    await actions.borrow_some(caller, SESSION, offering)
+    await library.drain()
+    loan = await lending_svc.active_loan(ALICE)
+    assert loan is not None and loan.state == "borrowed", caller.text
+    assert len(loan.cards) == len(POOL), "the draft record keeps the whole pool"
+    async with AsyncSessionLocal() as s:
+        draft = (await s.scalars(select(DraftSession))).first()
+    mine = next(b for b in await borrowers_of(draft) if b.user_id == ALICE)
+    return loan, mine
+
+
+async def test_panel_shows_a_collected_small_loan_as_its_cards(library):
+    from services.library_reminders import deck_summary
+    loan, mine = await _collected(library, THREE)
+
+    assert deck_summary(mine.cards) == deck_summary(THREE)
+    assert deck_summary(mine.cards) != deck_summary(loan.cards)
+
+
+async def test_return_reminder_counts_what_was_borrowed(library):
+    from services.library_reminders import deck_summary, return_message
+    loan, _ = await _collected(library, THREE)
+    owed = await lending_svc.owed_cards(
+        wallet_service.library_scope(loan.library_id), ALICE)
+
+    msg = return_message(loan, cards=owed)
+
+    assert deck_summary(THREE) in msg and deck_summary(loan.cards) not in msg, msg
+
+
+async def test_take_what_is_there_loan_reports_its_partial_size(library):
+    from services.library_panel_state import borrowers_of
+    from services.library_reminders import deck_summary
+    assert await assign_on_request(SESSION, ALICE) == "assigned"
+    await lending_svc.borrow_when_free(GUILD, ALICE, offering=THREE)
+    await lending_svc.settle_in_flight(GUILD)
+    async with AsyncSessionLocal() as s:
+        from sqlalchemy import select
+        draft = (await s.scalars(select(DraftSession))).first()
+
+    mine = next(b for b in await borrowers_of(draft) if b.user_id == ALICE)
+
+    assert mine.state == "borrowed"
+    assert deck_summary(mine.cards) == deck_summary(THREE)
