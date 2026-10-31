@@ -88,6 +88,10 @@ SETUP_MESSAGES = {
 # why_not instead, which can say what the library's rule is.
 _CANNOT_COLLECT = "⚠️ The library can't put your deck together for that draft — ask an admin."
 REQUEST_MESSAGES: "dict[RequestOutcome, str]" = {
+    # Never shown by `borrow`, which carries on and says "no deck waiting" for a
+    # draft it only guessed at; a press on one draft's panel names that draft,
+    # so the drafter is told plainly why it has nothing for them.
+    "not_drafter": "📭 You didn't draft in this draft, so there's no pool to borrow from.",
     "not_offered": "📭 The library doesn't lend that draft's cube.",
     "already": "📭 You've already had your deck from that draft.",
     "over": "📭 Your matches in that draft are done, so the library can't lend you "
@@ -287,12 +291,19 @@ async def _ask_for_deck(caller: LibraryCaller, guild_id: int,
     outcome = await assign_on_request(session_id, caller.user_id)
     if outcome in ("assigned", "not_drafter"):
         return True
+    await _say_request_refused(caller, guild_id, outcome)
+    return False
+
+
+async def _say_request_refused(caller: LibraryCaller, guild_id: int,
+                               outcome: RequestOutcome) -> None:
+    """Why assign_on_request handed nothing over. "not_allowed" is answered by
+    why_not, which can say what the library's rule is."""
     if outcome == "not_allowed":
         library_id = await library_id_for(guild_id)
         await caller.send(await why_not(library_id, caller.user_id))
     else:
         await caller.send(REQUEST_MESSAGES.get(outcome, _CANNOT_COLLECT))
-    return False
 
 
 async def borrow(caller: LibraryCaller, session_id: Optional[str] = None) -> None:
@@ -352,9 +363,10 @@ class SomeCardsPlan:
     """What a drafter's typed names came to, before they confirm.
 
     `available` is exactly what Confirm will borrow, and nothing else is ever
-    sent: a name that matched a card the shelf cannot hand over right now goes
-    in `reserved` instead, so the drafter sees it is spoken for BEFORE they
-    confirm rather than in a "take what's there" offer afterwards.
+    sent: a name that matched a card the shelf cannot hand over right now --
+    spoken for elsewhere, or never stocked -- goes in `reserved` instead, so
+    the drafter sees it BEFORE they confirm rather than in a "take what's
+    there" offer afterwards.
     """
     available: "list[dict[str, Any]]"
     reserved: "list[str]"
@@ -443,10 +455,11 @@ def describe_plan(plan: SomeCardsPlan, hold: int) -> str:
     lines = [f"You'll borrow: {names}" if names else
              "You'll borrow: nothing — none of the names you typed can be lent right now."]
     if plan.reserved:
-        lines.append(f"Spoken for by another draft right now: "
-                     f"{', '.join(plan.reserved)}. The library can't lend "
-                     f"{'it' if len(plan.reserved) == 1 else 'them'} until "
-                     f"{'it comes' if len(plan.reserved) == 1 else 'they come'} back.")
+        # Neutral on purpose: the shelf being short covers a copy another draft
+        # holds and a card the library never stocked, and from here the two
+        # cannot be told apart -- so no promise that it is coming back.
+        lines.append("Not available from the library right now: "
+                     + ", ".join(plan.reserved))
     if plan.match.unknown:
         lines.append("Not in your pool: "
                      + ", ".join(_shown(t) for t in plan.match.unknown))
@@ -490,9 +503,17 @@ async def borrow_some(caller: LibraryCaller, session_id: str,
     if refused:
         await caller.send(refused)
         return
+    # Whether this press created the loan, and so may take it back. Read once,
+    # here: a Borrow my deck pressed on the same fresh loan while this small
+    # borrow is queued would find it "waiting" and share it, and if the small
+    # trade then fails that offer is retracted under it. Its collect then
+    # answers "no deck waiting" -- a confusing message, but no card moves
+    # wrongly, since the retraction only ever touches a loan merely on offer.
     asked = loan is None
     if asked:
-        if not await _ask_for_deck(caller, guild_id, session_id):
+        outcome = await assign_on_request(session_id, caller.user_id)
+        if outcome != "assigned":
+            await _say_request_refused(caller, guild_id, outcome)
             return
         loan = await active_loan(caller.user_id)
     if loan is not None:
@@ -521,11 +542,30 @@ async def _borrow_some_when_ready(caller: LibraryCaller, guild_id: int,
     merely on offer, under the dispatch lock, so it is a no-op once the cards
     are out or on their way, and undoes the ask in every other case.
     """
-    try:
-        await _borrow_when_ready(caller, guild_id, offering=cards)
-    finally:
-        if asked:
-            await decline_offer(caller.user_id, session_id)
+    # Not in a `finally`: a raise can come after the serve accepted the job,
+    # and retracting then would expire a loan with a live trade on it. Left
+    # alone, the watchdog settles it and a stale offer lapses as usual.
+    await _borrow_when_ready(caller, guild_id, offering=cards,
+                             failed=_failed_nothing_held if asked else _failed_deck_still_waiting)
+    if asked:
+        await decline_offer(caller.user_id, session_id)
+
+
+# What a failed small collect says. Not the whole-deck wording: on the no-deck
+# path the loan is retracted straight after, so "still reserved" would be
+# untrue, and `/library borrow` would ask for the whole pool rather than the
+# few cards they wanted.
+def _failed_nothing_held(why: str) -> str:
+    return ("❌ The trade didn't complete, so no cards moved and your hold is back. "
+            "Nothing is being held for you — press **Borrow only some cards** "
+            f"again when you're ready.\n\n{why}")
+
+
+def _failed_deck_still_waiting(why: str) -> str:
+    return ("❌ The trade didn't complete, so no cards moved — your deck is "
+            f"**still reserved** and your hold is back.\n\n{why}\n\n"
+            "Press **Borrow only some cards** again, or **Borrow my deck** for "
+            "the whole deck.")
 
 
 async def decline(caller: LibraryCaller, session_id: str) -> None:
@@ -565,7 +605,8 @@ async def _warn_if_busy(caller: LibraryCaller) -> None:
 
 
 def _borrow_when_ready(caller: LibraryCaller, guild_id: int,
-                       offering: "Optional[list[dict[str, Any]]]" = None
+                       offering: "Optional[list[dict[str, Any]]]" = None,
+                       failed: "Optional[Callable[[str], str]]" = None
                        ) -> "Awaitable[str]":
     return _trade_when_ready(
         caller, guild_id, partial(borrow_when_free, offering=offering),
@@ -573,20 +614,23 @@ def _borrow_when_ready(caller: LibraryCaller, guild_id: int,
         note="\n⚠️ When you're done, **move these cards into your MTGO trade "
              "binder** before `/library return` — the bot can only take back what's "
              "in your binder.",
-        offering=offering)
+        offering=offering, failed=failed)
 
 
 async def _trade_when_ready(caller: LibraryCaller, guild_id: int,
                             when_free: "Callable[[int, int], Awaitable[tuple[str, bool]]]",
                             verb: str, expect: str, note: str = "",
-                            offering: "Optional[list[dict[str, Any]]]" = None
+                            offering: "Optional[list[dict[str, Any]]]" = None,
+                            failed: "Optional[Callable[[str], str]]" = None
                             ) -> str:
     """Wait for the library's turn, dispatch, then see the trade through.
 
     Returns the dispatch status ("dispatched", "short_funds", ...) so a caller
     that cares can tell how it went; one that ignores it is unaffected.
     `offering` is the cards being sent, so a short-funds answer quotes the hold
-    for THAT trade rather than for the whole deck.
+    for THAT trade rather than for the whole deck. `failed`, given the serve's
+    reason, words a failed trade for a caller whose loan the default wording
+    would misdescribe.
 
     Runs detached so the interaction is not held open for the wait: Discord
     gives a command 15 minutes of followups, but a player staring at a
@@ -629,12 +673,13 @@ async def _trade_when_ready(caller: LibraryCaller, guild_id: int,
     # The watchdog covers anything that outlives this poll.
     outcome, detail = await poll_until_settled(guild_id, caller.user_id, expect,
                                                job_id=job_id)
-    await _report_outcome(caller, outcome, expect, detail)
+    await _report_outcome(caller, outcome, expect, detail, failed=failed)
     return status
 
 
 async def _report_outcome(caller: LibraryCaller, outcome: str, expected: str,
-                          detail: Optional[str] = None) -> None:
+                          detail: Optional[str] = None,
+                          failed: "Optional[Callable[[str], str]]" = None) -> None:
     """Say what happened, and for a failure, what to do about it.
 
     A failed borrow and a failed return need opposite advice: the first
@@ -651,7 +696,9 @@ async def _report_outcome(caller: LibraryCaller, outcome: str, expected: str,
         await caller.send("✅ Deck returned. Thanks!")
     elif outcome == "failed":
         why = explain_trade_failure(detail or "the trade didn't complete")
-        if expected == "returned":
+        if failed is not None:
+            await caller.send(failed(why))
+        elif expected == "returned":
             await caller.send(
                 f"❌ The deck didn't come back, so it's **still with you** and still "
                 f"on loan.\n\n{why}\n\nRun `/library return` again when it's sorted.")

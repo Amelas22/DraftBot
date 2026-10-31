@@ -151,7 +151,7 @@ async def test_match_for_borrow_with_no_log_says_the_picks_are_not_in(library):
     assert said == actions.REQUEST_MESSAGES["no_log"]
 
 
-async def test_a_card_reserved_elsewhere_is_listed_not_offered(library, monkeypatch):
+async def test_a_card_reserved_elsewhere_is_listed_not_offered(library):
     # Every Counterspell the library holds is on Bob's deck from another draft.
     async with AsyncSessionLocal() as s:
         s.add(CardLoan(guild_id=GUILD, borrower_id=BOB, state="assigned",
@@ -226,6 +226,56 @@ async def test_a_small_borrow_that_fails_in_the_trade_with_no_deck_retracts_too(
 
     [loan] = await _alices_loans()
     assert loan.state == "expired", (loan.state, caller.text)
+    assert "Nothing is being held for you" in caller.text, caller.text
+    assert "**Borrow only some cards** again" in caller.text
+    assert "still reserved" not in caller.text, "it was taken back"
+    assert "/library borrow" not in caller.text, "that would ask for the whole pool"
+
+
+async def test_a_small_borrow_that_fails_in_the_trade_keeps_a_waiting_deck(library):
+    assert await assign_on_request(SESSION, ALICE) == "assigned"
+    library.job = {"state": "failed", "detail": "declined"}
+
+    caller = Caller()
+    await actions.borrow_some(caller, SESSION, TWO)
+    await library.drain()
+
+    loan = await lending_svc.active_loan(ALICE)
+    assert loan is not None and loan.state == "assigned", caller.text
+    assert "still reserved" in caller.text, caller.text
+    assert "**Borrow only some cards** again" in caller.text
+    assert "**Borrow my deck**" in caller.text
+
+
+async def test_a_raise_during_the_trade_does_not_retract_the_loan(library, monkeypatch):
+    """A raise can come after the serve accepted the job but before the loan
+    shows it; expiring the loan then would strand a live trade. Raised from
+    the dispatch here, where the loan still reads `assigned` -- the one case
+    the retraction would actually bite."""
+    async def boom(*_a, **_k):
+        raise RuntimeError("lost the connection after the serve accepted")
+
+    monkeypatch.setattr(actions, "borrow_when_free", boom)
+
+    caller = Caller()
+    await actions.borrow_some(caller, SESSION, TWO)
+    with pytest.raises(RuntimeError):
+        await library.drain()
+
+    [loan] = await _alices_loans()
+    assert loan.state == "assigned", "left for the watchdog, not retracted"
+
+
+async def test_a_non_drafter_is_told_they_have_no_pool(library):
+    said = await actions.match_for_borrow(GUILD, "3003", SESSION, ["bolt"])
+    assert said == actions.REQUEST_MESSAGES["not_drafter"]
+
+    caller = Caller(user_id="3003")
+    await actions.borrow_some(caller, SESSION, TWO)
+    await library.drain()
+
+    assert caller.said == [actions.REQUEST_MESSAGES["not_drafter"]]
+    assert library.sent == []
 
 
 async def test_a_failed_small_borrow_with_a_waiting_deck_keeps_the_loan(library):
@@ -241,7 +291,7 @@ async def test_a_failed_small_borrow_with_a_waiting_deck_keeps_the_loan(library)
 
 
 async def test_short_funds_on_a_small_borrow_quotes_the_small_hold(
-        test_db, library, monkeypatch):
+        library, monkeypatch):
     """The offering has to reach hold_shortfall: it reads the loan before
     pending_cards is written, so without it the quote is the deck's hold."""
     from models.library import Library
@@ -288,7 +338,8 @@ async def test_describe_plan_names_found_unknown_ambiguous_reserved_and_the_hold
     assert "Lightning Bolt" in text.split("\n")[0]
     assert "Not in your pool:" in text and "Black Lotus" in text
     assert "mage" in text and "Snapcaster Mage" in text and "Voidmage Prodigy" in text
-    assert "Counterspell" in text and "another draft" in text
+    assert "Not available from the library right now: Counterspell" in text
+    assert "another draft" not in text and "back" not in text.split("\n")[1]
     assert "**50 tix**" in text
     assert len(text) < 2000
 
