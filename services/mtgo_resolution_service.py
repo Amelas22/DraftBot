@@ -43,10 +43,10 @@ from services import debt_service
 # session and models, so it closes no cycle back into this module.
 from preference_service import get_players_dm_notification_preferences
 
-# Poll fast at first (a serve rejection surfaces in seconds), then back off — the human
-# step (accepting an MTGO trade) takes minutes, so terminal-detection latency is cheap.
+# Poll fast at first (a serve rejection surfaces in seconds), then back off — but not
+# far: the player is watching for the credit, and GET /jobs/{id} is cheap for the serve.
 _POLL_INTERVAL_S = 3.0
-_POLL_INTERVAL_MAX_S = 15.0
+_POLL_INTERVAL_MAX_S = 5.0
 _POLL_BACKOFF = 1.5
 # Keep the inline poll inside Discord's 15-minute interaction/followup window.
 _DEFAULT_POLL_TIMEOUT_S = 14 * 60

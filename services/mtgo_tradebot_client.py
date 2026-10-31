@@ -82,6 +82,9 @@ MAX_BODY_BYTES = 8192
 # Waiting minutes for a slow answer is much cheaper than that.
 ORDER_TIMEOUT_S = 600.0
 
+# A read that may have to wait for a full collection scan (GET /inventory).
+_SCAN_TIMEOUT_S = 90.0
+
 
 def max_cards_per_trade() -> int:
     """Read when ASKED, never at import.
@@ -392,6 +395,14 @@ class MtgoTradeBotClient:
     async def vault(self):
         """{available, custodian, tix, distinct, top[]} — used to reconcile physical == Σ wallets."""
         return await self._call("GET", "/vault")
+
+    async def read_inventory(self, refresh: bool = False):
+        """The raw ``GET /inventory`` reply: {available, tix, at, ageSec, consistent,
+        unnamed, busy, cards[], ...}; ``{"_missing": True}`` from a serve without the route.
+        Either form may scan the whole collection first, so the timeout is a scan's, not a
+        read's (mtgo2's 11k cards take about 21s)."""
+        return await self._call("GET", "/inventory", params={"refresh": "1"} if refresh else None,
+                                timeout=_SCAN_TIMEOUT_S, mark_missing=True)
 
     async def list_jobs(self) -> Optional[list]:
         """The serve's jobs, or None unless the reply really is a job listing -- a reply

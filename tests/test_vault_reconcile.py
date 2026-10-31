@@ -953,3 +953,247 @@ async def test_a_stuck_assumed_settlement_still_says_it_was_assumed(test_db, mon
 def test_a_withdraw_the_vault_rose_for_is_not_a_delivery():
     assert classify(1000, 1100, -100) == "other"
     assert classify(1000, 900, +100) == "other", "nor a deposit the vault fell for"
+
+
+# ---- one refreshed scan (GET /inventory?refresh=1) --------------------------------------------
+
+class _RefreshingServe:
+    """A serve with /inventory. Its clock runs `skew` ahead of ours; a refresh scans from
+    the moment the request arrives and takes `scan` to finish. `busy` makes every reply
+    the old, inconsistent snapshot -- as while a trade runs."""
+
+    def __init__(self, ours, skew, tix=1000, scan=timedelta(seconds=3), jobs=(), busy=False):
+        self.ours, self.skew, self.tix, self.scan = ours, skew, tix, scan
+        self.jobs, self.busy, self.failures = list(jobs), busy, 0
+        self.step_after_first_read = timedelta(0)   # a clock step once the first reply is out
+        self.unsettled = 0           # refreshes a trade completes during: inconsistent, mid-count
+        self.early_stamp = timedelta(0)   # the next refresh stamped this far before its scan ended
+        self.reads = 0
+        self.snap_at = self.serve_now() - timedelta(seconds=30)
+        self.arrivals: list = []
+
+    def serve_now(self):
+        return self.ours[0] + self.skew
+
+    def _reply(self, consistent):
+        age = max(0, int((self.serve_now() - self.snap_at).total_seconds()))   # as the serve clamps
+        return {"available": True, "tix": self.tix, "at": self.snap_at.isoformat(), "ageSec": age,
+                "consistent": consistent, "unnamed": 0, "busy": self.busy}
+
+    async def read_inventory(self, refresh=False):
+        self.reads += 1
+        if self.reads == 2:
+            self.skew += self.step_after_first_read
+        if self.failures:
+            self.failures -= 1
+            return None          # a timeout or reset: the client's None
+        if not refresh or self.busy:
+            return self._reply(False)
+        self.arrivals.append(self.serve_now())
+        self.ours[0] += self.scan
+        self.snap_at = self.serve_now() - self.early_stamp
+        self.early_stamp = timedelta(0)
+        if self.unsettled:
+            self.unsettled -= 1
+            return {**self._reply(False), "tix": self.tix + 50}
+        return self._reply(True)
+
+    async def list_jobs(self):
+        return self.jobs
+
+
+@pytest.fixture
+def _clock(monkeypatch):
+    """Our clock, as a one-item list, moved on only by the (mocked) sleeps."""
+    ours = [NOW]
+
+    async def sleep(s):
+        ours[0] += timedelta(seconds=s)
+    monkeypatch.setattr(vault_check.asyncio, "sleep", sleep)
+    monkeypatch.setattr(vault_check, "_now", lambda: ours[0])
+    return ours
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("skew_s", [-40, 0, 40])
+async def test_one_refreshed_scan_confirms_a_trade_by_the_serves_clock(_clock, skew_s):
+    """The scan must start after the trade settled ON THE SERVE'S CLOCK, whichever way
+    ours is off from it -- and one scan is enough."""
+    skew = timedelta(seconds=skew_s)
+    finished = NOW + skew - timedelta(seconds=2)          # serve clock: 2s before we look
+    serve = _RefreshingServe(_clock, skew, tix=900)
+
+    reading = await vault_check.after(serve, {"id": "ours", "finishedAt": finished.isoformat()}, BASE_AT)
+
+    window_opens = finished + vault_check.SETTLE_LAG
+    assert reading is not None and reading.tix == 900
+    assert len(serve.arrivals) == 1, "one scan, not two"
+    assert serve.arrivals[0] >= window_opens
+    assert reading.scan_from is not None and window_opens <= reading.scan_from <= serve.arrivals[0]
+    assert serve.arrivals[0] - window_opens < timedelta(seconds=2), "and no longer than needed"
+
+
+@pytest.mark.asyncio
+async def test_a_refreshed_reading_while_a_trade_runs_is_not_used(_clock, monkeypatch):
+    monkeypatch.setattr(vault_check, "_WAIT_FOR_FRESH_S", 0)
+    serve = _RefreshingServe(_clock, timedelta(0), busy=True)
+
+    assert await vault_check.after(serve, {"id": "ours", "finishedAt": NOW.isoformat()}, BASE_AT) is None
+    assert serve.arrivals == []
+
+
+@pytest.mark.asyncio
+async def test_a_refreshed_scan_a_trade_completed_during_is_not_used(_clock):
+    """In time and in the window, but the serve says it isn't consistent: a trade
+    completed while it counted, so its count may be either side of it."""
+    finished = NOW - timedelta(seconds=2)
+    serve = _RefreshingServe(_clock, timedelta(0), tix=900)
+    serve.unsettled = 1
+
+    reading = await vault_check.after(serve, {"id": "ours", "finishedAt": finished.isoformat()}, BASE_AT)
+
+    assert reading is not None and reading.tix == 900, "the mid-trade count is not the one booked"
+    assert len(serve.arrivals) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_refreshed_scan_stamped_before_the_window_is_not_believed(_clock):
+    """Consistent, sent in time -- but its `at` says it finished before the window
+    opened, which no scan begun inside it can have done. The reply is not trusted."""
+    finished = NOW - timedelta(seconds=2)
+    serve = _RefreshingServe(_clock, timedelta(0), tix=900)
+    serve.early_stamp = timedelta(seconds=60)
+
+    reading = await vault_check.after(serve, {"id": "ours", "finishedAt": finished.isoformat()}, BASE_AT)
+
+    window_opens = finished + vault_check.SETTLE_LAG
+    assert reading is not None and reading.at >= window_opens
+    assert len(serve.arrivals) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_refreshed_reading_after_the_next_trade_began_is_refused(_clock):
+    finished = NOW - timedelta(seconds=2)
+    serve = _RefreshingServe(_clock, timedelta(0), jobs=[
+        {"id": "next", "state": "done", "startedAt": (finished + timedelta(seconds=5)).isoformat(),
+         "finishedAt": (finished + timedelta(seconds=8)).isoformat()}])
+
+    assert await vault_check.after(serve, {"id": "ours", "finishedAt": finished.isoformat()}, BASE_AT) is None
+
+
+@pytest.mark.asyncio
+async def test_a_refreshed_baseline_after_a_quiet_spell_takes_one_scan_and_no_wait(_clock):
+    last_done = NOW - timedelta(hours=3)
+    serve = _RefreshingServe(_clock, timedelta(seconds=25), tix=840,
+                             jobs=[{"state": "done", "finishedAt": last_done.isoformat()}])
+
+    reading = await vault_check.baseline(serve)
+
+    assert reading is not None and reading.tix == 840
+    assert len(serve.arrivals) == 1
+    assert _clock[0] - NOW <= serve.scan + timedelta(seconds=1), "the scan, and the clock read after it"
+
+
+@pytest.mark.asyncio
+async def test_a_serve_without_inventory_gets_the_two_scan_read(monkeypatch):
+    monkeypatch.setattr(vault_check.asyncio, "sleep", AsyncMock())
+    finished = NOW
+    client = _client([], [(900, finished + timedelta(seconds=20)), (900, finished + timedelta(seconds=81))])
+    client.read_inventory = AsyncMock(return_value={"_missing": True})
+
+    reading = await vault_check.after(client, {"id": "ours", "finishedAt": finished.isoformat()}, BASE_AT)
+    assert reading is not None and reading.scan_from == finished + timedelta(seconds=20)
+
+
+@pytest.mark.asyncio
+async def test_a_serve_clock_stepped_back_cannot_pass_off_an_early_scan(_clock):
+    """After a backwards step the cached snapshot's `at` is in the serve's future and its
+    ageSec clamps to 0: at + ageSec would read the clock 30s fast and send a refresh 30s
+    early. A clamped-looking age dates nothing, so no refresh goes until one can."""
+    finished = NOW - timedelta(seconds=2)
+    serve = _RefreshingServe(_clock, timedelta(0), tix=900)
+    serve.snap_at = serve.serve_now() + timedelta(seconds=30)
+
+    reading = await vault_check.after(serve, {"id": "ours", "finishedAt": finished.isoformat()}, BASE_AT)
+
+    window_opens = finished + vault_check.SETTLE_LAG
+    assert reading is not None and serve.arrivals and min(serve.arrivals) >= window_opens
+    assert reading.scan_from is not None and window_opens <= reading.scan_from <= serve.arrivals[-1]
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_taken_just_now_dates_the_clock_a_second_later(_clock):
+    serve = _RefreshingServe(_clock, timedelta(seconds=25), tix=840, jobs=[])
+    serve.snap_at = serve.serve_now()                     # age 0: can't date the clock
+
+    reading = await vault_check.baseline(serve)
+
+    assert reading is not None and reading.tix == 840 and len(serve.arrivals) == 1
+    assert _clock[0] - NOW <= timedelta(seconds=2) + serve.scan
+
+
+@pytest.mark.asyncio
+async def test_a_serve_clock_stepped_back_after_it_was_read_cannot_pass_off_an_early_scan(_clock):
+    """Read at +0, then the serve's clock steps back 10s: a refresh timed by the first
+    reading lands 10s before the window, and a slow scan can still finish inside it. The
+    clock read after the reply shows the step, so that scan is not used."""
+    finished = NOW - timedelta(seconds=2)
+    serve = _RefreshingServe(_clock, timedelta(0), tix=900, scan=timedelta(seconds=12))
+    serve.step_after_first_read = timedelta(seconds=-10)
+
+    reading = await vault_check.after(serve, {"id": "ours", "finishedAt": finished.isoformat()}, BASE_AT)
+
+    window_opens = finished + vault_check.SETTLE_LAG
+    assert serve.arrivals[0] < window_opens <= serve.arrivals[0] + serve.scan, "the trap was set"
+    assert reading is not None and reading.scan_from is not None
+    assert window_opens <= reading.scan_from <= serve.arrivals[-1] and len(serve.arrivals) == 2
+
+
+@pytest.mark.asyncio
+async def test_nothing_is_sent_once_the_deadline_has_passed(_clock, monkeypatch):
+    monkeypatch.setattr(vault_check, "_WAIT_FOR_FRESH_S", 0)
+    serve = _RefreshingServe(_clock, timedelta(0))
+
+    assert await vault_check.after(serve, {"id": "ours", "finishedAt": NOW.isoformat()}, BASE_AT) is None
+    assert serve.reads == 1 and serve.arrivals == [], "the one read that says the serve can refresh"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_inventory_request_is_asked_again_not_given_up_on(_clock):
+    """A timeout says nothing about the route: dropping to the two-scan read on one would
+    hand it the minutes it needs already spent."""
+    finished = NOW - timedelta(seconds=2)
+    serve = _RefreshingServe(_clock, timedelta(0), tix=900)
+    serve.failures = 2
+    serve.vault = AsyncMock(side_effect=AssertionError("fell back to /vault"))
+
+    reading = await vault_check.after(serve, {"id": "ours", "finishedAt": finished.isoformat()}, BASE_AT)
+    assert reading is not None and reading.tix == 900 and len(serve.arrivals) == 1
+
+
+@pytest.mark.parametrize("body", [
+    {"available": True, "tix": 5, "at": NOW.isoformat(), "ageSec": 0, "consistent": True, "unnamed": 2},
+    {"available": True, "tix": 5, "at": "2026-10-05T12:00:00", "ageSec": 0, "consistent": True, "unnamed": 0},
+    {"available": True, "tix": "5", "at": NOW.isoformat(), "ageSec": 0, "consistent": True, "unnamed": 0},
+    {"available": True, "tix": 5, "at": NOW.isoformat(), "consistent": True, "unnamed": 0},
+    {"available": False, "reason": "snapshot pending (busy)"},
+    {"available": True, "tix": 5, "at": "9999-12-31T23:59:59+00:00", "ageSec": 1, "consistent": True, "unnamed": 0},
+    {"available": True, "tix": 5, "at": NOW.isoformat(), "ageSec": 10**12, "consistent": True, "unnamed": 0},
+    None,
+])
+def test_an_inventory_reply_that_cant_place_a_reading_is_not_used(body, monkeypatch):
+    monkeypatch.setattr(vault_check, "_now", lambda: NOW)
+    assert vault_check._parse_inventory(body) is None
+
+
+def test_an_inventory_reply_dates_the_serves_clock_no_later_than_it_was(monkeypatch):
+    monkeypatch.setattr(vault_check, "_now", lambda: NOW)
+    parsed = vault_check._parse_inventory(
+        {"available": True, "tix": 5, "at": NOW.isoformat(), "ageSec": 7, "consistent": True, "unnamed": 0})
+    assert parsed is not None and parsed.serve_now == NOW + timedelta(seconds=7) and parsed.consistent
+    old = vault_check._parse_inventory({"available": True, "tix": 5, "consistent": False, "unnamed": 0,
+                                        "at": (NOW - timedelta(days=2)).isoformat(), "ageSec": 172800})
+    assert old is not None and old.serve_now == NOW, "an old snapshot still dates the clock"
+    fresh = vault_check._parse_inventory(
+        {"available": True, "tix": 5, "at": NOW.isoformat(), "ageSec": 0, "consistent": True, "unnamed": 0})
+    assert fresh is not None and fresh.serve_now is None, "an age of 0 may be a clamped one"
