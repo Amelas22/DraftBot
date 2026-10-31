@@ -19,7 +19,8 @@ does not mis-post a message: it hands somebody another player's forty-five
 cards and takes collateral off them for it. So an empty mapping assigns nobody
 anything -- not the subset that could be lined up.
 """
-from typing import Any, Optional, Sequence
+from datetime import datetime
+from typing import Any, Literal, Optional, Sequence
 
 from loguru import logger
 from sqlalchemy import select
@@ -432,6 +433,127 @@ async def assign_drafted_decks(session_id: Any) -> int:
     if assigned:
         await _refresh_panel(session_id)
     return assigned
+
+
+async def _taken_from(session_id: Any) -> "set[str]":
+    """Who this draft has given a deck that still counts: anything but an offer
+    that lapsed or was turned down. Those two are the only way to have had a
+    deck from it and still be owed one."""
+    async with AsyncSessionLocal() as session:
+        rows = await session.scalars(
+            select(CardLoan.borrower_id).where(
+                CardLoan.source == loan_source(session_id),
+                CardLoan.state != "expired"))
+        return {str(r) for r in rows.all()}
+
+
+async def latest_draft_of(guild_id: Any, player_id: Any) -> Optional[str]:
+    """The newest draft in this server that the player drafted in, or None.
+
+    What /library borrow asks a deck for when the caller has none waiting:
+    the command names no draft, and the one they mean is the one they just
+    played. Whether it can still lend them anything is assign_on_request's
+    question, not this one's.
+    """
+    async with AsyncSessionLocal() as session:
+        drafts = (await session.execute(
+            select(DraftSession.session_id, DraftSession.sign_ups)
+            .where(DraftSession.guild_id == str(guild_id),
+                   DraftSession.teams_start_time.isnot(None))
+            .order_by(DraftSession.teams_start_time.desc())
+            .limit(20))).all()
+    for session_id, sign_ups in drafts:
+        if str(player_id) in {str(p) for p in (sign_ups or {})}:
+            return str(session_id)
+    return None
+
+
+RequestOutcome = Literal[
+    "assigned", "not_drafter", "not_offered", "already", "over", "busy",
+    "not_allowed", "no_log", "unseatable", "empty", "too_large", "failed"]
+
+
+async def assign_on_request(session_id: Any, player_id: Any) -> RequestOutcome:
+    """Hand ONE drafter their pool because they asked for it after the draft.
+
+    For somebody who changed their mind: they said no before the draft fired,
+    never answered, or turned the offer down and want it after all. Every other
+    rule assign_drafted_decks applies still does -- the library offers this
+    cube, the drafter has a match left, holds no other deck, may borrow here,
+    and the seating can be trusted. What is skipped is only the rental
+    library's "agreed before it fired": asking now IS agreeing.
+
+    The loan is dated from now (CardLoan.claimed_at), not from the draft: a
+    queue that reserved the cube since keeps what it reserved, and whatever of
+    the pool is spoken for is what /library borrow's "take what's there"
+    offers to leave behind. No "deck waiting" DM, now or from the watchdog's
+    retry sweep: the caller is collecting it, and was told so.
+
+    Returns "assigned", or why not: "not_drafter", "not_offered", "already",
+    "over", "busy", "not_allowed", "no_log", "unseatable", "empty",
+    "too_large" or "failed".
+    """
+    player = str(player_id)
+    meta = await _session_meta(session_id)
+    if meta is None:
+        return "not_drafter"
+    guild_id, sign_ups = meta
+    key = next((k for k in sign_ups if str(k) == player), None)
+    if key is None:
+        return "not_drafter"
+    cube = await _cube_of(session_id)
+    library = await library_for(guild_id)
+    if cube is None or library is None or not await offers(library.id, cube):
+        return "not_offered"
+    if player in await _taken_from(session_id):
+        return "already"
+    if player not in who_can_still_use(await draft_state(session_id), [player]):
+        return "over"
+    if await _holding_a_deck([player]):
+        return "busy"
+    if player not in await may_borrow_many(library.id, [player]):
+        return "not_allowed"
+
+    draft_data = await _draft_log(session_id)
+    if draft_data is None:
+        return "no_log"
+    seat = (None if _shared_names(sign_ups)
+            else map_discord_to_draftmancer(draft_data, sign_ups).get(key))
+    if seat is None:
+        return "unseatable"
+    cards = await _pool_the_library_can_lend(
+        pool_items(draft_data, seat, name_of=mtgo_name))
+    if not cards:
+        return "empty"
+    if too_large(sum(int(c["qty"]) for c in cards)):
+        return "too_large"
+    try:
+        loan_id = await assign_deck(guild_id, player, cards,
+                                    source=loan_source(session_id),
+                                    library_id=str(library.id),
+                                    claimed_at=datetime.now())
+    except IntegrityError:
+        # The one-active-loan index: a deck reached them between the check
+        # above and this write. From this draft -- the reconciler, or a second
+        # press -- it is the deck they asked for.
+        async with AsyncSessionLocal() as session:
+            held = await session.scalar(select(CardLoan.source).where(
+                CardLoan.borrower_id == player, CardLoan.state.in_(ACTIVE_STATES)))
+        return "assigned" if held == loan_source(session_id) else "busy"
+    except Exception:
+        logger.opt(exception=True).error(
+            "deck assignment: could not assign {}'s pool from {} on request",
+            player, session_id)
+        return "failed"
+    async with AsyncSessionLocal() as session:
+        loan = await session.get(CardLoan, loan_id)
+        if loan is not None:
+            loan.ready_dm_at = datetime.now()
+            await session.commit()
+    logger.info("deck assignment: {} asked for their deck from {} after the draft",
+                player, session_id)
+    await _refresh_panel(session_id)
+    return "assigned"
 
 
 async def _refresh_panel(session_id: Any) -> None:

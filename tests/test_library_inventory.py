@@ -40,10 +40,12 @@ async def _deposit(owner, name, qty, source):
         quantity=qty, created_by="test", source_id=source)
 
 
-async def _loan(borrower, cards, state, source="draft:s1", guild="g1"):
+async def _loan(borrower, cards, state, source="draft:s1", guild="g1",
+                claimed_at=None):
     async with AsyncSessionLocal() as s:
         loan = CardLoan(guild_id=guild, borrower_id=borrower, cards=cards,
-                        library_id=LIB, state=state, source=source)
+                        library_id=LIB, state=state, source=source,
+                        claimed_at=claimed_at)
         s.add(loan)
         await s.commit()
         return loan.id
@@ -283,6 +285,40 @@ async def test_a_later_drafts_uncollected_deck_does_not_take_an_earlier_drafts_d
                        source="draft:first")
     await _loan(ALICE, [{"name": "Swamp", "qty": 1}], "assigned",
                 source="draft:second")
+
+    available = await inv.library_available(
+        LIB, fetch=_cubes({}), exclude_loan_id=mine)
+
+    assert available == {"Swamp": 1}
+
+
+async def test_a_deck_asked_for_after_its_draft_yields_to_a_draft_since(test_db):
+    """Asked for late, a deck's claim starts when it was asked for. Dated from
+    its own draft it would outrank every draft since and take cards one of them
+    is dealing from."""
+    await _deposit(ALICE, "Swamp", 1, "d1")
+    await _draft("first", minutes_ago=60)
+    await _draft("second", minutes_ago=15)
+    mine = await _loan(BOB, [{"name": "Swamp", "qty": 1}], "assigned",
+                       source="draft:first", claimed_at=datetime.now())
+
+    available = await inv.library_available(
+        LIB, fetch=_cubes({CUBE: [{"name": "Swamp", "qty": 1}]}),
+        exclude_loan_id=mine)
+
+    assert available == {}
+
+
+async def test_a_late_uncollected_deck_does_not_take_an_earlier_reservations(test_db):
+    """The other side: a deck from a draft that reserved before the late one
+    was asked for keeps its cards, though the late one's draft is older."""
+    await _deposit(ALICE, "Swamp", 1, "d1")
+    await _draft("first", minutes_ago=60)
+    await _draft("second", minutes_ago=15)
+    await _loan(BOB, [{"name": "Swamp", "qty": 1}], "assigned",
+                source="draft:first", claimed_at=datetime.now())
+    mine = await _loan(ALICE, [{"name": "Swamp", "qty": 1}], "assigned",
+                       source="draft:second")
 
     available = await inv.library_available(
         LIB, fetch=_cubes({}), exclude_loan_id=mine)

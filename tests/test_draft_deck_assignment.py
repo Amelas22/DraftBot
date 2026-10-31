@@ -977,3 +977,149 @@ async def test_a_draft_reported_long_ago_but_ending_now_is_live(
 
     assert await svc.assign_drafted_decks(SESSION) == 1, "Bob reported"
     assert ALICE in await _loans()
+
+
+# --- a drafter who changes their mind after the draft ------------------------
+#
+# assign_on_request hands ONE drafter their pool when they ask, whether or not
+# they agreed before the draft fired. Everything else the automatic path checks
+# still applies, and the loan's claim on the shelf dates from the asking, so a
+# queue that reserved the cube in the meantime keeps it (see
+# test_library_inventory).
+
+async def _rental(*, reserved=True, agreed=(ALICE,)):
+    from conftest import a_library
+    from preference_service import set_uses_library
+
+    await a_library(LIBRARY, guild=GUILD, kind="rental", collateral=5,
+                    cubes=(CUBE,))
+    await set_uses_library(ALICE, GUILD, True)
+    await _seed()
+    if reserved:
+        await _reserved(agreed=agreed)
+
+
+async def test_a_drafter_who_did_not_agree_can_ask_for_their_deck(test_db, monkeypatch):
+    told = _recording_dm(monkeypatch)
+    await _rental()
+
+    assert await svc.assign_on_request(SESSION, BOB) == "assigned"
+
+    loan = (await _loans())[BOB]
+    assert loan.cards == [{"name": "Island", "qty": 1}], "their own pool"
+    assert loan.state == "assigned" and loan.source == svc.loan_source(SESSION)
+    assert loan.claimed_at is not None, "its claim dates from the asking"
+    assert told == [], "they are collecting it now; a 'deck waiting' DM is noise"
+    assert loan.ready_dm_at is not None, "nor from the watchdog's retry sweep"
+
+
+async def test_asking_works_when_nobody_in_the_draft_opted_in(test_db, monkeypatch):
+    """The draft never reserved the copy, so nobody was offered anything --
+    which is exactly when a drafter who changed their mind has no other way in."""
+    _recording_dm(monkeypatch)
+    await _rental(reserved=False)
+
+    assert await svc.assign_on_request(SESSION, BOB) == "assigned"
+
+
+async def test_a_declined_deck_can_be_asked_for_again(test_db, library_on, monkeypatch):
+    from services.card_lending_service import decline_offer
+
+    _recording_dm(monkeypatch)
+    await _seed()
+    await svc.assign_drafted_decks(SESSION)
+    assert await decline_offer(BOB, SESSION) is True
+
+    assert await svc.assign_on_request(SESSION, BOB) == "assigned"
+    assert (await _loans())[BOB].state == "assigned"
+
+
+async def test_a_declined_deck_is_not_handed_back_by_the_reconciler(
+        test_db, library_on, monkeypatch):
+    """Declining sticks unless they ask: the automatic path re-runs every minute."""
+    from services.card_lending_service import decline_offer
+
+    _recording_dm(monkeypatch)
+    await _seed()
+    await svc.assign_drafted_decks(SESSION)
+    await decline_offer(BOB, SESSION)
+
+    assert await svc.assign_drafted_decks(SESSION) == 0
+    assert (await _loans())[BOB].state == "expired"
+
+
+async def test_a_deck_already_returned_is_not_handed_out_twice(test_db, library_on):
+    from sqlalchemy import update
+
+    await _seed()
+    await svc.assign_drafted_decks(SESSION)
+    async with AsyncSessionLocal() as s:
+        await s.execute(update(CardLoan).where(CardLoan.borrower_id == BOB)
+                        .values(state="returned"))
+        await s.commit()
+
+    assert await svc.assign_on_request(SESSION, BOB) == "already"
+
+
+@pytest.mark.parametrize("who,why", [("9999", "not_drafter")])
+async def test_somebody_who_was_not_in_the_draft_gets_nothing(test_db, library_on, who, why):
+    await _seed()
+
+    assert await svc.assign_on_request(SESSION, who) == why
+    assert await _loans() == {}
+
+
+async def test_a_drafter_with_no_match_left_is_told_it_is_over(test_db, library_on):
+    await _seed()
+    await _reported(SESSION, [(ALICE, "x", False), (BOB, "y", True)])
+
+    assert await svc.assign_on_request(SESSION, BOB) == "over"
+    assert BOB not in await _loans()
+
+
+async def test_the_librarys_gate_still_applies(test_db, monkeypatch):
+    from conftest import a_library
+    from services import library_access_service as access
+
+    await a_library(LIBRARY, guild=GUILD, kind="rental", collateral=5,
+                    cubes=(CUBE,), min_drafts=3)
+    await access.invite(LIBRARY, "a-member", "test")
+    await _seed()
+
+    assert await svc.assign_on_request(SESSION, BOB) == "not_allowed"
+    assert await _loans() == {}
+
+
+async def test_somebody_holding_another_deck_is_refused(test_db, library_on):
+    await _seed()
+    await assign_deck(GUILD, BOB, [{"name": "Forest", "qty": 1}],
+                      source="draft:another", library_id=LIBRARY)
+
+    assert await svc.assign_on_request(SESSION, BOB) == "busy"
+
+
+async def test_a_cube_the_library_does_not_offer_is_refused(test_db):
+    from conftest import a_library
+
+    await a_library(LIBRARY, guild=GUILD, cubes=("some-other-cube",))
+    await _seed()
+
+    assert await svc.assign_on_request(SESSION, BOB) == "not_offered"
+
+
+async def test_a_deck_from_this_draft_landing_first_counts_as_handed_over(
+        test_db, library_on, monkeypatch):
+    """The reconciler, or a second press, can hand them this draft's deck
+    between the checks and the write. That is the deck they asked for, not a
+    deck from another draft in the way."""
+    from sqlalchemy.exc import IntegrityError
+
+    await _seed()
+
+    async def lands_first(guild_id, borrower, cards, **kw):
+        await assign_deck(guild_id, borrower, cards, source=kw["source"],
+                          library_id=kw["library_id"])
+        raise IntegrityError("insert", {}, Exception("one active loan"))
+    monkeypatch.setattr(svc, "assign_deck", lands_first)
+
+    assert await svc.assign_on_request(SESSION, BOB) == "assigned"

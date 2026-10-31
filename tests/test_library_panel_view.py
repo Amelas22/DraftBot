@@ -60,9 +60,11 @@ def _refused(interaction):
 @pytest.fixture
 def flows(monkeypatch):
     import library_views.panel_view as view
-    stubs = SimpleNamespace(borrow=AsyncMock(), return_deck=AsyncMock())
+    stubs = SimpleNamespace(borrow=AsyncMock(), return_deck=AsyncMock(),
+                            decline=AsyncMock())
     monkeypatch.setattr(view, "borrow", stubs.borrow)
     monkeypatch.setattr(view, "return_deck", stubs.return_deck)
+    monkeypatch.setattr(view, "decline", stubs.decline)
     return stubs
 
 
@@ -171,7 +173,8 @@ async def test_panel_view_has_fixed_custom_ids():
     from library_views.panel_view import LibraryPanelView, panel_view
     borrow = panel_view("borrow")
     assert borrow is not None
-    assert [i.custom_id for i in borrow.children] == ["library_panel:borrow"]
+    assert [i.custom_id for i in borrow.children] == [
+        "library_panel:borrow", "library_panel:decline"]
     ret = panel_view("return")
     assert ret is not None
     assert [i.custom_id for i in ret.children] == ["library_panel:return"]
@@ -179,4 +182,57 @@ async def test_panel_view_has_fixed_custom_ids():
     persistent = LibraryPanelView()
     assert persistent.timeout is None
     assert {i.custom_id for i in persistent.children} == {
-        "library_panel:borrow", "library_panel:return"}
+        "library_panel:borrow", "library_panel:return", "library_panel:decline"}
+
+
+# --- changing your mind after the draft --------------------------------------
+
+async def test_any_drafter_may_press_borrow_to_ask_for_their_deck(test_db):
+    """Not only the reserved: somebody who said no before the draft asks for
+    their deck here, and the borrow flow decides whether they can have it."""
+    from library_views.panel_view import may_use_panel
+    await _seed()
+    assert await may_use_panel("s1", "3", "borrow") is None
+    assert await may_use_panel("s1", "42", "borrow") == NO_DECK, "not a drafter"
+
+
+async def test_only_a_drafter_with_a_deck_from_here_may_turn_it_down(test_db):
+    from library_views.panel_view import may_use_panel
+    await _seed(loans=[("7", "draft:s1"), ("8", "draft:other")])
+    assert await may_use_panel("s1", "7", "decline") is None
+    assert "another draft" in (await may_use_panel("s1", "8", "decline") or "")
+    assert await may_use_panel("s1", "3", "decline") == NO_DECK
+
+
+async def test_the_buttons_name_the_draft_they_were_pressed_in(test_db, reserved, flows):
+    from library_views.panel_view import LibraryPanelView
+    await _seed(loans=[("7", "draft:s1")])
+    view = LibraryPanelView()
+
+    await view.borrow_button.callback(_interaction(7))
+    await view.decline_button.callback(_interaction(7))
+
+    assert flows.borrow.await_args.args[1] == "s1"
+    assert flows.decline.await_args.args[1] == "s1"
+
+
+async def test_turning_a_deck_down_says_how_to_change_your_mind(monkeypatch):
+    import services.library_loan_actions as mod
+    caller = SimpleNamespace(user_id=7, guild_id=99, defer=AsyncMock(), send=AsyncMock())
+    monkeypatch.setattr(mod, "decline_offer", AsyncMock(return_value=True))
+
+    await mod.decline(caller, "s1")
+
+    said = caller.send.await_args.args[0]
+    assert "back on the shelf" in said and "Borrow my deck" in said
+    mod.decline_offer.assert_awaited_once_with(7, "s1")
+
+
+async def test_nothing_to_turn_down_points_at_return(monkeypatch):
+    import services.library_loan_actions as mod
+    caller = SimpleNamespace(user_id=7, guild_id=99, defer=AsyncMock(), send=AsyncMock())
+    monkeypatch.setattr(mod, "decline_offer", AsyncMock(return_value=False))
+
+    await mod.decline(caller, "s1")
+
+    assert "Return my deck" in caller.send.await_args.args[0]

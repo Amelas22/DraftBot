@@ -203,7 +203,8 @@ async def _reserved_since(loan_id: Optional[int]) -> Optional[datetime]:
     from the moment its teams formed, and assigning decks narrowed that hold,
     it did not start a new one. Dating a deck from its own assignment would
     hand a draft that finished first to one still dealing packs. A loan from no
-    draft dates from its creation.
+    draft dates from its creation, and one asked for after its draft from the
+    asking (CardLoan.claimed_at): the draft's hold had lapsed for it by then.
     """
     if loan_id is None:
         return None
@@ -211,6 +212,8 @@ async def _reserved_since(loan_id: Optional[int]) -> Optional[datetime]:
         loan = await session.get(CardLoan, loan_id)
         if loan is None:
             return None
+        if loan.claimed_at is not None:
+            return loan.claimed_at
         draft_id = session_of(loan)
         if draft_id is None:
             return loan.created_at
@@ -224,8 +227,10 @@ async def _on_loan(library_id: Any, *, exclude_loan_id: Optional[int] = None,
     one's, however much the two share an MTGO account.
 
     An assigned deck whose draft formed after `yield_after` is a later
-    reservation and is left out. Only an ASSIGNED one: anything past that has
-    cards in flight or in somebody's hands, and priority cannot take them back.
+    reservation and is left out -- dated, like _reserved_since, from its asking
+    if it was asked for after the draft. Only an ASSIGNED one: anything past
+    that has cards in flight or in somebody's hands, and priority cannot take
+    them back.
     """
     async with AsyncSessionLocal() as session:
         loans = list((await session.scalars(
@@ -242,7 +247,8 @@ async def _on_loan(library_id: Any, *, exclude_loan_id: Optional[int] = None,
     for loan in loans:
         if loan.id == exclude_loan_id and loan.state == "assigned":
             continue  # Collecting this reservation must not subtract it twice.
-        if loan.state == "assigned" and _later(formed.get(session_of(loan) or ""), yield_after):
+        since = loan.claimed_at or formed.get(session_of(loan) or "")
+        if loan.state == "assigned" and _later(since, yield_after):
             continue  # Reserved after the loan asking; it waits its turn.
         cards = loan.offered_cards if loan.state == "out_pending" else loan.cards
         if loan.state in ("borrowed", "return_pending"):

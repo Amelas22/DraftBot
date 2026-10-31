@@ -80,8 +80,13 @@ DRAFT_PANEL = ("the draft's **Change Entry / Settings** button "
                "(**Library 🏛️** on other drafts)")
 # Where the setting lives.
 WHERE_TO_CHANGE = f"`/settings`, or {DRAFT_PANEL}"
-TOO_LATE = ("⚠️ Too late to agree: this draft has already started, so it "
-            "won't borrow from the library.")
+# Said wherever somebody turns the library down, or tries to agree too late, so
+# the way back is where they are when they need it: after the draft, the
+# panel's Borrow button and /library borrow hand them their pool if it's free.
+CHANGE_MIND = ("Change your mind once the draft is over? Press **Borrow my deck** "
+               "on the draft chat's library panel, or run `/library borrow`.")
+TOO_LATE = ("⚠️ Too late to agree: this draft has already started. "
+            + CHANGE_MIND)
 COULD_NOT_CHECK = ("⚠️ Couldn't check the library just now. Try again in a minute "
                    f"from {DRAFT_PANEL}.")
 
@@ -145,7 +150,8 @@ class _Release(discord.ui.Button[Any]):
             return
         await interaction.edit_original_response(
             content=("👍 Noted: no library deck for you this draft. If nobody "
-                     "else here needs it, the copy goes to the next queue."),
+                     "else here needs it, the copy goes to the next queue. "
+                     + CHANGE_MIND),
             view=None)
         if self.view is not None:
             self.view.stop()

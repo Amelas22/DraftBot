@@ -38,7 +38,11 @@ def _said(ctx):
     return " ".join(str(c.args[0]) for c in ctx.followup.send.await_args_list if c.args)
 
 
-async def _run(monkeypatch, command, status, loan=None, busy=None, waited=False):
+async def _run(monkeypatch, command, status, loan=None, busy=None, waited=False,
+               draft=None, asks=None, handed=None):
+    """`draft` is the recent draft a borrower with nothing waiting asks for
+    their deck from (None: they are in none), `asks` what that request answers,
+    and `handed` the deck it hands over -- active_loan's answer after the ask."""
     # The commands only adapt their context; the flows behind them, and every
     # name patched here, live in the loan-actions service.
     import services.library_loan_actions as mod
@@ -49,7 +53,11 @@ async def _run(monkeypatch, command, status, loan=None, busy=None, waited=False)
     monkeypatch.setattr(mod, "borrow_when_free", AsyncMock(return_value=(status, waited)))
     monkeypatch.setattr(mod, "return_when_free", AsyncMock(return_value=(status, waited)))
     monkeypatch.setattr(mod, "library_busy_reason", AsyncMock(return_value=busy))
-    monkeypatch.setattr(mod, "active_loan", AsyncMock(return_value=loan))
+    loans = iter([loan])
+    monkeypatch.setattr(mod, "active_loan", AsyncMock(
+        side_effect=lambda *_a: next(loans, handed if handed is not None else loan)))
+    monkeypatch.setattr(mod, "latest_draft_of", AsyncMock(return_value=draft))
+    monkeypatch.setattr(mod, "assign_on_request", AsyncMock(return_value=asks))
     # The shortfall path has its own tests; these cover what each status says,
     # so a library that cannot cover the deck would short-circuit all of them.
     monkeypatch.setattr(mod, "shortfall", AsyncMock(return_value=[]))
