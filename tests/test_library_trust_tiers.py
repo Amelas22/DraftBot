@@ -78,10 +78,11 @@ async def test_no_library_is_a_refusal_rather_than_a_free_borrow(test_db):
     assert await trust.hold_for(None, PLAYER) is None
 
 
-async def _library(*, collateral, untrusted):
+async def _library(*, collateral, untrusted, small=None, small_untrusted=None):
     from services.library_service import library_for
     await a_library(LIB, guild=GUILD, kind="rental", collateral=collateral,
-                    collateral_untrusted=untrusted)
+                    collateral_untrusted=untrusted, small=small,
+                    small_untrusted=small_untrusted)
     return await library_for(GUILD)
 
 
@@ -140,3 +141,45 @@ async def test_an_untiered_board_still_names_one_figure(test_db, monkeypatch):
     note = await library_signup_note("mycube", GUILD)
 
     assert "**50 tix**" in note and "–" not in note, note
+
+
+# --- a loan of a few named cards ----------------------------------------------
+
+async def test_a_small_loan_uses_the_small_figures(test_db):
+    library = await _library(collateral=200, untrusted=400, small=0, small_untrusted=50)
+    await access.invite(LIB, PLAYER, "test")
+    assert await trust.hold_for(library, PLAYER, cards=3) == 0
+    assert await trust.hold_for(library, "stranger", cards=2) == 50
+
+
+async def test_four_cards_is_a_deck(test_db):
+    library = await _library(collateral=200, untrusted=400, small=0, small_untrusted=50)
+    assert await trust.hold_for(library, "stranger", cards=4) == 400
+    assert await trust.hold_for(library, "stranger") == 400
+
+
+async def test_no_small_figures_charges_the_deck_figures(test_db):
+    library = await _library(collateral=200, untrusted=400)
+    assert await trust.hold_for(library, "stranger", cards=1) == 400
+
+
+async def test_a_missing_non_member_small_figure_falls_back_to_the_deck_non_member_figure(test_db):
+    """Setting only the member figure to 0 must not make small loans free for strangers."""
+    library = await _library(collateral=200, untrusted=400, small=0)
+    await access.invite(LIB, PLAYER, "test")
+    assert await trust.hold_for(library, PLAYER, cards=1) == 0
+    assert await trust.hold_for(library, "stranger", cards=1) == 400
+
+
+async def test_a_missing_member_small_figure_falls_back_to_the_deck_member_figure(test_db):
+    library = await _library(collateral=200, untrusted=400, small_untrusted=50)
+    await access.invite(LIB, PLAYER, "test")
+    assert await trust.hold_for(library, PLAYER, cards=1) == 200
+    assert await trust.hold_for(library, "stranger", cards=1) == 50
+
+
+async def test_a_running_exempt_tournament_waives_the_small_hold_too(test_db):
+    from test_library_tournament_exemption import CAPTAIN, _tournament
+    library = await _library(collateral=200, untrusted=400, small=10, small_untrusted=50)
+    await _tournament()
+    assert await trust.hold_for(library, CAPTAIN, cards=2) == 0
