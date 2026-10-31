@@ -38,6 +38,7 @@ async def learn_substitutions(reported: "Optional[list[dict[str, Any]]]",
     if not reported:
         return 0
     learned = 0
+    twins = {id(e) for e in await _twin_substitutions(reported)}
     async with AsyncSessionLocal() as session:
         for entry in reported:
             cube_name = entry.get("satisfies")
@@ -45,6 +46,10 @@ async def learn_substitutions(reported: "Optional[list[dict[str, Any]]]",
             if not cube_name or not mtgo_name:
                 logger.warning("substitution from job {} names only one side, "
                                "ignoring: {}", job_id, entry)
+                continue
+            if id(entry) in twins:
+                # Asked for by a name that is already MTGO's: a second printing,
+                # not a cube name to translate. booked_names books it as that name.
                 continue
             row = await session.get(CardSubstitution, str(cube_name))
             if row is not None:
@@ -66,6 +71,50 @@ async def learn_substitutions(reported: "Optional[list[dict[str, Any]]]",
                         cube_name, mtgo_name, job_id)
         await session.commit()
     return learned
+
+
+async def _twin_substitutions(
+        reported: "Optional[list[dict[str, Any]]]") -> "list[dict[str, Any]]":
+    """The reported substitutions whose asked-for name is already a learned MTGO
+    name, so what moved is that name's other printing.
+
+    A crossover card has two MTGO printings, one under each name, and the serve
+    treats them as one card: an order for either takes either. Once a cube name has
+    been learned as one of them, every later order asks for that one -- and a
+    partner holding only the other printing hands that over instead.
+    """
+    entries = [e for e in (reported or [])
+               if e.get("satisfies") and e.get("got") and e["satisfies"] != e["got"]]
+    if not entries:
+        return []
+    async with AsyncSessionLocal() as session:
+        known = set((await session.scalars(
+            select(CardSubstitution.mtgo_name).where(
+                CardSubstitution.mtgo_name.in_({str(e["satisfies"]) for e in entries})))).all())
+    return [e for e in entries if str(e["satisfies"]) in known]
+
+
+async def booked_names(items: "list[dict[str, Any]]",
+                       reported: "Optional[list[dict[str, Any]]]") -> "list[dict[str, Any]]":
+    """What a trade moved, under the names the library counts custody by.
+
+    A twin printing is booked as the name that was asked for. The cube is counted
+    under that name, so a copy booked under the twin's own name is on the shelf
+    where no count can see it -- a deposit that never makes the cube whole, and a
+    loan that never comes off what is available, so the copy is lent twice.
+    Only as many copies as each substitution covers: an order can ask for both
+    names, and a copy that crossed under the name it was asked by is not a twin.
+    """
+    totals: "dict[str, int]" = {}
+    for i in items:
+        totals[i["name"]] = totals.get(i["name"], 0) + int(i["qty"])
+    for e in await _twin_substitutions(reported):
+        got, asked = str(e["got"]), str(e["satisfies"])
+        n = min(int(e.get("qty") or 0), totals.get(got, 0))
+        if n:
+            totals[got] -= n
+            totals[asked] = totals.get(asked, 0) + n
+    return [{"name": n, "qty": q} for n, q in totals.items() if q]
 
 
 async def mtgo_names_for(cube_names: "list[str]") -> "dict[str, str]":

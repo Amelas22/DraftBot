@@ -27,7 +27,7 @@ from sqlalchemy import and_, or_, select, update
 
 from config import is_money_server
 from database.db_session import AsyncSessionLocal, db_session
-from services.card_substitution_service import learn_substitutions
+from services.card_substitution_service import booked_names, learn_substitutions
 from database.retry import with_db_retry
 from models.card_loan import ACTIVE_STATES, CardLoan
 from models.library import Library
@@ -1209,7 +1209,8 @@ async def _items_moved(job: "dict[str, Any]", kind: str) -> "list[dict[str, Any]
         name = i.get("name")
         if name:
             totals[name] = totals.get(name, 0) + int(i.get("qty") or 0)
-    return [{"name": n, "qty": q} for n, q in totals.items()]
+    return await booked_names([{"name": n, "qty": q} for n, q in totals.items()],
+                              job.get("substitutions"))
 
 
 async def _already_booked(guild_id: Any, source_id: str) -> bool:
