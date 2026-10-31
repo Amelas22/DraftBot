@@ -169,7 +169,8 @@ def return_message(loan: Any, decided: bool = False,
     available description.
     """
     lead = "Your draft is decided. " if decided else ""
-    return (f"{lead}📦 Please return your borrowed deck — **{deck_summary(cards if cards else loan.cards)}**.\n"
+    summary = deck_summary(cards if cards else loan.cards)
+    return (f"{lead}📦 Please return your borrowed deck — **{summary}**.\n"
             "Run `/library return` and the library will collect it, and the "
             "hold comes back with it.\n"
             "Other drafters are waiting on those cards.")
@@ -322,8 +323,15 @@ async def send_due_reminders(now: Optional[datetime] = None) -> int:
         # reads as the library having lost track of its own shelf.
         if not await _still_out(loan.id):
             continue
-        held = await owed_cards(wallet_service.library_scope(loan.library_id),
-                                loan.borrower_id)
+        try:
+            held = await owed_cards(wallet_service.library_scope(loan.library_id),
+                                    loan.borrower_id)
+        except ValueError:
+            # No library on the row: ask by the loan's own list rather than
+            # abort the pass for everyone behind it.
+            logger.warning("library reminders: loan {} has no library; asking "
+                           "by its pool", loan.id)
+            held = None
         if await _dm(loan, return_message(loan, decided, cards=held),
                      "return reminder"):
             await _stamp(loan.id, "last_reminded_at", at)

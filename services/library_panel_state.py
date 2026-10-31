@@ -9,6 +9,7 @@ from enum import Enum
 from typing import Any, Optional
 
 import discord
+from loguru import logger
 from sqlalchemy import select
 
 from database.db_session import AsyncSessionLocal
@@ -62,8 +63,15 @@ async def _cards_described(loan: CardLoan) -> Any:
     out states read the ledger, so a panel pays for the people holding cards.
     """
     if loan.state in {"borrowed", "return_pending"}:
-        held = await owed_cards(wallet_service.library_scope(loan.library_id),
-                                loan.borrower_id)
+        try:
+            scope = wallet_service.library_scope(loan.library_id)
+        except ValueError:
+            # No library on the row, so no scope to read claims from. One
+            # odd row must not take the whole panel down with it.
+            logger.warning("library panel: loan {} has no library; describing "
+                           "it by its pool", loan.id)
+            return loan.cards
+        held = await owed_cards(scope, loan.borrower_id)
         return held or loan.cards
     if loan.state == "out_pending":
         return loan.offered_cards

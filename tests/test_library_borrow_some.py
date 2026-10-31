@@ -403,16 +403,64 @@ async def test_return_reminder_counts_what_was_borrowed(library):
 
 
 async def test_take_what_is_there_loan_reports_its_partial_size(library):
+    """The vault holds only some of the deck: the offer is what
+    trim_to_available says it can cover, which is what the view sends."""
+    from sqlalchemy import select
     from services.library_panel_state import borrowers_of
     from services.library_reminders import deck_summary
     assert await assign_on_request(SESSION, ALICE) == "assigned"
-    await lending_svc.borrow_when_free(GUILD, ALICE, offering=THREE)
+    loan = await lending_svc.active_loan(ALICE)
+    # Every card is on the shelf except the last two names.
+    library.stock = {n: (0 if n in ("Island", "Brainstorm") else 4) for n in POOL}
+    partial = await lending_svc.trim_to_available(GUILD, loan.id)
+    assert 0 < len(partial) < len(POOL), partial
+
+    await lending_svc.borrow_when_free(GUILD, ALICE, offering=partial)
     await lending_svc.settle_in_flight(GUILD)
     async with AsyncSessionLocal() as s:
-        from sqlalchemy import select
         draft = (await s.scalars(select(DraftSession))).first()
-
     mine = next(b for b in await borrowers_of(draft) if b.user_id == ALICE)
 
     assert mine.state == "borrowed"
-    assert deck_summary(mine.cards) == deck_summary(THREE)
+    assert deck_summary(mine.cards) == deck_summary(partial)
+    assert deck_summary(mine.cards) != deck_summary(loan.cards)
+
+
+async def test_the_reminder_sweep_counts_what_was_borrowed(library, monkeypatch):
+    """The sweep, not just the message: it must hand return_message the ledger's
+    view of a loan that settled three of the pool's five cards."""
+    import services.library_reminders as reminders
+    from datetime import datetime
+    loan, _ = await _collected(library, THREE)
+    sent: list = []
+
+    async def record(_loan, message, _what):
+        sent.append(message)
+        return True
+
+    async def decided(_session_id):
+        return reminders.DraftState(done_at={}, settled=True, ended_at=None,
+                                    played_at={})
+
+    monkeypatch.setattr(reminders, "_dm", record)
+    monkeypatch.setattr(reminders, "draft_state", decided)
+
+    assert await reminders.send_due_reminders(now=datetime(2030, 1, 1)) == 1
+    [message] = sent
+    assert reminders.deck_summary(THREE) in message, message
+    assert reminders.deck_summary(loan.cards) not in message, message
+
+
+async def test_a_loan_with_no_library_does_not_break_the_panel(library):
+    from sqlalchemy import select
+    from services.library_panel_state import borrowers_of
+    loan, _ = await _collected(library, THREE)
+    async with AsyncSessionLocal() as s:
+        row = await s.get(CardLoan, loan.id)
+        row.library_id = None
+        draft = (await s.scalars(select(DraftSession))).first()
+        await s.commit()
+
+    mine = next(b for b in await borrowers_of(draft) if b.user_id == ALICE)
+
+    assert mine.cards == loan.cards
