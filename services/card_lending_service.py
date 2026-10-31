@@ -531,12 +531,16 @@ async def _mtgo_handle(discord_user_id: Any) -> Optional[str]:
 
 async def assign_deck(guild_id: Any, borrower_id: Any, cards: "list[dict[str, Any]]",
                       source: Optional[str] = None,
-                      library_id: "Optional[str]" = None) -> int:
+                      library_id: "Optional[str]" = None,
+                      claimed_at: Optional[datetime] = None) -> int:
     """Give a borrower a deck they may collect. Returns the new loan's id.
 
     The library is stamped on the loan at assignment, so the deck stays priced
     and stocked by the library it actually came out of even if the server is
     rebound afterwards. Defaults to whichever library serves this server.
+
+    `claimed_at` dates a deck asked for after its draft (see CardLoan); a deck
+    handed out with its draft leaves it unset.
     """
     if library_id is None:
         found = await library_for(guild_id)
@@ -545,7 +549,7 @@ async def assign_deck(guild_id: Any, borrower_id: Any, cards: "list[dict[str, An
         raise ValueError("Cannot assign a deck in an unbound server")
     async with AsyncSessionLocal() as session:
         loan = CardLoan(guild_id=str(guild_id), borrower_id=str(borrower_id),
-                        library_id=library_id,
+                        library_id=library_id, claimed_at=claimed_at,
                         cards=cards, state="assigned", source=source)
         session.add(loan)
         await session.commit()
@@ -643,6 +647,26 @@ async def _retract(session: Any, loans: "list[Any]") -> int:
         logger.info("library: {} of {} offers had been collected since they were "
                     "read, and were left alone", len(loans) - expired, len(loans))
     return expired
+
+
+async def decline_offer(borrower_id: Any, session_id: Any) -> bool:
+    """The drafter does not want the deck this draft offered them. True if it
+    was handed back.
+
+    Retracted the way a stale offer is, so the cards go back on the shelf and
+    their one loan slot is free at once rather than when the offer would have
+    lapsed. Only an offer: a deck already on its way, or in their hands, goes
+    back by /library return. Not final -- they can ask for it again while the
+    draft can still use it (draft_deck_assignment.assign_on_request).
+    """
+    async with AsyncSessionLocal() as session:
+        offers = list((await session.scalars(select(CardLoan).where(
+            CardLoan.borrower_id == str(borrower_id),
+            CardLoan.source == f"draft:{session_id}",
+            CardLoan.state == "assigned"))).all())
+        if not offers:
+            return False
+        return await _retract(session, offers) > 0
 
 
 async def active_loan(borrower_id: Any) -> "Optional[CardLoan]":

@@ -94,6 +94,13 @@ class CardLoan(Base):
     # the watchdog polls every ten minutes and without this it would ask every
     # ten minutes.
     last_reminded_at = Column(DateTime, nullable=True)
+    # When a deck asked for after its draft (draft_deck_assignment.
+    # assign_on_request) staked its claim on the shelf. NULL for a deck handed
+    # out with its draft, which carries the draft's own reservation forward from
+    # when its teams formed. A late one cannot: by the time it was asked for,
+    # another queue may have reserved those cards, and dating it from its draft
+    # would let it take them.
+    claimed_at = Column(DateTime, nullable=True)
 
     __table_args__ = (
         Index('ix_card_loans_borrower', 'guild_id', 'borrower_id'),
