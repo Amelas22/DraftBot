@@ -37,6 +37,9 @@ def _resolve(key: str, by_key: dict[str, str]) -> str | list[str] | None:
     Returns the pool name for a unique hit, the sorted candidate names when
     the typed text could mean several cards, or None when nothing is close.
     """
+    if not by_key:
+        return None
+
     exact = by_key.get(key)
     if exact is not None:
         return exact
@@ -70,21 +73,25 @@ def match_names(typed: list[str], pool: list[dict[str, Any]]) -> NameMatch:
         by_key.setdefault(name.casefold().strip(), name)
 
     found: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    seen_names: set[str] = set()
     unknown: list[str] = []
     ambiguous: list[tuple[str, list[str]]] = []
+    # Resolution depends only on the casefolded text, so repeats of the same
+    # text are skipped in every list, not just in found.
+    seen_text: set[str] = set()
 
     for raw in typed:
         text = raw.strip()
-        if not text:
+        if not text or text.casefold() in seen_text:
             continue
+        seen_text.add(text.casefold())
         resolved = _resolve(text.casefold(), by_key)
         if resolved is None:
             unknown.append(text)
         elif isinstance(resolved, list):
             ambiguous.append((text, resolved))
-        elif resolved not in seen:
-            seen.add(resolved)
+        elif resolved not in seen_names:
+            seen_names.add(resolved)
             found.append({"name": resolved, "qty": 1})
 
     return NameMatch(found=found, unknown=unknown, ambiguous=ambiguous)
