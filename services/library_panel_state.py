@@ -9,15 +9,13 @@ from enum import Enum
 from typing import Any, Optional
 
 import discord
-from loguru import logger
 from sqlalchemy import select
 
 from database.db_session import AsyncSessionLocal
 from models.card_loan import CardLoan
 from models.draft_session import DraftSession
 from services.draft_deck_assignment import loan_source
-from services import wallet_service
-from services.card_lending_service import owed_cards
+from services.card_lending_service import held_cards
 from services.library_reminders import deck_summary
 from services.library_reservation import library_users
 
@@ -63,15 +61,7 @@ async def _cards_described(loan: CardLoan) -> Any:
     out states read the ledger, so a panel pays for the people holding cards.
     """
     if loan.state in {"borrowed", "return_pending"}:
-        try:
-            scope = wallet_service.library_scope(loan.library_id)
-        except ValueError:
-            # No library on the row, so no scope to read claims from. One
-            # odd row must not take the whole panel down with it.
-            logger.warning("library panel: loan {} has no library; describing "
-                           "it by its pool", loan.id)
-            return loan.cards
-        held = await owed_cards(scope, loan.borrower_id)
+        held = await held_cards(loan)
         return held or loan.cards
     # dispatch_unknown as out_pending: a trade that may have started carries
     # the offer, not the pool.

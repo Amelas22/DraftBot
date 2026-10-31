@@ -14,11 +14,11 @@ from typing_extensions import override
 from helpers.money_gate import spawn_followup
 from helpers.utils import ui_button
 from library_views.callers import InteractionCaller
-from services.card_lending_service import active_loan, library_behind
-from services.library_loan_actions import borrow_some, describe_plan, match_for_borrow
+from services.card_lending_service import active_loan, card_count, library_behind
+from services.library_loan_actions import (
+    NOT_SET_UP, borrow_some, describe_plan, match_for_borrow)
 from services.library_trust_service import hold_for
 
-_UNAVAILABLE = "📭 This server isn't set up to borrow from a card library."
 # The longest card name Magic prints is a double-faced name with its "//" and
 # both halves; this leaves room for it.
 _NAME_MAX = 141
@@ -41,9 +41,8 @@ class SomeCardsConfirmView(discord.ui.View):
     """
 
     def __init__(self, cards: "list[dict[str, Any]]", session_id: str,
-                 timeout: float = 180,
                  origin: "Optional[discord.Interaction]" = None) -> None:
-        super().__init__(timeout=timeout)
+        super().__init__(timeout=180)
         self.cards, self.session_id, self.origin = cards, session_id, origin
 
     @ui_button(label="Confirm", style=discord.ButtonStyle.primary)
@@ -113,7 +112,7 @@ class SomeCardsModal(discord.ui.Modal):
         if isinstance(plan, str):
             await caller.send(plan)
             return
-        copies = sum(int(c.get("qty") or 0) for c in plan.available)
+        view = SomeCardsConfirmView(plan.available, self.session_id, origin=interaction)
         hold = 0
         if plan.available:
             # Priced by the library the trade will charge through: a waiting
@@ -122,12 +121,12 @@ class SomeCardsModal(discord.ui.Modal):
             # match_for_borrow has already refused a deck from another draft.
             library = await library_behind(await active_loan(caller.user_id),
                                            caller.guild_id)
-            held = await hold_for(library, caller.user_id, cards=copies)
+            held = await hold_for(library, caller.user_id,
+                                  cards=card_count(plan.available))
             if held is None:
-                await caller.send(_UNAVAILABLE)
+                await caller.send(NOT_SET_UP)
                 return
             hold = held
-        view = SomeCardsConfirmView(plan.available, self.session_id, origin=interaction)
-        if not plan.available:
+        else:
             view.remove_item(view.confirm)
         await caller.send(describe_plan(plan, hold), view=view)

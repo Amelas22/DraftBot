@@ -348,7 +348,7 @@ async def hold_shortfall(guild_id: Any, borrower_id: Any,
     else:
         library = await library_behind(loan, guild_id)
         hold = (await hold_for(library, loan.borrower_id,
-                               cards=_card_count(offering))
+                               cards=card_count(offering))
                 if library is not None else None)
     if hold is None:
         return None
@@ -384,7 +384,7 @@ async def library_behind(loan: Any, guild_id: Any) -> "Optional[Any]":
     return bound
 
 
-def _card_count(cards: "list[dict[str, Any]]") -> int:
+def card_count(cards: "list[dict[str, Any]]") -> int:
     """Copies in a list of {name, qty} entries -- the size a hold is set by."""
     return sum(int(c.get("qty") or 0) for c in cards)
 
@@ -419,7 +419,7 @@ async def collateral_for(loan: Any, guild_id: Any) -> Optional[int]:
     if library is None:
         return None
     return await hold_for(library, loan.borrower_id,
-                          cards=_card_count(loan.offered_cards))
+                          cards=card_count(loan.offered_cards))
 
 
 async def shortfall(guild_id: Any, cards: "list[dict[str, Any]]",
@@ -809,7 +809,7 @@ async def _dispatch(guild_id: Any, borrower_id: Any, *, from_state: str, to_stat
         # another at the trade. Off the library in hand, never a second
         # lookup that could come back empty and read as free. Sized by what
         # is being sent: a few named cards are held at the small figure.
-        held = await hold_for(library, borrower_id, cards=_card_count(requested))
+        held = await hold_for(library, borrower_id, cards=card_count(requested))
         if held is None:
             logger.warning("library: refusing to lend in {} -- no hold for {} "
                            "from {}", guild_id, borrower_id, library_id)
@@ -1478,3 +1478,19 @@ async def owed_cards(guild_id: Any, borrower_id: Any) -> "list[dict[str, Any]]":
         str(guild_id), str(borrower_id), wallet_service.HOUSE_MTGO)
     return [{"name": p["card_name"], "qty": -p["net"]}
             for p in positions if p["net"] < 0]
+
+
+async def held_cards(loan: Any) -> "Optional[list[dict[str, Any]]]":
+    """What the claim ledger says this loan's borrower holds, or None when the
+    loan has no library to read it from.
+
+    One odd row (a loan booked before loans carried a library) must not take a
+    whole pass down with it, so the caller falls back to the loan's own list.
+    """
+    try:
+        scope = wallet_service.library_scope(loan.library_id)
+    except ValueError:
+        logger.warning("library: loan {} has no library; falling back to its "
+                       "own card list", loan.id)
+        return None
+    return await owed_cards(scope, loan.borrower_id)

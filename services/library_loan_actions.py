@@ -83,6 +83,9 @@ SETUP_MESSAGES = {
     "unavailable": "🔌 The card library is unavailable right now. Try again shortly.",
 }
 
+# Said wherever a borrow finds no library behind this server.
+NOT_SET_UP = "📭 This server isn't set up to borrow from a card library."
+
 # Why a drafter who asked for their deck after the draft was not handed one
 # (draft_deck_assignment.assign_on_request). "not_allowed" is answered by
 # why_not instead, which can say what the library's rule is.
@@ -328,7 +331,7 @@ async def borrow(caller: LibraryCaller, session_id: Optional[str] = None) -> Non
     # sponsor's cards is trusted with them in every room it lends into.
     library_id = await library_id_for(guild_id)
     if library_id is None:
-        await caller.send("📭 This server isn't set up to borrow from a card library.")
+        await caller.send(NOT_SET_UP)
         return
     loan = await active_loan(caller.user_id)
     if loan is None:
@@ -432,13 +435,18 @@ async def match_for_borrow(guild_id: int, user_id: int, session_id: str,
         pool = read
         library_id = await library_id_for(guild_id)
     if library_id is None:
-        return "📭 This server isn't set up to borrow from a card library."
+        return NOT_SET_UP
 
     match = match_names(typed, pool)
     shelf = await lendable_now(library_id,
                                exclude_loan_id=loan.id if loan is not None else None)
-    available = [c for c in match.found if shelf.get(c["name"], 0) >= int(c["qty"])]
-    reserved = [c["name"] for c in match.found if c not in available]
+    available: "list[dict[str, Any]]" = []
+    reserved: "list[str]" = []
+    for c in match.found:
+        if shelf.get(c["name"], 0) >= int(c["qty"]):
+            available.append(c)
+        else:
+            reserved.append(c["name"])
     return SomeCardsPlan(available=available, reserved=reserved, match=match)
 
 
@@ -505,7 +513,7 @@ async def borrow_some(caller: LibraryCaller, session_id: str,
         return
     library_id = await library_id_for(guild_id)
     if library_id is None:
-        await caller.send("📭 This server isn't set up to borrow from a card library.")
+        await caller.send(NOT_SET_UP)
         return
     loan = await active_loan(caller.user_id)
     refused = _not_this_drafts_offer(loan, session_id)
@@ -555,8 +563,7 @@ async def _borrow_some_when_ready(caller: LibraryCaller, guild_id: int,
     # and retracting then would expire a loan with a live trade on it. Left
     # alone, the watchdog settles it and a stale offer lapses as usual.
     await _borrow_when_ready(caller, guild_id, offering=cards,
-                             failed=_failed_nothing_held if asked else _failed_deck_still_waiting,
-                             refused=partial(_small_refusal, held=not asked))
+                             small_with_deck_waiting=not asked)
     if asked:
         await decline_offer(caller.user_id, session_id)
 
@@ -565,16 +572,15 @@ async def _borrow_some_when_ready(caller: LibraryCaller, guild_id: int,
 # path the loan is retracted straight after, so "still reserved" would be
 # untrue, and `/library borrow` would ask for the whole pool rather than the
 # few cards they wanted.
-def _failed_nothing_held(why: str) -> str:
+def _failed_small(why: str, deck_waiting: bool) -> str:
+    if deck_waiting:
+        return ("❌ The trade didn't complete, so no cards moved — your deck is "
+                f"**still reserved** and your hold is back.\n\n{why}\n\n"
+                "Press **Borrow only some cards** again, or **Borrow my deck** for "
+                "the whole deck.")
     return ("❌ The trade didn't complete, so no cards moved and your hold is back. "
             "Nothing is being held for you — press **Borrow only some cards** "
             f"again when you're ready.\n\n{why}")
-
-
-# A refusal before dispatch, worded by the caller: given the status and the hold
-# figures (short_funds only, when the wallet could be read), the line to send,
-# or None for the default.
-Refusal = Callable[[str, "Optional[dict[str, int]]"], Optional[str]]
 
 
 # What a small collect refused before dispatch says, for the statuses whose
@@ -599,13 +605,6 @@ def _small_refusal(status: str, figures: "Optional[dict[str, int]]", *,
         return (f"🔒 This library doesn't lend to you.{nothing_held} "
                 "Press **Borrow only some cards** again to see why.")
     return None
-
-
-def _failed_deck_still_waiting(why: str) -> str:
-    return ("❌ The trade didn't complete, so no cards moved — your deck is "
-            f"**still reserved** and your hold is back.\n\n{why}\n\n"
-            "Press **Borrow only some cards** again, or **Borrow my deck** for "
-            "the whole deck.")
 
 
 async def decline(caller: LibraryCaller, session_id: str) -> None:
@@ -646,35 +645,31 @@ async def _warn_if_busy(caller: LibraryCaller) -> None:
 
 def _borrow_when_ready(caller: LibraryCaller, guild_id: int,
                        offering: "Optional[list[dict[str, Any]]]" = None,
-                       failed: "Optional[Callable[[str], str]]" = None,
-                       refused: "Optional[Refusal]" = None
-                       ) -> "Awaitable[str]":
+                       small_with_deck_waiting: Optional[bool] = None
+                       ) -> "Awaitable[None]":
     return _trade_when_ready(
         caller, guild_id, partial(borrow_when_free, offering=offering),
         "collect", "borrowed",
         note="\n⚠️ When you're done, **move these cards into your MTGO trade "
              "binder** before `/library return` — the bot can only take back what's "
              "in your binder.",
-        offering=offering, failed=failed, refused=refused)
+        offering=offering, small_with_deck_waiting=small_with_deck_waiting)
 
 
 async def _trade_when_ready(caller: LibraryCaller, guild_id: int,
                             when_free: "Callable[[int, int], Awaitable[tuple[str, bool]]]",
                             verb: str, expect: str, note: str = "",
                             offering: "Optional[list[dict[str, Any]]]" = None,
-                            failed: "Optional[Callable[[str], str]]" = None,
-                            refused: "Optional[Refusal]" = None
-                            ) -> str:
+                            small_with_deck_waiting: Optional[bool] = None
+                            ) -> None:
     """Wait for the library's turn, dispatch, then see the trade through.
 
-    Returns the dispatch status ("dispatched", "short_funds", ...) so a caller
-    that cares can tell how it went; one that ignores it is unaffected.
     `offering` is the cards being sent, so a short-funds answer quotes the hold
-    for THAT trade rather than for the whole deck. `failed`, given the serve's
-    reason, words a failed trade for a caller whose loan the default wording
-    would misdescribe. `refused` does the same for a refusal before dispatch:
-    given the status and the hold figures (short_funds only, when readable),
-    it returns the line to send, or None to use the default.
+    for THAT trade rather than for the whole deck. `small_with_deck_waiting`
+    is None for a whole-deck trade. For a small borrow it says whether a deck
+    was already waiting (True) or was asked for on the spot (False), which
+    words a failed trade, or a refusal before dispatch, for a loan the
+    whole-deck wording would misdescribe.
 
     Runs detached so the interaction is not held open for the wait: Discord
     gives a command 15 minutes of followups, but a player staring at a
@@ -693,16 +688,17 @@ async def _trade_when_ready(caller: LibraryCaller, guild_id: int,
         except Exception:
             logger.exception("library: could not read the hold figures for {}",
                              caller.user_id)
-        said = ((refused(status, figures) if refused is not None else None)
-                or (describe_hold_shortfall(figures) if figures
-                    else loan_said(status, status)))
-        await caller.send(said)
-        return status
+        said = (_small_refusal(status, figures, held=small_with_deck_waiting)
+                if small_with_deck_waiting is not None else None)
+        await caller.send(said or (describe_hold_shortfall(figures) if figures
+                                   else loan_said(status, status)))
+        return
     if status != "dispatched":
-        said = refused(status, None) if refused is not None else None
+        said = (_small_refusal(status, None, held=small_with_deck_waiting)
+                if small_with_deck_waiting is not None else None)
         await caller.send(said or loan_said(
             status, f"⚠️ Couldn't {verb} your deck ({status})."))
-        return status
+        return
 
     loan = await active_loan(caller.user_id)
     who = await custodian_name(get_lending_client())
@@ -720,13 +716,13 @@ async def _trade_when_ready(caller: LibraryCaller, guild_id: int,
     # The watchdog covers anything that outlives this poll.
     outcome, detail = await poll_until_settled(guild_id, caller.user_id, expect,
                                                job_id=job_id)
-    await _report_outcome(caller, outcome, expect, detail, failed=failed)
-    return status
+    await _report_outcome(caller, outcome, expect, detail,
+                          small_with_deck_waiting=small_with_deck_waiting)
 
 
 async def _report_outcome(caller: LibraryCaller, outcome: str, expected: str,
                           detail: Optional[str] = None,
-                          failed: "Optional[Callable[[str], str]]" = None) -> None:
+                          small_with_deck_waiting: Optional[bool] = None) -> None:
     """Say what happened, and for a failure, what to do about it.
 
     A failed borrow and a failed return need opposite advice: the first
@@ -743,8 +739,8 @@ async def _report_outcome(caller: LibraryCaller, outcome: str, expected: str,
         await caller.send("✅ Deck returned. Thanks!")
     elif outcome == "failed":
         why = explain_trade_failure(detail or "the trade didn't complete")
-        if failed is not None:
-            await caller.send(failed(why))
+        if small_with_deck_waiting is not None:
+            await caller.send(_failed_small(why, small_with_deck_waiting))
         elif expected == "returned":
             await caller.send(
                 f"❌ The deck didn't come back, so it's **still with you** and still "

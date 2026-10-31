@@ -312,8 +312,7 @@ async def send_due_reminders(now: Optional[datetime] = None) -> int:
                         finished_at=mine, played_since_ask=played_since_ask, now=at):
             due.append((loan, state.settled))
 
-    from services import wallet_service
-    from services.card_lending_service import owed_cards
+    from services.card_lending_service import held_cards
 
     asked = 0
     for loan, decided in due:
@@ -323,15 +322,7 @@ async def send_due_reminders(now: Optional[datetime] = None) -> int:
         # reads as the library having lost track of its own shelf.
         if not await _still_out(loan.id):
             continue
-        try:
-            held = await owed_cards(wallet_service.library_scope(loan.library_id),
-                                    loan.borrower_id)
-        except ValueError:
-            # No library on the row: ask by the loan's own list rather than
-            # abort the pass for everyone behind it.
-            logger.warning("library reminders: loan {} has no library; asking "
-                           "by its pool", loan.id)
-            held = None
+        held = await held_cards(loan)
         if await _dm(loan, return_message(loan, decided, cards=held),
                      "return reminder"):
             await _stamp(loan.id, "last_reminded_at", at)
