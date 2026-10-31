@@ -18,7 +18,7 @@ from sqlalchemy import select
 from config import get_config
 from database.db_session import db_session
 from models.tournament import Tournament, TournamentParticipant, TournamentTeamMember
-from services.tournament_roles import ensure_team_roles
+from services.tournament_roles import ensure_team_roles, role_name_clash, teams_missing_role
 from services.tournament_service import ACTIVE_STATUSES, get_active_tournament
 
 
@@ -139,33 +139,39 @@ class RoleSyncPlan:
     grant: list[str] = field(default_factory=list)
     strip: list[str] = field(default_factory=list)
     ok: bool = True  # False once an applied change was refused by Discord
+    unfixed: list[str] = field(default_factory=list)  # still roleless after an apply
+    unfixed_why: dict[str, str] = field(default_factory=dict)  # team name -> reason
+
+
+async def active_tournament_id(guild_id: str | int, *, registering: bool = False) -> int | None:
+    """The guild's active tournament's id; with ``registering``, only while it
+    is still taking registrations."""
+    async with db_session() as session:
+        tournament = await get_active_tournament(session, guild_id)
+    if tournament is None or (registering and tournament.status != "registration"):
+        return None
+    return tournament.id
+
+
+def missing_roles_text(names: list[str], then: str = "run this again") -> str:
+    """The refusal a command gives while teams lack their role."""
+    shown = ", ".join(f"**{n}**" for n in names[:SYNC_LIST_LIMIT])
+    more = f", and {len(names) - SYNC_LIST_LIMIT} more" if len(names) > SYNC_LIST_LIMIT else ""
+    return (f"❌ These teams have no team role: {shown}{more}. "
+            f"Run `/tournament sync_roles apply:True`, then {then}.")
 
 
 async def plan_role_sync(guild: discord.Guild) -> RoleSyncPlan:
     """Work out what brings the guild's tournament roles up to date.
 
-    Makes no Discord writes. The database is read in one session that is
+    Makes no Discord writes. The database is read in short sessions that are
     closed before any guild state is inspected.
     """
     async with db_session() as session:
         live = await live_member_ids(session, guild.id)
-        tournament = await get_active_tournament(session, guild.id)
-        teams: list[tuple[str, str | None]] = []
-        if tournament is not None:
-            result = await session.execute(
-                select(TournamentParticipant.team_name, TournamentParticipant.role_id)
-                .where(
-                    TournamentParticipant.tournament_id == tournament.id,
-                    TournamentParticipant.dropped_at.is_(None),
-                )
-                .order_by(TournamentParticipant.id)
-            )
-            teams = [(name, role_id) for name, role_id in result.all()]
+    tournament_id = await active_tournament_id(guild.id)
 
-    teams_missing_role = [
-        name for name, role_id in teams
-        if not role_id or guild.get_role(int(role_id)) is None
-    ]
+    missing = await teams_missing_role(guild, tournament_id) if tournament_id is not None else []
 
     league = league_participant_role(guild)
     active = active_role(guild)
@@ -179,15 +185,22 @@ async def plan_role_sync(guild: discord.Guild) -> RoleSyncPlan:
     strip: list[str] = []
     if league is not None:
         strip = [str(m.id) for m in league.members if str(m.id) not in live]
-    return RoleSyncPlan(teams_missing_role, grant, strip)
+    return RoleSyncPlan(missing, grant, strip)
+
+
+def _unfixed_reason(guild: discord.Guild, team_name: str) -> str:
+    """Why a team is still roleless after an apply: a role already holding its
+    name, or else Discord refusing the creation."""
+    clash = role_name_clash(guild, team_name)
+    if clash is not None:
+        return f"role \"{clash}\" already exists"
+    return REFUSED_CREATE_REASON
 
 
 async def apply_role_sync(guild: discord.Guild) -> RoleSyncPlan:
     """Make the changes plan_role_sync describes. Returns the plan acted on."""
     plan = await plan_role_sync(guild)
-    async with db_session() as session:
-        tournament = await get_active_tournament(session, guild.id)
-        tournament_id = tournament.id if tournament is not None else None
+    tournament_id = await active_tournament_id(guild.id)
     ok = True
     if tournament_id is not None:
         created = await ensure_team_roles(guild, tournament_id)
@@ -195,12 +208,17 @@ async def apply_role_sync(guild: discord.Guild) -> RoleSyncPlan:
     ok = await grant_league_roles(guild, plan.grant) and ok
     # Liveness is re-checked here: the plan is older than the Discord calls above.
     ok = await release_league_role(guild, plan.strip) and ok
+    if tournament_id is not None:
+        plan.unfixed = await teams_missing_role(guild, tournament_id)
+        plan.unfixed_why = {name: _unfixed_reason(guild, name) for name in plan.unfixed}
     plan.ok = ok
     return plan
 
 
 DISCORD_MESSAGE_LIMIT = 2000
 SYNC_LIST_LIMIT = 20
+REFUSED_CREATE_REASON = ("Discord refused to create it — check the bot's role sits above "
+                         "team roles")
 REFUSED_NOTE = ("\n⚠️ Couldn't make every change — check that the bot's own role sits above them, "
                 "then run this again.")
 
@@ -225,6 +243,10 @@ def format_role_sync(plan: RoleSyncPlan, applied: bool) -> str:
     lines.append(_listing(titles[0], [f"**{n}**" for n in plan.teams_missing_role]))
     lines.append(_listing(titles[1], [f"<@{u}>" for u in plan.grant]))
     lines.append(_listing(titles[2], [f"<@{u}>" for u in plan.strip]))
+    if applied and plan.unfixed:
+        lines.append(_listing("Teams still without a role", [f"**{n}**" for n in plan.unfixed]))
+        lines += [f"**{n}** — {plan.unfixed_why.get(n, REFUSED_CREATE_REASON)}"
+                  for n in plan.unfixed[:SYNC_LIST_LIMIT]]
     text = "\n".join(lines)[:DISCORD_MESSAGE_LIMIT - len(REFUSED_NOTE)]
     if applied and not plan.ok:
         text += REFUSED_NOTE

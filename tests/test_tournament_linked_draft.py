@@ -620,6 +620,7 @@ async def test_open_rooms_opens_only_roomless_matches_and_is_idempotent(test_db)
 
     with patch("cogs.tournament_commands.tournament_enabled", return_value=True), \
          patch("cogs.tournament_commands.db_session", _fake_db_session(test_db)), \
+         patch.object(TournamentCog, "_refuse_missing_roles", AsyncMock(return_value=False)), \
          patch("cogs.tournament_commands.create_match_room", fake_create_room):
         await TournamentCog.open_rooms.callback(cog, ctx, round_number=None)
         first_reply = ctx.followup.send.call_args.args[0]

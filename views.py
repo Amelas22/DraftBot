@@ -17,6 +17,7 @@ from models import SignUpHistory
 from sqlalchemy import update, select, and_
 from sqlalchemy.orm import selectinload
 from helpers.utils import get_cube_thumbnail_url
+from helpers.mentions import pings
 from helpers.money_gate import add_wallet_howto, wallet_howto
 from helpers.display_names import get_display_name, get_display_name_by_id
 from helpers.signup_board import (FIELD_SPLIT_THRESHOLD, build_board,
@@ -100,6 +101,13 @@ def queue_ping_text(player_count: int, cube: str, role_mention: str) -> str:
     Names the cube so readers can tell which of the channel's queues is filling.
     """
     return f"{player_count} Players in queue to play {cube}! {role_mention}"
+
+
+async def send_queue_ping(channel, player_count: int, cube: str, drafter_role) -> None:
+    """Post the queue ping, notifying the drafter role and no other role."""
+    await channel.send(
+        queue_ping_text(player_count, cube, drafter_role.mention),
+        allowed_mentions=pings(roles=[drafter_role.id]))
 
 
 def _draft_rooms_needed(guild, config) -> int:
@@ -669,9 +677,8 @@ class PersistentView(discord.ui.View):
                     # Get the channel where the draft message is
                     channel = await interaction.client.fetch_channel(draft_session_updated.draft_channel_id)
                     if channel:
-                        await channel.send(queue_ping_text(
-                            len(sign_ups), draft_session_updated.cube, drafter_role.mention
-                        ))
+                        await send_queue_ping(
+                            channel, len(sign_ups), draft_session_updated.cube, drafter_role)
 
             # Update the draft message to reflect the new list of sign-ups
             await update_draft_message(interaction.client, self.draft_session_id)
@@ -3065,9 +3072,8 @@ class StakeOptionsSelect(discord.ui.Select):
                     # Get the channel where the draft message is
                     channel = await interaction.client.fetch_channel(draft_session_updated.draft_channel_id)
                     if channel:
-                        await channel.send(queue_ping_text(
-                            len(sign_ups), draft_session_updated.cube, drafter_role.mention
-                        ))
+                        await send_queue_ping(
+                            channel, len(sign_ups), draft_session_updated.cube, drafter_role)
 
         # Confirm stake and provide draft link
         if voucher:

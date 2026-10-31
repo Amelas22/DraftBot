@@ -19,6 +19,33 @@ def not_none(x: _T | None) -> _T:
     return x
 
 
+def is_bot(guild: discord.Guild | None, user_id: str) -> bool:
+    """Whether ``user_id`` is a bot the guild's cache knows of."""
+    member = guild.get_member(int(user_id)) if guild is not None else None
+    return member is not None and member.bot
+
+
+async def resolve_display_name(
+    bot: discord.Client, guild_id: str, user_id: str, snapshot: str | None = None
+) -> str:
+    """The best name for a user: guild display name, the stored ``snapshot``,
+    their global name, and only then the bare id.
+
+    May ask Discord for a departed member; helpers/display_names.py has the
+    cache-only lookups for rendering names into messages."""
+    guild = bot.get_guild(int(guild_id))
+    member = guild.get_member(int(user_id)) if guild is not None else None
+    if member is not None:
+        return member.display_name
+    if snapshot:
+        return snapshot
+    try:
+        user = await bot.fetch_user(int(user_id))
+    except discord.HTTPException:
+        return user_id
+    return user.global_name or user.name
+
+
 def as_messageable(channel: object) -> "discord.abc.Messageable":
     """Narrow a ``bot.get_channel`` result to something you can send/fetch on.
 
@@ -31,6 +58,17 @@ def as_messageable(channel: object) -> "discord.abc.Messageable":
     if not isinstance(channel, discord.abc.Messageable):
         raise TypeError(f"channel is not messageable: {type(channel).__name__}")
     return channel
+
+
+async def reach_thread(bot: discord.Client, thread_id: int) -> object | None:
+    """The thread (or channel) from the cache, else fetched; None (logged by the caller) if unreachable."""
+    channel = bot.get_channel(thread_id)
+    if channel is not None:
+        return channel
+    try:
+        return await bot.fetch_channel(thread_id)
+    except discord.HTTPException:
+        return None
 
 
 def mention_all(user_ids: Iterable[object] | None, sep: str = " ") -> str:
@@ -67,12 +105,12 @@ async def send_then_mention(
     message = await destination.send(plain)
     if mentioned and mentioned != plain:
         try:
-            # Explicit, though the bot sets no global policy today: py-cord falls
-            # back to Client.allowed_mentions when this is omitted, so a global
-            # policy added later would silently stop the mention being PARSED --
-            # and an unparsed mention adds nobody to the thread, which is the only
-            # reason this function exists. Notification is not a risk to weigh
-            # here: an edit does not notify whatever is allowed.
+            # Explicit on purpose: the bot sets a bot-wide SAFE_DEFAULT
+            # (helpers/mentions.py) that parses nothing, and py-cord falls back
+            # to it when this is omitted. The mention must be PARSED here -- an
+            # unparsed mention adds nobody to the thread, which is the only
+            # reason this function exists. Notification is not a risk to weigh:
+            # an edit does not notify whatever is allowed.
             await message.edit(
                 content=mentioned,
                 allowed_mentions=discord.AllowedMentions(

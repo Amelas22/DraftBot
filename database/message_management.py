@@ -1,6 +1,7 @@
 from enum import Enum
 from typing import Optional, Dict, Any, Tuple
 import discord
+from helpers.mentions import pings
 from helpers.pin_helpers import safe_pin
 from sqlalchemy import JSON, Column, Integer, String, Boolean, Float, select, text, REAL
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -274,6 +275,7 @@ class DraftStickyStrategy(StickyStrategy):
             
             message_link = f"https://discord.com/channels/{guild_id}/{sticky_message.channel_id}/{sticky_message.message_id}"
             content = f"{message_link}: Looking for Drafters"
+            ping_role_ids: list[int] = []
 
             # Add role mention only on first notification (not on updates)
             # This prevents spamming the role on every sticky message refresh
@@ -281,6 +283,7 @@ class DraftStickyStrategy(StickyStrategy):
                 session_role = await find_session_role(guild, draft_session.session_type)
                 if session_role:
                     content = f"{session_role.mention} {content}"
+                    ping_role_ids.append(session_role.id)
 
             if sticky_message.notification_message_id:
                 try:
@@ -291,7 +294,8 @@ class DraftStickyStrategy(StickyStrategy):
                     sticky_message.notification_message_id = None # Logic to fall through to send new
             
             # Send new if didn't exist or wasn't found
-            new_notification = await notification_channel.send(content=content)
+            new_notification = await notification_channel.send(
+                content=content, allowed_mentions=pings(roles=ping_role_ids))
             return str(new_notification.id)
             
         except Exception as e:

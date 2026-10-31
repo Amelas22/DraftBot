@@ -16,6 +16,16 @@ STARTED = "started"
 
 _THREAD_NAME_MAX = 100
 
+# The one answer every team-draft entry point gives in a server without the
+# scheduler (board, wizard, /team_draft_board, Start draft, /premade_draft).
+NOT_ENABLED = "Team drafts aren't turned on in this server."
+# The same refusal for a tournament match room's Find a time button.
+MATCH_SCHEDULING_NOT_ENABLED = "Find a time isn't turned on in this server."
+# Shared by both Find a time buttons (team-draft matchups and tournament matches).
+TIME_LINK_INTRO = ("See both sides' usual weeks side by side and book a time that suits "
+                   "everyone. The link works for 7 days.")
+TIME_LINK_FAILED = "Couldn't make your link just now. Try again in a minute."
+
 
 @dataclass(frozen=True)
 class Side:
@@ -68,6 +78,16 @@ def discord_time(start_utc: datetime) -> str:
     return f"<t:{ts}:F> (<t:{ts}:R>)"
 
 
+def booking_line(booking: Booking) -> str:
+    """The control message's time line: the booked time, or a nudge to book one."""
+    if booking.start_utc is None:
+        return "No time booked yet — press **Find a time**."
+    when = f"Draft time: {discord_time(booking.start_utc)}"
+    if booking.by_name:
+        when += f" — booked by {booking.by_name}"
+    return when
+
+
 def matchup_state(has_draft: bool) -> str:
     return STARTED if has_draft else OPEN
 
@@ -92,13 +112,7 @@ def render_matchup_control(
         f"{a.mentions()} vs {b.mentions()}",
         f"Set up by {set_up_by}.",
     ]
-    if booking.start_utc is not None:
-        when = f"Draft time: {discord_time(booking.start_utc)}"
-        if booking.by_name:
-            when += f" — booked by {booking.by_name}"
-        lines.append(when)
-    else:
-        lines.append("No time booked yet — press **Find a time**.")
+    lines.append(booking_line(booking))
     if state == SETTING_UP:
         lines.append("⏳ Draft being set up…")
     elif state == STARTED:

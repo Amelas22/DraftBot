@@ -133,3 +133,43 @@ def test_pairing_line_leads_with_the_match_label():
 
 def test_pairing_line_without_a_label_is_unchanged():
     assert render_pairing_line("Alpha", "Bravo") == "• **Alpha** vs **Bravo**"
+
+
+def test_booking_line_booked_and_unbooked():
+    from datetime import datetime
+    from helpers.matchup import Booking, booking_line, discord_time
+
+    start = datetime(2026, 11, 3, 1, 0)
+    assert booking_line(Booking(start, "Ann")) == (
+        f"Draft time: {discord_time(start)} — booked by Ann"
+    )
+    assert booking_line(Booking(start, None)) == f"Draft time: {discord_time(start)}"
+    assert booking_line(Booking(None, None)) == (
+        "No time booked yet — press **Find a time**."
+    )
+
+
+def test_control_body_shows_booking_per_state():
+    from datetime import datetime
+    from helpers.match_control import DRAFTING, RECORDED, SCHEDULING, render_match_control
+    from helpers.matchup import Booking, booking_line
+
+    start = datetime(2026, 11, 3, 1, 0)
+    booked = Booking(start, "Ann")
+    none = Booking(None, None)
+    hdr = "**#135 · Round 1 — A vs B**"
+
+    def r(state, b, **kw):
+        return render_match_control(state, "A", "B", "#135 · Round 1", booking=b, **kw)
+
+    ready = "Not started yet. Hit **Start draft** when both teams are ready."
+    assert r(SCHEDULING, booked) == f"{hdr}\n{booking_line(booked)}\n{ready}"
+    assert r(SCHEDULING, none) == f"{hdr}\n{booking_line(none)}\n{ready}"
+    assert r(DRAFTING, booked) == f"{hdr}\n🟢 Draft in progress.\n{booking_line(booked)}"
+    assert r(DRAFTING, none) == f"{hdr}\n🟢 Draft in progress."
+    rec = r(RECORDED, booked, result=(2, 1))
+    assert rec == f"{hdr}\n✅ Result recorded: **A** 2–1 **B**"
+    # no booking passed at all: scheduling still shows the unbooked prompt
+    assert render_match_control(SCHEDULING, "A", "B", "#135 · Round 1") == (
+        f"{hdr}\n{booking_line(none)}\n{ready}"
+    )

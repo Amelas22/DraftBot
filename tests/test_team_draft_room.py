@@ -20,7 +20,8 @@ MEMBERS = {201: "Ash", 202: "Bo", 300: "Organiser"}
 @pytest.fixture(autouse=True)
 def scheduler_on():
     """Team drafts only run where the scheduler is turned on."""
-    with patch("team_draft_view.scheduler_enabled", return_value=True):
+    with patch("team_draft_view.scheduler_enabled", return_value=True), \
+         patch("helpers.booking_room.scheduler_enabled", return_value=True):
         yield
 
 
@@ -94,7 +95,8 @@ async def test_opening_a_room_tags_both_sides_pins_and_records_it(test_db):
     assert "<@&111>" in sent["content"] and "<@201>" in sent["content"] and "<@202>" in sent["content"]
     assert "Set up by Organiser." in sent["content"]
     assert sent["allowed_mentions"].everyone is False
-    assert sent["allowed_mentions"].roles is True
+    assert sent["allowed_mentions"].to_dict()["roles"] == [111]
+    assert "roles" not in sent["allowed_mentions"].to_dict()["parse"]
     assert sent["allowed_mentions"].users is True
     assert isinstance(sent["view"], TeamDraftControlView)
     control.pin.assert_awaited_once()
@@ -490,7 +492,7 @@ async def test_find_a_time_hands_out_a_link_for_this_matchup(test_db):
     interaction = _press_interaction(make_guild())
     link = AsyncMock(return_value="https://draftbot.fyi/#tok")
 
-    with patch("team_draft_view.issue_link", link):
+    with patch("helpers.booking_room.issue_link", link):
         await _time_button(view).callback(interaction)
 
     args, kwargs = link.await_args
@@ -505,12 +507,13 @@ async def test_find_a_time_hands_out_a_link_for_this_matchup(test_db):
 
 @pytest.mark.asyncio
 async def test_find_a_time_says_so_when_the_link_cannot_be_made(test_db):
-    from team_draft_view import TIME_LINK_FAILED, TeamDraftControlView
+    from helpers.matchup import TIME_LINK_FAILED
+    from team_draft_view import TeamDraftControlView
 
     team_draft_id = await seed_team_draft(thread_id="900", control_message_id="777")
     interaction = _press_interaction(make_guild())
 
-    with patch("team_draft_view.issue_link", AsyncMock(side_effect=RuntimeError("db"))):
+    with patch("helpers.booking_room.issue_link", AsyncMock(side_effect=RuntimeError("db"))):
         await _time_button(TeamDraftControlView(team_draft_id)).callback(interaction)
 
     interaction.response.send_message.assert_awaited_once_with(TIME_LINK_FAILED, ephemeral=True)
@@ -522,8 +525,8 @@ async def test_find_a_time_is_off_where_the_scheduler_is_off(test_db):
 
     interaction = _press_interaction(make_guild())
     link = AsyncMock()
-    with patch("team_draft_view.scheduler_enabled", return_value=False), \
-         patch("team_draft_view.issue_link", link):
+    with patch("helpers.booking_room.scheduler_enabled", return_value=False), \
+         patch("helpers.booking_room.issue_link", link):
         await _time_button(TeamDraftControlView(5)).callback(interaction)
 
     interaction.response.send_message.assert_awaited_once_with(NOT_ENABLED, ephemeral=True)
@@ -531,7 +534,7 @@ async def test_find_a_time_is_off_where_the_scheduler_is_off(test_db):
 
 
 def _booking_change(old=None, new=datetime(2026, 10, 28, 19, 30, tzinfo=timezone.utc)):
-    from services.team_draft import BookingChange
+    from services.booking import BookingChange
     return BookingChange(True, None, old, new, "Bo", 1)
 
 
@@ -561,7 +564,9 @@ async def test_announce_posts_in_the_thread_then_refreshes(test_db):
     assert sent["content"] == booking_announcement("Bo", None, change.new, facts.a, facts.b)
     assert sent["content"].startswith("<@&111> <@201> <@202>\n")
     mentions = sent["allowed_mentions"]
-    assert (mentions.everyone, mentions.roles, mentions.users) == (False, True, True)
+    assert (mentions.everyone, mentions.users) == (False, True)
+    assert mentions.to_dict()["roles"] == [111]
+    assert "roles" not in mentions.to_dict()["parse"]
     refresh.assert_awaited_once_with(bot, team_draft_id)
     assert order == ["send", "refresh"]
 

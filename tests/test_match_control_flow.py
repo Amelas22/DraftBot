@@ -200,12 +200,22 @@ async def test_launch_block_for_reports_a_live_draft(patched_db):
     assert "already underway" in block
 
 
+async def _give_roles(session, match, a="111", b="222"):
+    """Both teams hold a role: a room is only opened for teams it can tag."""
+    from models.tournament import TournamentParticipant
+
+    (await session.get(TournamentParticipant, match.team_a_participant_id)).role_id = a
+    (await session.get(TournamentParticipant, match.team_b_participant_id)).role_id = b
+    await session.commit()
+
+
 @pytest.mark.asyncio
 async def test_create_match_room_makes_a_long_lived_thread_and_pins_control(patched_db):
     from match_control_view import create_match_room
 
     async with patched_db() as session:
         match = await seed_tournament_match(session)
+        await _give_roles(session, match)
 
     thread = make_thread()
     message = MagicMock()
@@ -232,15 +242,10 @@ async def test_create_match_room_mentions_both_team_roles(patched_db):
     (see control_body_and_view's docstring), and it must actually reach
     Discord as a real mention -- not just a pill nobody gets notified by."""
     from match_control_view import create_match_room
-    from models.tournament import TournamentParticipant
 
     async with patched_db() as session:
         match = await seed_tournament_match(session)
-        part_a = await session.get(TournamentParticipant, match.team_a_participant_id)
-        part_b = await session.get(TournamentParticipant, match.team_b_participant_id)
-        part_a.role_id = "111"
-        part_b.role_id = "222"
-        await session.commit()
+        await _give_roles(session, match)
 
     thread = make_thread()
     message = MagicMock()
@@ -251,10 +256,12 @@ async def test_create_match_room_mentions_both_team_roles(patched_db):
 
     body = thread.send.call_args.kwargs["content"]
     assert "<@&111>" in body and "<@&222>" in body
-    # roles=True is what turns the pill into a real mention: it notifies both
-    # teams and adds their members to the thread.
+    # Naming the two roles is what turns the pill into a real mention: it
+    # notifies both teams and adds their members to the thread, and a role id
+    # smuggled in through a team name stays a pill.
     allowed_mentions = thread.send.call_args.kwargs["allowed_mentions"]
-    assert allowed_mentions.roles is True
+    assert allowed_mentions.to_dict()["roles"] == [111, 222]
+    assert "roles" not in allowed_mentions.to_dict()["parse"]
     # everyone=False is the only thing standing between a team name containing
     # "@everyone" and a guild-wide ping: register_team only strips whitespace.
     assert allowed_mentions.everyone is False
@@ -270,11 +277,30 @@ async def test_control_message_permits_role_mentions_without_a_view():
 
     thread = make_thread()
     with patch("match_control_view.safe_pin", AsyncMock()):
-        await _resolve_control_message(thread, None, "body", None)
+        await _resolve_control_message(thread, None, "body", None, role_ids=("111",))
 
     allowed_mentions = thread.send.call_args.kwargs["allowed_mentions"]
-    assert allowed_mentions.roles is True
+    assert allowed_mentions.to_dict()["roles"] == [111]
     assert allowed_mentions.everyone is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("b_role, guild_has", [(None, True), ("222", False)])
+async def test_create_match_room_refuses_a_team_without_a_working_role(patched_db, b_role, guild_has):
+    """No role stored, or one the guild has since lost: nobody on that side
+    would be tagged, so no room opens (a bracket result reaches here unguarded)."""
+    from match_control_view import create_match_room
+
+    async with patched_db() as session:
+        match = await seed_tournament_match(session)
+        await _give_roles(session, match, b=b_role)
+
+    message = MagicMock()
+    message.create_thread = AsyncMock(return_value=make_thread())
+    message.guild.get_role = lambda rid: MagicMock() if guild_has or rid == 111 else None
+
+    assert await create_match_room(message, match.id) is None
+    message.create_thread.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -284,6 +310,7 @@ async def test_create_match_room_degrades_when_discord_refuses(patched_db):
 
     async with patched_db() as session:
         match = await seed_tournament_match(session)
+        await _give_roles(session, match)
 
     message = MagicMock()
     message.create_thread = AsyncMock(
@@ -303,6 +330,7 @@ async def test_create_match_room_cleans_up_when_the_control_message_fails(patche
 
     async with patched_db() as session:
         match = await seed_tournament_match(session)
+        await _give_roles(session, match)
 
     thread = make_thread()
     thread.send = AsyncMock(side_effect=_discord.HTTPException(MagicMock(), "boom"))
@@ -348,3 +376,75 @@ async def test_refresh_updates_the_pairing_message_with_the_result(patched_db):
     # A pairing message posted before this task's switchover can still carry a
     # dead ▶ Play button; the rewrite must strip it, not just replace the text.
     assert pairing.edit.call_args.kwargs["view"] is None
+
+
+@pytest.mark.asyncio
+async def test_match_control_view_buttons():
+    import discord
+    from match_control_view import MatchControlView
+
+    view = MatchControlView(135)
+    assert [(b.label, b.style, b.custom_id) for b in view.children] == [
+        ("Find a time", discord.ButtonStyle.secondary, "tournament_find_time:135"),
+        ("Start draft", discord.ButtonStyle.primary, "tournament_start_draft:135"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_find_a_time_sends_an_ephemeral_link_to_anyone():
+    from datetime import datetime
+    from helpers.matchup import TIME_LINK_INTRO
+    from match_control_view import find_a_time_for_match
+    from services.scheduler_match_api import VIEW
+
+    interaction = make_interaction(make_thread())
+    interaction.user.id = 4242  # on neither roster
+    with patch("helpers.booking_room.scheduler_enabled", return_value=True), \
+            patch("helpers.booking_room.issue_link",
+                  AsyncMock(return_value="https://draftbot.fyi/x")) as issue:
+        await find_a_time_for_match(interaction, 135)
+
+    args, kwargs = issue.call_args
+    assert args[:3] == ("4242", "1", VIEW)
+    assert isinstance(args[3], datetime)
+    assert kwargs == {"subject": "135"}
+    call = interaction.response.send_message.call_args
+    assert call.args[0] == TIME_LINK_INTRO
+    assert call.kwargs["ephemeral"] is True
+    (button,) = call.kwargs["view"].children
+    assert (button.label, button.url) == ("Open Find a time", "https://draftbot.fyi/x")
+
+
+@pytest.mark.asyncio
+async def test_find_a_time_refuses_when_scheduler_is_off():
+    from helpers.matchup import MATCH_SCHEDULING_NOT_ENABLED
+    from match_control_view import find_a_time_for_match
+
+    interaction = make_interaction(make_thread())
+    with patch("helpers.booking_room.scheduler_enabled", return_value=False), \
+            patch("helpers.booking_room.issue_link", AsyncMock()) as issue:
+        await find_a_time_for_match(interaction, 135)
+
+    issue.assert_not_awaited()
+    interaction.response.send_message.assert_awaited_once_with(
+        MATCH_SCHEDULING_NOT_ENABLED, ephemeral=True)
+
+
+@pytest.mark.asyncio
+async def test_find_a_time_reports_a_failed_link():
+    from helpers.matchup import TIME_LINK_FAILED
+    from match_control_view import find_a_time_for_match
+
+    interaction = make_interaction(make_thread())
+    with patch("helpers.booking_room.scheduler_enabled", return_value=True), \
+            patch("helpers.booking_room.issue_link", AsyncMock(side_effect=RuntimeError("down"))):
+        await find_a_time_for_match(interaction, 135)
+
+    interaction.response.send_message.assert_awaited_once_with(TIME_LINK_FAILED, ephemeral=True)
+
+
+def test_team_draft_view_still_exposes_the_shared_copy():
+    import team_draft_view
+    from helpers import matchup
+
+    assert team_draft_view.NOT_ENABLED == matchup.NOT_ENABLED

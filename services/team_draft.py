@@ -6,14 +6,15 @@ Every function takes the caller's session; none commits. The caller commits.
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 
 from sqlalchemy import delete, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.team_draft import TeamDraft
-from services.availability import CELL_MINUTES, floor_half_hour, naive_utc
+from services.availability import naive_utc
+from services.booking import BookingChange, change
 
 MAX_PICKS = 5
 MAX_SIDE_PEOPLE = 12
@@ -165,98 +166,39 @@ async def release_deleted_draft(session: AsyncSession, draft_session_id: str) ->
 
 DRAFT_CELLS = 2  # a draft takes two half-hour cells
 MIN_PER_SIDE = 2  # a good start has this many of each side free (all of a smaller side)
-WINDOW_CELLS = 336  # the bookable window: seven days of half-hour cells
-_CELL = timedelta(minutes=CELL_MINUTES)
 
 
-@dataclass(frozen=True)
-class BookingChange:
-    """The outcome of a book or clear: ``code`` names the refusal, None when ``ok``.
+class TeamDraftStore:
+    """A team draft's booking, kept on its TeamDraft row."""
 
-    ``old``/``new`` are tz-aware UTC (or None). On ``changed`` they carry the
-    booking as it now stands (old is None), and ``version`` is the current one.
-    """
+    def __init__(self, team_draft_id: int) -> None:
+        self.team_draft_id = team_draft_id
 
-    ok: bool
-    code: str | None
-    old: datetime | None
-    new: datetime | None
-    by_name: str
-    version: int
-
-
-def _aware(moment: datetime | None) -> datetime | None:
-    return None if moment is None else moment.replace(tzinfo=timezone.utc)
-
-
-async def _current(session: AsyncSession, team_draft_id: int) -> tuple[datetime | None, int, bool] | None:
-    """(booked start, version, started) as the database holds them now, or None if gone."""
-    row = (
-        await session.execute(
-            select(TeamDraft.booked_start_utc, TeamDraft.booking_version, TeamDraft.draft_session_id).where(
-                TeamDraft.id == team_draft_id
+    async def current(self, session: AsyncSession) -> tuple[datetime | None, int, bool] | None:
+        row = (
+            await session.execute(
+                select(TeamDraft.booked_start_utc, TeamDraft.booking_version, TeamDraft.draft_session_id).where(
+                    TeamDraft.id == self.team_draft_id
+                )
             )
+        ).first()
+        if row is None:
+            return None
+        return row[0], row[1], row[2] is not None
+
+    async def write(self, session: AsyncSession, seen_version: int, values: dict[str, datetime | str | None]) -> bool:
+        # The version check and the write are one statement, so of two sessions
+        # holding the same version exactly one UPDATE matches a row.
+        result = await session.execute(
+            update(TeamDraft)
+            .where(
+                TeamDraft.id == self.team_draft_id,
+                TeamDraft.booking_version == seen_version,
+                TeamDraft.draft_session_id.is_(None),
+            )
+            .values(booking_version=seen_version + 1, **values)
         )
-    ).first()
-    if row is None:
-        return None
-    return row[0], row[1], row[2] is not None
-
-
-async def _change(
-    session: AsyncSession,
-    team_draft_id: int,
-    user_id: str,
-    name: str,
-    start_utc: datetime | None,
-    seen_version: int,
-    now: datetime,
-) -> BookingChange:
-    """Shared body of book and clear; ``start_utc`` None means clear."""
-    current = await _current(session, team_draft_id)
-    if current is None:
-        return BookingChange(False, "gone", None, None, name, seen_version)
-    old, version, started = current
-    old_aware = _aware(old)
-    if started:
-        return BookingChange(False, "started", old_aware, old_aware, name, version)
-    if version != seen_version:
-        return BookingChange(False, "changed", None, old_aware, name, version)
-    if start_utc is not None:
-        start_utc = start_utc.astimezone(timezone.utc)
-        if start_utc.minute % 30 or start_utc.second or start_utc.microsecond:
-            return BookingChange(False, "bad_input", old_aware, None, name, version)
-        if start_utc < now:
-            return BookingChange(False, "past", old_aware, None, name, version)
-        if start_utc >= floor_half_hour(now) + WINDOW_CELLS * _CELL:
-            return BookingChange(False, "out_of_window", old_aware, None, name, version)
-    elif old is None:
-        return BookingChange(False, "not_booked", None, None, name, version)
-
-    values: dict[str, datetime | str | None] = (
-        dict(booked_start_utc=None, booked_by=None, booked_by_name=None)
-        if start_utc is None
-        else dict(booked_start_utc=naive_utc(start_utc), booked_by=user_id, booked_by_name=name)
-    )
-    # The version check and the write are one statement, so of two sessions
-    # holding the same version exactly one UPDATE matches a row.
-    result = await session.execute(
-        update(TeamDraft)
-        .where(
-            TeamDraft.id == team_draft_id,
-            TeamDraft.booking_version == seen_version,
-            TeamDraft.draft_session_id.is_(None),
-        )
-        .values(booking_version=seen_version + 1, **values)
-    )
-    if not (isinstance(result, CursorResult) and result.rowcount == 1):
-        now_row = await _current(session, team_draft_id)
-        if now_row is None:
-            return BookingChange(False, "gone", None, None, name, seen_version)
-        cur_start, cur_version, now_started = now_row
-        code = "started" if now_started else "changed"
-        return BookingChange(False, code, None, _aware(cur_start), name, cur_version)
-    return BookingChange(True, None, old_aware, start_utc, name, seen_version + 1)
+        return isinstance(result, CursorResult) and result.rowcount == 1
 
 
 async def book(
@@ -269,11 +211,11 @@ async def book(
     now: datetime,
 ) -> BookingChange:
     """Book or move the matchup's time. The caller commits."""
-    return await _change(session, team_draft_id, user_id, name, start_utc, seen_version, now)
+    return await change(session, TeamDraftStore(team_draft_id), user_id, name, start_utc, seen_version, now)
 
 
 async def clear(
     session: AsyncSession, team_draft_id: int, user_id: str, name: str, seen_version: int, now: datetime
 ) -> BookingChange:
     """Remove the matchup's booked time. The caller commits."""
-    return await _change(session, team_draft_id, user_id, name, None, seen_version, now)
+    return await change(session, TeamDraftStore(team_draft_id), user_id, name, None, seen_version, now)

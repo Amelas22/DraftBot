@@ -5,7 +5,9 @@ cog, the premade session hook, utils.py and views.py can all import it without
 an import cycle through cogs/. The message body itself is rendered by
 helpers/match_control.py, which stays free of Discord imports.
 """
-from typing import TYPE_CHECKING, Any, Callable, Coroutine, cast
+import asyncio
+from collections.abc import Iterable
+from typing import TYPE_CHECKING, Any, cast
 
 import discord
 from loguru import logger
@@ -22,15 +24,35 @@ from helpers.match_control import (
     match_tag,
     render_pairing_line,
 )
+from helpers.matchup import (
+    MATCH_SCHEDULING_NOT_ENABLED,
+    Booking,
+    Roster,
+    Side,
+    assign_people,
+    booking_announcement,
+)
+from helpers.booking_room import add_press_button, post_announcement, send_time_link
+from helpers.mentions import pings
 from helpers.pin_helpers import safe_pin
-from helpers.utils import DISCORD_THREAD_NAME_LIMIT, THREAD_ARCHIVE_MAX_MINUTES, as_messageable
+from helpers.utils import (
+    DISCORD_THREAD_NAME_LIMIT,
+    THREAD_ARCHIVE_MAX_MINUTES,
+    as_messageable,
+    is_bot,
+    resolve_display_name,
+)
 from models.draft_session import DraftSession
 from models.tournament import (
     Tournament,
     TournamentMatch,
     TournamentParticipant,
     TournamentRound,
+    TournamentTeamMember,
 )
+from services.booking import BookingChange
+from services.match_booking import schedulable_match
+from services.scheduler_match_api import VIEW as TIME_LINK_VIEW
 from services.tournament_formatter import round_name
 
 if TYPE_CHECKING:
@@ -71,6 +93,47 @@ async def match_facts(
         select(DraftSession).where(DraftSession.tournament_match_id == match_id)
     )).scalars().first()
     return match, part_a.team_name, part_b.team_name, name, draft
+
+
+async def match_side_rosters(
+    bot: discord.Client, guild_id: str, match_id: int
+) -> tuple[Roster, Roster] | None:
+    """Both sides of a tournament match as the scheduler page lists them, or None.
+
+    None when the match is gone, a bye, still waiting on a side, or belongs to a
+    tournament of another guild. A side is its team name; its people are the
+    captain, then the roster in the order they were added. Bots are left out and
+    someone on both rosters is counted once, on side A.
+    """
+    guild = bot.get_guild(int(guild_id))
+    async with db_session() as session:
+        found = await schedulable_match(session, guild_id, match_id)
+        if found is None:
+            return None
+        parts = (found.a, found.b)
+        members = (await session.execute(
+            select(TournamentTeamMember)
+            .where(TournamentTeamMember.participant_id.in_([part.id for part in parts]))
+            .order_by(TournamentTeamMember.id)
+        )).scalars().all()
+        sides = [(str(part.team_name), [
+            (str(part.captain_user_id), None),
+            *((str(m.user_id), str(m.display_name)) for m in members if m.participant_id == part.id),
+        ]) for part in parts]
+
+    # Names come after the session closes: a missing member costs a Discord call.
+    a_people, b_people = assign_people(
+        [u for u, _n in sides[0][1] if not is_bot(guild, u)], [],
+        [u for u, _n in sides[1][1] if not is_bot(guild, u)], [],
+    )
+    snapshots = {u: n for _label, people in reversed(sides) for u, n in people if n}
+
+    async def roster(label: str, ids: list[str]) -> Roster:
+        names = await asyncio.gather(*(resolve_display_name(bot, guild_id, u, snapshots.get(u)) for u in ids))
+        return Roster(label, tuple(zip(ids, names)))
+
+    a, b = await asyncio.gather(roster(sides[0][0], a_people), roster(sides[1][0], b_people))
+    return a, b
 
 
 async def pairing_round_name(session: AsyncSession, match_id: int) -> str | None:
@@ -138,6 +201,7 @@ def control_body_and_view(
         lobby_link=lobby_link(draft),
         result=(match.team_a_wins, match.team_b_wins),
         role_mentions=role_mentions,
+        booking=Booking(match.booked_start_utc, match.booked_by_name),
     )
     return body, (MatchControlView(match.id) if state == SCHEDULING else None)
 
@@ -176,30 +240,28 @@ def cube_picker_for_match(guild_id: int | None, match_id: int, a_name: str,
 
 
 class MatchControlView(discord.ui.View):
-    """Persistent 'Start draft' button on a match's control message."""
+    """Persistent 'Find a time' and 'Start draft' buttons on a match's control message."""
 
     def __init__(self, match_id: int) -> None:
         super().__init__(timeout=None)
-        button: discord.ui.Button[Any] = discord.ui.Button(
-            label="Start draft",
-            style=discord.ButtonStyle.primary,
-            custom_id=f"tournament_start_draft:{match_id}",
-        )
-        # discord.ui.Item.callback is declared on the class as an unbound method
-        # (self, interaction), so pyrefly sees the attribute type as still
-        # expecting `self` even though py-cord calls it bound at dispatch time.
-        button.callback = self._make_callback(match_id)  # pyrefly: ignore [bad-assignment]
-        self.add_item(button)
+        add_press_button(self, match_id, "Find a time", discord.ButtonStyle.secondary,
+                         f"tournament_find_time:{match_id}", find_a_time_for_match)
+        add_press_button(self, match_id, "Start draft", discord.ButtonStyle.primary,
+                         f"tournament_start_draft:{match_id}", start_match_draft)
 
-    @staticmethod
-    def _make_callback(match_id: int) -> Callable[[discord.Interaction], Coroutine[Any, Any, None]]:
-        async def callback(interaction: discord.Interaction) -> None:
-            await start_match_draft(interaction, match_id)
-        return callback
+
+async def find_a_time_for_match(interaction: discord.Interaction, match_id: int) -> None:
+    """Find a time button: the presser's own 7-day draftbot.fyi link to this match.
+
+    Open to anyone who can see the room; the page itself decides what a
+    non-participant may do.
+    """
+    await send_time_link(interaction, TIME_LINK_VIEW, match_id, MATCH_SCHEDULING_NOT_ENABLED, f"Match {match_id}")
 
 
 async def _resolve_control_message(
-    thread: discord.Thread, control_id: "str | None", body: str, view: "MatchControlView | None"
+    thread: discord.Thread, control_id: "str | None", body: str, view: "MatchControlView | None",
+    role_ids: Iterable[str] = (),
 ) -> discord.Message:
     """The pinned control message, editing an existing one or posting a new one."""
     if control_id:
@@ -210,10 +272,11 @@ async def _resolve_control_message(
         except discord.NotFound:
             logger.warning(
                 f"Control message {control_id} missing in thread {thread.id}; reposting")
-    # roles=True is load-bearing: without it Discord renders the role mention
-    # as a plain pill, notifies nobody, and adds nobody to the thread -- the
-    # entire point of tagging both teams' roles in the body above.
-    allowed_mentions = discord.AllowedMentions(everyone=False, roles=True, users=True)
+    # Naming the roles is load-bearing: without it Discord renders the role
+    # mention as a plain pill, notifies nobody, and adds nobody to the thread
+    # -- the entire point of tagging both teams' roles in the body above. Only
+    # these roles: a team name can contain any other role mention.
+    allowed_mentions = pings(roles=role_ids)
     # Messageable.send's view overloads don't accept an explicit None (only a
     # real View or the omitted-argument default), even though py-cord treats
     # a falsy view as "no view" at runtime.
@@ -228,8 +291,8 @@ async def _resolve_control_message(
 async def create_match_room(message: discord.Message, match_id: int) -> discord.Thread | None:
     """Open a match's room off its pairing message: thread + pinned control message.
 
-    Returns the thread, or None when Discord refuses (typically missing Manage
-    Threads). A failure must not take the round's pairings down with it, so the
+    Returns the thread, or None when a team has no working role or Discord
+    refuses (typically missing Manage Threads). A failure must not take the round's pairings down with it, so the
     caller simply leaves that match's line without a link.
     """
     async with db_session() as session:
@@ -248,11 +311,15 @@ async def create_match_room(message: discord.Message, match_id: int) -> discord.
             .where(TournamentParticipant.id.in_(
                 [match.team_a_participant_id, match.team_b_participant_id]))
         )).all())
-        body, view = control_body_and_view(
-            match, a_name, b_name, name, draft,
-            role_mentions=(roles.get(match.team_a_participant_id),
-                           roles.get(match.team_b_participant_id)),
-        )
+        role_ids = (roles.get(match.team_a_participant_id), roles.get(match.team_b_participant_id))
+        body, view = control_body_and_view(match, a_name, b_name, name, draft, role_mentions=role_ids)
+
+    # A room tags its teams by role; without one a side would never hear of it.
+    # The commands refuse before pairing, but a bracket result opens rooms too.
+    guild = message.guild
+    if guild is None or any(not r or guild.get_role(int(r)) is None for r in role_ids):
+        logger.warning(f"Not opening a room for match {match_id}: a team has no working role")
+        return None
 
     try:
         thread = await message.create_thread(
@@ -266,7 +333,9 @@ async def create_match_room(message: discord.Message, match_id: int) -> discord.
         return None
 
     try:
-        control = await _resolve_control_message(thread, None, body, view)
+        control = await _resolve_control_message(
+            thread, None, body, view,
+            role_ids=[r for r in role_ids if r])
     except discord.HTTPException as e:
         logger.warning(
             f"Created a thread for match {match_id} but could not post its control "
@@ -481,3 +550,60 @@ async def announce_and_refresh(
     # Facts already fetched above -- the public refresh_match_views would
     # open a second session and fetch them again for the same match.
     await _refresh_match_views_with_facts(bot, match_id, facts)
+
+
+async def _announcement_targets(
+    match_id: int
+) -> tuple[str, str | None, list[tuple[str, str | None]]] | None:
+    """(guild id, thread id, [(team name, role id)] for sides A and B), or None.
+
+    One short session, closed before the caller talks to Discord.
+    """
+    async with db_session() as session:
+        found = await schedulable_match(session, None, match_id)
+        if found is None:
+            return None
+        sides = [(str(p.team_name), None if p.role_id is None else str(p.role_id))
+                 for p in (found.a, found.b)]
+        thread_id = None if found.match.thread_id is None else str(found.match.thread_id)
+        return found.guild_id, thread_id, sides
+
+
+async def announce_match_booking(bot: discord.Client, match_id: int, change: BookingChange) -> None:
+    """Tag both teams in the match's room with a committed booking change, then
+    re-render the control message. Discord errors are logged, never raised: the
+    booking already stands. Re-booking the time already booked pings nobody;
+    only the control message (its "booked by") is re-rendered.
+
+    A team is tagged by its role; one whose role is gone (a tournament still
+    running without it) is tagged by name through its people instead.
+    """
+    if change.old is not None and change.old == change.new:
+        await safe_refresh_match_views(bot, match_id)
+        return
+    try:
+        targets = await _announcement_targets(match_id)
+        if targets is None:
+            return
+        guild_id, thread_id, teams = targets
+        if not thread_id:
+            return
+        guild = bot.get_guild(int(guild_id))
+        roles = [role_id if role_id is not None and guild is not None
+                 and guild.get_role(int(role_id)) is not None else None
+                 for _name, role_id in teams]
+        rosters = await match_side_rosters(bot, guild_id, match_id) if None in roles else None
+        a, b = (
+            Side(name, (role_id,), ()) if role_id is not None
+            # The role is gone: tag the team's people instead.
+            else Side(name, (), tuple(u for u, _n in rosters[i].people) if rosters is not None else ())
+            for i, ((name, _stored), role_id) in enumerate(zip(teams, roles))
+        )
+        content = booking_announcement(change.by_name, change.old, change.new, a, b)
+        mentions = pings(roles=a.role_ids + b.role_ids, users=list(a.user_ids + b.user_ids) or False)
+        if not await post_announcement(bot, int(thread_id), content, mentions, f"match {match_id}"):
+            return
+    except Exception:
+        logger.exception(f"Match {match_id}: booking announcement failed")
+    # After the send: another booking may have committed during it.
+    await safe_refresh_match_views(bot, match_id)

@@ -17,7 +17,7 @@ from database.db_session import db_session
 from helpers.money_gate import gate_serve, linked_username
 from helpers.permissions import bot_manager_button, has_bot_manager_role, is_bot_manager
 from helpers.pin_helpers import safe_pin
-from helpers.utils import not_none, ui_button
+from helpers.utils import not_none, reach_thread, ui_button
 from notification_service import send_dm
 from services.team_finder_sync import reconcile_after_command
 from services.tournament_registration import add_roster_members, register_captain
@@ -90,10 +90,11 @@ from services.tournament_service import (
 from services.mtgo_tradebot_client import EVENT_TICKET
 from services import tournament_escrow_service as escrow
 from services import wallet_service
-from services.league_roles import (apply_role_sync, format_role_sync, grant_league_roles,
-                                    plan_role_sync, release_league_role)
-from services.tournament_roles import (delete_team_roles, ensure_team_role, ensure_team_roles,
-                                       sync_member)
+from services.league_roles import (active_tournament_id, apply_role_sync, format_role_sync, grant_league_roles,
+                                    SYNC_LIST_LIMIT, missing_roles_text, plan_role_sync,
+                                    release_league_role)
+from services.tournament_roles import (clashing_teams, delete_team_roles, ensure_team_role,
+                                       ensure_team_roles, sync_member, teams_missing_role)
 
 
 # Registering records only the captain, so every successful registration has to say
@@ -333,13 +334,10 @@ async def open_room_for_posted_match(bot, match_id):
     match, a_name, b_name, stage, _draft = facts
     if not match.pairings_channel_id or not match.pairings_message_id:
         return False
-    channel = bot.get_channel(int(match.pairings_channel_id))
+    channel = await reach_thread(bot, int(match.pairings_channel_id))
     if channel is None:
-        try:
-            channel = await bot.fetch_channel(int(match.pairings_channel_id))
-        except discord.HTTPException as e:
-            logger.warning(f"open_rooms: pairings channel for match {match_id} unreachable: {e}")
-            return False
+        logger.warning(f"open_rooms: pairings channel for match {match_id} unreachable")
+        return False
     try:
         message = await channel.fetch_message(int(match.pairings_message_id))
     except discord.HTTPException as e:
@@ -1242,6 +1240,37 @@ class TournamentCog(commands.Cog):
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
 
+    async def _refuse_missing_roles(self, ctx) -> bool:
+        """Tell the TO (privately) and return True when the active tournament
+        has a team without a working Discord role. Pairing a round or opening
+        a room for such a team would leave its players out of their room.
+        No active tournament is not a refusal: the command says so itself."""
+        tournament_id = await active_tournament_id(ctx.guild.id)
+        if tournament_id is None:
+            return False
+        names = await teams_missing_role(ctx.guild, tournament_id)
+        if not names:
+            return False
+        await ctx.followup.send(missing_roles_text(names), ephemeral=True)
+        return True
+
+    async def _refuse_role_clashes(self, ctx) -> bool:
+        """Tell the TO (privately) and return True when a registering team
+        cannot be given its role because the name is taken. The start cannot
+        be undone, so it is refused while registration is still open."""
+        registering_id = await active_tournament_id(ctx.guild.id, registering=True)
+        clashes = await clashing_teams(ctx.guild, registering_id) if registering_id is not None else []
+        if not clashes:
+            return False
+        listed = ", ".join(f"**{team}** (role \"{role}\")" for team, role in clashes[:SYNC_LIST_LIMIT])
+        more = f", and {len(clashes) - SYNC_LIST_LIMIT} more" if len(clashes) > SYNC_LIST_LIMIT else ""
+        await ctx.followup.send(
+            f"❌ A \"Team <name>\" role for these teams can't be created because "
+            f"the name is already taken: {listed}{more}. Rename or remove the "
+            f"clashing role (or rename the team), then run `/tournament start` "
+            f"again. Registration is still open.", ephemeral=True)
+        return True
+
     @tournament.command(name="start", description="Admin: close registration and open the schedule")
     @has_bot_manager_role()
     async def start(self, ctx):
@@ -1249,6 +1278,8 @@ class TournamentCog(commands.Cog):
             return
         await ctx.defer()
         try:
+            if await self._refuse_role_clashes(ctx):
+                return
             res = await escrow.close_registration_and_seed(ctx.guild.id, random.Random())
             tournament_id = res["tournament_id"]
             logger.info(f"Tournament {tournament_id} started in guild {ctx.guild.id} by {ctx.author.id}")
@@ -1261,14 +1292,19 @@ class TournamentCog(commands.Cog):
                 logger.exception(
                     f"[team-roles] could not fill missing roles for tournament {tournament_id}")
             await self._refresh_board(tournament_id)
+            unroled = await teams_missing_role(ctx.guild, tournament_id)
             pot_line = f" 🏦 Prize pool: **{res['pot']} tix**." if res["fee"] > 0 else ""
             play = self._destination(ctx, PAIRINGS.setting)
             standings = self._destination(ctx, STANDINGS.setting)
             where = "" if play == standings == ctx.channel else (
                 f" Pairings in {play.mention}, standings in {standings.mention}.")
             await ctx.followup.send(f"🏆 **{res['name']}** has started!{pot_line}{where}")
-            await self._post_schedule(play, tournament_id)
+            await self._post_schedule(play, tournament_id, create_rooms=not unroled)
             await self._post_standings(standings, tournament_id)
+            if unroled:
+                await ctx.followup.send(
+                    missing_roles_text(unroled, then="run `/tournament open_rooms 1`"),
+                    ephemeral=True)
         except ValueError as e:
             await ctx.followup.send(f"❌ {e}", ephemeral=True)
 
@@ -1560,6 +1596,8 @@ class TournamentCog(commands.Cog):
         if not await self._check_enabled(ctx):
             return
         await ctx.defer()
+        if await self._refuse_missing_roles(ctx):
+            return
         try:
             completed = None
             async with db_session() as session:
@@ -1676,6 +1714,8 @@ class TournamentCog(commands.Cog):
             await ctx.respond("❌ Name both play-in teams, or neither.", ephemeral=True)
             return
         await ctx.defer()
+        if await self._refuse_missing_roles(ctx):
+            return
         play_in = None
         async with db_session() as session:
             tournament = await get_active_tournament(session, ctx.guild.id)
@@ -1751,6 +1791,8 @@ class TournamentCog(commands.Cog):
         if not await self._check_enabled(ctx):
             return
         await ctx.defer(ephemeral=True)
+        if await self._refuse_missing_roles(ctx):
+            return
         async with db_session() as session:
             tournament = await get_active_tournament(session, ctx.guild.id)
             if tournament is None:
@@ -1845,7 +1887,7 @@ class TournamentCog(commands.Cog):
         """
         return resolve_channel(ctx.guild, get_config(ctx.guild.id), setting) or ctx.channel
 
-    async def _post_schedule(self, channel, tournament_id):
+    async def _post_schedule(self, channel, tournament_id, create_rooms=True):
         """Post the whole schedule, one message per match. Swiss has one round;
         all-open formats reveal every round at once.
 
@@ -1866,7 +1908,8 @@ class TournamentCog(commands.Cog):
             )).scalars().all()
             round_meta = [(r.id, r.round_number) for r in rounds]
         for i, (round_id, round_number) in enumerate(round_meta):
-            await self._post_round_messages(channel, round_id, round_number, create_rooms=(i == 0))
+            await self._post_round_messages(
+                channel, round_id, round_number, create_rooms=create_rooms and i == 0)
 
     async def _post_round_messages(self, channel, round_id, round_number, create_rooms=True):
         """Post a week header, then one message per match. Each playable match
