@@ -64,8 +64,11 @@ async def hold_for(library: Any, player_id: Any,
         return None
     least, most = prices
     # Before is_trusted, so an exempt player is never logged as a non-member; and
-    # only where there is a hold to waive.
-    if most and await is_exempt(library.id, player_id):
+    # only where there is a hold to waive. Either figure, not `most`: the shell
+    # tool refuses a pair whose member figure is the higher, but the columns
+    # can still hold one, and reading `most` alone would then skip the check
+    # and charge an exempt member the larger figure.
+    if max(least, most) and await is_exempt(library.id, player_id):
         return 0   # a running tournament lends its players the deck on the house
     if least == most or await is_trusted(library.id, player_id):
         return least

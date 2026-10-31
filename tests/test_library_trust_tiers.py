@@ -183,3 +183,54 @@ async def test_a_running_exempt_tournament_waives_the_small_hold_too(test_db):
     library = await _library(collateral=200, untrusted=400, small=10, small_untrusted=50)
     await _tournament()
     assert await trust.hold_for(library, CAPTAIN, cards=2) == 0
+
+
+async def test_an_odd_small_pair_never_charges_an_exempt_member(test_db):
+    """A member figure above the non-member one -- refused by the shell tool,
+    but nothing stops the columns holding it -- must not let the exemption
+    test read the smaller figure and skip a member it should waive."""
+    from test_library_tournament_exemption import CAPTAIN, _tournament
+    library = await _library(collateral=200, untrusted=400, small=10, small_untrusted=0)
+    await access.invite(LIB, CAPTAIN, "test")
+    await _tournament()
+    assert await trust.hold_for(library, CAPTAIN, cards=2) == 0
+
+
+# --- the shell tool refuses a pair that reads backwards -----------------------
+
+def _tool():
+    import importlib.util
+    import pathlib
+    path = pathlib.Path(__file__).resolve().parent.parent / "scripts" / "library_tool.py"
+    spec = importlib.util.spec_from_file_location("library_tool_under_test", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("kwargs", [
+    # Falls back on --hold for strangers: members 10, strangers 0.
+    {"hold": 0, "small_hold": 10},
+    # Falls back on --hold-unknown for strangers: members 60, strangers 50.
+    {"hold": 20, "hold_unknown": 50, "small_hold": 60},
+    {"hold": 20, "small_hold": 30, "small_hold_unknown": 25},
+])
+async def test_the_tool_refuses_a_small_pair_cheaper_for_strangers(test_db, capsys, kwargs):
+    from models.library import Library
+    await _tool()._create("odd", "Odd", "rental", by="test", replace=False, **kwargs)
+
+    assert "Nothing changed." in capsys.readouterr().out
+    async with AsyncSessionLocal() as s:
+        assert await s.get(Library, "odd") is None
+
+
+async def test_the_tool_accepts_a_small_member_figure_under_the_deck_stranger_one(
+        test_db, capsys):
+    from models.library import Library
+    await _tool()._create("ok", "Ok", "rental", hold=20, by="test", replace=False,
+                          hold_unknown=50, small_hold=30)
+
+    assert "Nothing changed." not in capsys.readouterr().out
+    async with AsyncSessionLocal() as s:
+        assert await s.get(Library, "ok") is not None
