@@ -1,4 +1,4 @@
-from services.draft_setup_manager import mpt_embed_field_value
+from services.draft_end import mpt_embed_field_value
 
 
 def test_mpt_embed_field_value_link_when_url():

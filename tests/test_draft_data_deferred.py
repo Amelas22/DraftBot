@@ -127,11 +127,11 @@ async def test_publish_draft_log_reads_the_log_against_a_real_database(test_db):
 
     seen = {}
 
-    async def _embed(draft_data, table_url=None):
+    async def _embed(bot, session_id, draft_data, table_url=None):
         seen["draft_data"] = draft_data
         return True
 
-    with patch.object(DraftSetupManager, "send_magicprotools_embed",
+    with patch("services.draft_end.send_draft_log_embed",
                       AsyncMock(side_effect=_embed)):
         published = await m.publish_draft_log()
 

@@ -125,6 +125,7 @@ project-includes = [
     "services/match_booking.py",
     "team_draft_wizard.py",
     "cogs/team_draft_cog.py",
+    "services/draft_end.py",
 ]
 
 # SQLAlchemy 1.x-style Column() declarations type column attributes as Column[T]

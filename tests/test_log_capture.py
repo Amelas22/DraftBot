@@ -51,14 +51,15 @@ def _mock_db_session(draft_session):
 @pytest.mark.asyncio
 async def test_capture_stores_data_and_stamps_without_publishing():
     m = _manager()
-    ds = SimpleNamespace(session_id="sid", sign_ups={"d1": "Alice", "d2": "Bob"},
+    ds = SimpleNamespace(session_id="sid", session_type="premade", cube="MyCube",
+                         sign_ups={"d1": "Alice", "d2": "Bob"},
                          draft_data=None, pack_first_picks=None, logs_captured_at=None,
                          unlock_at=None, data_received=False)
     db_factory, session = _mock_db_session(ds)
-    with patch("services.draft_setup_manager.db_session", db_factory), \
-         patch.object(DraftSetupManager, "save_to_digitalocean_spaces", AsyncMock(return_value="team/x.json")) as spaces, \
-         patch.object(DraftSetupManager, "get_pack_first_picks", MagicMock(return_value={})), \
-         patch.object(DraftSetupManager, "send_magicprotools_embed", AsyncMock()) as embed:
+    with patch("services.draft_end.db_session", db_factory), \
+         patch("services.draft_end.upload_draft_log", AsyncMock(return_value="team/x.json")) as spaces, \
+         patch("services.draft_end.pack_first_picks", MagicMock(return_value={})), \
+         patch("services.draft_end.send_draft_log_embed", AsyncMock()) as embed:
         ok = await m.capture_draft_log(_draft_data())
 
     assert ok is True
@@ -80,8 +81,8 @@ async def test_capture_is_idempotent():
                          pack_first_picks=None, logs_captured_at=datetime.now(),
                          data_received=False)
     db_factory, _ = _mock_db_session(ds)
-    with patch("services.draft_setup_manager.db_session", db_factory), \
-         patch.object(DraftSetupManager, "save_to_digitalocean_spaces", AsyncMock(return_value="team/x.json")) as spaces:
+    with patch("services.draft_end.db_session", db_factory), \
+         patch("services.draft_end.upload_draft_log", AsyncMock(return_value="team/x.json")) as spaces:
         ok = await m.capture_draft_log(_draft_data())
 
     assert ok is True
@@ -91,7 +92,7 @@ async def test_capture_is_idempotent():
 @pytest.mark.asyncio
 async def test_capture_no_data_is_noop():
     m = _manager()
-    with patch.object(DraftSetupManager, "save_to_digitalocean_spaces", AsyncMock()) as spaces:
+    with patch("services.draft_end.upload_draft_log", AsyncMock()) as spaces:
         ok = await m.capture_draft_log(None)
     assert ok is False
     spaces.assert_not_called()
@@ -102,14 +103,15 @@ async def test_capture_spaces_failure_keeps_db_copy_without_stamp():
     """If the Spaces upload fails, the raw log is still saved to the DB, but
     logs_captured_at stays NULL so the capture is retryable."""
     m = _manager()
-    ds = SimpleNamespace(session_id="sid", sign_ups={"d1": "Alice", "d2": "Bob"},
+    ds = SimpleNamespace(session_id="sid", session_type="premade", cube="MyCube",
+                         sign_ups={"d1": "Alice", "d2": "Bob"},
                          draft_data=None, pack_first_picks=None, logs_captured_at=None,
                          data_received=False, spaces_object_key=None)
     db_factory, session = _mock_db_session(ds)
-    with patch("services.draft_setup_manager.db_session", db_factory), \
-         patch.object(DraftSetupManager, "save_to_digitalocean_spaces", AsyncMock(return_value=None)) as spaces, \
-         patch.object(DraftSetupManager, "get_pack_first_picks", MagicMock(return_value={})), \
-         patch.object(DraftSetupManager, "send_magicprotools_embed", AsyncMock()) as embed:
+    with patch("services.draft_end.db_session", db_factory), \
+         patch("services.draft_end.upload_draft_log", AsyncMock(return_value=None)) as spaces, \
+         patch("services.draft_end.pack_first_picks", MagicMock(return_value={})), \
+         patch("services.draft_end.send_draft_log_embed", AsyncMock()) as embed:
         ok = await m.capture_draft_log(_draft_data())
 
     assert ok is False                      # upload failed
@@ -133,9 +135,9 @@ async def test_on_end_draft_captures_log():
     bot.get_guild.return_value = None      # skip the rooms-creation branch
     bot.get_channel.return_value = None
     with patch("services.draft_setup_manager.get_bot", return_value=bot), \
-         patch.object(DraftSetupManager, "capture_draft_log", AsyncMock()) as cap:
+         patch("services.draft_end.capture_draft_log", AsyncMock()) as cap:
         await m._on_end_draft()
-    cap.assert_awaited_once_with(m.current_draft_log)
+    cap.assert_awaited_once_with(m.session_id, m.current_draft_log)
 
 
 @pytest.mark.asyncio
@@ -152,7 +154,7 @@ async def test_on_end_draft_warns_when_no_log_arrives():
     bot.get_channel.return_value = None
     with patch("services.draft_setup_manager.get_bot", return_value=bot), \
          patch("services.draft_setup_manager.asyncio.sleep", AsyncMock()) as sleep, \
-         patch.object(DraftSetupManager, "capture_draft_log", AsyncMock()) as cap:
+         patch("services.draft_end.capture_draft_log", AsyncMock()) as cap:
         await m._on_end_draft()
     cap.assert_not_awaited()
     assert sleep.await_count == DRAFT_LOG_WAIT_ATTEMPTS
@@ -162,10 +164,10 @@ async def test_on_end_draft_warns_when_no_log_arrives():
 @pytest.mark.asyncio
 async def test_publish_posts_and_marks_received():
     m = _manager()
-    ds = SimpleNamespace(session_id="sid", draft_data=_draft_data(), data_received=False, drafttable_url=None)
+    ds = SimpleNamespace(session_id="sid", draft_data=_draft_data(), data_received=False, drafttable_url=None, guild_id="42")
     db_factory, _ = _mock_db_session(ds)
-    with patch("services.draft_setup_manager.db_session", db_factory), \
-         patch.object(DraftSetupManager, "send_magicprotools_embed", AsyncMock(return_value=True)) as embed:
+    with patch("services.draft_end.db_session", db_factory), \
+         patch("services.draft_end.send_draft_log_embed", AsyncMock(return_value=True)) as embed:
         ok = await m.publish_draft_log()
     assert ok is True
     embed.assert_awaited_once()
@@ -178,10 +180,10 @@ async def test_publish_does_not_mark_received_when_embed_not_sent():
     (guild/channel missing, or an exception was swallowed), publish_draft_log
     must NOT stamp data_received, so the reconciler retries on a later tick."""
     m = _manager()
-    ds = SimpleNamespace(session_id="sid", draft_data=_draft_data(), data_received=False, drafttable_url=None)
+    ds = SimpleNamespace(session_id="sid", draft_data=_draft_data(), data_received=False, drafttable_url=None, guild_id="42")
     db_factory, _ = _mock_db_session(ds)
-    with patch("services.draft_setup_manager.db_session", db_factory), \
-         patch.object(DraftSetupManager, "send_magicprotools_embed", AsyncMock(return_value=False)) as embed:
+    with patch("services.draft_end.db_session", db_factory), \
+         patch("services.draft_end.send_draft_log_embed", AsyncMock(return_value=False)) as embed:
         ok = await m.publish_draft_log()
     assert ok is False
     embed.assert_awaited_once()
@@ -191,10 +193,10 @@ async def test_publish_does_not_mark_received_when_embed_not_sent():
 @pytest.mark.asyncio
 async def test_publish_idempotent_when_already_received():
     m = _manager()
-    ds = SimpleNamespace(session_id="sid", draft_data=_draft_data(), data_received=True, drafttable_url=None)
+    ds = SimpleNamespace(session_id="sid", draft_data=_draft_data(), data_received=True, drafttable_url=None, guild_id="42")
     db_factory, _ = _mock_db_session(ds)
-    with patch("services.draft_setup_manager.db_session", db_factory), \
-         patch.object(DraftSetupManager, "send_magicprotools_embed", AsyncMock()) as embed:
+    with patch("services.draft_end.db_session", db_factory), \
+         patch("services.draft_end.send_draft_log_embed", AsyncMock()) as embed:
         ok = await m.publish_draft_log()
     assert ok is True
     embed.assert_not_called()
@@ -203,10 +205,10 @@ async def test_publish_idempotent_when_already_received():
 @pytest.mark.asyncio
 async def test_publish_no_data_returns_false():
     m = _manager()
-    ds = SimpleNamespace(session_id="sid", draft_data=None, data_received=False, drafttable_url=None)
+    ds = SimpleNamespace(session_id="sid", draft_data=None, data_received=False, drafttable_url=None, guild_id="42")
     db_factory, _ = _mock_db_session(ds)
-    with patch("services.draft_setup_manager.db_session", db_factory), \
-         patch.object(DraftSetupManager, "send_magicprotools_embed", AsyncMock()) as embed:
+    with patch("services.draft_end.db_session", db_factory), \
+         patch("services.draft_end.send_draft_log_embed", AsyncMock()) as embed:
         ok = await m.publish_draft_log()
     assert ok is False
     embed.assert_not_called()
@@ -219,10 +221,10 @@ async def test_publish_release_emits_sharedraftlog_when_connected():
     m.socket_client = MagicMock()
     m.socket_client.connected = True
     m.socket_client.emit = AsyncMock()
-    ds = SimpleNamespace(session_id="sid", draft_data=_draft_data(), data_received=False, drafttable_url=None)
+    ds = SimpleNamespace(session_id="sid", draft_data=_draft_data(), data_received=False, drafttable_url=None, guild_id="42")
     db_factory, _ = _mock_db_session(ds)
-    with patch("services.draft_setup_manager.db_session", db_factory), \
-         patch.object(DraftSetupManager, "send_magicprotools_embed", AsyncMock()):
+    with patch("services.draft_end.db_session", db_factory), \
+         patch("services.draft_end.send_draft_log_embed", AsyncMock()):
         ok = await m.publish_draft_log(release=True)
     assert ok is True
     m.socket_client.emit.assert_awaited_once()
@@ -237,10 +239,10 @@ async def test_publish_release_skips_when_disconnected():
     m.socket_client = MagicMock()
     m.socket_client.connected = False
     m.socket_client.emit = AsyncMock()
-    ds = SimpleNamespace(session_id="sid", draft_data=_draft_data(), data_received=False, drafttable_url=None)
+    ds = SimpleNamespace(session_id="sid", draft_data=_draft_data(), data_received=False, drafttable_url=None, guild_id="42")
     db_factory, _ = _mock_db_session(ds)
-    with patch("services.draft_setup_manager.db_session", db_factory), \
-         patch.object(DraftSetupManager, "send_magicprotools_embed", AsyncMock()) as embed:
+    with patch("services.draft_end.db_session", db_factory), \
+         patch("services.draft_end.send_draft_log_embed", AsyncMock()) as embed:
         ok = await m.publish_draft_log(release=True)
     assert ok is True
     m.socket_client.emit.assert_not_called()
@@ -258,8 +260,8 @@ async def test_on_end_draft_posts_team_pools():
     bot.get_guild.return_value = None
     bot.get_channel.return_value = None
     with patch("services.draft_setup_manager.get_bot", return_value=bot), \
-         patch.object(DraftSetupManager, "capture_draft_log", AsyncMock()), \
-         patch("services.draft_setup_manager.post_team_logs", AsyncMock()) as team:
+         patch("services.draft_end.capture_draft_log", AsyncMock()), \
+         patch("services.draft_end.post_team_logs", AsyncMock()) as team:
         await m._on_end_draft()
     team.assert_awaited_once_with(m.session_id, bot)
 
@@ -296,13 +298,11 @@ async def test_keep_connection_alive_reclaims_ownership_after_initial_connect():
 
 @pytest.mark.asyncio
 async def test_save_to_spaces_returns_object_key():
-    m = DraftSetupManager.__new__(DraftSetupManager)   # bypass __init__
-    m.session_type = "team"; m.cube_id = "TestCube"
-    m.logger = MagicMock()
+    from services.draft_end import upload_draft_log
     fake_result = MagicMock(success=True, object_path="team/TestCube-123-DBABC.json")
     fake_helper = MagicMock(); fake_helper.upload_json = AsyncMock(return_value=fake_result)
-    with patch("services.draft_setup_manager.DigitalOceanHelper", return_value=fake_helper):
-        key = await m.save_to_digitalocean_spaces({"time": 123, "sessionID": "DBABC"})
+    with patch("services.draft_end.DigitalOceanHelper", return_value=fake_helper):
+        key = await upload_draft_log("team", "TestCube", {"time": 123, "sessionID": "DBABC"})
     assert key == "team/TestCube-123-DBABC.json"
 
 
@@ -315,7 +315,8 @@ async def test_save_to_spaces_returns_object_key():
 
 
 def _captured(draft_data, **over):
-    ds = SimpleNamespace(session_id="sid", sign_ups={"d1": "Alice", "d2": "Bob"},
+    ds = SimpleNamespace(session_id="sid", session_type="premade", cube="MyCube",
+                         sign_ups={"d1": "Alice", "d2": "Bob"},
                          draft_data=draft_data, pack_first_picks={"d1": ["old"]},
                          logs_captured_at=datetime(2026, 11, 5, 22, 8),
                          unlock_at=datetime(2026, 11, 6, 1, 8),
@@ -335,10 +336,10 @@ def _second_run():
 
 def _supersede_patches(spaces_key, dropped=()):
     return (
-        patch.object(DraftSetupManager, "save_to_digitalocean_spaces", AsyncMock(return_value=spaces_key)),
-        patch.object(DraftSetupManager, "get_pack_first_picks", MagicMock(return_value=["new"])),
-        patch("services.draft_setup_manager.drop_uncollected", AsyncMock(return_value=list(dropped))),
-        patch("services.draft_setup_manager.loan_changed", MagicMock()),
+        patch("services.draft_end.upload_draft_log", AsyncMock(return_value=spaces_key)),
+        patch("services.draft_end.pack_first_picks", MagicMock(return_value=["new"])),
+        patch("services.draft_end.drop_uncollected", AsyncMock(return_value=list(dropped))),
+        patch("services.draft_end.loan_changed", MagicMock()),
     )
 
 
@@ -349,7 +350,7 @@ async def test_capture_replaces_the_log_of_a_restarted_draft():
     db_factory, session = _mock_db_session(ds)
     gone = SimpleNamespace(id=7)
     spaces, picks, drop, panel = _supersede_patches("team/second.json", dropped=[gone])
-    with patch("services.draft_setup_manager.db_session", db_factory), spaces, picks, drop, panel:
+    with patch("services.draft_end.db_session", db_factory), spaces, picks, drop, panel:
         ok = await m.capture_draft_log(_second_run())
 
     assert ok is True
@@ -376,7 +377,7 @@ async def test_a_superseding_capture_whose_upload_fails_leaves_the_row_uncapture
     ds = _captured(_draft_data())
     db_factory, session = _mock_db_session(ds)
     spaces, picks, drop, panel = _supersede_patches(None)
-    with patch("services.draft_setup_manager.db_session", db_factory), spaces, picks, drop, panel:
+    with patch("services.draft_end.db_session", db_factory), spaces, picks, drop, panel:
         ok = await m.capture_draft_log(_second_run())
 
     assert ok is False
@@ -397,7 +398,7 @@ async def test_capture_keeps_a_published_log_even_when_a_later_one_arrives():
     ds = _captured(_draft_data(), data_received=True)
     db_factory, _ = _mock_db_session(ds)
     spaces, picks, drop, panel = _supersede_patches("team/second.json")
-    with patch("services.draft_setup_manager.db_session", db_factory), spaces, picks, drop, panel:
+    with patch("services.draft_end.db_session", db_factory), spaces, picks, drop, panel:
         ok = await m.capture_draft_log(_second_run())
 
     assert ok is True
@@ -413,7 +414,7 @@ async def test_capture_ignores_the_same_run_s_log_sent_again():
     ds = _captured(_draft_data())
     db_factory, _ = _mock_db_session(ds)
     spaces, picks, drop, panel = _supersede_patches("team/second.json")
-    with patch("services.draft_setup_manager.db_session", db_factory), spaces, picks, drop, panel:
+    with patch("services.draft_end.db_session", db_factory), spaces, picks, drop, panel:
         ok = await m.capture_draft_log(_draft_data())
 
     assert ok is True

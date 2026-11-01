@@ -2,6 +2,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from services.draft_end import upload_draft_log
 from services.draft_setup_manager import DraftSetupManager
 from helpers.magicprotools_helper import MagicProtoolsHelper
 from helpers.digital_ocean_helper import UploadResult
@@ -25,17 +26,12 @@ def _draft_data():
 
 @pytest.mark.asyncio
 async def test_save_to_spaces_uploads_json_and_writes_no_txt():
-    mgr = DraftSetupManager.__new__(DraftSetupManager)   # skip __init__
-    mgr.session_type = "team"
-    mgr.cube_id = "LSVCube"
-    mgr.logger = MagicMock()
-
     do = MagicMock()
     do.upload_json = AsyncMock(return_value=UploadResult(success=True, object_path="team/LSVCube-1000-DB123.json"))
     do.upload_text = AsyncMock(return_value=UploadResult(success=True, object_path="x"))
 
-    with patch("services.draft_setup_manager.DigitalOceanHelper", return_value=do):
-        key = await mgr.save_to_digitalocean_spaces(_draft_data())
+    with patch("services.draft_end.DigitalOceanHelper", return_value=do):
+        key = await upload_draft_log("team", "LSVCube", _draft_data())
 
     assert key == "team/LSVCube-1000-DB123.json"
     do.upload_json.assert_awaited_once()

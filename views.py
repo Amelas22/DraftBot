@@ -1516,15 +1516,23 @@ class PersistentView(discord.ui.View):
         return channel.id
 
     @classmethod
-    async def create_rooms_pairings(cls, bot, guild, session_id, interaction=None, session_type=None):
-        """Class method version of creating rooms and posting pairings"""
+    async def create_rooms_pairings(cls, bot, guild, session_id, interaction=None, session_type=None,
+                                    claim=None):
+        """Class method version of creating rooms and posting pairings.
+
+        `claim` is the rooms_created_at a caller stamped to reserve the build
+        (services/draft_end.claim_rooms). A set rooms_created_at normally means
+        the rooms exist and this refuses; one equal to the caller's own claim
+        means the build is theirs to do.
+        """
         logger.info("Starting create_rooms_pairings for session_id={}, session_type={}", session_id, session_type)
         async with rooms_creation_lock(session_id):
             return await cls._create_rooms_pairings_unlocked(
-                bot, guild, session_id, interaction, session_type)
+                bot, guild, session_id, interaction, session_type, claim)
 
     @classmethod
-    async def _create_rooms_pairings_unlocked(cls, bot, guild, session_id, interaction=None, session_type=None):
+    async def _create_rooms_pairings_unlocked(cls, bot, guild, session_id, interaction=None, session_type=None,
+                                              claim=None):
         """The body of create_rooms_pairings. Call that one, never this: it is
         only safe to run one at a time per draft, and the lock is there.
         """
@@ -1548,7 +1556,7 @@ class PersistentView(discord.ui.View):
                     # starts producing anything -- and a failure after it left the
                     # draft with a chat it could not be played in, permanently,
                     # because every retry read that flag and stopped.
-                    if session.rooms_created_at:
+                    if session.rooms_created_at and session.rooms_created_at != claim:
                         logger.info("Rooms already exist for session_id={}, channel={}", session_id, session.draft_chat_channel)
                         if interaction:
                             await interaction.followup.send(

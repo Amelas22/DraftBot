@@ -1,12 +1,10 @@
 import asyncio
-import contextlib
 import socketio
 from collections import Counter
 from loguru import logger
 from functools import wraps
 import random
 import aiohttp
-from sqlalchemy.orm import undefer
 import json
 import os
 import pytz
@@ -18,23 +16,17 @@ from config import (get_draftmancer_websocket_url, get_draftmancer_base_url,
                     is_disconnect_autopause_enabled, is_test_mode)
 from database.db_session import db_session
 from models.draft_session import DraftSession
-from models.match import MatchResult
 from bot_registry import get_bot
 from session import AsyncSessionLocal
 from sqlalchemy import select, update
-from helpers.digital_ocean_helper import DigitalOceanHelper
-from helpers.draft_footer import apply_draft_footer
-from helpers.magicprotools_helper import MagicProtoolsHelper
 from helpers.seating import resolve_seating_ids
 from helpers.stale_drafts import is_finished_draft
 from notification_service import send_ready_check_dms
 from services.draft_socket_client import DraftSocketClient
-from services.draft_log_store import post_team_logs, supersedes
-from services.draft_deck_assignment import assign_drafted_decks, loan_source
-from services.card_lending_service import dispatch_lock, drop_uncollected
-from services.library_panel import loan_changed
+from services import draft_end
+# Re-exported: the public log delay lives with the rest of the end-of-draft work.
+from services.draft_end import PUBLISH_DELAY_SECONDS  # noqa: F401
 from cube_views.pack_options import DEFAULT_PACKS_PER_PLAYER, DEFAULT_CARDS_PER_PACK
-from helpers.team_names import BLUE, RED
 
 # Constants
 READY_CHECK_INSTRUCTIONS = (
@@ -55,13 +47,11 @@ DRAFT_LOG_WAIT_ATTEMPTS = 20    # Poll for the draftLog push after endDraft (10s
 DRAFT_LOG_WAIT_INTERVAL = 0.5   # Seconds between draftLog availability checks
 # Draft-setup timings. In test mode (TEST_MODE=true) these are shortened so an
 # end-to-end draft completes and publishes in seconds; production uses the real
-# durations. PUBLISH_DELAY_SECONDS aligns with the Draftmancer unlock timer in prod.
+# durations. PUBLISH_DELAY_SECONDS (services/draft_end) aligns with the unlock timer.
 if is_test_mode():
-    PUBLISH_DELAY_SECONDS = 30            # publish ~30s after draft-end (prod: 3h)
     DRAFT_PICK_TIMER_SECONDS = 3          # fast auto-pick so test drafts finish quickly (prod: 60s)
     DRAFT_LOG_UNLOCK_TIMER_MINUTES = 1    # Draftmancer public unlock (prod: 180 min)
 else:
-    PUBLISH_DELAY_SECONDS = 180 * 60      # post logs when Draftmancer auto-unlocks (matches setDraftLogUnlockTimer)
     DRAFT_PICK_TIMER_SECONDS = 60
     DRAFT_LOG_UNLOCK_TIMER_MINUTES = 180
 # The outer bound on ANY manager's life, measured from construction and needing
@@ -138,14 +128,6 @@ _TOLD_NOT_MANAGING: "set[tuple[str, str]]" = set()
 # because nothing can -- standing down disconnects, and the only path that mints
 # a new Draftmancer session refuses to run once teams have formed.
 STOOD_DOWN: "set[str]" = set()
-
-
-def mpt_embed_field_value(direct_url):
-    """Embed field value for one player's MagicProTools link, or an unavailable
-    note when the direct API push returned no URL."""
-    if direct_url:
-        return f"[View on MagicProTools]({direct_url})"
-    return "_log temporarily unavailable_"
 
 
 class StopRetryException(Exception):
@@ -372,8 +354,6 @@ class DraftSetupManager:
         self.session_type = "team"  # Default to team drafts
 
         
-        # Initialize helpers
-        self.mpt_helper = MagicProtoolsHelper()
         self.discord_client = None
 
         # Status tracking variables
@@ -437,29 +417,10 @@ class DraftSetupManager:
             bot = get_bot()
             guild = bot.get_guild(int(self.guild_id))
             channel = bot.get_channel(int(self.draft_channel_id))
-            from views import PersistentView
+            # The two halves of draft_end.finish_draft, split around the wait
+            # below so the rooms are not held up by a log that lands late.
             if guild:
-                # Attempt to create rooms and pairings
-                result = await PersistentView.create_rooms_pairings(bot, guild, self.session_id, session_type=self.session_type)
-                if channel:
-                    # Only announce if rooms were actually created
-                    if result:
-                        await channel.send("Rooms and Pairings have been created!")
-                    else:
-                        # Check if rooms already existed
-
-                        async with AsyncSessionLocal() as db_session:
-                            stmt = select(DraftSession).filter(DraftSession.session_id == self.session_id)
-                            session = await db_session.scalar(stmt)
-                            # rooms_created_at, not draft_chat_channel: the latter
-                            # is set while creating the FIRST of three channels, so
-                            # a half-created draft would be reported as "already
-                            # existed" -- silently, for exactly the case the retry
-                            # now exists to finish.
-                            if session and session.rooms_created_at:
-                                self.logger.info(f"Rooms already existed for session {self.session_id} - skipping creation")
-                            else:
-                                await channel.send("Failed to create rooms and pairings. Check logs for details.")
+                await draft_end.create_rooms_once(bot, guild, channel, self.session_id, self.session_type)
             else:
                 self.logger.info("Could not find guild")
             # Capture the draft log immediately so it is never lost (Slice 1).
@@ -469,28 +430,7 @@ class DraftSetupManager:
                     break
                 await asyncio.sleep(DRAFT_LOG_WAIT_INTERVAL)
             if self.current_draft_log:
-                await self.capture_draft_log(self.current_draft_log)
-                # Push-primary: post each team its own pools immediately (private
-                # team channels). The reconciler retries this if it fails.
-                try:
-                    await post_team_logs(self.session_id, bot)
-                except Exception as e:
-                    self.logger.error(f"Eager team-pool post failed for {self.session_id}: {e}")
-                # Its own try, and not folded into post_team_logs: posting pools
-                # is all-or-nothing on team channels resolving, and whether a
-                # player can borrow their deck has nothing to do with a room.
-                try:
-                    await assign_drafted_decks(self.session_id)
-                except Exception:
-                    # With the traceback: the body spans SQLAlchemy, config
-                    # reads and log parsing, so `{e}` alone gives an operator a
-                    # bare TypeError with no file and no line. A broad catch is
-                    # right here; a broad catch that also destroys the evidence
-                    # is not. Some drafters may have a deck and others not --
-                    # the reconciler re-runs and finishes the rest.
-                    self.logger.opt(exception=True).error(
-                        f"Deck assignment failed for {self.session_id}; it may "
-                        f"have assigned some drafters and not others")
+                await draft_end.take_draft_log(bot, self.session_id, self.current_draft_log)
             else:
                 self.logger.warning(f"No draft log available to capture for {self.session_id}")
             # Publishing the public embed is the reconciler's job (restart-safe);
@@ -1462,114 +1402,8 @@ class DraftSetupManager:
             return False
 
     async def capture_draft_log(self, draft_data):
-        """Persist the draft log as soon as the draft ends, WITHOUT posting it.
-
-        Saves the raw log to the DB (`draft_data`) and DigitalOcean Spaces (raw
-        JSON + per-player MagicProTools files via save_to_digitalocean_spaces),
-        records pack first-picks, and stamps `logs_captured_at`. Does NOT post the
-        Discord embed or set `data_received` — that happens at publish.
-
-        The raw log is always written to the DB so it is never lost (publish can
-        post from `draft_data` even if Spaces failed). `logs_captured_at` /
-        `pack_first_picks` are only set when the Spaces upload succeeds, so a
-        failed upload stays retryable (logs_captured_at stays NULL -> reconnect
-        re-captures). Idempotent: the same run's log delivered again is skipped.
-        A LATER run's log -- the draft was stopped and restarted in the same
-        room -- replaces an unpublished capture, along with everything derived
-        from the old log; a published one is kept.
-        """
-        if not draft_data:
-            self.logger.warning("capture_draft_log called with no draft_data; skipping")
-            return False
-        try:
-            # Idempotency guard, keyed on WHICH log was captured.
-            async with db_session() as session:
-                existing = (await session.execute(
-                    select(DraftSession)
-                    .options(undefer(DraftSession.draft_data))
-                    .filter(DraftSession.session_id == self.session_id)
-                )).scalar_one_or_none()
-                if existing is None:
-                    self.logger.warning(f"No draft session for {self.session_id}; skipping capture")
-                    return False
-                if existing.logs_captured_at is not None:
-                    if not supersedes(draft_data, existing.draft_data):
-                        self.logger.info(f"Draft log already captured for {self.session_id}; skipping")
-                        return True
-                    if existing.data_received:
-                        self.logger.warning(
-                            f"A later draft log arrived for {self.session_id} after its "
-                            f"first was published; keeping the published one")
-                        return True
-                    self.logger.warning(
-                        f"Draft {self.session_id} ended again with a later log "
-                        f"(started {draft_data.get('time')}, had "
-                        f"{(existing.draft_data or {}).get('time')}); replacing the capture")
-                superseding = existing.logs_captured_at is not None
-
-            # Upload raw JSON + per-player MPT files to Spaces.
-            object_key = await self.save_to_digitalocean_spaces(draft_data)
-
-            # Replacing a capture deletes the old log's uncollected decks in the
-            # same transaction, under the lending dispatch lock (see
-            # drop_uncollected); a first capture holds nothing.
-            dropped = []
-            async with (dispatch_lock() if superseding else contextlib.nullcontext()), \
-                    db_session() as session:
-                draft_session = (await session.execute(
-                    select(DraftSession).filter(DraftSession.session_id == self.session_id)
-                )).scalar_one_or_none()
-                if not draft_session:
-                    # Spaces upload may already have happened; only the DB write failed.
-                    self.logger.warning(f"No draft session for {self.session_id} (spaces_key={object_key})")
-                    return False
-                if superseding:
-                    # Back to "uncaptured" first: everything derived from the
-                    # old log goes, and the stamps below are re-set only once
-                    # the new log's upload has succeeded. A failed upload then
-                    # leaves a NULL stamp for the reconciler to retry, exactly
-                    # as for a first capture -- keeping the old stamp would
-                    # read the next attempt as the same run and skip it.
-                    draft_session.logs_captured_at = None
-                    draft_session.unlock_at = None
-                    draft_session.spaces_object_key = None
-                    draft_session.pack_first_picks = None
-                    draft_session.team_logs_posted_at = None
-                    draft_session.drafttable_url = None
-                    dropped = await drop_uncollected(session, loan_source(self.session_id))
-
-                # Always persist the raw log so the data is never lost.
-                draft_session.draft_data = draft_data
-
-                # Only mark fully captured when Spaces succeeded, so a failed
-                # upload stays retryable (logs_captured_at stays NULL).
-                if object_key:
-                    discord_user_pack_picks = {}
-                    if draft_session.sign_ups:
-                        discord_ids = list(draft_session.sign_ups.keys())
-                        sorted_users = sorted(
-                            draft_data["users"].items(),
-                            key=lambda item: item[1].get("seatNum", 999),
-                        )
-                        for idx, (draft_user_id, _) in enumerate(sorted_users):
-                            if idx < len(discord_ids):
-                                discord_user_pack_picks[discord_ids[idx]] = self.get_pack_first_picks(draft_data, draft_user_id)
-                    draft_session.pack_first_picks = discord_user_pack_picks
-                    draft_session.logs_captured_at = datetime.now()
-                    draft_session.unlock_at = draft_session.logs_captured_at + timedelta(
-                        seconds=PUBLISH_DELAY_SECONDS
-                    )
-                    draft_session.spaces_object_key = object_key
-
-                await session.commit()
-
-            if dropped:
-                loan_changed(dropped[0])  # one sync per draft: the panel is per session
-            self.logger.info(f"Captured draft log for {self.session_id} (spaces_key={object_key})")
-            return bool(object_key)
-        except Exception as e:
-            self.logger.exception(f"Error capturing draft log: {e}")
-            return False
+        """Persist the draft log without posting it; see draft_end.capture_draft_log."""
+        return await draft_end.capture_draft_log(self.session_id, draft_data)
 
     async def release_draftmancer_log(self) -> None:
         """Unlock the log in Draftmancer now, ahead of its own timer.
@@ -1589,361 +1423,15 @@ class DraftSetupManager:
             self.logger.error(f"Failed to release Draftmancer log for {self.session_id}: {e}")
 
     async def publish_draft_log(self, release=False):
-        """Post the captured draft log to Discord and mark it published.
+        """Post the captured log to Discord; see draft_end.publish_draft_log.
 
-        Reads the already-captured `draft_data` from the DB (capture runs at
-        draft-end), posts the MagicProTools embed, and sets `data_received`.
-        Works without a live socket — it operates on the saved data. Idempotent:
-        a session already published (`data_received`) is skipped.
-
-        When `release=True` (manual early release) and the socket is still
-        connected, the Draftmancer log is unlocked first via `shareDraftLog`; the
-        timer-driven path does not release (Draftmancer auto-unlocks on its own).
+        The manager's part is the early release: unlocking the log inside
+        Draftmancer needs this manager's live socket, so it is handed over as
+        the release step and is a no-op once the socket is gone.
         """
-        try:
-            async with db_session() as session:
-                # undefer: draft_data is deferred at the mapper (it is dead
-                # weight for ~128 other queries), and this is one of the few
-                # places that genuinely needs the log.
-                draft_session = (await session.execute(
-                    select(DraftSession)
-                    .options(undefer(DraftSession.draft_data))
-                    .filter(DraftSession.session_id == self.session_id)
-                )).scalar_one_or_none()
-                if not draft_session:
-                    self.logger.warning(f"No draft session for {self.session_id}; cannot publish")
-                    return False
-                if draft_session.data_received:
-                    self.logger.info(f"Draft log already published for {self.session_id}; skipping")
-                    return True
-                draft_data = draft_session.draft_data
-                table_url = draft_session.drafttable_url
+        return await draft_end.publish_draft_log(
+            get_bot(), self.session_id, release, release_log=self.release_draftmancer_log)
 
-            if not draft_data:
-                self.logger.warning(f"No captured draft_data for {self.session_id}; nothing to publish")
-                return False
-
-            if release:
-                await self.release_draftmancer_log()
-
-            # Every draft gets a full table page, built before the embed because
-            # its URL goes inside; best-effort, since the embed is the
-            # deliverable. The row is re-read (the one above is detached) and the
-            # publish runs inside that session so its fields stay live -- holding
-            # a connection for the seconds a Scryfall fetch, render and upload
-            # take, which NullPool and WAL-mode SQLite make harmless.
-            #
-            # The URL is recorded as soon as the page is up, not with
-            # data_received: a failed embed is retried every reconciler tick,
-            # and each retry would otherwise build and upload the page again.
-            # So a page is built once per draft, unless its upload itself fails.
-            if not table_url:
-                from services.draft_table_publisher import publish as publish_table
-                async with db_session() as session:
-                    draft_session = (await session.execute(
-                        select(DraftSession).filter(DraftSession.session_id == self.session_id)
-                    )).scalar_one_or_none()
-                    if draft_session and draft_session.drafttable_url:
-                        table_url = draft_session.drafttable_url  # an overlapping publish got there first
-                    elif draft_session:
-                        table_url = await publish_table(draft_data, draft_session)
-                        if table_url:
-                            draft_session.drafttable_url = table_url
-                            await session.commit()
-
-            # Post the MagicProTools embed/links to Discord.
-            sent = False
-            if self.guild_id:
-                sent = await self.send_magicprotools_embed(draft_data, table_url=table_url)
-
-            if not sent:
-                self.logger.warning(
-                    f"MagicProTools embed not sent for {self.session_id}; "
-                    "leaving data_received unset so publish is retried"
-                )
-                return False
-
-            async with db_session() as session:
-                draft_session = (await session.execute(
-                    select(DraftSession).filter(DraftSession.session_id == self.session_id)
-                )).scalar_one_or_none()
-                if draft_session:
-                    draft_session.data_received = True
-                    await session.commit()
-
-            self.logger.info(f"Published draft log for {self.session_id} (release={release})")
-            return True
-        except Exception as e:
-            self.logger.exception(f"Error publishing draft log: {e}")
-            return False
-
-    async def save_to_digitalocean_spaces(self, draft_data):
-        """Upload draft log data to DigitalOcean Spaces. Returns the object key
-        (e.g. 'team/cube-ts-id.json') on success, or None on failure."""
-        start_time = draft_data.get("time")
-        draft_id = draft_data.get("sessionID")
-        
-        # Create DigitalOcean helper
-        do_helper = DigitalOceanHelper()
-        
-        try:
-            # Determine folder based on session type
-            folder = "swiss" if self.session_type == "swiss" else "team"
-            filename = f'{self.cube_id}-{start_time}-{draft_id}.json'
-            
-            # Upload the JSON data
-            result = await do_helper.upload_json(draft_data, folder, filename)
-
-            if result.success:
-                self.logger.info(f"Draft log data uploaded to DigitalOcean Space: {result.object_path}")
-                return result.object_path
-            else:
-                self.logger.warning("Failed to upload draft log data to DigitalOcean Spaces")
-                return None
-
-        except Exception as e:
-            self.logger.error(f"Error uploading to DigitalOcean Space: {e}")
-            return None
-
-    # This method has been replaced by using the MagicProtoolsHelper.convert_to_magicprotools_format method
-
-    # This method has been replaced by using the MagicProtoolsHelper.submit_to_api method
-
-    async def send_magicprotools_embed(self, draft_data, table_url=None) -> bool:
-        """Find draft-logs channel and send the embed if found.
-
-        Returns:
-            bool: True if the embed was actually sent to a channel, False if
-            the guild/`draft-logs` channel wasn't found or an exception was
-            caught. Callers (e.g. `publish_draft_log`) rely on this to decide
-            whether the publish should be retried later.
-        """
-        try:
-            # Find the guild
-            bot = get_bot()
-            guild = bot.get_guild(int(self.guild_id))
-            if not guild:
-                self.logger.warning(f"Could not find guild with ID {self.guild_id}")
-                return False
-
-            # Find a channel named "draft-logs"
-            draft_logs_channel = None
-            for channel in guild.channels:
-                if channel.name.lower() == "draft-logs" and hasattr(channel, "send"):
-                    draft_logs_channel = channel
-                    break
-
-            if draft_logs_channel:
-                # Generate the embed and send it
-                embed = await self.generate_magicprotools_embed(draft_data, table_url=table_url)
-                message = await draft_logs_channel.send(embed=embed)
-                self.logger.info(f"Sent MagicProTools links to #{draft_logs_channel.name} in {guild.name}")
-
-                # Save the channel and message IDs to the database
-                async with db_session() as session:
-                    # Get a fresh reference to the draft session
-                    stmt = select(DraftSession).filter(DraftSession.session_id == self.session_id)
-                    result = await session.execute(stmt)
-                    draft_session = result.scalar_one_or_none()
-
-                    if draft_session:
-                        draft_session.logs_channel_id = str(draft_logs_channel.id)
-                        draft_session.logs_message_id = str(message.id)
-                        await session.commit()
-                        self.logger.info(f"Saved logs channel and message IDs for session {self.session_id}")
-
-                        # Update victory messages to include the logs link
-                        # Import the function here to avoid circular imports
-                        from utils import check_and_post_victory_or_draw
-                        try:
-                            await check_and_post_victory_or_draw(bot, self.session_id)
-                            self.logger.info(f"Successfully updated victory messages with logs link for session {self.session_id}")
-                        except Exception as e:
-                            self.logger.error(f"Error updating victory messages with logs link: {e}")
-                return True
-            else:
-                self.logger.warning(f"No 'draft-logs' channel found in guild {guild.name}, skipping embed message")
-                return False
-        except Exception as e:
-            self.logger.error(f"Error sending MagicProTools embed: {e}")
-            return False
-
-    async def generate_magicprotools_embed(self, draft_data, table_url=None):
-        """Generate a Discord embed with MagicProTools links for all drafters"""
-        try:
-            # Get the draft session to access sign_ups and start time
-            async with db_session() as session:
-                # Get draft session in this session context
-                stmt = select(DraftSession).filter(DraftSession.session_id == self.session_id)
-                result = await session.execute(stmt)
-                draft_session = result.scalar_one_or_none()
-                
-                if not draft_session:
-                    self.logger.warning(f"Draft session not found for session ID: {self.session_id}")
-                    sign_ups = {}
-                    formatted_start_time = "Unknown"
-                    player_records = {}
-                else:
-                    sign_ups = draft_session.sign_ups or {}
-                    if draft_session.teams_start_time:
-                        start_time = draft_session.teams_start_time
-                        # Format the start time for Discord
-                        start_timestamp = int(start_time.timestamp())
-                        formatted_start_time = f"<t:{start_timestamp}:F>"
-                    else:
-                        formatted_start_time = "Unknown"
-                    
-                    # Get all match results for this session and calculate player records
-                    player_records = {}
-                    if draft_session.victory_message_id_draft_chat:  # Only fetch if victory message exists
-                        match_results_stmt = select(MatchResult).filter(MatchResult.session_id == self.session_id)
-                        match_results_result = await session.execute(match_results_stmt)
-                        match_results = match_results_result.scalars().all()
-                        
-                        # Calculate win-loss records for each player
-                        for match in match_results:
-                            # Skip matches without a winner
-                            if not match.winner_id:
-                                continue
-                                
-                            # Add win for winner, loss for loser
-                            if match.winner_id == match.player1_id:
-                                # Player 1 won
-                                player_records.setdefault(match.player1_id, {"wins": 0, "losses": 0})["wins"] += 1
-                                player_records.setdefault(match.player2_id, {"wins": 0, "losses": 0})["losses"] += 1
-                            elif match.winner_id == match.player2_id:
-                                # Player 2 won
-                                player_records.setdefault(match.player2_id, {"wins": 0, "losses": 0})["wins"] += 1
-                                player_records.setdefault(match.player1_id, {"wins": 0, "losses": 0})["losses"] += 1
-            
-            embed = discord.Embed(
-                title="Draft Log",
-                description=f"View your draft in MagicProTools with the links below:\n\n**Draft Start:** {formatted_start_time}",
-                color=0x3498db  # Blue color
-            )
-            apply_draft_footer(embed, self.friendly_id, self.cube_id)
-
-            # Added before any per-player field so it reads as the headline.
-            if table_url:
-                embed.add_field(
-                    name="📊 Full draft table",
-                    value=f"[Replay every pack around the table]({table_url})",
-                    inline=False,
-                )
-
-            # Get list of sign_ups keys (Discord user IDs) and values (display names or dictionaries)
-            sign_up_discord_ids = list(sign_ups.keys())
-            sign_up_display_names = list(sign_ups.values())
-            
-            # Create mapping of user index to Discord display name and ID
-            # First sort users by seat number
-            sorted_users = sorted(
-                [(user_id, user_data) for user_id, user_data in draft_data["users"].items()],
-                key=lambda item: item[1].get("seatNum", 999)
-            )
-            
-            # Now map Discord display names and IDs to sorted users
-            discord_name_by_user_id = {}
-            discord_id_by_user_id = {}
-            for idx, (user_id, _) in enumerate(sorted_users):
-                if idx < len(sign_up_discord_ids):
-                    if idx < len(sign_up_discord_ids):
-                        discord_id_by_user_id[user_id] = sign_up_discord_ids[idx]
-                    
-                    if isinstance(sign_up_display_names[idx], str):
-                        discord_name_by_user_id[user_id] = sign_up_display_names[idx]
-                    elif isinstance(sign_up_display_names[idx], dict) and 'name' in sign_up_display_names[idx]:
-                        # Handle dictionary format
-                        discord_name_by_user_id[user_id] = sign_up_display_names[idx]['name']
-            
-            # Dictionary to store MagicProTools links for each Discord ID
-            magicprotools_links = {}
-            
-            for idx, (user_id, user_data) in enumerate(sorted_users):
-                user_name = user_data["userName"]
-                
-                # Get Discord display name if available
-                discord_name = discord_name_by_user_id.get(user_id)
-                discord_id = discord_id_by_user_id.get(user_id)
-                
-                # Add team color emoji based on player position. Seating
-                # alternates, so an even seat is on the same side as team_a --
-                # the emoji comes from the same constants every Discord surface
-                # uses, so the Draftmancer seat list and the teams embed cannot
-                # disagree about which colour a side is.
-                team_emoji = RED.emoji if idx % 2 == 0 else BLUE.emoji
-                
-                # Get win-loss record if available
-                record_str = ""
-                trophy_emoji = ""
-                if discord_id and discord_id in player_records:
-                    record = player_records[discord_id]
-                    record_str = f" ({record['wins']}-{record['losses']})"
-                    # Add trophy emoji if they have 3 wins
-                    if record['wins'] == 3:
-                        trophy_emoji = "🏆 "
-                
-                # Format the name with team emoji, trophy, and record
-                display_name = f"{team_emoji} {trophy_emoji}{user_name}"
-                if discord_name:
-                    display_name = f"{team_emoji} {user_name} - {discord_name}{record_str} {trophy_emoji}"
-                
-                self.logger.info(f"Getting MagicProTools URL for {user_name} (ID: {user_id})")
-                direct_mpt_url = None
-                try:
-                    direct_mpt_url = await self.mpt_helper.submit_to_api(user_id, draft_data)
-                except Exception as e:
-                    self.logger.error(f"Error submitting to MagicProTools API for {user_name}: {e}")
-
-                if not direct_mpt_url:
-                    self.logger.warning(f"No MagicProTools URL for {user_name}; showing unavailable note")
-
-                embed.add_field(
-                    name=display_name,
-                    value=mpt_embed_field_value(direct_mpt_url),
-                    inline=False,
-                )
-
-                if direct_mpt_url and discord_id:
-                    magicprotools_links[discord_id] = {
-                        "name": discord_name_by_user_id.get(user_id, user_name),
-                        "link": direct_mpt_url,
-                    }
-                elif not discord_id:
-                    self.logger.warning(f"No Discord ID mapping for {user_name} (ID: {user_id})")
-
-            # Update the database with the MagicProTools links
-            if magicprotools_links and draft_session:
-                try:
-                    draft_session.magicprotools_links = magicprotools_links
-                    session.add(draft_session)  
-                    await session.commit()
-                    self.logger.info(f"Updated DraftSession with MagicProTools links for {len(magicprotools_links)} users")
-                except Exception as e:
-                    self.logger.error(f"Error saving MagicProTools links to database: {e}")
-            
-            return embed
-        except Exception as e:
-            self.logger.error(f"Error generating Discord embed: {e}")
-            # Return a basic embed if there's an error
-            fallback = discord.Embed(
-                title="Draft Log",
-                description="Error generating MagicProTools links. Check logs for details.",
-                color=0xFF0000  # Red color
-            )
-            # Stamp the fallback too — a failed log is exactly when someone needs
-            # to know which draft it belonged to.
-            return apply_draft_footer(fallback, self.friendly_id, self.cube_id)
-
-    def get_pack_first_picks(self, draft_data, user_id):
-        """Extract the first pick card name for each pack for a specific user."""
-        try:
-            # Use the MagicProtoolsHelper to get the first picks
-            return self.mpt_helper.get_pack_first_picks(draft_data, user_id)
-        except Exception as e:
-            # In case of any error, return empty result
-            self.logger.error(f"Error getting first picks: {e}")
-            return {}
 
     async def fetch_draft_info(self):
         """Load draft channel and other info from database"""

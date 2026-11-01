@@ -34,7 +34,7 @@ def display_name(name: Any) -> str:
 def _sign_up_name(value: Any) -> Any:
     """A sign_ups entry's display name.
 
-    Usually a bare str, but generate_magicprotools_embed (draft_setup_manager.py)
+    Usually a bare str, but build_draft_log_embed (draft_end.py)
     shows some rows store {"name": ...} instead -- match its handling so a dict
     row doesn't render as its own str(dict) here.
     """
