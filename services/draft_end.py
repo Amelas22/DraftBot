@@ -37,6 +37,14 @@ PUBLISH_DELAY_SECONDS = 30 if is_test_mode() else 180 * 60
 
 DraftLog = dict[str, Any]
 
+# How long a rooms_created_at with nothing behind it is still taken to be a
+# build in progress. A claim is stamped BEFORE the build and the build's own
+# stamp lands after it, so a run that dies in between leaves a claim that looks
+# exactly like finished rooms -- and the button and /mutiny both read it as
+# "done". A real build has made its match_results long before this; a claim this
+# old without them is a run that is never coming back.
+STALE_ROOMS_CLAIM_MINUTES = 10
+
 
 # --- the end of a draft ----------------------------------------------------
 
@@ -74,8 +82,11 @@ async def create_rooms_once(bot: discord.Client, guild: discord.Guild, channel: 
     """
     from views import PersistentView
 
-    # Never raises: the log still has to be captured after this, whatever
-    # happened to the rooms.
+    # Never raises, bar cancellation: the log still has to be captured after
+    # this, whatever happened to the rooms.
+    claim: datetime | None = None
+    created = False
+    returned = False
     try:
         claim = await claim_rooms(session_id)
         if claim is None:
@@ -83,12 +94,16 @@ async def create_rooms_once(bot: discord.Client, guild: discord.Guild, channel: 
             return
         created = await PersistentView.create_rooms_pairings(
             bot, guild, session_id, session_type=session_type, claim=claim)
-        # Nothing to give back after a run whose post_pairings threw: it
-        # committed its own rooms_created_at, so the rooms exist and the
-        # release finds no claim of ours left.
-        returned = (not created) and await release_rooms_claim(session_id, claim)
     except Exception:
         logger.opt(exception=True).error(f"Room creation failed for session {session_id}")
+    finally:
+        # Every exit that built nothing, cancellation included. Nothing to give
+        # back after a run whose post_pairings threw: it committed its own
+        # rooms_created_at, so the rooms exist and the release finds no claim
+        # of ours left.
+        if claim is not None and not created:
+            returned = await _give_back(session_id, claim)
+    if claim is None:
         return
     if not channel:
         return
@@ -96,6 +111,30 @@ async def create_rooms_once(bot: discord.Client, guild: discord.Guild, channel: 
         await channel.send("Rooms and Pairings have been created!")
     elif returned:
         await channel.send("Failed to create rooms and pairings. Check logs for details.")
+
+
+def rooms_taken(rooms_created_at: datetime | None, has_matches: bool,
+                claim: datetime | None = None) -> bool:
+    """Whether a draft's rooms are built or being built by someone else.
+
+    The one rule for every path that builds rooms: rooms_created_at set means
+    taken, unless it is the asker's own claim, or a claim gone stale -- older
+    than STALE_ROOMS_CLAIM_MINUTES with no match_results to show for it.
+    """
+    if rooms_created_at is None or rooms_created_at == claim:
+        return False
+    stale = rooms_created_at < datetime.now() - timedelta(minutes=STALE_ROOMS_CLAIM_MINUTES)
+    return has_matches or not stale
+
+
+async def rooms_taken_for(session_id: str) -> bool:
+    """rooms_taken for a session read fresh from the database."""
+    async with AsyncSessionLocal() as session:
+        stamp = await session.scalar(
+            select(DraftSession.rooms_created_at).where(DraftSession.session_id == session_id))
+        match = await session.scalar(
+            select(MatchResult.id).where(MatchResult.session_id == session_id).limit(1))
+    return rooms_taken(stamp, match is not None)
 
 
 async def claim_rooms(session_id: str) -> datetime | None:
@@ -110,6 +149,16 @@ async def claim_rooms(session_id: str) -> datetime | None:
                        DraftSession.rooms_created_at.is_(None))
                 .values(rooms_created_at=stamp))
     return stamp if result.rowcount == 1 else None
+
+
+async def _give_back(session_id: str, claim: datetime) -> bool:
+    try:
+        return await release_rooms_claim(session_id, claim)
+    except Exception:
+        # Left in place, the claim goes stale after STALE_ROOMS_CLAIM_MINUTES
+        # and the button can build then.
+        logger.opt(exception=True).error(f"Could not give back the rooms claim for {session_id}")
+        return False
 
 
 async def release_rooms_claim(session_id: str, claim: datetime) -> bool:

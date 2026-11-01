@@ -160,7 +160,7 @@ async def create_rooms_and_pairings_with_fallback(
     # is success, not failure, and belongs here rather than at each caller.
     existing = await DraftSession.get_by_session_id(session_id)
     if existing is not None:
-        if existing.rooms_created_at is not None:
+        if await draft_end.rooms_taken_for(session_id):
             if logger:
                 logger.info(f"Rooms already exist for session {session_id}; nothing to create")
             return True

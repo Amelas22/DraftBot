@@ -12,6 +12,7 @@ from config import (
 from notification_service import send_ready_check_dms
 from ready_check import ReadyCheckView, ReadyCheckSession
 from services.draft_setup_manager import DraftSetupManager, ACTIVE_MANAGERS
+from services.draft_end import rooms_taken
 from session import StakeInfo, AsyncSessionLocal, get_draft_session, DraftSession, MatchResult
 from models import SignUpHistory
 from sqlalchemy import update, select, and_
@@ -1556,7 +1557,7 @@ class PersistentView(discord.ui.View):
                     # starts producing anything -- and a failure after it left the
                     # draft with a chat it could not be played in, permanently,
                     # because every retry read that flag and stopped.
-                    if session.rooms_created_at and session.rooms_created_at != claim:
+                    if rooms_taken(session.rooms_created_at, bool(session.match_results), claim):
                         logger.info("Rooms already exist for session_id={}, channel={}", session_id, session.draft_chat_channel)
                         if interaction:
                             await interaction.followup.send(

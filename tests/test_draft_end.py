@@ -205,3 +205,121 @@ async def test_the_claimant_builds_the_draft_and_nobody_else_does(monkeypatch, t
     assert await views.PersistentView.create_rooms_pairings(
         bot, guild, RACE_ID, claim=claim) is True
     assert posted.await_count == 1
+
+
+# --- a claim nobody is finishing -------------------------------------------
+#
+# A claim is written before the build and the build's own stamp after it, so a
+# run that never finishes leaves a claim that reads exactly like built rooms.
+# Both the button and /mutiny's fallback read rooms_created_at as "done"; a
+# claim that outlives its run must not stop them for good.
+
+def _stale():
+    return datetime.now() - timedelta(minutes=draft_end.STALE_ROOMS_CLAIM_MINUTES + 1)
+
+
+async def _button_builds(monkeypatch):
+    """Run the real create_rooms_pairings with no claim, as the button does."""
+    from test_rooms_cannot_strand import _Chan, _stub_everything_but_the_race
+    posted = _stub_everything_but_the_race(monkeypatch)
+    guild = SimpleNamespace(id=1, get_member=lambda uid: SimpleNamespace(
+        id=uid, display_name=str(uid)), get_channel=lambda cid: _Chan())
+    bot = SimpleNamespace(get_channel=lambda cid: None)
+    from test_rooms_cannot_strand import RACE_ID
+    ok = await views.PersistentView.create_rooms_pairings(bot, guild, RACE_ID)
+    return ok, posted.await_count
+
+
+async def _stamp_race_draft(when):
+    from test_rooms_cannot_strand import RACE_ID, _seed_race_draft
+    await _seed_race_draft()
+    async with AsyncSessionLocal() as s:
+        row = await s.scalar(select(DraftSession).filter_by(session_id=RACE_ID))
+        row.rooms_created_at = when
+        await s.commit()
+    return RACE_ID
+
+
+@pytest.mark.asyncio
+async def test_a_stale_claim_with_no_matches_lets_the_button_build(monkeypatch, test_db):
+    await _stamp_race_draft(_stale())
+    ok, posts = await _button_builds(monkeypatch)
+    assert ok is True and posts == 1
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_claim_still_turns_the_button_away(monkeypatch, test_db):
+    await _stamp_race_draft(datetime.now())
+    ok, posts = await _button_builds(monkeypatch)
+    assert ok is False and posts == 0
+
+
+@pytest.mark.asyncio
+async def test_an_old_stamp_with_matches_is_built_rooms_not_a_stale_claim(monkeypatch, test_db):
+    from models.match import MatchResult
+    race_id = await _stamp_race_draft(_stale())
+    async with AsyncSessionLocal() as s:
+        s.add(MatchResult(session_id=race_id, match_number=1,
+                          player1_id="10", player2_id="20"))
+        await s.commit()
+    ok, posts = await _button_builds(monkeypatch)
+    assert ok is False and posts == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stamp, matches, taken", [
+    (None, False, False),
+    ("fresh", False, True),
+    ("stale", False, False),
+    ("stale", True, True),
+])
+async def test_the_fallback_reads_the_same_rule(test_db, stamp, matches, taken):
+    """/mutiny and ownership loss go through create_rooms_and_pairings_with_fallback,
+    which answers "rooms exist" itself before calling create_rooms_pairings."""
+    import services.draft_setup_manager as dsm
+    from models.match import MatchResult
+    when = {"fresh": datetime.now(), "stale": _stale(), None: None}[stamp]
+    await _seed(rooms_created_at=when)
+    if matches:
+        async with AsyncSessionLocal() as s:
+            s.add(MatchResult(session_id=SID, match_number=1, player1_id="d1", player2_id="d2"))
+            await s.commit()
+    inner = AsyncMock(return_value=True)
+    with patch.object(views.PersistentView, "create_rooms_pairings", inner):
+        ok = await dsm.create_rooms_and_pairings_with_fallback(
+            MagicMock(), MagicMock(), None, SID)
+    assert ok is True
+    assert inner.called is (not taken)
+
+
+@pytest.mark.asyncio
+async def test_a_build_that_raises_gives_the_claim_back(test_db):
+    await _seed()
+    bot, channel = _bot()
+    with patch.object(views.PersistentView, "create_rooms_pairings",
+                      AsyncMock(side_effect=RuntimeError("boom"))):
+        await draft_end.create_rooms_once(bot, MagicMock(), channel, SID, None)
+    assert (await _row()).rooms_created_at is None
+    channel.send.assert_awaited_once_with(
+        "Failed to create rooms and pairings. Check logs for details.")
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_build_gives_the_claim_back(test_db):
+    await _seed()
+    bot, channel = _bot()
+    started = asyncio.Event()
+
+    async def hang(*a, **k):
+        started.set()
+        await asyncio.Event().wait()
+
+    with patch.object(views.PersistentView, "create_rooms_pairings", AsyncMock(side_effect=hang)):
+        task = asyncio.create_task(
+            draft_end.create_rooms_once(bot, MagicMock(), channel, SID, None))
+        await asyncio.wait_for(started.wait(), timeout=5)
+        assert (await _row()).rooms_created_at is not None   # claimed while building
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert (await _row()).rooms_created_at is None
