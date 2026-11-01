@@ -9,29 +9,37 @@ as a pushed log -- or the reconciler's pull -- and runs finish_draft, which
 builds rooms at most once.
 
 Everything the poller acts on is re-read from the database and the status
-endpoint every tick, so a restarted bot picks up where it was. What it keeps in
-memory is only what the room has already been told (a ready check's messages, a
-disconnect notice); losing that on a restart costs at most one repeated message.
+endpoint every tick, so a restarted bot picks up where it was. Who paused the
+table, its notice, and the seats an admin gave to a bot are in the database too:
+a restart neither lifts a player's /pause nor pauses for a bot-played seat. What
+stays in memory is only a running ready check's messages; losing it on a restart
+costs at most one repeated message.
+
+Discord commands on a hosted draft (/pause, /unpause, /scrap, /ready,
+/release_draft_logs, /replace_seat, Update Cube) are API calls made here, under
+the same per-draft lock as the poller's tick, so a command and a tick never act
+on one draft at once.
 """
 from __future__ import annotations
 
 import asyncio
+import secrets
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import discord
 from loguru import logger
 from sqlalchemy import select, update
 
-from config import (draftmancer_api_token, draftmancer_api_url, hosted_draftmancer_enabled,
-                    scheduler_base_url)
+from config import (draftmancer_api_token, draftmancer_api_url, get_draftmancer_session_url,
+                    hosted_draftmancer_enabled, scheduler_base_url)
 from cube_views.pack_options import DEFAULT_CARDS_PER_PACK, DEFAULT_PACKS_PER_PLAYER
 from database.db_session import db_session
-from helpers.hosted_seats import discord_ids_by_seat, seat_list
+from helpers.hosted_seats import discord_ids_by_seat, seat_list, seat_names
 from models.draft_session import DraftSession
 from notification_service import send_ready_check_dms
-from services.draft_end import DraftLog, finish_draft
+from services.draft_end import DraftLog, finish_draft, publish_draft_log
 from services.draft_messages import (
     READY_CHECK_PASSED,
     READY_CHECK_TIMEOUT_SECONDS,
@@ -52,6 +60,7 @@ from services.draft_setup_manager import (
 )
 from services.hosted_draftmancer import (
     HostedDraftmancer,
+    HostedLogStopped,
     HostedRefused,
     HostedSeat,
     HostedStatus,
@@ -65,6 +74,11 @@ POLL_INTERVAL_SECONDS = 5
 # in-app prompt is one-shot), so a fresh one is asked for after this pause.
 NOT_READY_RETRY_SECONDS = 30
 WEBHOOK_PATH = "/hosted/draft-ended"
+
+# Who paused a hosted draft (draft_sessions.hosted_paused_by). The poller lifts
+# only its own pause, once every seat is back; a player's /pause waits for /unpause.
+BOT_PAUSE = "bot"
+HUMAN_PAUSE = "human"
 
 # Only the mentions this module builds may ping: a display name is free text.
 _PING_USERS_ONLY = discord.AllowedMentions(everyone=False, roles=False, users=True)
@@ -190,8 +204,9 @@ class _Tracked:
     # After a failed check: "all-ready" (start again once every seat reads
     # ready, as after a timeout today) or the time a new check may be asked for.
     retry: str | float | None = None
+    # The seats the pause notice names. None after a restart: the notice is
+    # re-rendered once from the current seats.
     paused_for: list[str] | None = None
-    notice_id: str | None = None
 
 
 _TRACKED: dict[str, _Tracked] = {}
@@ -199,12 +214,21 @@ _TRACKED: dict[str, _Tracked] = {}
 _DONE: set[str] = set()
 _END_LOCKS: dict[str, asyncio.Lock] = {}
 _FINISHING: dict[str, asyncio.Task[None]] = {}
+# One per draft: a poll tick and a command never act on the same draft at once.
+_DRAFT_LOCKS: dict[str, asyncio.Lock] = {}
+# Drafts the reconciler has learnt will never have a log: stopped, or lost.
+_UNPULLABLE: set[str] = set()
 
 
 def forget_all() -> None:
-    """Drop everything remembered (tests)."""
+    """Drop everything remembered (tests, and what a restart loses)."""
     _TRACKED.clear()
     _DONE.clear()
+    _UNPULLABLE.clear()
+
+
+def _draft_lock(session_id: str) -> asyncio.Lock:
+    return _DRAFT_LOCKS.setdefault(session_id, asyncio.Lock())
 
 
 # --- the poller --------------------------------------------------------------------------
@@ -247,6 +271,15 @@ async def poll_hosted_drafts(bot: discord.Client) -> None:
 
 
 async def _poll_draft(bot: discord.Client, row: Any) -> None:
+    async with _draft_lock(row.session_id):
+        # Read again under the lock: a command may have paused, resumed or moved
+        # the draft while this tick waited for it.
+        fresh = await DraftSession.get_by_session_id(row.session_id)
+        if fresh is not None and fresh.draftmancer_route == ROUTE:
+            await _poll_draft_locked(bot, fresh)
+
+
+async def _poll_draft_locked(bot: discord.Client, row: Any) -> None:
     try:
         status = await hosted_client().status(row.draft_id)
     except HostedUnavailable as e:
@@ -393,28 +426,43 @@ async def _start(row: Any, st: _Tracked, channel: Any) -> None:
 
 async def _drafting(row: Any, status: HostedStatus, st: _Tracked, channel: Any) -> None:
     st.ready_check = None
-    away = _away_past_grace(status.seats)
+    if row.hosted_paused_by == HUMAN_PAUSE:
+        st.paused_for = None
+        return  # A player's /pause: only /unpause lifts it.
+    seats = _human_seats(row, status.seats)
+    away = _away_past_grace(seats)
+    paused = row.hosted_paused_by == BOT_PAUSE
     if away:
-        if st.paused_for is None:
+        if not paused:
             await hosted_client().pause(row.draft_id)
+            await _store_on(row, hosted_paused_by=BOT_PAUSE)
             st.paused_for = away
             logger.info(f"Paused hosted draft {row.session_id}: {away} disconnected")
             if channel is not None:
                 notice = await channel.send(_paused_text(row, away), allowed_mentions=_PING_USERS_ONLY)
-                st.notice_id = str(notice.id)
-        elif away != st.paused_for and channel is not None:
+                await _store_on(row, hosted_pause_notice_id=str(notice.id))
+        elif away != st.paused_for:
+            # Someone else dropped or came back -- or a restart forgot whom the notice names.
             st.paused_for = away
-            await _edit_notice(channel, st, _paused_text(row, away))
+            if channel is not None:
+                await _edit_notice(row, channel, _paused_text(row, away))
         return
-    if any(not s.connected for s in status.seats):
+    if any(not s.connected for s in seats):
         return  # Only a blip so far, or still paused while someone's blip passes.
-    if st.paused_for is not None:
+    if paused:
         await hosted_client().resume(row.draft_id)
         logger.info(f"Resumed hosted draft {row.session_id}: every seat is back")
         if channel is not None:
-            await _edit_notice(channel, st, _resumed_text(row, st.paused_for))
+            await _edit_notice(row, channel, _resumed_text(row, st.paused_for or []))
+        await _store_on(row, hosted_paused_by=None, hosted_pause_notice_id=None)
         st.paused_for = None
-        st.notice_id = None
+
+
+def _human_seats(row: Any, seats: list[HostedSeat]) -> list[HostedSeat]:
+    """The seats a person plays: the server keeps reporting a bot-played seat
+    disconnected, and it must never hold the table for it."""
+    bots = set(row.hosted_bot_seats or [])
+    return [s for s in seats if s.name not in bots]
 
 
 def _away_past_grace(seats: list[HostedSeat]) -> list[str]:
@@ -450,14 +498,16 @@ def _paused_text(row: Any, away: list[str]) -> str:
 
 
 def _resumed_text(row: Any, away: list[str]) -> str:
+    if not away:
+        return "▶️ **Draft resumed** — every seat is connected again."
     who = ", ".join(_mentions(row, away))
     return f"▶️ **Draft resumed** — every seat is connected again ({who} dropped out for a while)."
 
 
-async def _edit_notice(channel: Any, st: _Tracked, text: str) -> None:
-    message = await update_or_send_message(channel, st.notice_id, content=text)
-    if message is not None:
-        st.notice_id = str(message.id)
+async def _edit_notice(row: Any, channel: Any, text: str) -> None:
+    message = await update_or_send_message(channel, row.hosted_pause_notice_id, content=text)
+    if message is not None and str(message.id) != row.hosted_pause_notice_id:
+        await _store_on(row, hosted_pause_notice_id=str(message.id))
 
 
 async def _delete_message(channel: Any, message_id: str | None) -> None:
@@ -474,6 +524,298 @@ async def _store(session_id: str, **values: Any) -> None:
     async with db_session() as session:
         await session.execute(update(DraftSession)
                               .where(DraftSession.session_id == session_id).values(**values))
+
+
+async def _store_on(row: Any, **values: Any) -> None:
+    """Write the values and keep the tick's row in step with them."""
+    await _store(row.session_id, **values)
+    for name, value in values.items():
+        setattr(row, name, value)
+
+
+# --- commands --------------------------------------------------------------------------
+#
+# Each returns what happened, in a word the cog turns into a reply; none raises
+# for an API that is down or says no.
+
+PauseResult = Literal["paused", "already", "not-drafting", "unreachable", "gone"]
+ResumeResult = Literal["resumed", "not-drafting", "unreachable", "gone"]
+StopResult = Literal["stopped", "ended", "unreachable", "gone"]
+ReplaceResult = Literal["replaced", "not-in-draft", "refused", "unreachable", "gone"]
+ReadyResult = Literal["started", "running", "missing", "no-teams", "started-already",
+                      "unreachable", "gone"]
+CubeResult = Literal["moved", "started", "unreachable", "failed"]
+
+
+def _refusal_text(e: HostedRefused) -> str:
+    body = e.body
+    if isinstance(body, dict) and isinstance(body.get("error"), str):
+        return str(body["error"])
+    return f"the drafting server refused ({e.status})"
+
+
+async def hosted_stage(draft_id: str) -> str | None:
+    """The session's stage; "lost" when the server does not know it, None when unreachable."""
+    try:
+        return (await hosted_client().status(draft_id)).stage
+    except HostedUnavailable as e:
+        logger.warning(f"Hosted status for DB{draft_id} unavailable: {e}")
+        return None
+    except HostedRefused as e:
+        if e.status == 404:
+            return "lost"
+        logger.error(f"Hosted status for DB{draft_id} refused: {e}")
+        return None
+
+
+async def pause_for_player(session_id: str) -> PauseResult:
+    """A player's /pause. It holds until /unpause; the poller never lifts it."""
+    async with _draft_lock(session_id):
+        row = await DraftSession.get_by_session_id(session_id)
+        if row is None:
+            return "gone"
+        if row.hosted_paused_by == HUMAN_PAUSE:
+            return "already"
+        try:
+            await hosted_client().pause(row.draft_id)
+        except HostedUnavailable as e:
+            logger.warning(f"Could not pause hosted draft {session_id}: {e}")
+            return "unreachable"
+        except HostedRefused as e:
+            logger.info(f"Hosted pause of {session_id} refused: {e}")
+            return "not-drafting"
+        # Over a pause for an empty seat too: a player asked for this one.
+        await _store(session_id, hosted_paused_by=HUMAN_PAUSE)
+        logger.info(f"Hosted draft {session_id} paused by a player")
+        return "paused"
+
+
+async def resume_for_players(session_id: str) -> ResumeResult:
+    """/unpause, once its ready check has passed."""
+    async with _draft_lock(session_id):
+        row = await DraftSession.get_by_session_id(session_id)
+        if row is None:
+            return "gone"
+        try:
+            await hosted_client().resume(row.draft_id)
+        except HostedUnavailable as e:
+            logger.warning(f"Could not resume hosted draft {session_id}: {e}")
+            return "unreachable"
+        except HostedRefused as e:
+            logger.info(f"Hosted resume of {session_id} refused: {e}")
+            await _store(session_id, hosted_paused_by=None, hosted_pause_notice_id=None)
+            return "not-drafting"
+        await _store(session_id, hosted_paused_by=None, hosted_pause_notice_id=None)
+        tracked = _TRACKED.get(session_id)
+        if tracked is not None:
+            tracked.paused_for = None
+        logger.info(f"Hosted draft {session_id} resumed by the players")
+        return "resumed"
+
+
+async def stop_hosted_draft(session_id: str) -> StopResult:
+    """/scrap: stop the session for good. A stopped draft has no log and is never polled again."""
+    async with _draft_lock(session_id):
+        row = await DraftSession.get_by_session_id(session_id)
+        if row is None:
+            return "gone"
+        try:
+            await hosted_client().stop(row.draft_id)
+        except HostedUnavailable as e:
+            logger.warning(f"Could not stop hosted draft {session_id}: {e}")
+            return "unreachable"
+        except HostedRefused as e:
+            if e.status != 404:
+                logger.info(f"Hosted stop of {session_id} refused: {e}")
+                return "ended"
+        _forget(session_id)
+        _UNPULLABLE.add(session_id)
+        logger.info(f"Stopped hosted draft {session_id}")
+        return "stopped"
+
+
+async def release_hosted_logs(bot: discord.Client, session_id: str) -> bool:
+    """/release_draft_logs: unlock the log on the server, then post it in Discord.
+
+    A failed unlock still posts: the captured log is the deliverable, and the
+    server unlocks it on its own timer anyway.
+    """
+    row = await DraftSession.get_by_session_id(session_id)
+    if row is None:
+        return False
+    draft_id = row.draft_id
+
+    async def release() -> None:
+        try:
+            await hosted_client().release_log(draft_id)
+        except (HostedUnavailable, HostedRefused) as e:
+            logger.warning(f"Could not unlock the hosted log of {session_id}: {e}")
+
+    return await publish_draft_log(bot, session_id, release=True, release_log=release)
+
+
+async def replace_seat_with_bot(session_id: str, discord_id: str) -> tuple[ReplaceResult, str]:
+    """An admin's /replace_seat: a bot takes over that player's seat and pool.
+
+    Returns the outcome and the seat name -- or, when refused, the server's reason.
+    """
+    async with _draft_lock(session_id):
+        row = await DraftSession.get_by_session_id(session_id)
+        if row is None:
+            return "gone", ""
+        seat = seat_names(row.sign_ups or {}).get(discord_id)
+        if seat is None:
+            return "not-in-draft", ""
+        try:
+            await hosted_client().replace_with_bot(row.draft_id, seat)
+        except HostedUnavailable as e:
+            logger.warning(f"Could not replace seat {seat!r} of {session_id}: {e}")
+            return "unreachable", seat
+        except HostedRefused as e:
+            logger.info(f"Replacing seat {seat!r} of {session_id} refused: {e}")
+            return "refused", _refusal_text(e)
+        bots = list(row.hosted_bot_seats or [])
+        if seat not in bots:
+            bots.append(seat)
+        await _store(session_id, hosted_bot_seats=bots)
+        logger.info(f"Seat {seat!r} of hosted draft {session_id} is now played by a bot")
+        return "replaced", seat
+
+
+async def request_ready_check(bot: discord.Client, session_id: str) -> tuple[ReadyResult, list[str]]:
+    """/ready: re-send the seating and run a new in-app ready check now.
+
+    The poller runs one on its own once every seat is connected; this is for
+    when it is waiting on something nobody can fix from Draftmancer -- such as
+    a "not ready" answered after a check had already timed out. Returns the
+    outcome and, when seats are empty, whose.
+    """
+    async with _draft_lock(session_id):
+        row = await DraftSession.get_by_session_id(session_id)
+        if row is None:
+            return "gone", []
+        if not row.session_stage:
+            return "no-teams", []
+        try:
+            status = await hosted_client().status(row.draft_id)
+        except (HostedUnavailable, HostedRefused) as e:
+            logger.warning(f"/ready for {session_id}: no hosted status: {e}")
+            return "unreachable", []
+        if status.stage != "gathering":
+            return "started-already", []
+        away = [s.name for s in status.seats if not s.connected]
+        if away:
+            return "missing", away
+        st = _TRACKED.setdefault(session_id, _Tracked())
+        if st.ready_check is not None:
+            return "running", []
+        channel = bot.get_channel(int(row.draft_channel_id)) if row.draft_channel_id else None
+        if channel is None:
+            return "gone", []
+        try:
+            await hosted_client().set_seating(row.draft_id, seat_list(row.sign_ups or {}))
+            st.retry = None
+            await _open_ready_check(bot, row, len(status.seats), st, channel)
+        except (HostedUnavailable, HostedRefused) as e:
+            logger.warning(f"/ready for {session_id} failed: {e}")
+            return "unreachable", []
+        return "started", []
+
+
+def _new_draft_id() -> str:
+    """Same shape as SessionDetails' draft ids."""
+    return "".join(secrets.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789") for _ in range(8))
+
+
+async def change_hosted_cube(bot: discord.Client, session_id: str, cube: str,
+                             packs: int, cards: int) -> CubeResult:
+    """Update Cube on a hosted queue: move the queue to a new session with the new cube.
+
+    The server takes a session's cube and pack settings only at creation, so
+    the draft gets a new draft_id -- and a new link -- as the manager's
+    regenerate_draft_session does. The new session is made before the old one
+    is stopped, so a failure leaves the queue where it was. Refused once the
+    draft has started.
+    """
+    async with _draft_lock(session_id):
+        row = await DraftSession.get_by_session_id(session_id)
+        if row is None:
+            return "failed"
+        old_id = row.draft_id
+        stage = await hosted_stage(old_id)
+        if stage is None:
+            return "unreachable"
+        if stage not in ("gathering", "lost"):
+            return "started"
+        new_id = _new_draft_id()
+        seats = seat_list(row.sign_ups or {})
+        spec = build_session_spec(
+            draft_id=new_id, players=seats, cube_id=cube, packs_per_player=packs,
+            cards_per_pack=cards, pick_timer=DRAFT_PICK_TIMER_SECONDS,
+            unlock_timer_minutes=DRAFT_LOG_UNLOCK_TIMER_MINUTES, log_webhook=log_webhook_url())
+        client = hosted_client()
+        try:
+            await client.create(spec)
+        except HostedUnavailable as e:
+            logger.warning(f"Could not open a new hosted session for {session_id}: {e}")
+            return "unreachable"
+        except HostedRefused as e:
+            logger.error(f"New hosted session for {session_id} refused: {e}")
+            return "failed"
+        # Compare-and-swap: only the queue that was checked moves.
+        async with db_session() as session:
+            result = await session.execute(
+                update(DraftSession)
+                .where(DraftSession.session_id == session_id, DraftSession.draft_id == old_id)
+                .values(draft_id=new_id, draft_link=get_draftmancer_session_url(new_id),
+                        cube=cube, packs_per_player=packs, cards_per_pack=cards))
+        if getattr(result, "rowcount", 0) == 0:
+            logger.warning(f"{session_id} changed while its cube was being updated; keeping it")
+            await _stop_quietly(client, new_id)
+            return "failed"
+        if stage != "lost":
+            await _stop_quietly(client, old_id)
+        logger.info(f"Moved hosted queue {session_id} from DB{old_id} to DB{new_id} for cube {cube}")
+
+        channel = bot.get_channel(int(row.draft_channel_id)) if row.draft_channel_id else None
+        tracked = _TRACKED.pop(session_id, None)
+        if tracked is not None and tracked.ready_check is not None:
+            await _end_ready_check(channel, tracked, None)
+        _DONE.discard(session_id)
+        if row.session_stage:
+            try:
+                await client.set_seating(new_id, seats)
+            except (HostedUnavailable, HostedRefused) as e:
+                logger.warning(f"Could not seat the new hosted session of {session_id}: {e}")
+        if row.teams_start_time is not None and channel is not None:
+            await _announce_move(session_id, channel)
+        return "moved"
+
+
+async def _stop_quietly(client: HostedDraftmancer, draft_id: str) -> None:
+    try:
+        await client.stop(draft_id)
+    except (HostedUnavailable, HostedRefused) as e:
+        logger.warning(f"Could not stop hosted session DB{draft_id}: {e}")
+
+
+async def _announce_move(session_id: str, channel: Any) -> None:
+    """Every player's new link: the links handed out with the teams now lead nowhere."""
+    row = await DraftSession.get_by_session_id(session_id)
+    if row is None:
+        return
+    links = {discord_id: link for discord_id, name in (row.sign_ups or {}).items()
+             if (link := row.get_draft_link_for_user(name, user_id=discord_id))}
+    lines = "\n".join(f"<@{discord_id}> — [your new draft link]({link})"
+                      for discord_id, link in links.items())
+    try:
+        await channel.send(
+            f"⚠️ **The cube changed, so the draft moved to a new Draftmancer room** "
+            f"(`DB{row.draft_id}`). **Any link you were given before this message no "
+            f"longer works.**\n\n{lines}",
+            allowed_mentions=_PING_USERS_ONLY)
+    except Exception as e:
+        logger.error(f"Could not announce the moved session of {session_id}: {e}")
 
 
 # --- the end ------------------------------------------------------------------------------
@@ -531,3 +873,47 @@ async def wait_for_finishing() -> None:
     tasks = list(_FINISHING.values())
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+# --- the reconciler's pull -------------------------------------------------------------
+
+async def pull_ended_draft(bot: discord.Client, session_id: str, draft_id: str) -> None:
+    """The reconciler's safety net for a lost push: fetch an ended draft's log and finish it.
+
+    Asks status first, because a log 404 means both "not ended yet" and "no
+    such session" -- and a session the server lost (a restart without its
+    state) would otherwise be asked about until the reconciler's window ran
+    out. A stopped or lost draft is never asked about again; an unreachable
+    server is tried again next tick. Never raises for API trouble.
+    """
+    if session_id in _UNPULLABLE:
+        return
+    client = hosted_client()
+    try:
+        status = await client.status(draft_id)
+        if status.stage == "stopped":
+            logger.info(f"[reconciler] hosted draft {session_id} was stopped; it has no log")
+            _UNPULLABLE.add(session_id)
+            return
+        if status.stage != "ended":
+            return
+        log = await client.fetch_log(draft_id)
+    except HostedUnavailable as e:
+        logger.warning(f"[reconciler] hosted API unreachable for {session_id}; retrying next tick: {e}")
+        return
+    except HostedLogStopped:
+        logger.info(f"[reconciler] hosted draft {session_id} was stopped; it has no log")
+        _UNPULLABLE.add(session_id)
+        return
+    except HostedRefused as e:
+        if e.status == 404:
+            logger.error(f"[reconciler] the hosted server no longer knows {session_id} "
+                         f"(DB{draft_id}); its log is lost")
+            _UNPULLABLE.add(session_id)
+        else:
+            logger.error(f"[reconciler] hosted API refused for {session_id}: {e}")
+        return
+    if log is None:
+        return
+    logger.info(f"[reconciler] pulled the hosted log of {session_id}")
+    await on_draft_ended(bot, session_id, log)

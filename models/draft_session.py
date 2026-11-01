@@ -41,6 +41,15 @@ class DraftSession(Base):
     # Which Draftmancer path the draft runs on: "hosted" (control API), "fallback"
     # (websocket manager, chosen when the API was down at creation); NULL = legacy manager.
     draftmancer_route = Column(String(16), nullable=True)
+    # A hosted draft's pause, as the poller and the commands must agree on it
+    # across a restart: "bot" (a seat was empty; the poller resumes it once every
+    # seat is back) or "human" (/pause; only /unpause lifts it). NULL: not paused.
+    hosted_paused_by = Column(String(16), nullable=True)
+    # The poller's "draft paused" notice, edited when the table resumes.
+    hosted_pause_notice_id = Column(String(64), nullable=True)
+    # Seat names an admin handed to a bot (/replace_seat). The hosted server keeps
+    # reporting them disconnected, so the poller counts them as present.
+    hosted_bot_seats = Column(JSON, nullable=True)
     team_a_name = Column(String(128))
     team_b_name = Column(String(128))
     are_rooms_processing = Column(Boolean, default=False)

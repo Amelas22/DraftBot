@@ -12,6 +12,7 @@ from config import (
 from notification_service import send_ready_check_dms
 from ready_check import ReadyCheckView, ReadyCheckSession
 from services.draft_setup_manager import DraftSetupManager, ACTIVE_MANAGERS
+from services import hosted_draft
 from services.hosted_draft import on_signups_changed
 from services.draft_end import rooms_taken
 from session import StakeInfo, AsyncSessionLocal, get_draft_session, DraftSession, MatchResult
@@ -82,6 +83,14 @@ from ready_check import READY_CHECK_DEBOUNCE_SECONDS
 # newer accounts — membership must be a tight range gated on test mode.
 TEST_USER_ID_START = 900000000000000000
 TEST_USER_ID_END = TEST_USER_ID_START + 100
+
+# Why Update Cube did nothing on a hosted draft, by change_hosted_cube's outcome.
+HOSTED_CUBE_REFUSALS = {
+    "started": "The draft has already started, so its cube can no longer be changed.",
+    "unreachable": "Couldn't reach the drafting server, so the cube was not changed. "
+                   "Please try again in a moment.",
+    "failed": "Failed to update the cube in Draftmancer. Please try again later.",
+}
 
 
 def is_synthetic_test_user(user_id: str) -> bool:
@@ -795,9 +804,21 @@ class PersistentView(discord.ui.View):
                     )
 
                     manager = DraftSetupManager.get_active_manager(draft_session.session_id)
+                    hosted = draft_session.draftmancer_route == hosted_draft.ROUTE
 
+                    if hosted:
+                        # The hosted server takes a cube only at creation: the
+                        # queue moves to a new session, until the draft starts.
+                        moved = await hosted_draft.change_hosted_cube(
+                            select_interaction.client, draft_session.session_id,
+                            cube_choice, packs, cards)
+                        if moved != "moved":
+                            await select_interaction.followup.send(
+                                HOSTED_CUBE_REFUSALS.get(moved, HOSTED_CUBE_REFUSALS["failed"]),
+                                ephemeral=True)
+                            return
                     # Push to Draftmancer when we have a live manager.
-                    if manager:
+                    elif manager:
                         if cube_changed:
                             if not await manager.update_cube(cube_choice):
                                 await select_interaction.followup.send(
@@ -834,7 +855,7 @@ class PersistentView(discord.ui.View):
 
                     await update_draft_message(select_interaction.client, draft_session.session_id)
 
-                    if manager:
+                    if manager or hosted:
                         await select_interaction.followup.send(
                             f"The draft has been updated to cube **{cube_choice}** "
                             f"({packs} packs × {cards} cards).",

@@ -1,7 +1,8 @@
 """Backup retry loop for draft-log capture/publish. Push is primary; this poll
 re-fires idempotent steps the push path left pending. Pure-DB actions
-(team-pool retry, deck assignment, delayed public embed) live here; the socket
-capture-retry is added in reconcile_capture (Task 6)."""
+(team-pool retry, deck assignment, delayed public embed) live here, and so does
+the capture retry: a hosted draft's log is pulled through the control API, a
+manager draft's is re-delivered to a rejoining socket."""
 import asyncio
 from datetime import datetime, timedelta
 
@@ -12,6 +13,7 @@ from database.db_session import db_session
 from models.draft_session import DraftSession
 from services.draft_log_store import post_team_logs
 from services.draft_deck_assignment import assign_drafted_decks
+from services import hosted_draft
 from services.draft_setup_manager import ACTIVE_MANAGERS, DraftSetupManager
 
 RECONCILE_INTERVAL_SECONDS: int = 60
@@ -64,10 +66,13 @@ _RECONCILER_RUNNING: bool = False  # guards against on_ready firing on every gat
 
 
 async def reconcile_capture(bot) -> None:
-    """Backup for a missed endDraft push: reconnect the owner socket for
-    uncaptured, recently-active drafts and capture the log the session
-    re-delivers on join, for as long as the room can still exist (see
-    CAPTURE_RETRY_WINDOW_MINUTES)."""
+    """Backup for a missed end-of-draft push, for uncaptured, recently-active
+    drafts, for as long as the log can still exist (see
+    CAPTURE_RETRY_WINDOW_MINUTES).
+
+    A hosted draft's log is pulled from the control API and the draft finished
+    (hosted_draft.pull_ended_draft). A manager draft gets its owner socket
+    reconnected, and the log the session re-delivers on join is captured."""
     cutoff = datetime.now() - timedelta(minutes=CAPTURE_RETRY_WINDOW_MINUTES)
     async with db_session() as session:
         uncaptured = (await session.execute(
@@ -82,6 +87,9 @@ async def reconcile_capture(bot) -> None:
     for ds in uncaptured:
         session_id = ds.session_id
         try:
+            if getattr(ds, "draftmancer_route", None) == hosted_draft.ROUTE:
+                await hosted_draft.pull_ended_draft(bot, session_id, ds.draft_id)
+                continue
             manager = await DraftSetupManager.spawn_for_existing_session(session_id, bot)
             if manager is None:
                 continue
