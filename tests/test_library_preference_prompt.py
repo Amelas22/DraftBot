@@ -377,7 +377,7 @@ async def test_the_library_button_appears_only_on_those_boards(test_db):
 
     boards._BOARDS.clear()
     boards._BOARDS.add("lib-board")
-    for kind in ("premade", "random", "swiss", "winston"):
+    for kind in ("premade", "random", "swiss"):
         assert "Library 🏛️" in labels(kind, "lib-board"), kind
         assert "Library 🏛️" not in labels(kind, "plain-board"), kind
     assert "Library 🏛️" not in labels("staked", "lib-board"), \

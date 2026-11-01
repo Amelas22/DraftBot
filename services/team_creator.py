@@ -55,11 +55,7 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                     await interaction.followup.send("The draft session could not be found.", ephemeral=True)
                     return False
 
-                if session.session_type == 'winston':
-                    if len(session.sign_ups) != 2:
-                        await interaction.followup.send("Winston draft requires exactly 2 players.")
-                        return False
-                elif len(session.sign_ups) % 2 != 0:
+                if len(session.sign_ups) % 2 != 0:
                     await interaction.followup.send("There must be an even number of players to fire.")
                     return False
 
@@ -100,8 +96,8 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                 rc_channel = bot.get_channel(int(session.draft_channel_id)) if session.draft_channel_id else None
                 await ReadyCheckSession.cleanup(session_id, rc_channel)
 
-                # Create teams for random/test/staked/winston drafts
-                if session.session_type in ['random', 'test', 'staked', 'winston']:
+                # Create teams for random/test/staked drafts
+                if session.session_type in ['random', 'test', 'staked']:
                     await split_into_teams(bot, session.session_id)
                     updated_session = await DraftSessionModel.get_by_session_id(draft_session_id)
 
@@ -190,11 +186,7 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                 for item in ([] if staked_done else persistent_view.children):
                     if isinstance(item, discord.ui.Button):
                         if item.custom_id == f"create_rooms_pairings_{draft_session_id}":
-                            # Keep disabled for Winston drafts as per original logic
-                            if session.session_type == 'winston':
-                                item.disabled = True
-                            else:
-                                item.disabled = False
+                            item.disabled = False
                         elif item.custom_id == f"cancel_draft_{draft_session_id}":
                             item.disabled = False
                         else:
@@ -440,9 +432,8 @@ async def _add_stake_info_to_embed(embed, session):
 async def _create_teams_embed(session, team_a_names, team_b_names, seating_order, session_type):
     """Create the main embed showing teams and seating order."""
 
-    title_prefix = "Winston " if session.session_type == 'winston' else ""
     embed = discord.Embed(
-        title=f"{title_prefix}Draft is Ready!",
+        title="Draft is Ready!",
         description=f"**Chosen Cube: [{session.cube}]"
                     f"(https://cubecobra.com/cube/list/{session.cube})**\n\n"
                     "Host of Draftmancer must manually adjust seating as per below. \n**TURN OFF RANDOM SEATING SETTING IN DRAFTMANCER**"

@@ -76,7 +76,6 @@ async def reconcile_capture(bot) -> None:
                 DraftSession.session_stage.in_(["teams", "pairings"]),
                 DraftSession.teams_start_time.isnot(None),
                 DraftSession.teams_start_time >= cutoff,
-                DraftSession.session_type != "winston",
             )
         )).scalars().all()
 
@@ -106,7 +105,7 @@ async def reconcile_publish_and_team_logs(bot) -> None:
     # Pending team-pool posts: captured but not yet posted. Bounded to recently
     # captured drafts of session types that actually have Red-Team/Blue-Team
     # channels -- otherwise every historical captured draft (team_logs_posted_at
-    # is a new column, NULL on all pre-existing rows) and every swiss/winston
+    # is a new column, NULL on all pre-existing rows) and every swiss
     # draft (which structurally can't be team-posted) would be re-selected on
     # every tick forever.
     team_post_cutoff: datetime = datetime.now() - timedelta(hours=TEAM_POST_RETRY_WINDOW_HOURS)
@@ -116,7 +115,7 @@ async def reconcile_publish_and_team_logs(bot) -> None:
                 DraftSession.logs_captured_at.isnot(None),
                 DraftSession.team_logs_posted_at.is_(None),
                 DraftSession.logs_captured_at >= team_post_cutoff,
-                DraftSession.session_type.notin_(["winston", "swiss"]),
+                DraftSession.session_type != "swiss",
             )
         )).scalars().all()
     for ds in pending_team:

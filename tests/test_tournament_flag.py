@@ -40,7 +40,7 @@ def _migrate_fake_guild(features):
 
 
 def test_migrate_configs_adds_tournament_true_when_missing():
-    features = _migrate_fake_guild({"winston_draft": False})
+    features = _migrate_fake_guild({"voice_channels": False})
     assert features["tournament"] is True
 
 

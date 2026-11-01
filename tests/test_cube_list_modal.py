@@ -41,8 +41,8 @@ async def test_valid_input_saves_config():
 
 
 @pytest.mark.asyncio
-async def test_valid_input_for_winston_session_type():
-    modal = make_modal(session_type="winston", input_value="LSVWinston : LSVWinston")
+async def test_valid_input_for_another_session_type():
+    modal = make_modal(session_type="swiss", input_value="LSVCube : LSVCube")
     interaction = make_interaction()
 
     with patch("cube_views.CubeListModal.get_config") as mock_get, \
@@ -50,8 +50,8 @@ async def test_valid_input_for_winston_session_type():
         mock_get.return_value = {}
         await modal.callback(interaction)
 
-    assert mock_get.return_value["cubes"]["winston"] == [
-        {"label": "LSVWinston", "value": "LSVWinston"},
+    assert mock_get.return_value["cubes"]["swiss"] == [
+        {"label": "LSVCube", "value": "LSVCube"},
     ]
 
 

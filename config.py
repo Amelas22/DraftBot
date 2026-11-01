@@ -52,9 +52,7 @@ class Config:
             "roles": {
                 "admin": "Cube Overseer",
                 "drafter": "Cube Drafter",  # Default drafter role
-                "session_roles": {
-                    "winston": "Winston Gamer",
-                },
+                "session_roles": {},
                 "timeout": "the pit",
                 "league_participant": "League Participant",
                 "bots_with_draft_access": list(DEFAULT_BOTS_WITH_DRAFT_ACCESS)  # Bot roles granted read+send in every draft channel
@@ -73,15 +71,8 @@ class Config:
                     {"label": "Powerslax", "value": "Powerslax"},
                     {"label": "PowerSam", "value": "PowerSam"},
                 ],
-                "winston": [
-                    {"label": "LSVWinston", "value": "LSVWinston"},
-                    {"label": "ChillWinston", "value": "ChillWinston"},
-                    {"label": "WinstonDeluxe", "value": "WinstonDeluxe"},
-                    {"label": "data", "value": "data"},
-                ],
             },
             "features": {
-                "winston_draft": False,
                 "voice_channels": False,
                 "bot_detection": False,
                 "money_server": False,
@@ -155,7 +146,6 @@ class Config:
         self.special_guild_config = {
             "channels": {
                 "draft_results": "team-draft-results",
-                "winston_draft": "winston-draft",
                 "open_play": "cube-draft-open-play",
                 "role_request": "role-request"
             },
@@ -166,9 +156,7 @@ class Config:
              "roles": {
                 "admin": "Cube Overseer",
                 "drafter": "Cube Drafter",
-                "session_roles": {
-                    "winston": "Winston Gamer",
-                },
+                "session_roles": {},
                 "suspected_bot": "suspected bot",
                 "league_participant": "League Participant",
                 "bots_with_draft_access": list(DEFAULT_BOTS_WITH_DRAFT_ACCESS)  # Bot roles granted read+send in every draft channel
@@ -187,15 +175,8 @@ class Config:
                     {"label": "Powerslax", "value": "Powerslax"},
                     {"label": "PowerSam", "value": "PowerSam"},
                 ],
-                "winston": [
-                    {"label": "LSVWinston", "value": "LSVWinston"},
-                    {"label": "ChillWinston", "value": "ChillWinston"},
-                    {"label": "WinstonDeluxe", "value": "WinstonDeluxe"},
-                    {"label": "data", "value": "data"},
-                ],
             },
             "features": {
-                "winston_draft": True,
                 "voice_channels": True,
                 "bot_detection": True,
                 "money_server": False,
@@ -301,7 +282,6 @@ class Config:
         
         # Prevent changing special features in non-special guilds
         if guild_id != SPECIAL_GUILD_ID and path.startswith("features.") and (
-            path == "features.winston_draft" or
             path == "features.bot_detection"
         ):
             return False
@@ -447,8 +427,6 @@ def get_session_deletion_hours(guild_id):
 
 def get_cube_options(guild_id, session_type):
     """Return the list of cube dicts for the given session type."""
-    if session_type == "winston":
-        return bot_config.default_config["cubes"]["winston"]
     config = get_config(guild_id)
     cubes = config.get("cubes", bot_config.default_config["cubes"])
     return cubes.get(session_type, cubes.get("default", bot_config.default_config["cubes"]["default"]))
@@ -610,12 +588,6 @@ def migrate_configs():
                     {"label": "PowerLSV", "value": "PowerLSV"},
                     {"label": "Powerslax", "value": "Powerslax"},
                     {"label": "PowerSam", "value": "PowerSam"},
-                ],
-                "winston": [
-                    {"label": "LSVWinston", "value": "LSVWinston"},
-                    {"label": "ChillWinston", "value": "ChillWinston"},
-                    {"label": "WinstonDeluxe", "value": "WinstonDeluxe"},
-                    {"label": "data", "value": "data"},
                 ],
             }
             updated = True

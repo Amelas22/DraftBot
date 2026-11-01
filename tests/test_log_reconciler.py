@@ -75,7 +75,7 @@ async def test_reconcile_posts_pending_team_logs_and_publishes_due_embeds(test_d
     bound on the pending-team query still exists; otherwise every historical
     captured draft gets re-selected forever).
     E: a recent SWISS draft, team_logs_posted_at NULL -> must NOT be
-    team-posted (swiss/winston drafts have no Red-Team/Blue-Team channels,
+    team-posted (swiss drafts have no Red-Team/Blue-Team channels,
     so post_team_logs can never succeed for them and they'd be re-selected
     every tick forever).
     G: captured 4 days ago, team-posted already, unlock_at in the PAST,

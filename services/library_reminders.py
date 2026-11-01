@@ -63,7 +63,7 @@ ANNOUNCEABLE_STATE = "assigned"
 # absent: utils.calculate_pairings builds its rounds one at a time, so a Swiss
 # player who has reported every match that EXISTS may still have rounds to come,
 # and asking then would take the cards they need to play them.
-FULLY_PAIRED_TYPES = ("random", "staked", "premade", "winston")
+FULLY_PAIRED_TYPES = ("random", "staked", "premade")
 
 _DRAFT_SOURCE_PREFIX = "draft:"
 

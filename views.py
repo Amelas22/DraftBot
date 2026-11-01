@@ -200,9 +200,7 @@ class PersistentView(discord.ui.View):
 
         self._add_shared_buttons()
 
-        if self.session_type == "winston":
-            self._add_winston_specific_buttons()
-        elif self.session_type == "premade":
+        if self.session_type == "premade":
             self._add_premade_buttons()
         else:
             self._add_generic_buttons()
@@ -235,10 +233,6 @@ class PersistentView(discord.ui.View):
         self._add_button("Cancel Draft", "grey", "cancel_draft", self.cancel_draft_callback)
         self._add_button("Remove User", "grey", "remove_user", self.remove_user_button_callback)
         self._add_button("Update Cube", "green", "update_cube", self.update_cube_callback)
-
-
-    def _add_winston_specific_buttons(self):
-        self._add_button("Start Draft", "green", "start_draft", self.start_draft_callback)
 
 
     def _add_premade_buttons(self):
@@ -529,11 +523,6 @@ class PersistentView(discord.ui.View):
         # Check if user has Draftmancer role
         has_draftmancer_role = discord.utils.get(interaction.user.roles, name="Draftmancer") is not None
         
-        if self.session_type == "winston":
-            now = datetime.now()
-            deletion_time = now + timedelta(minutes=10)
-            relative_time = f"<t:{int(deletion_time.timestamp())}:R>"
-
         # Fetch the current draft session to ensure it's up to date
         draft_session = await get_draft_session(self.draft_session_id)
         if not draft_session:
@@ -686,18 +675,6 @@ class PersistentView(discord.ui.View):
             # If a ready check is active, add the new player to no_response and refresh the embed
             await ReadyCheckSession.sync_added_player(self.draft_session_id, user_id, draft_session_updated, interaction)
 
-            if self.session_type == "winston":
-                if len(sign_ups) == 2:
-                    sign_up_tags = ' '.join([f"<@{user_id}>" for user_id in draft_session_updated.sign_ups.keys()])
-                    guild = self.bot.get_guild(int(interaction.guild_id))
-                    channel = discord.utils.get(guild.text_channels, name="winston-draft")
-                    await channel.send(f"Winston Draft Ready. Good luck in your match! {sign_up_tags}")
-                else:
-                    guild = interaction.guild
-                    message_link = f"https://discord.com/channels/{draft_session_updated.guild_id}/{draft_session_updated.draft_channel_id}/{draft_session_updated.message_id}"
-                    channel = discord.utils.get(guild.text_channels, name="cube-draft-open-play")
-                    await channel.send(f"**{get_display_name(interaction.user, guild)}** is looking for an opponent for a **Winston Draft**. [Join Here!]({message_link})")
-                    
     async def cancel_sign_up_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         draft_session = await get_draft_session(self.draft_session_id)
         if not draft_session:
@@ -1322,43 +1299,6 @@ class PersistentView(discord.ui.View):
         confirm_view = CancelConfirmationView(self.bot, self.draft_session_id, get_display_name(interaction.user, interaction.guild))
         await interaction.response.send_message("Are you sure you want to cancel this draft?", view=confirm_view, ephemeral=True)    
     
-    async def start_draft_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        bot = interaction.client
-        session_id = self.draft_session_id
-
-        # Check for race condition
-        if state_manager.is_creating_teams(session_id):
-            await interaction.response.send_message(
-                "Teams are already being created. Please wait.",
-                ephemeral=True
-            )
-            return
-
-        state_manager.set_creating_teams(session_id, True)
-
-        try:
-            from services.team_creator import create_and_display_teams
-            
-            # Defer since it might take a moment
-            await interaction.response.defer()
-            
-            success = await create_and_display_teams(bot, session_id, interaction, self)
-            
-            if not success:
-                logger.error(f"Winston draft team creation failed for session {session_id}")
-                
-        except Exception as e:
-            logger.exception(f"Error in start_draft_callback: {e}")
-            try:
-                await interaction.followup.send(
-                    "An error occurred while creating teams. Please try again.",
-                    ephemeral=True
-                )
-            except:
-                pass
-        finally:
-            state_manager.set_creating_teams(session_id, False)
-
     @staticmethod
     def _team_field_index(fields, label, skip=None):
         """Index of `label`'s field, never the one already claimed by the other side.

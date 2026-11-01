@@ -247,7 +247,7 @@ def test_the_capture_gate_matches_the_settlement_gate():
     assert "'staked'" in condition or '"staked"' in condition, (
         f"the capture is gated on {condition}, which is not the gate settlement "
         "uses -- one of them will see a draft the other does not")
-    for other in ("random", "premade", "winston", "test", "swiss"):
+    for other in ("random", "premade", "test", "swiss"):
         assert f"'{other}'" not in condition, (
             f"{other} drafts would have a pool levelled that settlement never "
             "pays out, stranding it in the holder")
@@ -575,7 +575,8 @@ def test_every_path_into_matching_holds_the_team_creation_flag():
                 f"taking state_manager.is_creating_teams first, so two of them "
                 f"can reach match_pool at once and trim a side twice")
 
-    assert len(callers) >= 3, (
+    # Randomize Teams and the all-ready path; a scan finding fewer has stopped seeing them.
+    assert len(callers) >= 2, (
         f"expected the known entry points into team creation, found {callers}")
 
 

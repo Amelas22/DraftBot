@@ -88,7 +88,7 @@ async def test_unrated_session_type_skips_stats_fetch(monkeypatch):
 
     monkeypatch.setattr(utils, "_fetch_player_stats_map", recording_fetch)
     title, _, _ = await utils.determine_draft_outcome(
-        _Bot(), _session(session_type="winston"), team_a_wins=5, team_b_wins=2,
+        _Bot(), _session(session_type="test"), team_a_wins=5, team_b_wins=2,
         half_matches=3, total_matches=7,
     )
     assert calls == []

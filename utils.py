@@ -2019,9 +2019,6 @@ async def cleanup_sessions_task(bot):
                                         print(f"Failed to delete channel: {channel.name}. Reason: {e}")
 
                         if session.draft_channel_id and session.message_id:
-                            if session.session_type == "winston":
-                                if not session.sign_ups or len(session.sign_ups) < 2:
-                                    continue
                             draft_channel = bot.get_channel(int(session.draft_channel_id))
                             if draft_channel:
                                 try:
@@ -2696,19 +2693,12 @@ async def re_register_views(bot):
                     try:
                         message = await channel.fetch_message(int(draft_session.message_id))
                         from views import PersistentView
-                        if draft_session.session_type == "winston":
-                            view = PersistentView(
-                                                bot=bot,
-                                                draft_session_id=draft_session.session_id,
-                                                session_type=draft_session.session_type
-                                                )
-                        else:
-                            view = PersistentView(bot=bot,
-                                                draft_session_id=draft_session.session_id,
-                                                session_type=draft_session.session_type,
-                                                team_a_name=draft_session.team_a_name,
-                                                team_b_name=draft_session.team_b_name,
-                                                session_stage=None)
+                        view = PersistentView(bot=bot,
+                                            draft_session_id=draft_session.session_id,
+                                            session_type=draft_session.session_type,
+                                            team_a_name=draft_session.team_a_name,
+                                            team_b_name=draft_session.team_b_name,
+                                            session_stage=None)
                             
                         await message.edit(view=view)  # Reattach the view
                         print(f"Re-registered view for session: {draft_session.session_id}")
