@@ -35,6 +35,7 @@ import os
 import secrets
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from typing import Any, Literal
 
 import discord
@@ -58,6 +59,7 @@ from services.draft_messages import (
     ready_check_deadline_text,
     ready_check_left_text,
     ready_check_not_ready_text,
+    ready_check_reset_text,
     ready_check_text,
     ready_check_timed_out_text,
     session_status,
@@ -84,6 +86,10 @@ from services.hosted_draftmancer import (
 ROUTE = "hosted"
 FALLBACK_ROUTE = "fallback"
 POLL_INTERVAL_SECONDS = 5
+# Drafts opened longer ago than this are not polled: by then a hosted draft has
+# ended (or been scrapped, abandoned or cancelled), and asking the server about
+# every one of them on each restart would only add calls and outage notices.
+POLL_WINDOW = timedelta(hours=24)
 # A player who answered "not ready" cannot answer the same check again (the
 # in-app prompt is one-shot), so a fresh one is asked for after this pause.
 NOT_READY_RETRY_SECONDS = 30
@@ -174,10 +180,18 @@ async def _create_hosted(draft_session: Any) -> FallbackReason | None:
     except HostedRefused as e:
         logger.error(f"The hosted server refused to create {draft_session.session_id}: {e}")
         return "refused"
-    async with db_session() as session:
-        await session.execute(update(DraftSession)
-                              .where(DraftSession.session_id == draft_session.session_id)
-                              .values(draftmancer_route=ROUTE))
+    try:
+        await _store(draft_session.session_id, draftmancer_route=ROUTE,
+                     draft_link=get_draftmancer_session_url(draft_session.draft_id))
+    except Exception:
+        # A row left without the route would have no poller, and a restart
+        # would put a manager into a draft that has none: close the room and
+        # take the fallback, whose own write records a route.
+        logger.opt(exception=True).error(
+            f"Could not record the hosted route of {draft_session.session_id}; "
+            f"closing its hosted session")
+        await _stop_quietly(hosted_client(), draft_session.draft_id)
+        return "refused"
     logger.info(f"Opened hosted session DB{draft_session.draft_id} for {draft_session.session_id}")
     return None
 
@@ -274,6 +288,8 @@ async def on_signups_changed(session_id: str) -> None:
     seats with the sign-ups on every tick.
     """
     try:
+        if _known_down():
+            return  # Not worth the click's wait: the poller re-syncs once it is back.
         row = await _hosted_row(session_id)
         if row is None:
             return
@@ -369,12 +385,17 @@ async def poll_hosted_drafts(bot: discord.Client) -> None:
     """One tick: every hosted draft that has not ended, concurrently."""
     if not hosted_draftmancer_enabled():
         return
+    # Naive local time, as draft_start_time is stored (and reconnect_drafts compares).
+    since = datetime.now() - POLL_WINDOW
     async with db_session() as session:
         rows = list((await session.execute(
             select(DraftSession).where(
                 DraftSession.draftmancer_route == ROUTE,
-                DraftSession.rooms_created_at.is_(None),
                 DraftSession.logs_captured_at.is_(None),
+                DraftSession.draft_start_time >= since,
+                # `!=` alone would drop a queue's NULL stage.
+                (DraftSession.session_stage.is_(None))
+                | (DraftSession.session_stage != "abandoned"),
             ))).scalars())
     rows = [r for r in rows if r.session_id not in _DONE]
     results = await asyncio.gather(*(_poll_draft(bot, row) for row in rows),
@@ -414,7 +435,9 @@ async def _poll_draft_locked(bot: discord.Client, row: Any) -> None:
             logger.warning(f"Hosted session for {row.session_id} no longer exists; not polling it")
             _forget(row.session_id)
             return
-        raise
+        # A refused token: the admins hear once per incident (_report_auth).
+        logger.warning(f"Hosted status for {row.session_id} refused: {e}")
+        return
     st = _TRACKED.setdefault(row.session_id, _Tracked())
     channel = bot.get_channel(int(row.draft_channel_id)) if row.draft_channel_id else None
     if status.stage == "gathering":
@@ -439,7 +462,10 @@ async def _gathering(bot: discord.Client, row: Any, status: HostedStatus, st: _T
         # players clears the in-app ready check, so ours goes with it.
         await hosted_client().set_players(row.draft_id, expected)
         if st.ready_check is not None:
-            await _end_ready_check(channel, st, None)
+            changed = sorted(set(expected) ^ {s.name for s in status.seats})
+            await _end_ready_check(channel, st, ready_check_left_text(changed[0]) if changed
+                                   else ready_check_reset_text())
+        st.retry = None
         return
     if not row.session_stage or channel is None:
         return  # No teams yet: nobody has been given a link.
@@ -475,6 +501,13 @@ async def _ready_check_step(bot: discord.Client, row: Any, status: HostedStatus,
     if away:
         st.retry = None  # A leave resets: a new check runs once everyone is back.
         return
+    if st.retry == "start":
+        # The check passed but the start did not reach the server: try it again
+        # quietly while every seat still reads ready.
+        if all(s.ready == "ready" for s in seats):
+            await _start(row, st, channel, announce=False)
+            return
+        st.retry = None
     if st.retry == "all-ready":
         if not all(s.ready == "ready" for s in seats):
             return
@@ -535,11 +568,22 @@ async def _end_ready_check(channel: Any, st: _Tracked, text: str | None) -> None
     await _delete_message(channel, rc.deadline_message_id)
 
 
-async def _start(row: Any, st: _Tracked, channel: Any) -> None:
-    await _end_ready_check(channel, st, None)
-    await channel.send(READY_CHECK_PASSED)
-    await asyncio.sleep(START_DELAY_SECONDS)
-    missing = await hosted_client().start(row.draft_id)
+async def _start(row: Any, st: _Tracked, channel: Any, *, announce: bool = True) -> None:
+    if announce:
+        await _end_ready_check(channel, st, None)
+        await channel.send(READY_CHECK_PASSED)
+        await asyncio.sleep(START_DELAY_SECONDS)
+    st.retry = "start"
+    try:
+        missing = await hosted_client().start(row.draft_id)
+    except HostedUnavailable as e:
+        logger.warning(f"Hosted start of {row.session_id} unavailable; retrying next tick: {e}")
+        return
+    except HostedRefused as e:
+        logger.warning(f"Hosted start of {row.session_id} refused: {e}")
+        st.retry = None
+        return
+    st.retry = None
     if missing:
         # Someone dropped in the last seconds; a new check runs once they are back.
         logger.info(f"Hosted start of {row.session_id} refused; waiting on {missing}")
@@ -758,6 +802,32 @@ async def stop_hosted_draft(session_id: str) -> StopResult:
         return "stopped"
 
 
+async def stop_if_hosted(session_id: str, draft_id: str | None, route: str | None) -> None:
+    """Close a hosted draft's session as its draft goes away: cancelled, reaped, abandoned.
+
+    Best effort, and never raises: a session the server no longer has (404) or
+    has already ended or stopped (409) is what was wanted, and one it cannot
+    be asked about is logged -- the user's action goes ahead either way, and
+    the server closes a never-started session on its own after a while.
+    Pass the row's values rather than the row: callers read them before the
+    row is deleted.
+    """
+    if route != ROUTE or not draft_id:
+        return
+    try:
+        async with _draft_lock(session_id):
+            try:
+                await hosted_client().stop(draft_id)
+            except HostedRefused as e:
+                if e.status not in (404, 409):
+                    raise
+            _forget(session_id)
+            _UNPULLABLE.add(session_id)
+        logger.info(f"Closed the hosted session DB{draft_id} of {session_id}")
+    except Exception as e:
+        logger.warning(f"Could not close the hosted session DB{draft_id} of {session_id}: {e}")
+
+
 async def release_hosted_logs(bot: discord.Client, session_id: str) -> bool:
     """/release_draft_logs: unlock the log on the server, then post it in Discord.
 
@@ -770,12 +840,21 @@ async def release_hosted_logs(bot: discord.Client, session_id: str) -> bool:
     draft_id = row.draft_id
 
     async def release() -> None:
-        try:
-            await hosted_client().release_log(draft_id)
-        except (HostedUnavailable, HostedRefused) as e:
-            logger.warning(f"Could not unlock the hosted log of {session_id}: {e}")
+        await unlock_hosted_log(session_id, draft_id)
 
     return await publish_draft_log(bot, session_id, release=True, release_log=release)
+
+
+async def unlock_hosted_log(session_id: str, draft_id: str) -> None:
+    """Unlock a hosted draft's log for its players. Best effort; never raises.
+
+    For /release_draft_logs and for the clinch, which unlocks the log early:
+    the server unlocks it on its own timer anyway.
+    """
+    try:
+        await hosted_client().release_log(draft_id)
+    except Exception as e:
+        logger.warning(f"Could not unlock the hosted log of {session_id}: {e}")
 
 
 async def replace_seat_with_bot(session_id: str, discord_id: str) -> tuple[ReplaceResult, str]:
@@ -1120,8 +1199,8 @@ ALERT_ENV = "SERVE_ALERT_DISCORD_ID"
 
 OUTAGE_NOTICE = (
     "⚠️ **The drafting server isn't answering.** DraftBot keeps retrying, and the "
-    "draft carries on from where it was once it's back. If it stays down, an admin "
-    "can move this draft to draftmancer.com with `/mutiny`."
+    "draft carries on from where it was once it's back. If it stays down, any player "
+    "in this draft can move it to draftmancer.com with `/mutiny`."
 )
 RECOVERED_NOTICE = "✅ The drafting server is answering again."
 
@@ -1229,7 +1308,8 @@ async def _report_outage(bot: discord.Client, rows: list[Any]) -> None:
             f"⚠️ **The hosted Draftmancer hasn't answered for {minutes} minutes** "
             f"({draftmancer_api_url()}). Drafts on it wait where they were, and new "
             f"drafts open on draftmancer.com instead. If it stays down, `/mutiny` in a "
-            f"draft's channel moves that draft to draftmancer.com."))
+            f"draft's channel -- by any of its players or an admin -- moves that draft "
+            f"to draftmancer.com."))
     # Gathering queues too: their players are waiting on the server as well.
     for row in rows:
         if row.session_id in h.channels_told or not row.draft_channel_id:

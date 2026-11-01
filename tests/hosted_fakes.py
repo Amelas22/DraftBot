@@ -1,6 +1,7 @@
 """Fakes and fixtures for the hosted-Draftmancer tests: a stand-in for the
 control API client, a Discord channel that remembers what it was sent, and a
 hosted draft seeded in the test database."""
+from datetime import datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -179,6 +180,7 @@ def dms():
 
 
 async def _seed(stage: str | None = "teams", route: str | None = "hosted", **kw: Any) -> None:
+    kw.setdefault("start", datetime.now())  # The poller only looks at recent drafts.
     await seed_session(session_id=SID, guild="1", stype="random", stage=stage,
                        draft_channel_id="999", sign_ups=dict(SIGN_UPS), draft_id=DRAFT_ID, **kw)
     async with AsyncSessionLocal() as s:

@@ -2759,6 +2759,8 @@ class CancelConfirmationView(discord.ui.View):
             await best_effort("announce", channel.send(
                 f"User **{self.user_display_name}** has cancelled the draft `{session.friendly_id}`."))
         await best_effort("stop the manager", DraftSetupManager.cancel_for_session(self.draft_session_id))
+        await best_effort("close the hosted session", hosted_draft.stop_if_hosted(
+            self.draft_session_id, session.draft_id, session.draftmancer_route))
         await best_effort("clear the ready check", ReadyCheckSession.cleanup(self.draft_session_id, channel))
         await best_effort("delete the sign-up", _delete_message(channel, session.message_id))
 

@@ -215,3 +215,40 @@ async def test_an_undecided_draft_leaves_draftmancer_locked(test_db):
         await release_decided_draft_log(SID)
 
     manager.release_draftmancer_log.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_the_clinch_unlocks_a_hosted_draft_on_the_server(test_db):
+    """A hosted draft has no manager: the clinch asks the hosted server instead."""
+    await _a_captured_draft(a_wins=5, b_wins=1)
+    async with AsyncSessionLocal() as s:
+        await s.execute(update(DraftSession).where(DraftSession.session_id == SID)
+                        .values(draftmancer_route="hosted", draft_id="HOST1"))
+        await s.commit()
+    client = MagicMock(release_log=AsyncMock())
+    manager, registry = _a_live_manager()
+
+    with registry, patch("services.hosted_draft.hosted_client", return_value=client):
+        await release_decided_draft_log(SID)
+
+    client.release_log.assert_awaited_once_with("HOST1")
+    manager.release_draftmancer_log.assert_not_awaited()
+    assert await _unlock_at() <= datetime.now()
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_hosted_server_does_not_fail_the_clinch(test_db):
+    from services.hosted_draftmancer import HostedUnavailable
+
+    await _a_captured_draft(a_wins=5, b_wins=1)
+    async with AsyncSessionLocal() as s:
+        await s.execute(update(DraftSession).where(DraftSession.session_id == SID)
+                        .values(draftmancer_route="hosted", draft_id="HOST1"))
+        await s.commit()
+    client = MagicMock(release_log=AsyncMock(side_effect=HostedUnavailable("down")))
+
+    with patch("services.hosted_draft.hosted_client", return_value=client):
+        await release_decided_draft_log(SID)
+
+    client.release_log.assert_awaited_once()
+    assert await _unlock_at() <= datetime.now()

@@ -278,7 +278,7 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                 session, seating_order, persistent_view.session_type)
             await _handle_staked_draft_completion(
                 interaction, session, embed, channel_embed,
-                persistent_view, draft_session_id, bot, guild_id)
+                persistent_view, draft_session_id, bot, guild_id, seat_names)
             return True
 
         # Update message and send announcement
@@ -526,8 +526,13 @@ async def _create_channel_announcement_embed(session, seating_order, session_typ
 
 
 async def _handle_staked_draft_completion(interaction, session, embed, channel_embed,
-                                         persistent_view, draft_session_id, bot, guild_id):
-    """Handle special completion flow for staked drafts."""
+                                         persistent_view, draft_session_id, bot, guild_id,
+                                         seat_names):
+    """Handle special completion flow for staked drafts.
+
+    `seat_names` is the seating as drawn -- the reordered sign-ups the database
+    holds, which `session.sign_ups` may predate.
+    """
     from views import CallbackButton
 
     # Create view with stake calculation button
@@ -572,7 +577,7 @@ async def _handle_staked_draft_completion(interaction, session, embed, channel_e
 
     # Update draft manager
     await _update_draft_manager(draft_session_id, bot, interaction.client)
-    await on_teams_formed(draft_session_id, seat_list(session.sign_ups))
+    await on_teams_formed(draft_session_id, seat_names)
 
     # Check weekly limits
     if session.tracked_draft and session.premade_match_id is not None:

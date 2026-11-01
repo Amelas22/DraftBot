@@ -179,6 +179,7 @@ async def abandon_draft_session(session_id, session_factory=None, *, only_if=Non
             # Read inside the transaction; the pool release below runs after it
             # closes, and the row object is not safe to touch by then.
             guild_id = str(current.guild_id)
+            draft_id, route = current.draft_id, current.draftmancer_route
 
             await db.execute(
                 update(MatchResult)
@@ -193,6 +194,9 @@ async def abandon_draft_session(session_id, session_factory=None, *, only_if=Non
                     deletion_time=datetime.now() + timedelta(hours=ABANDON_CLEANUP_HOURS),
                 )
             )
+    # A hosted queue abandoned before it started would otherwise hold its
+    # session open on the server; one that has ended answers 409, which is fine.
+    await hosted_draft.stop_if_hosted(session_id, draft_id, route)
     # An abandoned draft pays nobody, so everything in the pool goes back.
     await release_draft_pool(guild_id, session_id, "abandoned")
     return True
@@ -1421,8 +1425,11 @@ class DraftControlCog(commands.Cog):
             await ctx.followup.send(UNREACHABLE, ephemeral=True)
             return
         if stage in ("ended", "stopped", "lost"):
+            gone = {"lost": "This draft is no longer on the drafting server",
+                    "stopped": "This draft has already been stopped on the drafting server",
+                    }.get(stage, "This draft has finished drafting")
             await ctx.followup.send(
-                "This draft has finished drafting, so there's no session to "
+                f"{gone}, so there's no session to "
                 "cancel. Use `/abandon` from the draft chat or a team channel "
                 "to void the draft and its results.",
                 ephemeral=True,

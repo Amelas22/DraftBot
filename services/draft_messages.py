@@ -41,7 +41,8 @@ def ready_check_timed_out_text(seconds: int, missing: list[str]) -> str:
     missing_text = f"\nWaiting for: **{', '.join(missing)}**" if missing else ""
     return (
         f"⚠️ **Ready check failed!** Timed out after {seconds} seconds.{missing_text}\n"
-        f"A new ready check will start automatically when all players are present."
+        f"A new ready check starts once everyone has answered ready in Draftmancer, "
+        f"or run `/ready`.\n"
         f"{READY_CHECK_INSTRUCTIONS}"
     )
 
@@ -50,6 +51,14 @@ def ready_check_left_text(user_name: str) -> str:
     return (
         f"⚠️ **Ready check failed!** User {user_name} joined or left during the ready check.\n"
         f"A new ready check will start automatically when all players are present."
+    )
+
+
+def ready_check_reset_text() -> str:
+    """A running check called off because the expected players changed."""
+    return (
+        "⚠️ **Ready check cancelled** — the players changed.\n"
+        "A new ready check will start automatically when all players are present."
     )
 
 
@@ -104,7 +113,7 @@ def format_status_message(status: Mapping[str, Any]) -> str:
         message_parts.append("• All drafters are present! Setting seating order...")
         message_parts.append("• Ready check will begin shortly.")
 
-    message_parts.append("• Ready check will time out after 60 seconds.")
+    message_parts.append(f"• Ready check will time out after {READY_CHECK_TIMEOUT_SECONDS} seconds.")
     message_parts.append("• If everyone marks ready, the draft will begin.")
     message_parts.append("• Use `/ready` to start a new ready check if needed.")
     message_parts.append("• Use `/mutiny` to run the draft yourselves, without DraftBot, if required.")
