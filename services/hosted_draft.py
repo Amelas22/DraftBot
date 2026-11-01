@@ -70,6 +70,7 @@ from services.draft_setup_manager import (
 )
 from services.hosted_draftmancer import (
     HostedCubeImportFailed,
+    Outcome,
     HostedDraftmancer,
     HostedLogStopped,
     HostedRefused,
@@ -246,6 +247,10 @@ def _fallback_text(row: Any, reason: str, requested_by: str | None) -> str:
     if not row.session_stage:
         how += " After the draft, press **Create Rooms & Post Pairings** on the draft board."
     parts = [head, how]
+    if not row.session_stage and row.sign_ups:
+        # They signed up while the server was being asked, and were handed its link.
+        parts.append("Signed up already? The link you were given points at the old room; "
+                     "the links posted with the teams are the right ones.")
     links = [f"<@{discord_id}> — [your new draft link]({link})"
              for discord_id, name in (row.sign_ups or {}).items()
              if row.session_stage and (link := row.get_draft_link_for_user(name, user_id=discord_id))]
@@ -1099,11 +1104,16 @@ async def pull_fallback_log(bot: discord.Client, session_id: str, draft_id: str)
 
 # --- health ------------------------------------------------------------------------------
 #
-# Every request the client makes reports whether the server answered. Failing
+# Every request the client makes reports what it says about the server. Failing
 # without a break for OUTAGE_ALERT_AFTER_SECONDS is an outage: the admins hear
 # once (by DM, to the same SERVE_ALERT_DISCORD_ID the custodian's health monitor
-# alerts), each hosted draft's channel hears once, and both hear when it is
-# back. A single answer ends the outage, so a flapping server is never one.
+# alerts), each hosted draft's channel -- gathering or drafting -- hears once,
+# and both hear when it is back. A single answer ends the outage, so a flapping
+# server is never one.
+#
+# A server refusing our token (401/403) is up but unusable -- every new draft
+# falls back -- and no restart fixes it: the admins hear at once, once per
+# incident, and again when an authenticated request is accepted.
 
 OUTAGE_ALERT_AFTER_SECONDS = 180
 ALERT_ENV = "SERVE_ALERT_DISCORD_ID"
@@ -1123,15 +1133,18 @@ class _Health:
     admins_told: bool = False
     recovered_after: float | None = None  # How long a reported outage lasted, until that is said.
     channels_told: dict[str, Any] = field(default_factory=dict)  # session_id -> channel
+    unauthorized: bool = False            # The server is refusing our token.
+    auth_told: bool = False
+    auth_recovered: bool = False          # A reported refusal has ended, until that is said.
 
 
 _HEALTH = _Health()
 
 
-def _observe_api(answered: bool) -> None:
+def _observe_api(outcome: Outcome) -> None:
     """The client's report on one request."""
     h = _HEALTH
-    if not answered:
+    if outcome == "unanswered":
         if h.failing_since is None:
             h.failing_since = _now()
         return
@@ -1140,6 +1153,12 @@ def _observe_api(answered: bool) -> None:
     h.failing_since = None
     h.declared = False
     h.admins_told = False
+    if outcome == "unauthorized":
+        h.unauthorized = True
+    elif outcome == "answered" and h.unauthorized:
+        h.auth_recovered = h.auth_told
+        h.unauthorized = False
+        h.auth_told = False
 
 
 def _known_down() -> bool:
@@ -1156,41 +1175,65 @@ async def _tell_admins(bot: discord.Client, text: str) -> bool:
     return await send_dm(bot, to, text, label="hosted Draftmancer health")
 
 
+async def _post(channel: Any, text: str) -> bool:
+    try:
+        await channel.send(text)
+        return True
+    except Exception as e:
+        logger.warning(f"Could not post a hosted health notice: {e}")
+        return False
+
+
 async def _report_health(bot: discord.Client, rows: list[Any]) -> None:
     """Once per tick: say what has changed about the server's health. Never raises."""
-    h = _HEALTH
     try:
-        if h.recovered_after is not None:
-            for channel in h.channels_told.values():
-                try:
-                    await channel.send(RECOVERED_NOTICE)
-                except Exception as e:
-                    logger.warning(f"Could not post the hosted recovery notice: {e}")
-            h.channels_told.clear()
-            minutes = max(1, round(h.recovered_after / 60))
-            if await _tell_admins(bot, f"✅ The hosted Draftmancer is answering again "
-                                       f"(down about {minutes} minutes)."):
-                h.recovered_after = None
-        since = h.failing_since
-        if since is None or not _known_down():
-            return
-        if not h.declared:
-            h.declared = True
-            logger.error(f"The hosted Draftmancer has not answered for {OUTAGE_ALERT_AFTER_SECONDS} s")
-        if not h.admins_told:
-            minutes = int((_now() - since) // 60)
-            h.admins_told = await _tell_admins(bot, (
-                f"⚠️ **The hosted Draftmancer hasn't answered for {minutes} minutes** "
-                f"({draftmancer_api_url()}). Drafts on it wait where they were, and new "
-                f"drafts open on draftmancer.com instead. If it stays down, `/mutiny` in a "
-                f"draft's channel moves that draft to draftmancer.com."))
-        for row in rows:
-            if row.session_id in h.channels_told or not row.session_stage or not row.draft_channel_id:
-                continue
-            channel: Any = bot.get_channel(int(row.draft_channel_id))
-            if channel is None:
-                continue
-            h.channels_told[row.session_id] = channel
-            await channel.send(OUTAGE_NOTICE)
+        await _report_auth(bot)
+        await _report_outage(bot, rows)
     except Exception:
         logger.opt(exception=True).error("Reporting the hosted Draftmancer's health failed")
+
+
+async def _report_auth(bot: discord.Client) -> None:
+    h = _HEALTH
+    if h.auth_recovered:
+        if await _tell_admins(bot, "✅ The hosted Draftmancer accepts DraftBot's token again."):
+            h.auth_recovered = False
+    if h.unauthorized and not h.auth_told:
+        logger.error("The hosted Draftmancer is refusing DraftBot's API token")
+        h.auth_told = await _tell_admins(bot, (
+            f"⚠️ **The hosted Draftmancer is refusing DraftBot's API token** "
+            f"({draftmancer_api_url()}). It is up, but every new draft falls back to "
+            f"draftmancer.com until DRAFTMANCER_API_TOKEN matches the server's "
+            f"DRAFTBOT_API_TOKEN."))
+
+
+async def _report_outage(bot: discord.Client, rows: list[Any]) -> None:
+    h = _HEALTH
+    if h.recovered_after is not None:
+        for channel in h.channels_told.values():
+            await _post(channel, RECOVERED_NOTICE)
+        h.channels_told.clear()
+        minutes = max(1, round(h.recovered_after / 60))
+        if await _tell_admins(bot, f"✅ The hosted Draftmancer is answering again "
+                                   f"(down about {minutes} minutes)."):
+            h.recovered_after = None
+    since = h.failing_since
+    if since is None or not _known_down():
+        return
+    if not h.declared:
+        h.declared = True
+        logger.error(f"The hosted Draftmancer has not answered for {OUTAGE_ALERT_AFTER_SECONDS} s")
+    if not h.admins_told:
+        minutes = int((_now() - since) // 60)
+        h.admins_told = await _tell_admins(bot, (
+            f"⚠️ **The hosted Draftmancer hasn't answered for {minutes} minutes** "
+            f"({draftmancer_api_url()}). Drafts on it wait where they were, and new "
+            f"drafts open on draftmancer.com instead. If it stays down, `/mutiny` in a "
+            f"draft's channel moves that draft to draftmancer.com."))
+    # Gathering queues too: their players are waiting on the server as well.
+    for row in rows:
+        if row.session_id in h.channels_told or not row.draft_channel_id:
+            continue
+        channel: Any = bot.get_channel(int(row.draft_channel_id))
+        if channel is not None and await _post(channel, OUTAGE_NOTICE):
+            h.channels_told[row.session_id] = channel

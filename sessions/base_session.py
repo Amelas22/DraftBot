@@ -48,20 +48,13 @@ class BaseSession:
                 new_draft_session = self.setup_draft_session(session, self.session_details.friendly_id)
                 await session.commit()
 
-                # Step 2: Open the draft in Draftmancer. On the hosted server
-                # when it is configured -- or, when that server cannot open it,
-                # on a plain draftmancer.com session the players run, with no
-                # manager either way. Without hosting, the manager joins the
-                # session and runs it from inside.
-                if hosted_draftmancer_enabled():
-                    route = await open_draft_room(new_draft_session, channel=interaction.channel)
-                    if route == FALLBACK_ROUTE:
-                        # A new session on draftmancer.com; the board links to it.
-                        moved = await DraftSession.get_by_session_id(new_draft_session.session_id)
-                        if moved is not None:
-                            self.session_details.draft_id = moved.draft_id
-                            self.session_details.draft_link = moved.draft_link
-                else:
+                # Step 2: Without hosting, the manager joins the Draftmancer
+                # session and runs it from inside. With it, the room is opened
+                # after the board is posted (step 5b): the hosted server can
+                # take seconds to answer, or not answer at all, and the
+                # interaction must be answered within three.
+                hosted = hosted_draftmancer_enabled()
+                if not hosted:
                     self.start_draft_manager(new_draft_session)
                 
                 # Step 3: Create Embed and Persistent View
@@ -105,6 +98,19 @@ class BaseSession:
 
                 # Step 5: Update the draft session with message information
                 await self.update_message_info(new_draft_session, message)
+
+                # Step 5b: Open the room on the hosted server -- or, when that
+                # server cannot open it, on a plain draftmancer.com session the
+                # players run, its notice following the board. No manager
+                # either way. Sign-ups read the link from the row when they
+                # happen, so they get the new session's from here on.
+                if hosted:
+                    route = await open_draft_room(new_draft_session, channel=interaction.channel)
+                    if route == FALLBACK_ROUTE:
+                        moved = await DraftSession.get_by_session_id(new_draft_session.session_id)
+                        if moved is not None:
+                            self.session_details.draft_id = moved.draft_id
+                            self.session_details.draft_link = moved.draft_link
 
                 # After the reply, so its database read is outside the
                 # interaction's three-second window.

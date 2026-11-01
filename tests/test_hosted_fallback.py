@@ -10,6 +10,7 @@ It is taken on its own only when the hosted session cannot be created. Once one
 exists, a failing server is retried and reported -- to the draft channel and,
 after three minutes, once to the admins -- and an admin decides with /mutiny.
 """
+import asyncio
 import socket
 from datetime import datetime
 from typing import Any
@@ -69,7 +70,8 @@ def no_manager():
         yield init
 
 
-async def _create_draft(monkeypatch: pytest.MonkeyPatch, api_url: str) -> tuple[Any, FakeChannel, Any]:
+async def _create_draft(monkeypatch: pytest.MonkeyPatch, api_url: str,
+                        events: list[str] | None = None) -> tuple[Any, FakeChannel, Any]:
     """Run the real queue creation against `api_url`; returns (details, channel, manager mock)."""
     from models.session_details import SessionDetails
     from sessions.random_session import RandomSession
@@ -87,6 +89,16 @@ async def _create_draft(monkeypatch: pytest.MonkeyPatch, api_url: str) -> tuple[
     interaction.guild = MagicMock(id=789012)
     interaction.channel = posted_in
     interaction.response = AsyncMock()
+    if events is not None:
+        interaction.response.send_message = AsyncMock(
+            side_effect=lambda *a, **k: events.append("board"))
+        sent = posted_in.send
+
+        async def recording_send(content: str | None = None, **kw: Any) -> Any:
+            events.append("notice")
+            return await sent(content, **kw)
+
+        posted_in.send = recording_send  # type: ignore[method-assign]
     message = MagicMock(id="987654321")
     message.channel = MagicMock(id="111222333")
     interaction.original_response = AsyncMock(return_value=message)
@@ -112,7 +124,8 @@ async def _create_draft(monkeypatch: pytest.MonkeyPatch, api_url: str) -> tuple[
 @pytest.mark.asyncio
 async def test_create_falls_back_when_the_api_is_unreachable(test_db, monkeypatch):
     hosted_draft.forget_all()
-    details, posted_in, manager = await _create_draft(monkeypatch, _dead_url())
+    events: list[str] = []
+    details, posted_in, manager = await _create_draft(monkeypatch, _dead_url(), events)
 
     manager.assert_not_called()
     async with AsyncSessionLocal() as s:
@@ -126,6 +139,32 @@ async def test_create_falls_back_when_the_api_is_unreachable(test_db, monkeypatc
     [notice] = posted_in.sent("draftmancer.com")
     assert "couldn't be reached" in notice.content
     assert "LSVCube" in notice.content
+    assert events == ["board", "notice"]                 # the notice follows the board
+
+
+@pytest.mark.asyncio
+async def test_the_board_is_posted_before_the_hosted_server_answers(test_db, monkeypatch):
+    """Discord gives three seconds to answer; the hosted server may take longer."""
+    events: list[str] = []
+
+    async def slow(request: web.Request) -> web.StreamResponse:
+        await asyncio.sleep(0.3)
+        events.append("created")
+        return web.json_response({"result": "created"})
+
+    app = web.Application()
+    app.router.add_route("*", "/{tail:.*}", slow)
+    server = TestServer(app)
+    await server.start_server()
+    hosted_draft.forget_all()
+    try:
+        details, _, manager = await _create_draft(monkeypatch, str(server.make_url("")), events)
+    finally:
+        await server.close()
+
+    assert events == ["board", "created"]
+    manager.assert_not_called()
+    assert (await DraftSession.get_by_session_id(details.session_id)).draftmancer_route == "hosted"
 
 
 @pytest.mark.asyncio
@@ -491,7 +530,7 @@ async def test_a_short_blip_alerts_nobody(api, bot, channel):
 async def test_an_outage_with_no_hosted_draft_still_alerts_once(api, bot):
     """A failed create leaves no draft to poll: the poller asks the server itself."""
     sent = AsyncMock(return_value=True)
-    hosted_draft._observe_api(False)                  # a create that could not connect
+    hosted_draft._observe_api("unanswered")                  # a create that could not connect
     with patch("services.hosted_draft.send_dm", sent):
         await _ticks(api, bot, 60)
         api.up = True
@@ -510,9 +549,84 @@ async def test_an_undelivered_alert_is_tried_again(api, bot):
 
 @pytest.mark.asyncio
 async def test_while_the_server_is_known_down_a_new_queue_goes_straight_to_the_fallback(hosted):
-    hosted_draft._observe_api(False)
+    hosted_draft._observe_api("unanswered")
     hosted.clock["now"] += hosted_draft.OUTAGE_ALERT_AFTER_SECONDS
     await _seed(stage=None, route=None)
     await hosted_draft.open_draft_room(await _row(), channel=None)
     assert (await _row()).draftmancer_route == "fallback"
     assert "create" not in hosted.call_names()
+
+
+@pytest.mark.asyncio
+async def test_a_gathering_hosted_queue_hears_of_an_outage_once(api, bot, channel):
+    await _seed(stage=None)
+    with patch("services.hosted_draft.send_dm", AsyncMock(return_value=True)):
+        await _ticks(api, bot, 60)
+    assert len(channel.sent("drafting server isn't answering")) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_notice_that_could_not_be_posted_is_posted_later(api, bot, channel):
+    await _seed()
+    send = channel.send
+    failures = {"left": 1}
+
+    async def flaky_send(content: str | None = None, **kw: Any) -> Any:
+        if failures["left"]:
+            failures["left"] -= 1
+            raise discord.HTTPException(MagicMock(status=500), "Discord is down")
+        return await send(content, **kw)
+
+    channel.send = flaky_send  # type: ignore[method-assign]
+    with patch("services.hosted_draft.send_dm", AsyncMock(return_value=True)):
+        await _ticks(api, bot, 60)
+    assert len(channel.sent("drafting server isn't answering")) == 1
+
+
+class TokenApi:
+    """The control API, refusing our token while `refusing` is True."""
+
+    def __init__(self) -> None:
+        self.refusing = True
+
+    async def handle(self, request: web.Request) -> web.StreamResponse:
+        if self.refusing:
+            return web.Response(status=401)
+        return web.json_response({"result": "created"})
+
+
+@pytest.mark.asyncio
+async def test_a_refused_token_alerts_the_admins_once_and_recovery_resets_it(test_db, bot, monkeypatch):
+    token_api = TokenApi()
+    app = web.Application()
+    app.router.add_route("*", "/{tail:.*}", token_api.handle)
+    server = TestServer(app)
+    await server.start_server()
+    monkeypatch.setenv("DRAFTMANCER_API_URL", str(server.make_url("")))
+    monkeypatch.setenv("DRAFTMANCER_API_TOKEN", "wrong")
+    monkeypatch.setenv("SERVE_ALERT_DISCORD_ID", "4242")
+    hosted_draft.forget_all()
+    await hosted_draft.close_hosted_client()
+    sent = AsyncMock(return_value=True)
+
+    async def new_queue() -> str:
+        await _seed(stage=None, route=None)
+        route = await hosted_draft.open_draft_room(await _row(), channel=None)
+        await hosted_draft.poll_hosted_drafts(bot)
+        return route
+
+    try:
+        with patch("services.hosted_draft.send_dm", sent):
+            assert [await new_queue() for _ in range(3)] == ["fallback"] * 3   # drafts still run
+            token_api.refusing = False
+            assert await new_queue() == "hosted"
+            token_api.refusing = True
+            assert await new_queue() == "fallback"
+    finally:
+        await hosted_draft.close_hosted_client()
+        hosted_draft.forget_all()
+        await server.close()
+
+    texts = _alerts(sent)
+    assert [("refusing" in t, "accepts" in t) for t in texts] == [
+        (True, False), (False, True), (True, False)]

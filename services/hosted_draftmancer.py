@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote
 
 import aiohttp
@@ -114,19 +114,25 @@ def _seat(raw: dict[str, Any]) -> HostedSeat:
     )
 
 
+# What one request says about the server, for whoever watches its health:
+# "answered" (it took our token), "unauthorized" (it answered, refusing our token:
+# 401/403), "unanswered" (no answer, or a server error), and "reachable" (an
+# unauthenticated probe answered -- it says nothing about the token).
+Outcome = Literal["answered", "unauthorized", "unanswered", "reachable"]
+
+
 class HostedDraftmancer:
     def __init__(self, base_url: str, token: str,
-                 on_outcome: Callable[[bool], None] | None = None) -> None:
-        """`on_outcome` hears every request's fate: True when the server answered
-        (whatever it said), False when it did not or answered with a server error."""
+                 on_outcome: Callable[[Outcome], None] | None = None) -> None:
+        """`on_outcome` hears every request's fate (see Outcome)."""
         self._base_url = base_url.rstrip("/")
         self._token = token
         self._on_outcome = on_outcome
         self._http: aiohttp.ClientSession | None = None
 
-    def _outcome(self, answered: bool) -> None:
+    def _outcome(self, outcome: Outcome) -> None:
         if self._on_outcome is not None:
-            self._on_outcome(answered)
+            self._on_outcome(outcome)
 
     async def close(self) -> None:
         if self._http is not None:
@@ -142,7 +148,7 @@ class HostedDraftmancer:
         return self._http
 
     async def _request(self, method: str, url: str, body: Any = None,
-                       cube_import: bool = False) -> tuple[int, Any]:
+                       cube_import: bool = False, authenticated: bool = True) -> tuple[int, Any]:
         """One request; returns (status, json body or None). Raises HostedUnavailable on 5xx or no answer.
 
         With `cube_import`, a JSON 502 is the server's own word that it could not
@@ -156,15 +162,20 @@ class HostedDraftmancer:
                     payload = await response.json()
                 status = response.status
         except (aiohttp.ClientError, TimeoutError) as e:
-            self._outcome(False)
+            self._outcome("unanswered")
             raise HostedUnavailable(f"{method} {url}: {e!r}") from e
         if cube_import and status == 502 and isinstance(payload, dict):
-            self._outcome(True)
+            self._outcome("answered")
             raise HostedCubeImportFailed(f"{method} {url}: {payload!r}")
         if status >= 500:
-            self._outcome(False)
+            self._outcome("unanswered")
             raise HostedUnavailable(f"{method} {url}: {status} {payload!r}")
-        self._outcome(True)
+        if not authenticated:
+            self._outcome("reachable")
+        elif status in (401, 403):
+            self._outcome("unauthorized")
+        else:
+            self._outcome("answered")
         return status, payload
 
     async def _call(
@@ -191,7 +202,7 @@ class HostedDraftmancer:
 
     async def ping(self) -> None:
         """Whether the server answers at all (Draftmancer's own /healthCheck). Raises HostedUnavailable."""
-        await self._request("GET", f"{self._base_url}/healthCheck")
+        await self._request("GET", f"{self._base_url}/healthCheck", authenticated=False)
 
     async def set_players(self, draft_id: str, names: list[str]) -> None:
         await self._ok("PUT", draft_id, "/players", {"players": names})
