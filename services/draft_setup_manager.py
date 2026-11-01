@@ -1,6 +1,5 @@
 import asyncio
 import socketio
-from collections import Counter
 from loguru import logger
 from functools import wraps
 import random
@@ -28,10 +27,19 @@ from services import draft_end
 from services.draft_end import PUBLISH_DELAY_SECONDS  # noqa: F401
 from cube_views.pack_options import DEFAULT_PACKS_PER_PLAYER, DEFAULT_CARDS_PER_PACK
 
-# Constants
-READY_CHECK_INSTRUCTIONS = (
-    "If the seating order is wrong, or if someone missed the ready check, please run `/ready` again — this will reset the seating order and start a new ready check. "
-    "You can also use `/mutiny` to take control if needed."
+# Ready-check and status wording, shared with the hosted route.
+from services.draft_messages import (
+    READY_CHECK_INSTRUCTIONS,  # noqa: F401 -- re-exported
+    READY_CHECK_PASSED,
+    READY_CHECK_TIMEOUT_SECONDS,
+    format_status_message,
+    mention_names,
+    ready_check_deadline_text,
+    ready_check_left_text,
+    ready_check_text,
+    ready_check_timed_out_text,
+    session_status,
+    update_or_send_message,
 )
 
 # Victory detection constants
@@ -781,16 +789,7 @@ class DraftSetupManager:
         draft_session = await self._get_draft_session_from_db()
         sign_ups = (draft_session.sign_ups if draft_session else None) or {}
 
-        name_counts = Counter(sign_ups.values())
-        mentions = {
-            name: discord_id for discord_id, name in sign_ups.items()
-            if name_counts[name] == 1
-        }
-
-        who = []
-        for name in sorted(n for n in self.disconnected_users.values() if n):
-            discord_id = mentions.get(name)
-            who.append(f"<@{discord_id}>" if discord_id else name)
+        who = mention_names(sign_ups, sorted(n for n in self.disconnected_users.values() if n))
 
         session_url = get_draftmancer_session_url(self.draft_id)
         return (
@@ -921,36 +920,9 @@ class DraftSetupManager:
         }
 
     async def _update_or_send_message(self, channel, message_id: str, content=None, embed=None, view=None):
-        """
-        Try to update an existing message, fallback to sending a new one.
-
-        Args:
-            channel: Discord channel to send/edit in
-            message_id: ID of message to try editing (can be None)
-            content: Text content for the message
-            embed: Discord embed for the message
-            view: Discord view for the message
-
-        Returns:
-            The message object if successful, None otherwise.
-        """
-        # Try to edit existing message
-        if message_id:
-            try:
-                message = await channel.fetch_message(int(message_id))
-                await message.edit(content=content, embed=embed, view=view)
-                return message
-            except discord.NotFound:
-                self.logger.debug(f"Message {message_id} not found, will send new")
-            except Exception as e:
-                self.logger.warning(f"Could not update message {message_id}: {e}")
-
-        # Fallback to sending new message
-        try:
-            return await channel.send(content=content, embed=embed, view=view)
-        except Exception as e:
-            self.logger.error(f"Failed to send message: {e}")
-            return None
+        """Edit the message, or post a new one when it is gone (draft_messages)."""
+        return await update_or_send_message(channel, message_id, content=content,
+                                            embed=embed, view=view)
 
     async def _safe_delete_message(self, channel, message_id: str):
         """
@@ -1529,19 +1501,18 @@ class DraftSetupManager:
                 return False
             
             # Calculate the timestamp 90 seconds from now
-            future_time = datetime.now() + timedelta(seconds=90)
+            future_time = datetime.now() + timedelta(seconds=READY_CHECK_TIMEOUT_SECONDS)
             timeout = int(future_time.timestamp())
 
             message = await channel.send(
-                f"🔔🔔 Seating order set. Draftmancer Readycheck in progress: 0/{self.expected_user_count} ready.\n"
-                f"{READY_CHECK_INSTRUCTIONS}"
+                ready_check_text(0, self.expected_user_count, first=True)
             )
             # Store initial message ID safely
             self.ready_check_message_id = str(message.id)
             await self.update_draft_session_field('ready_check_message_id', str(message.id))
 
             # Store the timeout message ID
-            timeout_message = await channel.send(f"Readycheck will timeout <t:{timeout}:R>")
+            timeout_message = await channel.send(ready_check_deadline_text(timeout))
             self.timeout_message_id = str(timeout_message.id)
 
             # Send DM notifications to users who have opted in
@@ -1556,7 +1527,8 @@ class DraftSetupManager:
                 )
 
             # Start timeout timer
-            self.ready_check_timer = asyncio.create_task(self.ready_check_timeout(90, bot))
+            self.ready_check_timer = asyncio.create_task(
+                self.ready_check_timeout(READY_CHECK_TIMEOUT_SECONDS, bot))
             
             # Emit ready check to Draftmancer
             await self.socket_client.emit('readyCheck')
@@ -1709,10 +1681,7 @@ class DraftSetupManager:
             return False
 
         ready_count = len(self.ready_users)
-        new_content = (
-            f"Seating order set. Draftmancer Readycheck in progress: {ready_count}/{self.expected_user_count} ready.\n"
-            f"{READY_CHECK_INSTRUCTIONS}"
-        )
+        new_content = ready_check_text(ready_count, self.expected_user_count)
 
         self.logger.info(f"Updating ready check message to show {ready_count}/{self.expected_user_count} ready")
         message = await self._update_or_send_message(channel, self.ready_check_message_id, content=new_content)
@@ -1744,15 +1713,7 @@ class DraftSetupManager:
                     if user.get('userName') != 'DraftBot' and user.get('userID') not in self.ready_users
                 ]
 
-                # Format missing users for display
-                missing_text = f"\nWaiting for: **{', '.join(missing_users)}**" if missing_users else ""
-
-                # Prepare and send the timeout message
-                timeout_message = (
-                    f"⚠️ **Ready check failed!** Timed out after {seconds} seconds.{missing_text}\n"
-                    f"A new ready check will start automatically when all players are present."
-                    f"{READY_CHECK_INSTRUCTIONS}"
-                )
+                timeout_message = ready_check_timed_out_text(seconds, missing_users)
 
                 if channel and self.ready_check_message_id:
                     await self._update_or_send_message(channel, self.ready_check_message_id, content=timeout_message)
@@ -1791,7 +1752,7 @@ class DraftSetupManager:
         try:
             if channel:
                 self.logger.info("Sending ready success message")
-                await channel.send("🎉 All drafters ready! Draft starting in 5 seconds...")
+                await channel.send(READY_CHECK_PASSED)
 
             # Wait before starting
             self.logger.info("Waiting 5 seconds before starting draft")
@@ -1820,10 +1781,7 @@ class DraftSetupManager:
                 self.logger.error(f"Error cancelling ready check timer during invalidation: {e}")
 
         # Prepare the failure message
-        failure_message = (
-            f"⚠️ **Ready check failed!** User {user_name} joined or left during the ready check.\n"
-            f"A new ready check will start automatically when all players are present."
-        )
+        failure_message = ready_check_left_text(user_name)
 
         # Update or send the failure message
         channel = await self._get_draft_channel()
@@ -1948,12 +1906,8 @@ class DraftSetupManager:
                 user_status = self._compute_user_status(sign_ups)
 
                 # Update our session status
-                self.session_status = {
-                    'present_users': sorted(list(user_status['present'])),
-                    'missing_users': sorted(list(user_status['missing'])),
-                    'unexpected_users': sorted(list(user_status['unexpected'])),
-                    'updated_at': datetime.now().strftime('%H:%M:%S')
-                }
+                self.session_status = session_status(user_status['present'], user_status['missing'],
+                                                 user_status['unexpected'])
 
                 # Send/update status message to Discord channel if available
                 channel = await self._get_draft_channel()
@@ -2983,12 +2937,8 @@ class DraftSetupManager:
             self.logger.info(f"Status data - Present: {user_status['present']}, Missing: {user_status['missing']}, Unexpected: {user_status['unexpected']}")
 
             # Store status in a dictionary for easier updates
-            self.session_status = {
-                'present_users': sorted(list(user_status['present'])),
-                'missing_users': sorted(list(user_status['missing'])),
-                'unexpected_users': sorted(list(user_status['unexpected'])),
-                'updated_at': datetime.now().strftime('%H:%M:%S')
-            }
+            self.session_status = session_status(user_status['present'], user_status['missing'],
+                                                 user_status['unexpected'])
 
             # Format the message using the status dictionary
             message_content = self.format_status_message(self.session_status)
@@ -3019,51 +2969,8 @@ class DraftSetupManager:
             return message
 
     def format_status_message(self, status):
-        """
-        Formats the status dictionary into a readable Discord message.
-        
-        Args:
-            status: Dictionary containing status information
-            
-        Returns:
-            Formatted message string
-        """
-        message_parts = [
-            f"**Draft Session Status** (Updated: {status['updated_at']})"
-        ]
-        
-        # Present users section
-        if status['present_users']:
-            message_parts.append("\n**:black_joker: Drafters in Draftmancer:**")
-            message_parts.append("\n".join(f"✅ {name}" for name in status['present_users']))
-        
-        # Missing users section
-        if status['missing_users']:
-            message_parts.append("\n**⏳ Waiting on:**")
-            message_parts.append("\n".join(f"❌ {name}" for name in status['missing_users']))
-        
-        # Unexpected users section
-        if status['unexpected_users']:
-            message_parts.append("\n**⚠️ Unexpected Users:**")
-            message_parts.append("\n".join(f"❓ {name}" for name in status['unexpected_users']))
-        
-        # Instructions section
-        message_parts.append("\n**Instructions:**")
-        
-        if status['missing_users']:
-            message_parts.append("• Waiting for all drafters to join Draftmancer.")
-            message_parts.append("• When all drafters are present, seating order will be set automatically and a ready check will trigger.")
-        else:
-            message_parts.append("• All drafters are present! Setting seating order...")
-            message_parts.append("• Ready check will begin shortly.")
-            
-        message_parts.append("• Ready check will time out after 60 seconds.")
-        message_parts.append("• If everyone marks ready, the draft will begin.")
-        message_parts.append("• Use `/ready` to start a new ready check if needed.")
-        message_parts.append("• Use `/mutiny` to take control of the session if required.")
-        
-        # Join all parts with newlines
-        return "\n".join(message_parts)
+        """The status dictionary as the channel's status message (draft_messages)."""
+        return format_status_message(status)
 
     async def update_status_message_after_user_change(self):
         """
@@ -3082,12 +2989,8 @@ class DraftSetupManager:
                 user_status = self._compute_user_status(draft_session.sign_ups)
 
                 # Update session status with fresh data
-                self.session_status = {
-                    'present_users': sorted(list(user_status['present'])),
-                    'missing_users': sorted(list(user_status['missing'])),
-                    'unexpected_users': sorted(list(user_status['unexpected'])),
-                    'updated_at': datetime.now().strftime('%H:%M:%S')
-                }
+                self.session_status = session_status(user_status['present'], user_status['missing'],
+                                                 user_status['unexpected'])
 
                 # Check for unexpected users if we have expected users defined
                 if self.expected_user_count > 0 and user_status['unexpected']:
