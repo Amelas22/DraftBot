@@ -12,6 +12,7 @@ from config import (
 from notification_service import send_ready_check_dms
 from ready_check import ReadyCheckView, ReadyCheckSession
 from services.draft_setup_manager import DraftSetupManager, ACTIVE_MANAGERS
+from services.hosted_draft import on_signups_changed
 from services.draft_end import rooms_taken
 from session import StakeInfo, AsyncSessionLocal, get_draft_session, DraftSession, MatchResult
 from models import SignUpHistory
@@ -442,6 +443,7 @@ class PersistentView(discord.ui.View):
         
         # Update the draft message to reflect the new list of sign-ups
         await update_draft_message(interaction.client, self.draft_session_id)
+        await on_signups_changed(self.draft_session_id)
         
         # Re-fetch to get the updated session data
         updated_session = await get_draft_session(self.draft_session_id)
@@ -498,6 +500,7 @@ class PersistentView(discord.ui.View):
         logger.info(f"Added {len(new_users)} test users to premade draft {self.draft_session_id} "
                     f"({draft_session.team_a_name}: {len(team_a)}, {draft_session.team_b_name}: {len(team_b)})")
         await self.update_team_view(interaction)
+        await on_signups_changed(self.draft_session_id)
         red, blue = labels_for(draft_session)
         await interaction.followup.send(
             f"Added {len(new_users)} test users. "
@@ -673,6 +676,7 @@ class PersistentView(discord.ui.View):
 
             # Update the draft message to reflect the new list of sign-ups
             await update_draft_message(interaction.client, self.draft_session_id)
+            await on_signups_changed(self.draft_session_id)
 
             # If a ready check is active, add the new player to no_response and refresh the embed
             await ReadyCheckSession.sync_added_player(self.draft_session_id, user_id, draft_session_updated, interaction)
@@ -754,6 +758,7 @@ class PersistentView(discord.ui.View):
             
             # Update the draft message to reflect the new list of sign-ups
             await update_draft_message(interaction.client, self.draft_session_id)
+            await on_signups_changed(self.draft_session_id)
 
             await ReadyCheckSession.sync_removed_player(self.draft_session_id, user_id, draft_session_updated, interaction)
 
@@ -1276,6 +1281,7 @@ class PersistentView(discord.ui.View):
 
         # Optionally update the message view to reflect the new team compositions
         await self.update_team_view(interaction)
+        await on_signups_changed(self.draft_session_id)
 
     async def cancel_draft_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         # Get the guild config for the interaction's guild
@@ -1802,6 +1808,7 @@ class UserRemovalSelect(Select):
                 action="leave",
                 guild_id=str(interaction.guild_id)
             )
+            await on_signups_changed(session.session_id)
             # After removing a user, update the original message with the new sign-up list
             if session.session_type != "premade":
                 await update_draft_message(bot, session_id=session.session_id)
@@ -3088,6 +3095,7 @@ class StakeOptionsSelect(discord.ui.Select):
 
         # Update the draft message to reflect the new list of sign-ups
         await update_draft_message(interaction.client, self.draft_session_id)
+        await on_signups_changed(self.draft_session_id)
 
 
 class StakeOptionsView(discord.ui.View):
@@ -3266,6 +3274,7 @@ class StakeModal(discord.ui.Modal):
 
             # Update the draft message to reflect the new list of sign-ups
             await update_draft_message(interaction.client, self.draft_session_id)
+            await on_signups_changed(self.draft_session_id)
 
         except _EntryAborted:
             # A refused entry, not a fault: the transaction rolled back, so
@@ -3631,3 +3640,4 @@ class CombinedStakeSelect(discord.ui.Select):
         
         # Update the draft message to reflect the new list of sign-ups
         await update_draft_message(interaction.client, self.draft_session_id)
+        await on_signups_changed(self.draft_session_id)

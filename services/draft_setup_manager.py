@@ -2863,7 +2863,13 @@ class DraftSetupManager:
         draft_session = await DraftSession.get_by_session_id(session_id)
         if not draft_session:
             return None
-            
+        # A draft on another route (hosted, fallback) has no manager, and must
+        # never get one: the bot does not sit in those sessions.
+        if draft_session.draftmancer_route is not None:
+            logger.debug(f"not building a manager for {session_id}: it runs on the "
+                         f"{draft_session.draftmancer_route} route")
+            return None
+
         # Check if there's already an active manager
         manager = cls.get_active_manager(session_id)
         if manager:

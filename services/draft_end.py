@@ -8,6 +8,7 @@ reaches publish_draft_log as its `release_log` callback.
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable
@@ -201,7 +202,21 @@ async def take_draft_log(bot: discord.Client, session_id: str, log: DraftLog) ->
 
 # --- capture -----------------------------------------------------------------
 
+# One capture at a time per draft. The guard below reads logs_captured_at, then
+# uploads, then stamps it, so two captures in flight together -- a pushed log
+# arriving twice, or racing the reconciler's pull -- would both pass it and
+# upload twice. Serialised, the second finds the first's stamp.
+_CAPTURE_LOCKS: dict[str, asyncio.Lock] = {}
+
+
 async def capture_draft_log(session_id: str, log: DraftLog) -> bool:
+    """Persist the draft log once; concurrent calls for one draft run in turn."""
+    lock = _CAPTURE_LOCKS.setdefault(session_id, asyncio.Lock())
+    async with lock:
+        return await _capture_draft_log(session_id, log)
+
+
+async def _capture_draft_log(session_id: str, log: DraftLog) -> bool:
     """Persist the draft log as soon as the draft ends, WITHOUT posting it.
 
     Saves the raw log to the DB (`draft_data`) and DigitalOcean Spaces (raw

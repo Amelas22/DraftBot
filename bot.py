@@ -82,6 +82,8 @@ async def main():
         ensure_running(bot, "_inactive_players_task", lambda: check_inactive_players_task(bot))
         from services.log_reconciler import run_log_reconciler
         ensure_running(bot, "_log_reconciler_task", lambda: run_log_reconciler(bot))
+        from services.hosted_draft import run_hosted_poller
+        ensure_running(bot, "_hosted_poller_task", lambda: run_hosted_poller(bot))
         from services.donation_day_publisher import run_donation_publisher
         ensure_running(bot, "_donation_publisher_task", lambda: run_donation_publisher(bot))
         # Before reconnecting drafts in setup: a draft a crash left between

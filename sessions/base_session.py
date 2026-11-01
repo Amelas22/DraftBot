@@ -7,6 +7,8 @@ from helpers.draft_footer import apply_draft_footer
 from views import PersistentView
 import discord
 from services.draft_setup_manager import DraftSetupManager
+from services.hosted_draft import open_hosted_draft
+from config import hosted_draftmancer_enabled
 import asyncio
 from loguru import logger
 from config import get_session_deletion_hours
@@ -46,18 +48,13 @@ class BaseSession:
                 new_draft_session = self.setup_draft_session(session, self.session_details.friendly_id)
                 await session.commit()
 
-                # Step 2: Set up draft manager and start connection
-                self.draft_manager = DraftSetupManager(
-                    session_id=new_draft_session.session_id,
-                    draft_id=new_draft_session.draft_id,
-                    friendly_id=new_draft_session.friendly_id,
-                    cube_id=new_draft_session.cube,
-                    guild_id=new_draft_session.guild_id,
-                    packs_per_player=new_draft_session.packs_per_player,
-                    cards_per_pack=new_draft_session.cards_per_pack
-                )
-                # Start the connection manager as a background task
-                self.connection_task = asyncio.create_task(self.draft_manager.keep_connection_alive())
+                # Step 2: Open the draft in Draftmancer. On the hosted server
+                # when it is configured; otherwise (or until the fallback route
+                # exists, when it cannot be reached) the manager joins the
+                # session and runs it from inside.
+                hosted = hosted_draftmancer_enabled() and await open_hosted_draft(new_draft_session)
+                if not hosted:
+                    self.start_draft_manager(new_draft_session)
                 
                 # Step 3: Create Embed and Persistent View
                 #
@@ -114,6 +111,20 @@ class BaseSession:
 
                 # Step 6: Make the message sticky
                 await make_message_sticky(interaction.guild.id, message.channel.id, message, view, bot)
+
+    def start_draft_manager(self, new_draft_session):
+        """Run the draft with a DraftSetupManager sitting in the session."""
+        self.draft_manager = DraftSetupManager(
+            session_id=new_draft_session.session_id,
+            draft_id=new_draft_session.draft_id,
+            friendly_id=new_draft_session.friendly_id,
+            cube_id=new_draft_session.cube,
+            guild_id=new_draft_session.guild_id,
+            packs_per_player=new_draft_session.packs_per_player,
+            cards_per_pack=new_draft_session.cards_per_pack
+        )
+        # Start the connection manager as a background task
+        self.connection_task = asyncio.create_task(self.draft_manager.keep_connection_alive())
 
     async def cleanup(self):
         """Call this method when the draft session needs to be cleaned up"""

@@ -168,6 +168,23 @@ async def test_capture_draft_log_stores_the_log_under_the_session(test_db):
 
 
 @pytest.mark.asyncio
+async def test_captures_racing_each_other_upload_the_log_once(test_db):
+    """A pushed log arriving twice, or racing the reconciler's pull."""
+    await _seed()
+
+    async def slow_upload(*a, **k):
+        await asyncio.sleep(0.05)   # both captures are past the guard at once
+        return "team/x.json"
+
+    with patch("services.draft_end.upload_draft_log", AsyncMock(side_effect=slow_upload)) as upload:
+        results = await asyncio.gather(draft_end.capture_draft_log(SID, LOG),
+                                       draft_end.capture_draft_log(SID, LOG))
+
+    assert results == [True, True]
+    upload.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_upload_files_the_log_by_session_type_and_cube():
     result = SimpleNamespace(success=True, object_path="swiss/Cube-1-DB1.json")
     helper = MagicMock()

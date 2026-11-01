@@ -53,6 +53,13 @@ def ready_check_left_text(user_name: str) -> str:
     )
 
 
+def ready_check_not_ready_text(names: list[str], retry_seconds: int) -> str:
+    return (
+        f"⚠️ **Ready check failed!** {', '.join(names)} answered not ready.\n"
+        f"A new ready check will start in {retry_seconds} seconds."
+    )
+
+
 class SessionStatus(TypedDict):
     present_users: list[str]
     missing_users: list[str]
