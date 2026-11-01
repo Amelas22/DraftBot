@@ -97,7 +97,7 @@ async def test_a_new_queue_creates_a_hosted_session_and_records_the_route(test_d
 
 
 @pytest.mark.asyncio
-async def test_an_unreachable_api_does_not_record_the_route(test_db, monkeypatch):
+async def test_an_unreachable_api_records_the_fallback_not_the_hosted_route(test_db, monkeypatch):
     await _seed(stage=None, route=None)
     failing = MagicMock()
     failing.create = AsyncMock(side_effect=HostedUnavailable("down"))
@@ -105,8 +105,9 @@ async def test_an_unreachable_api_does_not_record_the_route(test_db, monkeypatch
     monkeypatch.setenv("DRAFTMANCER_API_URL", "http://api.test")
     monkeypatch.setenv("DRAFTMANCER_API_TOKEN", TOKEN)
 
-    assert await hosted_draft.open_hosted_draft(await _row()) is False
-    assert (await _row()).draftmancer_route is None
+    assert await hosted_draft.open_draft_room(await _row(), channel=None) == "fallback"
+    failing.create.assert_awaited_once()
+    assert (await _row()).draftmancer_route == "fallback"
 
 
 # --- players and seating --------------------------------------------------------
@@ -472,7 +473,7 @@ async def test_two_sign_ups_with_the_same_display_name_each_get_a_seat(hosted, b
         created.append(spec)
 
     monkeypatch.setattr(hosted, "create", create, raising=False)
-    assert await hosted_draft.open_hosted_draft(await _row())
+    assert await hosted_draft.open_draft_room(await _row(), channel=None) == "hosted"
     assert created[0]["players"] == seats
 
     await hosted_draft.on_signups_changed(SID)

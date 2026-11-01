@@ -2,7 +2,9 @@
 re-fires idempotent steps the push path left pending. Pure-DB actions
 (team-pool retry, deck assignment, delayed public embed) live here, and so does
 the capture retry: a hosted draft's log is pulled through the control API, a
-manager draft's is re-delivered to a rejoining socket."""
+fallback draft's fetched from draftmancer.com's public endpoint, and a manager
+draft's re-delivered to a rejoining socket. Only a manager draft ever gets a
+manager here."""
 import asyncio
 from datetime import datetime, timedelta
 
@@ -72,8 +74,11 @@ async def reconcile_capture(bot) -> None:
     CAPTURE_RETRY_WINDOW_MINUTES).
 
     A hosted draft's log is pulled from the control API and the draft finished
-    (hosted_draft.pull_ended_draft). A manager draft gets its owner socket
-    reconnected, and the log the session re-delivers on join is captured."""
+    (hosted_draft.pull_ended_draft); a fallback draft's is fetched from
+    draftmancer.com when its room shares it (hosted_draft.pull_fallback_log) --
+    a log it withholds is asked for again until the window ends. A manager
+    draft gets its owner socket reconnected, and the log the session
+    re-delivers on join is captured."""
     cutoff = datetime.now() - timedelta(minutes=CAPTURE_RETRY_WINDOW_MINUTES)
     async with db_session() as session:
         uncaptured = (await session.execute(
@@ -88,8 +93,12 @@ async def reconcile_capture(bot) -> None:
     for ds in uncaptured:
         session_id = ds.session_id
         try:
-            if getattr(ds, "draftmancer_route", None) == hosted_draft.ROUTE:
+            route = getattr(ds, "draftmancer_route", None)
+            if route == hosted_draft.ROUTE:
                 await hosted_draft.pull_ended_draft(bot, session_id, ds.draft_id)
+                continue
+            if route == hosted_draft.FALLBACK_ROUTE:
+                await hosted_draft.pull_fallback_log(bot, session_id, ds.draft_id)
                 continue
             manager = await DraftSetupManager.spawn_for_existing_session(session_id, bot)
             if manager is None:
@@ -183,9 +192,9 @@ async def reconcile_publish_and_team_logs(bot) -> None:
         )).scalars().all()
     for ds in due_publish:
         try:
-            if getattr(ds, "draftmancer_route", None) == hosted_draft.ROUTE:
-                # No manager for a hosted draft: release=False needs no
-                # connection, and the server unlocks the log on its own timer.
+            if getattr(ds, "draftmancer_route", None) is not None:
+                # No manager for a hosted or fallback draft: release=False
+                # needs no connection, and the room unlocks the log itself.
                 await publish_draft_log(bot, ds.session_id)
                 continue
             # Prefer an already-active manager (real state, idempotent publish)

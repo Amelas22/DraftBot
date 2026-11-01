@@ -20,6 +20,15 @@ def get_draftmancer_base_url() -> str:
     return os.environ.get("DRAFTMANCER_BASE_URL", "https://draftmancer.com").rstrip("/")
 
 
+def public_draftmancer_url() -> str:
+    """The public draftmancer.com, where a fallback draft runs.
+
+    Never DRAFTMANCER_BASE_URL: once hosting is on, that is our own server --
+    the one a fallback exists because it could not be used.
+    """
+    return os.environ.get("PUBLIC_DRAFTMANCER_URL", "https://draftmancer.com").rstrip("/")
+
+
 def draftmancer_api_url() -> str:
     """Control API of the self-hosted Draftmancer fork ("" when unset)."""
     return os.environ.get("DRAFTMANCER_API_URL", "")
@@ -398,6 +407,10 @@ def scheduler_trusted_proxies() -> frozenset[str]:
 def get_draftmancer_session_url(draft_id, guild_id=None):
     """Get full session URL for a draft ID"""
     return f"{get_draftmancer_base_url()}/?session=DB{draft_id}"
+
+def public_draftmancer_session_url(draft_id: str) -> str:
+    """A fallback draft's session on the public draftmancer.com."""
+    return f"{public_draftmancer_url()}/?session=DB{draft_id}"
 
 def get_draftmancer_draft_url(draft_id, guild_id=None):
     """Get full draft URL for a draft ID"""

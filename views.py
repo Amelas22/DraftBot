@@ -89,6 +89,8 @@ HOSTED_CUBE_REFUSALS = {
     "started": "The draft has already started, so its cube can no longer be changed.",
     "unreachable": "Couldn't reach the drafting server, so the cube was not changed. "
                    "Please try again in a moment.",
+    "cube-import": "The drafting server couldn't import that cube from CubeCobra, so the "
+                   "cube was not changed. Check the cube id and try again.",
     "failed": "Failed to update the cube in Draftmancer. Please try again later.",
 }
 
@@ -859,6 +861,14 @@ class PersistentView(discord.ui.View):
                         await select_interaction.followup.send(
                             f"The draft has been updated to cube **{cube_choice}** "
                             f"({packs} packs × {cards} cards).",
+                            ephemeral=True
+                        )
+                    elif draft_session.draftmancer_route == hosted_draft.FALLBACK_ROUTE:
+                        # Nobody from DraftBot is in a fallback room to change it.
+                        await select_interaction.followup.send(
+                            f"The draft has been updated to cube **{cube_choice}** "
+                            f"({packs} packs × {cards} cards). This draft runs on draftmancer.com "
+                            "without DraftBot, so import the new cube there yourselves.",
                             ephemeral=True
                         )
                     else:

@@ -51,8 +51,16 @@ UNREACHABLE = ("⚠️ Couldn't reach the drafting server. Nothing has changed �
                "please try again in a moment.")
 
 
+FALLBACK_NO_BOT = ("This draft runs on draftmancer.com without DraftBot in the room, so "
+                   "DraftBot can't do that there — run it from Draftmancer itself.")
+
+
 def _is_hosted(draft_session):
     return getattr(draft_session, "draftmancer_route", None) == hosted_draft.ROUTE
+
+
+def _is_fallback(draft_session):
+    return getattr(draft_session, "draftmancer_route", None) == hosted_draft.FALLBACK_ROUTE
 
 
 def _is_participant(ctx, draft_session):
@@ -606,6 +614,9 @@ class DraftControlCog(commands.Cog):
         draft_session = draft_sessions[0]
         logger.info(f"Found most recent draft: {draft_session.session_id}")
 
+        if _is_fallback(draft_session):
+            await ctx.followup.send(FALLBACK_NO_BOT, ephemeral=True)
+            return None
         if hosted_ok and _is_hosted(draft_session):
             return None, draft_session
         
@@ -675,6 +686,9 @@ class DraftControlCog(commands.Cog):
                 return
                 
             session_id = draft_session.session_id
+            if _is_fallback(draft_session):
+                await ctx.followup.send(FALLBACK_NO_BOT, ephemeral=True)
+                return
             
             # A hosted draft unlocks through the control API: no manager to ask.
             manager = None if _is_hosted(draft_session) else DraftSetupManager.get_active_manager(session_id)
@@ -1009,17 +1023,24 @@ class DraftControlCog(commands.Cog):
             logger.exception(f"Error in abandon command: {e}")
             await ctx.followup.send(f"An error occurred: {str(e)}", ephemeral=True)
 
-    @discord.slash_command(name='mutiny', description='Take control of the Draftmancer session from the bot')
+    @discord.slash_command(name='mutiny', description='Run the draft yourselves on draftmancer.com, without DraftBot')
     async def mutiny_command(self, ctx):
-        """Transfer draft control to a user and disconnect the bot"""
+        """Hand the draft to its players.
+
+        A manager draft: the bot gives a player ownership of the Draftmancer
+        session and disconnects. A hosted draft: its session is closed and the
+        draft moves to a plain draftmancer.com session (the fallback)."""
         await ctx.defer(ephemeral=True)
         
         try:
-            result = await self._get_manager_for_channel(ctx)
+            result = await self._get_manager_for_channel(ctx, hosted_ok=True)
             if not result:
                 return
                 
             manager, draft_session = result
+            if manager is None:
+                await self._hosted_mutiny(ctx, draft_session)
+                return
             
             if manager.drafting:
                 self.logger.info(f"Mutiny during active draft for session {manager.session_id}. Will advance to pairings.")
@@ -1059,63 +1080,102 @@ class DraftControlCog(commands.Cog):
                 
             await ctx.channel.send(f"✅ Ownership transferred to {requester_name}. Bot disconnected.")
 
-            # No condition here. _get_manager_for_channel only returns sessions
-            # with a non-NULL session_stage, so every draft reaching this line
-            # has left the queue and its players already hold room links; asking
-            # a predicate that is constant True would only hide that. Whether
-            # there is anything left to create -- rooms already made, draft
-            # already over -- is create_rooms_and_pairings_with_fallback's
-            # question, answered once for both of its callers.
-            success = await create_rooms_and_pairings_with_fallback(
-                ctx.bot, ctx.guild, ctx.channel, session_id, logger=self.logger
-            )
-            if success:
-                return  # create_rooms_pairings handles the rest (deletes original message, etc)
-            # If failed, fall through to update the view so the button is enabled
-
-            # Room creation genuinely failed, so re-enable the button and let
-            # someone drive it by hand.
-            try:
-                # Get the original draft message
-                from session import AsyncSessionLocal
-                async with AsyncSessionLocal() as db_session:
-                    stmt = select(DraftSession).where(DraftSession.session_id == draft_session.session_id)
-                    draft_session_db = await db_session.scalar(stmt)
-                    
-                    if draft_session_db and draft_session_db.draft_channel_id and draft_session_db.message_id:
-                        # Get the channel and message
-                        channel = ctx.bot.get_channel(int(draft_session_db.draft_channel_id))
-                        if channel:
-                            try:
-                                message = await channel.fetch_message(int(draft_session_db.message_id))
-                                
-                                # Find the view for this message
-                                # Create a new view with the same settings but updated button states
-                                from views import PersistentView
-                                updated_view = PersistentView(
-                                    bot=ctx.bot,
-                                    draft_session_id=draft_session_db.session_id,
-                                    session_type=draft_session_db.session_type,
-                                    team_a_name=draft_session_db.team_a_name,
-                                    team_b_name=draft_session_db.team_b_name,
-                                    session_stage=draft_session_db.session_stage
-                                )
-                                
-                                # Apply button disabling logic - this will enable the button 
-                                # since the manager is now gone
-                                updated_view._apply_stage_button_disabling()
-                                
-                                # Update the message with the new view
-                                await message.edit(view=updated_view)
-                                logger.info(f"Updated view after mutiny for session {draft_session_db.session_id}")
-                            except Exception as view_error:
-                                logger.error(f"Error updating view after mutiny: {view_error}")
-            except Exception as update_error:
-                logger.error(f"Error finding message to update view: {update_error}")
+            await self._rooms_after_mutiny(ctx, session_id)
                 
         except Exception as e:
             logger.exception(f"Error in mutiny command: {e}")
             await ctx.followup.send(f"An error occurred: {str(e)}", ephemeral=True)
+
+    async def _hosted_mutiny(self, ctx, draft_session):
+        """Close the hosted session, then move the draft to draftmancer.com.
+
+        For the draft's players or an admin: it moves everyone to a new room.
+        A server that can't be reached doesn't stop it -- an outage is when
+        this is needed -- but everyone is told the old room may come back."""
+        if not _is_participant(ctx, draft_session) and not await is_bot_manager(ctx):
+            await ctx.followup.send(
+                "Only the draft's players or an admin can move it to draftmancer.com.",
+                ephemeral=True)
+            return
+        outcome, detail = await hosted_draft.mutiny_hosted_draft(
+            draft_session.session_id, channel=ctx.channel, requested_by=ctx.author.mention)
+        if outcome == "ended":
+            await ctx.followup.send(
+                "This draft has already finished on the drafting server, so there's nothing "
+                "to move — its rooms and log follow on their own.", ephemeral=True)
+            return
+        if outcome == "refused":
+            await ctx.followup.send(f"Couldn't move the draft: {detail}", ephemeral=True)
+            return
+        if outcome == "gone":
+            await ctx.followup.send("This draft is no longer on the drafting server.", ephemeral=True)
+            return
+        if outcome == "moved-unstopped":
+            await ctx.followup.send(
+                "⚠️ The drafting server couldn't be reached to close the draft's room there, "
+                "so it may come back when the server does. The draft has moved to "
+                "draftmancer.com anyway; the channel has everyone's new link.", ephemeral=True)
+        else:
+            await ctx.followup.send(
+                "The draft has moved to draftmancer.com; the channel has everyone's new link.",
+                ephemeral=True)
+        await self._rooms_after_mutiny(ctx, draft_session.session_id)
+
+    async def _rooms_after_mutiny(self, ctx, session_id):
+        """Rooms and pairings now, as after any /mutiny; on failure, the board's button."""
+        # No condition here. _get_manager_for_channel only returns sessions
+        # with a non-NULL session_stage, so every draft reaching this line
+        # has left the queue and its players already hold room links; asking
+        # a predicate that is constant True would only hide that. Whether
+        # there is anything left to create -- rooms already made, draft
+        # already over -- is create_rooms_and_pairings_with_fallback's
+        # question, answered once for both of its callers.
+        success = await create_rooms_and_pairings_with_fallback(
+            ctx.bot, ctx.guild, ctx.channel, session_id, logger=self.logger
+        )
+        if success:
+            return  # create_rooms_pairings handles the rest (deletes original message, etc)
+        # If failed, fall through to update the view so the button is enabled
+
+        # Room creation genuinely failed, so re-enable the button and let
+        # someone drive it by hand.
+        try:
+            # Get the original draft message
+            from session import AsyncSessionLocal
+            async with AsyncSessionLocal() as db_session:
+                stmt = select(DraftSession).where(DraftSession.session_id == session_id)
+                draft_session_db = await db_session.scalar(stmt)
+                
+                if draft_session_db and draft_session_db.draft_channel_id and draft_session_db.message_id:
+                    # Get the channel and message
+                    channel = ctx.bot.get_channel(int(draft_session_db.draft_channel_id))
+                    if channel:
+                        try:
+                            message = await channel.fetch_message(int(draft_session_db.message_id))
+                            
+                            # Find the view for this message
+                            # Create a new view with the same settings but updated button states
+                            from views import PersistentView
+                            updated_view = PersistentView(
+                                bot=ctx.bot,
+                                draft_session_id=draft_session_db.session_id,
+                                session_type=draft_session_db.session_type,
+                                team_a_name=draft_session_db.team_a_name,
+                                team_b_name=draft_session_db.team_b_name,
+                                session_stage=draft_session_db.session_stage
+                            )
+                            
+                            # Apply button disabling logic - this will enable the button 
+                            # since the manager is now gone
+                            updated_view._apply_stage_button_disabling()
+                            
+                            # Update the message with the new view
+                            await message.edit(view=updated_view)
+                            logger.info(f"Updated view after mutiny for session {draft_session_db.session_id}")
+                        except Exception as view_error:
+                            logger.error(f"Error updating view after mutiny: {view_error}")
+        except Exception as update_error:
+            logger.error(f"Error finding message to update view: {update_error}")
 
     @discord.slash_command(name='pause', description='Pause the current draft (only for draft participants)')
     async def pause_command(self, ctx):

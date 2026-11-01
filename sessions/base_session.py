@@ -7,7 +7,7 @@ from helpers.draft_footer import apply_draft_footer
 from views import PersistentView
 import discord
 from services.draft_setup_manager import DraftSetupManager
-from services.hosted_draft import open_hosted_draft
+from services.hosted_draft import FALLBACK_ROUTE, open_draft_room
 from config import hosted_draftmancer_enabled
 import asyncio
 from loguru import logger
@@ -49,11 +49,19 @@ class BaseSession:
                 await session.commit()
 
                 # Step 2: Open the draft in Draftmancer. On the hosted server
-                # when it is configured; otherwise (or until the fallback route
-                # exists, when it cannot be reached) the manager joins the
+                # when it is configured -- or, when that server cannot open it,
+                # on a plain draftmancer.com session the players run, with no
+                # manager either way. Without hosting, the manager joins the
                 # session and runs it from inside.
-                hosted = hosted_draftmancer_enabled() and await open_hosted_draft(new_draft_session)
-                if not hosted:
+                if hosted_draftmancer_enabled():
+                    route = await open_draft_room(new_draft_session, channel=interaction.channel)
+                    if route == FALLBACK_ROUTE:
+                        # A new session on draftmancer.com; the board links to it.
+                        moved = await DraftSession.get_by_session_id(new_draft_session.session_id)
+                        if moved is not None:
+                            self.session_details.draft_id = moved.draft_id
+                            self.session_details.draft_link = moved.draft_link
+                else:
                     self.start_draft_manager(new_draft_session)
                 
                 # Step 3: Create Embed and Persistent View

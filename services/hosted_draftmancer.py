@@ -6,10 +6,16 @@ is named on the wire "DB" + draft_id, the id the website already uses.
 Three failures are told apart because callers act on them differently:
 HostedUnavailable (the API could not be reached or answered 5xx -- retry later),
 HostedRefused (it answered, and said no -- a 4xx the caller must handle or a bug),
-and HostedLogStopped (the draft was stopped and will never have a log).
+and HostedLogStopped (the draft was stopped and will never have a log). A create
+whose cube the server could not import from CubeCobra is HostedCubeImportFailed,
+a HostedUnavailable that is not an outage: the server answered.
+
+Also here: fetch_public_log, for a fallback draft's log on the public
+draftmancer.com -- no token, and none of this API.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
@@ -24,6 +30,10 @@ MAX_PLAYERS = 10
 
 class HostedUnavailable(Exception):
     """The hosted API did not answer, or answered with a server error."""
+
+
+class HostedCubeImportFailed(HostedUnavailable):
+    """The create's 502: the server is up, but could not import the cube from CubeCobra."""
 
 
 class HostedRefused(Exception):
@@ -105,10 +115,18 @@ def _seat(raw: dict[str, Any]) -> HostedSeat:
 
 
 class HostedDraftmancer:
-    def __init__(self, base_url: str, token: str) -> None:
+    def __init__(self, base_url: str, token: str,
+                 on_outcome: Callable[[bool], None] | None = None) -> None:
+        """`on_outcome` hears every request's fate: True when the server answered
+        (whatever it said), False when it did not or answered with a server error."""
         self._base_url = base_url.rstrip("/")
         self._token = token
+        self._on_outcome = on_outcome
         self._http: aiohttp.ClientSession | None = None
+
+    def _outcome(self, answered: bool) -> None:
+        if self._on_outcome is not None:
+            self._on_outcome(answered)
 
     async def close(self) -> None:
         if self._http is not None:
@@ -123,11 +141,14 @@ class HostedDraftmancer:
             )
         return self._http
 
-    async def _call(
-        self, method: str, draft_id: str, tail: str = "", body: Any = None
-    ) -> tuple[int, Any]:
-        """One request; returns (status, json body or None). Raises HostedUnavailable on 5xx or no answer."""
-        url = f"{self._base_url}/api/hosted/sessions/{wire_id(draft_id)}{tail}"
+    async def _request(self, method: str, url: str, body: Any = None,
+                       cube_import: bool = False) -> tuple[int, Any]:
+        """One request; returns (status, json body or None). Raises HostedUnavailable on 5xx or no answer.
+
+        With `cube_import`, a JSON 502 is the server's own word that it could not
+        import the cube (HostedCubeImportFailed), not a proxy's: nothing proxies
+        the control API, and a proxy's error page is not JSON.
+        """
         try:
             async with self._session().request(method, url, json=body) as response:
                 payload: Any = None
@@ -135,20 +156,42 @@ class HostedDraftmancer:
                     payload = await response.json()
                 status = response.status
         except (aiohttp.ClientError, TimeoutError) as e:
+            self._outcome(False)
             raise HostedUnavailable(f"{method} {url}: {e!r}") from e
+        if cube_import and status == 502 and isinstance(payload, dict):
+            self._outcome(True)
+            raise HostedCubeImportFailed(f"{method} {url}: {payload!r}")
         if status >= 500:
+            self._outcome(False)
             raise HostedUnavailable(f"{method} {url}: {status} {payload!r}")
+        self._outcome(True)
         return status, payload
 
-    async def _ok(self, method: str, draft_id: str, tail: str = "", body: Any = None) -> Any:
-        status, payload = await self._call(method, draft_id, tail, body)
+    async def _call(
+        self, method: str, draft_id: str, tail: str = "", body: Any = None,
+        cube_import: bool = False,
+    ) -> tuple[int, Any]:
+        url = f"{self._base_url}/api/hosted/sessions/{wire_id(draft_id)}{tail}"
+        return await self._request(method, url, body, cube_import)
+
+    async def _ok(self, method: str, draft_id: str, tail: str = "", body: Any = None,
+                  cube_import: bool = False) -> Any:
+        status, payload = await self._call(method, draft_id, tail, body, cube_import)
         if status >= 400:
             raise HostedRefused(status, payload)
         return payload
 
     async def create(self, spec: dict[str, Any]) -> None:
-        """Create the room, or confirm an identical one. A different room under the id is a 409 HostedRefused."""
-        await self._ok("PUT", spec["sessionID"].removeprefix("DB"), body=spec)
+        """Create the room, or confirm an identical one.
+
+        A different room under the id is a 409 HostedRefused; a cube the server
+        could not import is HostedCubeImportFailed.
+        """
+        await self._ok("PUT", spec["sessionID"].removeprefix("DB"), body=spec, cube_import=True)
+
+    async def ping(self) -> None:
+        """Whether the server answers at all (Draftmancer's own /healthCheck). Raises HostedUnavailable."""
+        await self._request("GET", f"{self._base_url}/healthCheck")
 
     async def set_players(self, draft_id: str, names: list[str]) -> None:
         await self._ok("PUT", draft_id, "/players", {"players": names})
@@ -204,3 +247,26 @@ class HostedDraftmancer:
         if status >= 400:
             raise HostedRefused(status, payload)
         return payload
+
+
+async def fetch_public_log(base_url: str, draft_id: str) -> dict[str, Any] | None:
+    """A draft's full log from a public Draftmancer's GET /api/getDraftLog; None when not to be had now.
+
+    That endpoint answers 403 while drafting or when the room's settings keep
+    the log from the public, 404 before the end and once the room is gone, and
+    -- while the log is delayed -- 200 with a copy stripped of every pick, which
+    is not the log. All of those, and no answer at all, are None: never raises.
+    """
+    url = f"{base_url.rstrip('/')}/api/getDraftLog/{wire_id(draft_id)}"
+    try:
+        timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
+        async with aiohttp.ClientSession(timeout=timeout) as http:
+            async with http.get(url) as response:
+                if response.status != 200:
+                    return None
+                log = await response.json(content_type=None)
+    except (aiohttp.ClientError, TimeoutError, ValueError):
+        return None
+    if not isinstance(log, dict) or log.get("delayed"):
+        return None
+    return log

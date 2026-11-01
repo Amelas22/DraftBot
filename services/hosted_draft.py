@@ -19,10 +19,19 @@ Discord commands on a hosted draft (/pause, /unpause, /scrap, /ready,
 /release_draft_logs, /replace_seat, Update Cube) are API calls made here, under
 the same per-draft lock as the poller's tick, so a command and a tick never act
 on one draft at once.
+
+The fallback (route "fallback") is a plain session on the public draftmancer.com
+with no bot inside -- the state /mutiny leaves a manager draft in. A draft goes
+there on its own only when its hosted session cannot be created; once one
+exists, a failing server is retried, the draft channel told, and the admins
+alerted once per outage, and an admin decides with /mutiny, which closes the
+hosted session first. Its log is fetched from draftmancer.com afterwards, when
+the players' settings allow it.
 """
 from __future__ import annotations
 
 import asyncio
+import os
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -33,12 +42,13 @@ from loguru import logger
 from sqlalchemy import select, update
 
 from config import (draftmancer_api_token, draftmancer_api_url, get_draftmancer_session_url,
-                    hosted_draftmancer_enabled, scheduler_base_url)
+                    hosted_draftmancer_enabled, public_draftmancer_session_url,
+                    public_draftmancer_url, scheduler_base_url)
 from cube_views.pack_options import DEFAULT_CARDS_PER_PACK, DEFAULT_PACKS_PER_PLAYER
 from database.db_session import db_session
 from helpers.hosted_seats import discord_ids_by_seat, seat_list, seat_names
 from models.draft_session import DraftSession
-from notification_service import send_ready_check_dms
+from notification_service import send_dm, send_ready_check_dms
 from services.draft_end import DraftLog, finish_draft, publish_draft_log
 from services.draft_messages import (
     READY_CHECK_PASSED,
@@ -59,6 +69,7 @@ from services.draft_setup_manager import (
     DRAFT_PICK_TIMER_SECONDS,
 )
 from services.hosted_draftmancer import (
+    HostedCubeImportFailed,
     HostedDraftmancer,
     HostedLogStopped,
     HostedRefused,
@@ -66,9 +77,11 @@ from services.hosted_draftmancer import (
     HostedStatus,
     HostedUnavailable,
     build_session_spec,
+    fetch_public_log,
 )
 
 ROUTE = "hosted"
+FALLBACK_ROUTE = "fallback"
 POLL_INTERVAL_SECONDS = 5
 # A player who answered "not ready" cannot answer the same check again (the
 # in-app prompt is one-shot), so a fresh one is asked for after this pause.
@@ -93,7 +106,8 @@ def hosted_client() -> HostedDraftmancer:
     """The one client this process uses, made on first use from the environment."""
     global _client
     if _client is None:
-        _client = HostedDraftmancer(draftmancer_api_url(), draftmancer_api_token())
+        _client = HostedDraftmancer(draftmancer_api_url(), draftmancer_api_token(),
+                                    on_outcome=_observe_api)
     return _client
 
 
@@ -115,14 +129,28 @@ def _now() -> float:
 
 # --- queue, sign-ups, teams ---------------------------------------------------------
 
-async def open_hosted_draft(draft_session: Any) -> bool:
-    """Create the draft's hosted session and record the route.
+# Why a draft runs on the fallback; each has its own channel notice.
+FallbackReason = Literal["unreachable", "cube", "refused", "mutiny", "mutiny-unstopped"]
 
-    False when it could not be created; the caller then runs the draft another
-    way, and nothing here has been written.
+
+async def open_draft_room(draft_session: Any, channel: Any) -> str:
+    """Open a new queue's Draftmancer room: hosted, or the fallback when that fails.
+
+    Returns the route taken. A server already down for OUTAGE_ALERT_AFTER_SECONDS
+    is not asked: the attempt would only spend the interaction's few seconds on
+    a timeout before falling back anyway.
     """
-    if not hosted_draftmancer_enabled():
-        return False
+    reason: FallbackReason | None = "unreachable"
+    if not _known_down():
+        reason = await _create_hosted(draft_session)
+    if reason is None:
+        return ROUTE
+    await open_fallback_draft(draft_session, reason, channel=channel)
+    return FALLBACK_ROUTE
+
+
+async def _create_hosted(draft_session: Any) -> FallbackReason | None:
+    """Create the session and record the route; None on success, else why it failed."""
     spec = build_session_spec(
         draft_id=draft_session.draft_id,
         players=seat_list(draft_session.sign_ups or {}),
@@ -135,15 +163,96 @@ async def open_hosted_draft(draft_session: Any) -> bool:
     )
     try:
         await hosted_client().create(spec)
-    except (HostedUnavailable, HostedRefused) as e:
-        logger.error(f"Could not create the hosted session for {draft_session.session_id}: {e}")
-        return False
+    except HostedCubeImportFailed as e:
+        logger.error(f"The hosted server could not import cube {draft_session.cube} "
+                     f"for {draft_session.session_id}: {e}")
+        return "cube"
+    except HostedUnavailable as e:
+        logger.error(f"Could not reach the hosted server for {draft_session.session_id}: {e}")
+        return "unreachable"
+    except HostedRefused as e:
+        logger.error(f"The hosted server refused to create {draft_session.session_id}: {e}")
+        return "refused"
     async with db_session() as session:
         await session.execute(update(DraftSession)
                               .where(DraftSession.session_id == draft_session.session_id)
                               .values(draftmancer_route=ROUTE))
     logger.info(f"Opened hosted session DB{draft_session.draft_id} for {draft_session.session_id}")
-    return True
+    return None
+
+
+async def open_fallback_draft(draft_session: Any, reason: str, *, channel: Any = None,
+                              requested_by: str | None = None) -> None:
+    """Move the draft to a new plain session on the public draftmancer.com.
+
+    A new draft id and link, the route "fallback", and none of the hosted
+    route's state. DraftBot never joins it -- no manager is built -- and the
+    players run the room; rooms and pairings come from the board's "Create
+    Rooms & Post Pairings" button. `channel` is told why, how to run it, and,
+    once teams exist, every player's new link. `draft_session` itself is not
+    changed (it may belong to a caller's open transaction): read the row again.
+    """
+    new_id = _new_draft_id()
+    values: dict[str, Any] = {
+        "draft_id": new_id,
+        "draft_link": public_draftmancer_session_url(new_id),
+        "draftmancer_route": FALLBACK_ROUTE,
+        "hosted_paused_by": None,
+        "hosted_pause_notice_id": None,
+        "hosted_bot_seats": None,
+    }
+    await _store(draft_session.session_id, **values)
+    logger.warning(f"{draft_session.session_id} runs on draftmancer.com as DB{new_id} ({reason})")
+    if channel is None:
+        return
+    row = await DraftSession.get_by_session_id(draft_session.session_id)
+    if row is None:
+        return
+    try:
+        await channel.send(_fallback_text(row, reason, requested_by), allowed_mentions=_PING_USERS_ONLY)
+    except Exception as e:
+        logger.error(f"Could not post the fallback notice of {draft_session.session_id}: {e}")
+
+
+_MUTINY_GIF = ("https://tenor.com/view/mutiny-jack-sparrow-pirates-pirates-of-the-caribbean-"
+               "i-wish-to-report-a-mutiny-gif-26531174")
+
+
+def _fallback_text(row: Any, reason: str, requested_by: str | None) -> str:
+    cube = f"**{row.cube}**" if row.cube else "the cube"
+    where = "on draftmancer.com instead, without DraftBot in the room"
+    head = {
+        "unreachable": f"⚠️ **DraftBot's drafting server couldn't be reached**, so this draft runs {where}.",
+        "cube": f"⚠️ **The drafting server couldn't import the cube {cube} from CubeCobra**, so "
+                f"this draft runs {where}. Import it yourselves in Draftmancer, as below.",
+        "refused": f"⚠️ **The drafting server couldn't open this draft**, so it runs {where}.",
+        "mutiny": f"{_MUTINY_GIF}\n\n🔄 **Mutiny!** {requested_by or 'A player'} moved this draft "
+                  f"to draftmancer.com, without DraftBot in the room. The drafting server's "
+                  f"room is closed.",
+        "mutiny-unstopped": f"{_MUTINY_GIF}\n\n🔄 **Mutiny!** {requested_by or 'A player'} moved "
+                            f"this draft to draftmancer.com, without DraftBot in the room.\n"
+                            f"⚠️ The drafting server couldn't be reached to close its room, which "
+                            f"may still be open if it comes back. Don't draft there.",
+    }.get(reason, f"⚠️ This draft runs {where}.")
+    packs = row.packs_per_player or DEFAULT_PACKS_PER_PLAYER
+    cards = row.cards_per_pack or DEFAULT_CARDS_PER_PACK
+    seating = ("seat everyone in the team order posted here" if row.session_stage
+               else "once teams are posted here, seat everyone in that order")
+    how = (
+        f"**Running the room:** whoever opens their link first owns it. In Draftmancer's "
+        f"settings, import {cube} from CubeCobra ({packs} packs of {cards} cards), turn on "
+        f"Team Draft, and {seating} with random seating **off**."
+    )
+    if not row.session_stage:
+        how += " After the draft, press **Create Rooms & Post Pairings** on the draft board."
+    parts = [head, how]
+    links = [f"<@{discord_id}> — [your new draft link]({link})"
+             for discord_id, name in (row.sign_ups or {}).items()
+             if row.session_stage and (link := row.get_draft_link_for_user(name, user_id=discord_id))]
+    if links:
+        parts.append("**Any draft link you were given before this message no longer works.**\n"
+                     + "\n".join(links))
+    return "\n\n".join(parts)
 
 
 async def _hosted_row(session_id: str) -> Any:
@@ -222,9 +331,11 @@ _UNPULLABLE: set[str] = set()
 
 def forget_all() -> None:
     """Drop everything remembered (tests, and what a restart loses)."""
+    global _HEALTH
     _TRACKED.clear()
     _DONE.clear()
     _UNPULLABLE.clear()
+    _HEALTH = _Health()
 
 
 def _draft_lock(session_id: str) -> asyncio.Lock:
@@ -268,6 +379,14 @@ async def poll_hosted_drafts(bot: discord.Client) -> None:
             raise result
         if isinstance(result, BaseException):
             logger.opt(exception=result).error(f"Polling hosted draft {row.session_id} failed")
+    if not rows and _HEALTH.failing_since is not None:
+        # No draft's poll will say whether it is back -- the failure may have
+        # been a create that fell back -- so ask the server itself.
+        try:
+            await hosted_client().ping()
+        except HostedUnavailable:
+            pass
+    await _report_health(bot, rows)
 
 
 async def _poll_draft(bot: discord.Client, row: Any) -> None:
@@ -544,7 +663,7 @@ StopResult = Literal["stopped", "ended", "unreachable", "gone"]
 ReplaceResult = Literal["replaced", "not-in-draft", "refused", "unreachable", "gone"]
 ReadyResult = Literal["started", "running", "missing", "no-teams", "started-already",
                       "unreachable", "gone"]
-CubeResult = Literal["moved", "started", "unreachable", "failed"]
+CubeResult = Literal["moved", "started", "unreachable", "cube-import", "failed"]
 
 
 def _refusal_text(e: HostedRefused) -> str:
@@ -722,6 +841,43 @@ async def request_ready_check(bot: discord.Client, session_id: str) -> tuple[Rea
         return "started", []
 
 
+MutinyResult = Literal["moved", "moved-unstopped", "ended", "refused", "gone"]
+
+
+async def mutiny_hosted_draft(session_id: str, channel: Any,
+                              requested_by: str) -> tuple[MutinyResult, str]:
+    """/mutiny on a hosted draft: close the hosted session, then move to the fallback.
+
+    The session is stopped first, so nobody keeps drafting there and no
+    end-of-draft push arrives later. A server that cannot be reached moves the
+    draft anyway -- an outage is what /mutiny is for -- and says the old room
+    may come back ("moved-unstopped"); its late push finds no draft, since the
+    draft id changes. A draft that has already ended there is left alone: its
+    log is on the way. Returns the outcome and, when refused, the server's reason.
+    """
+    async with _draft_lock(session_id):
+        row = await DraftSession.get_by_session_id(session_id)
+        if row is None or row.draftmancer_route != ROUTE:
+            return "gone", ""
+        stopped = True
+        try:
+            await hosted_client().stop(row.draft_id)
+        except HostedUnavailable as e:
+            logger.warning(f"/mutiny could not stop hosted draft {session_id}; moving anyway: {e}")
+            stopped = False
+        except HostedRefused as e:
+            if e.status == 409:
+                return "ended", ""
+            if e.status != 404:
+                logger.error(f"/mutiny: stopping hosted draft {session_id} refused: {e}")
+                return "refused", _refusal_text(e)
+        _forget(session_id)
+        _UNPULLABLE.add(session_id)
+        reason: FallbackReason = "mutiny" if stopped else "mutiny-unstopped"
+        await open_fallback_draft(row, reason, channel=channel, requested_by=requested_by)
+        return ("moved" if stopped else "moved-unstopped"), ""
+
+
 def _new_draft_id() -> str:
     """Same shape as SessionDetails' draft ids."""
     return "".join(secrets.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789") for _ in range(8))
@@ -756,6 +912,9 @@ async def change_hosted_cube(bot: discord.Client, session_id: str, cube: str,
         client = hosted_client()
         try:
             await client.create(spec)
+        except HostedCubeImportFailed as e:
+            logger.warning(f"The hosted server could not import cube {cube} for {session_id}: {e}")
+            return "cube-import"
         except HostedUnavailable as e:
             logger.warning(f"Could not open a new hosted session for {session_id}: {e}")
             return "unreachable"
@@ -917,3 +1076,121 @@ async def pull_ended_draft(bot: discord.Client, session_id: str, draft_id: str) 
         return
     logger.info(f"[reconciler] pulled the hosted log of {session_id}")
     await on_draft_ended(bot, session_id, log)
+
+
+# --- the fallback's log -----------------------------------------------------------------
+
+async def pull_fallback_log(bot: discord.Client, session_id: str, draft_id: str) -> None:
+    """The reconciler's fetch of a fallback draft's log from draftmancer.com.
+
+    draftmancer.com gives the log out only once the draft has ended, and only
+    when the players' room shares it with everyone (or has unlocked a delayed
+    one); until then -- or for good, if it never does -- there is nothing to
+    take, and the reconciler asks again until its window ends. Never raises
+    for draftmancer.com's trouble.
+    """
+    log = await fetch_public_log(public_draftmancer_url(), draft_id)
+    if log is None:
+        logger.debug(f"[reconciler] no public log yet for fallback draft {session_id}")
+        return
+    logger.info(f"[reconciler] fetched the draftmancer.com log of fallback draft {session_id}")
+    await on_draft_ended(bot, session_id, log)
+
+
+# --- health ------------------------------------------------------------------------------
+#
+# Every request the client makes reports whether the server answered. Failing
+# without a break for OUTAGE_ALERT_AFTER_SECONDS is an outage: the admins hear
+# once (by DM, to the same SERVE_ALERT_DISCORD_ID the custodian's health monitor
+# alerts), each hosted draft's channel hears once, and both hear when it is
+# back. A single answer ends the outage, so a flapping server is never one.
+
+OUTAGE_ALERT_AFTER_SECONDS = 180
+ALERT_ENV = "SERVE_ALERT_DISCORD_ID"
+
+OUTAGE_NOTICE = (
+    "⚠️ **The drafting server isn't answering.** DraftBot keeps retrying, and the "
+    "draft carries on from where it was once it's back. If it stays down, an admin "
+    "can move this draft to draftmancer.com with `/mutiny`."
+)
+RECOVERED_NOTICE = "✅ The drafting server is answering again."
+
+
+@dataclass
+class _Health:
+    failing_since: float | None = None    # The first failure with no answer since.
+    declared: bool = False                # This outage has lasted long enough to report.
+    admins_told: bool = False
+    recovered_after: float | None = None  # How long a reported outage lasted, until that is said.
+    channels_told: dict[str, Any] = field(default_factory=dict)  # session_id -> channel
+
+
+_HEALTH = _Health()
+
+
+def _observe_api(answered: bool) -> None:
+    """The client's report on one request."""
+    h = _HEALTH
+    if not answered:
+        if h.failing_since is None:
+            h.failing_since = _now()
+        return
+    if h.failing_since is not None and h.declared:
+        h.recovered_after = _now() - h.failing_since
+    h.failing_since = None
+    h.declared = False
+    h.admins_told = False
+
+
+def _known_down() -> bool:
+    since = _HEALTH.failing_since
+    return since is not None and _now() - since >= OUTAGE_ALERT_AFTER_SECONDS
+
+
+async def _tell_admins(bot: discord.Client, text: str) -> bool:
+    """True once the admins have been told -- or there is nobody to tell."""
+    to = os.getenv(ALERT_ENV, "").strip()
+    if not to:
+        logger.error(f"Hosted Draftmancer: {text!r} -- {ALERT_ENV} is not set, so nobody is told")
+        return True
+    return await send_dm(bot, to, text, label="hosted Draftmancer health")
+
+
+async def _report_health(bot: discord.Client, rows: list[Any]) -> None:
+    """Once per tick: say what has changed about the server's health. Never raises."""
+    h = _HEALTH
+    try:
+        if h.recovered_after is not None:
+            for channel in h.channels_told.values():
+                try:
+                    await channel.send(RECOVERED_NOTICE)
+                except Exception as e:
+                    logger.warning(f"Could not post the hosted recovery notice: {e}")
+            h.channels_told.clear()
+            minutes = max(1, round(h.recovered_after / 60))
+            if await _tell_admins(bot, f"✅ The hosted Draftmancer is answering again "
+                                       f"(down about {minutes} minutes)."):
+                h.recovered_after = None
+        since = h.failing_since
+        if since is None or not _known_down():
+            return
+        if not h.declared:
+            h.declared = True
+            logger.error(f"The hosted Draftmancer has not answered for {OUTAGE_ALERT_AFTER_SECONDS} s")
+        if not h.admins_told:
+            minutes = int((_now() - since) // 60)
+            h.admins_told = await _tell_admins(bot, (
+                f"⚠️ **The hosted Draftmancer hasn't answered for {minutes} minutes** "
+                f"({draftmancer_api_url()}). Drafts on it wait where they were, and new "
+                f"drafts open on draftmancer.com instead. If it stays down, `/mutiny` in a "
+                f"draft's channel moves that draft to draftmancer.com."))
+        for row in rows:
+            if row.session_id in h.channels_told or not row.session_stage or not row.draft_channel_id:
+                continue
+            channel: Any = bot.get_channel(int(row.draft_channel_id))
+            if channel is None:
+                continue
+            h.channels_told[row.session_id] = channel
+            await channel.send(OUTAGE_NOTICE)
+    except Exception:
+        logger.opt(exception=True).error("Reporting the hosted Draftmancer's health failed")
