@@ -11,6 +11,7 @@ preset = "strict"
 project-includes = [
     "helpers/background_tasks.py",
     "services/entry_notices.py",
+    "services/hosted_draftmancer.py",
     "services/availability.py",
     "services/round_weeks.py",
     "services/round_confirmation.py",

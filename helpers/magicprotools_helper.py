@@ -5,6 +5,7 @@ import logging
 import aiohttp
 from typing import Dict, Any, Optional, List
 
+from config import DRAFTMANCER_BASE_URL
 from .digital_ocean_helper import DigitalOceanHelper
 from services.draft_log_store import split_decklist, build_mtgo_deck_text
 
@@ -129,7 +130,7 @@ class MagicProtoolsHelper:
             headers = {
                 "Accept": "application/json, text/plain, */*",
                 "Content-Type": "application/x-www-form-urlencoded",
-                "Referer": "https://draftmancer.com",
+                "Referer": DRAFTMANCER_BASE_URL,
             }
             self.logger.info(
                 f"[MPT] Submitting draft for user {user_name} (session {session_id}, "

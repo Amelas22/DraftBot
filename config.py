@@ -4,12 +4,28 @@ import os
 from pathlib import Path
 import logging
 
+from dotenv import load_dotenv
+
+# These URLs are read at import, and config is imported before bot.py's main()
+# loads .env; load it here (it never overrides the real environment).
+load_dotenv()
+
 # Your specific guild ID
 SPECIAL_GUILD_ID = "336345350535118849"
 
-# Base URL for Draftmancer service
-# Change this to switch between environments (prod, beta, dev)
-DRAFTMANCER_BASE_URL = "https://draftmancer.com"
+# Public base URL for Draftmancer links, websocket and Referer headers.
+# Set DRAFTMANCER_BASE_URL to switch between environments (prod, beta, dev).
+DRAFTMANCER_BASE_URL = os.environ.get("DRAFTMANCER_BASE_URL", "https://draftmancer.com")
+
+# Control API of the self-hosted Draftmancer fork. Hosted drafts are used only
+# when both are set; otherwise every draft keeps the websocket manager.
+DRAFTMANCER_API_URL = os.environ.get("DRAFTMANCER_API_URL", "")
+DRAFTMANCER_API_TOKEN = os.environ.get("DRAFTMANCER_API_TOKEN", "")
+
+
+def hosted_draftmancer_enabled() -> bool:
+    """Whether the self-hosted Draftmancer control API is configured."""
+    return bool(DRAFTMANCER_API_URL and DRAFTMANCER_API_TOKEN)
 
 # Bots granted read+send in every draft channel (incl. private team
 # channels). Matched against bot-managed integration roles only — the role a

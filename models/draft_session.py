@@ -38,6 +38,9 @@ class DraftSession(Base):
     channel_ids = Column(JSON)
     session_type = Column(String(64))
     session_stage = Column(String(64))
+    # Which Draftmancer path the draft runs on: "hosted" (control API), "fallback"
+    # (websocket manager, chosen when the API was down at creation); NULL = legacy manager.
+    draftmancer_route = Column(String(16), nullable=True)
     team_a_name = Column(String(128))
     team_b_name = Column(String(128))
     are_rooms_processing = Column(Boolean, default=False)

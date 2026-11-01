@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 
 from models import DraftSession
 from helpers.digital_ocean_helper import DigitalOceanHelper
+from config import DRAFTMANCER_BASE_URL
 from helpers.magicprotools_helper import MagicProtoolsHelper
 
 # Try to load from .env file
@@ -88,7 +89,7 @@ async def submit_to_mpt_api(log_text):
         headers = {
             "Accept": "application/json, text/plain, */*",
             "Content-Type": "application/x-www-form-urlencoded",
-            "Referer": "https://draftmancer.com"
+            "Referer": DRAFTMANCER_BASE_URL
         }
         data = {
             "draft": log_text,
