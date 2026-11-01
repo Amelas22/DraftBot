@@ -215,3 +215,35 @@ async def test_fetch_log_raises_stopped_on_410(api, client):
     api.replies[("GET", "/api/hosted/sessions/DBabc/log")] = (410, {"error": "stopped"})
     with pytest.raises(HostedLogStopped):
         await client.fetch_log("abc")
+
+
+# --- configuration is read when asked, never at import -------------------------
+
+def test_draftmancer_settings_are_read_when_asked(monkeypatch):
+    import config
+
+    monkeypatch.setenv("DRAFTMANCER_BASE_URL", "https://draft.example")
+    monkeypatch.setenv("DRAFTMANCER_API_URL", "http://api.example:3000")
+    monkeypatch.setenv("DRAFTMANCER_API_TOKEN", "tok")
+    assert config.get_draftmancer_base_url() == "https://draft.example"
+    assert config.get_draftmancer_session_url("X1") == "https://draft.example/?session=DBX1"
+    assert config.draftmancer_api_url() == "http://api.example:3000"
+    assert config.draftmancer_api_token() == "tok"
+    assert config.hosted_draftmancer_enabled()
+
+    monkeypatch.delenv("DRAFTMANCER_API_TOKEN")
+    monkeypatch.delenv("DRAFTMANCER_BASE_URL")
+    assert not config.hosted_draftmancer_enabled()
+    assert config.get_draftmancer_base_url() == "https://draftmancer.com"
+
+
+def test_importing_config_does_not_load_dotenv():
+    import importlib
+    from unittest.mock import patch
+
+    import config
+
+    with patch("dotenv.load_dotenv") as load:
+        importlib.reload(config)
+    load.assert_not_called()
+    assert not hasattr(config, "DRAFTMANCER_API_TOKEN")

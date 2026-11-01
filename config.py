@@ -4,28 +4,39 @@ import os
 from pathlib import Path
 import logging
 
-from dotenv import load_dotenv
-
-# These URLs are read at import, and config is imported before bot.py's main()
-# loads .env; load it here (it never overrides the real environment).
-load_dotenv()
-
 # Your specific guild ID
 SPECIAL_GUILD_ID = "336345350535118849"
 
-# Public base URL for Draftmancer links, websocket and Referer headers.
-# Set DRAFTMANCER_BASE_URL to switch between environments (prod, beta, dev).
-DRAFTMANCER_BASE_URL = os.environ.get("DRAFTMANCER_BASE_URL", "https://draftmancer.com")
+# The Draftmancer settings are read when ASKED, never at import: config is
+# imported before bot.py's main() loads .env, so a module-level read would freeze
+# them at their defaults (see mtgo_tradebot_client.max_cards_per_trade).
 
-# Control API of the self-hosted Draftmancer fork. Hosted drafts are used only
-# when both are set; otherwise every draft keeps the websocket manager.
-DRAFTMANCER_API_URL = os.environ.get("DRAFTMANCER_API_URL", "")
-DRAFTMANCER_API_TOKEN = os.environ.get("DRAFTMANCER_API_TOKEN", "")
+
+def get_draftmancer_base_url() -> str:
+    """Public base URL for Draftmancer links, websocket and Referer headers.
+
+    DRAFTMANCER_BASE_URL switches between environments (prod, beta, dev).
+    """
+    return os.environ.get("DRAFTMANCER_BASE_URL", "https://draftmancer.com").rstrip("/")
+
+
+def draftmancer_api_url() -> str:
+    """Control API of the self-hosted Draftmancer fork ("" when unset)."""
+    return os.environ.get("DRAFTMANCER_API_URL", "")
+
+
+def draftmancer_api_token() -> str:
+    """Bearer token for the control API, and for the fork's log pushes to us."""
+    return os.environ.get("DRAFTMANCER_API_TOKEN", "")
 
 
 def hosted_draftmancer_enabled() -> bool:
-    """Whether the self-hosted Draftmancer control API is configured."""
-    return bool(DRAFTMANCER_API_URL and DRAFTMANCER_API_TOKEN)
+    """Whether the self-hosted Draftmancer control API is configured.
+
+    Hosted drafts are used only when both are set; otherwise every draft keeps
+    the websocket manager.
+    """
+    return bool(draftmancer_api_url() and draftmancer_api_token())
 
 # Bots granted read+send in every draft channel (incl. private team
 # channels). Matched against bot-managed integration roles only — the role a
@@ -384,17 +395,13 @@ def scheduler_trusted_proxies() -> frozenset[str]:
     return frozenset(part.strip() for part in raw.split(",") if part.strip())
 
 
-def get_draftmancer_base_url():
-    """Return the draftmancer base URL"""
-    return DRAFTMANCER_BASE_URL
-
 def get_draftmancer_session_url(draft_id, guild_id=None):
     """Get full session URL for a draft ID"""
-    return f"{DRAFTMANCER_BASE_URL}/?session=DB{draft_id}"
+    return f"{get_draftmancer_base_url()}/?session=DB{draft_id}"
 
 def get_draftmancer_draft_url(draft_id, guild_id=None):
     """Get full draft URL for a draft ID"""
-    return f"{DRAFTMANCER_BASE_URL}/draft/DB{draft_id}"
+    return f"{get_draftmancer_base_url()}/draft/DB{draft_id}"
 
 def get_draftmancer_bot_user_id(draft_id):
     """The bot's Draftmancer identity for ONE draft.
@@ -415,7 +422,7 @@ def get_draftmancer_websocket_url(draft_id, guild_id=None, user_id=None, user_na
     compares userName, never userID.
     """
     # Convert https:// to wss://
-    websocket_url = DRAFTMANCER_BASE_URL.replace('https://', 'wss://')
+    websocket_url = get_draftmancer_base_url().replace('https://', 'wss://')
     user_id = user_id or get_draftmancer_bot_user_id(draft_id)
     return f"{websocket_url}?userID={user_id}&sessionID=DB{draft_id}&userName={user_name}"
 
