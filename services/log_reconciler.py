@@ -14,6 +14,7 @@ from models.draft_session import DraftSession
 from services.draft_log_store import post_team_logs
 from services.draft_deck_assignment import assign_drafted_decks
 from services import hosted_draft
+from services.draft_end import publish_draft_log
 from services.draft_setup_manager import ACTIVE_MANAGERS, DraftSetupManager
 
 RECONCILE_INTERVAL_SECONDS: int = 60
@@ -182,6 +183,11 @@ async def reconcile_publish_and_team_logs(bot) -> None:
         )).scalars().all()
     for ds in due_publish:
         try:
+            if getattr(ds, "draftmancer_route", None) == hosted_draft.ROUTE:
+                # No manager for a hosted draft: release=False needs no
+                # connection, and the server unlocks the log on its own timer.
+                await publish_draft_log(bot, ds.session_id)
+                continue
             # Prefer an already-active manager (real state, idempotent publish)
             # over constructing a transient one that would leak into / clobber
             # the module-global ACTIVE_MANAGERS registry.

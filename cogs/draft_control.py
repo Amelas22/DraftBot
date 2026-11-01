@@ -902,8 +902,18 @@ class DraftControlCog(commands.Cog):
                 return
 
             # Still being drafted: that is /scrap's job. Voiding the record now
-            # would strand a session people are mid-pick in.
-            if DraftSetupManager.is_drafting(draft_session.session_id):
+            # would strand a session people are mid-pick in. A hosted draft has
+            # no manager to ask, so the server is asked -- and one it cannot
+            # reach may be mid-draft, so that refuses too.
+            if _is_hosted(draft_session):
+                stage = await hosted_draft.hosted_stage(draft_session.draft_id)
+                if stage is None:
+                    await ctx.followup.send(UNREACHABLE, ephemeral=True)
+                    return
+                still_drafting = stage == "drafting"
+            else:
+                still_drafting = DraftSetupManager.is_drafting(draft_session.session_id)
+            if still_drafting:
                 await ctx.followup.send(
                     "This draft is still running in Draftmancer. Use `/pause` then "
                     "`/scrap` **in the channel the draft was posted in**; `/abandon` "

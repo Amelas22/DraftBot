@@ -397,3 +397,23 @@ async def test_an_unreachable_api_is_retried_on_the_next_tick(test_db, hosted, n
 
     finish.assert_not_awaited()
     assert hosted.calls == [("status", "raised")] * 2
+
+
+@pytest.mark.asyncio
+async def test_a_due_hosted_draft_publishes_without_a_manager(test_db, hosted):
+    await _seed("HP", captured_at=datetime.now() - timedelta(hours=1),
+                unlock_at=datetime.now() - timedelta(minutes=1),
+                team_posted_at=datetime.now(), data_received=False)
+    from sqlalchemy import update
+    async with AsyncSessionLocal() as session:
+        await session.execute(update(DraftSession).where(DraftSession.session_id == "HP")
+                              .values(draftmancer_route="hosted"))
+        await session.commit()
+    bot = MagicMock()
+    with patch("services.log_reconciler.publish_draft_log", AsyncMock(return_value=True)) as publish, \
+         patch("services.log_reconciler.DraftSetupManager",
+               MagicMock(side_effect=AssertionError("built a manager"))), \
+         patch("services.log_reconciler.assign_drafted_decks", AsyncMock()):
+        await reconcile_publish_and_team_logs(bot)
+
+    publish.assert_awaited_once_with(bot, "HP")

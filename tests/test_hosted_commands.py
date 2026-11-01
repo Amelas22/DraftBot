@@ -571,3 +571,50 @@ async def test_the_update_cube_button_refuses_a_started_hosted_draft(hosted, mon
 
     assert "already started" in str(submit.followup.send.await_args)
     assert (await _row()).cube != "NewCube"
+
+
+# --- /abandon -------------------------------------------------------------------------
+
+async def _abandon_hosted(cog: DraftControlCog, ctx: MagicMock) -> None:
+    from conftest import make_draft_stub
+
+    draft = make_draft_stub("teams", draftmancer_route="hosted", draft_id=DRAFT_ID)
+    with patch("cogs.draft_control.DraftSession.get_by_any_channel_id",
+               new=AsyncMock(return_value=draft)), \
+         patch("cogs.draft_control.is_bot_manager", new=AsyncMock(return_value=True)), \
+         patch.object(DraftSetupManager, "is_drafting",
+                      MagicMock(side_effect=AssertionError("asked a manager"))):
+        await cog._do_abandon(ctx)
+
+
+@pytest.mark.asyncio
+async def test_abandon_refuses_a_drafting_hosted_draft_and_points_at_scrap(hosted, cog):
+    hosted.stage = "drafting"
+    ctx = make_ctx()
+
+    await _abandon_hosted(cog, ctx)
+
+    assert "/scrap" in replies(ctx)
+    assert "Abandon this draft?" not in replies(ctx)
+
+
+@pytest.mark.asyncio
+async def test_abandon_refuses_when_the_hosted_server_is_unreachable(hosted, cog):
+    hosted.fail("status", HostedUnavailable("down"))
+    ctx = make_ctx()
+
+    await _abandon_hosted(cog, ctx)
+
+    assert "reach" in replies(ctx)
+    assert "Abandon this draft?" not in replies(ctx)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["gathering", "ended", "stopped"])
+async def test_abandon_goes_ahead_on_a_hosted_draft_not_drafting(hosted, cog, stage):
+    hosted.stage = stage
+    ctx = make_ctx()
+
+    await _abandon_hosted(cog, ctx)
+
+    assert "Abandon this draft?" in replies(ctx)
