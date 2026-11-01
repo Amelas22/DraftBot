@@ -273,18 +273,24 @@ class DraftSession(Base):
             result = await session.execute(query)
             return result.scalars().first()
 
-    def get_draft_link_for_user(self, user_name: str) -> str:
+    def get_draft_link_for_user(self, user_name: str, user_id: str | None = None) -> str:
         """
         Get a personalized draft link for a specific user.
         
         Args:
             user_name (str): The username to add to the draft link
+            user_id: The player's Discord id. On a hosted draft the link names
+                their SEAT (helpers.hosted_seats), which differs from the
+                display name when two players share one.
             
         Returns:
             str: The draft link with the username parameter added
         """
         if not self.draft_link:
             return None
+        if self.draftmancer_route == "hosted" and user_id is not None:
+            from helpers.hosted_seats import seat_names
+            user_name = seat_names(self.sign_ups or {}).get(str(user_id), user_name)
         
         # URL-encode the username to handle spaces and special characters
         encoded_username = quote(user_name)

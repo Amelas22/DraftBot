@@ -35,7 +35,7 @@ def fake_session():
         team_b_name=None,
         cube="LSVCube",
         friendly_id="test-1",
-        get_draft_link_for_user=lambda name: f"https://draftmancer.com/?session=X&userName={name}",
+        get_draft_link_for_user=lambda name, user_id=None: f"https://draftmancer.com/?session=X&userName={name}",
     )
 
 

@@ -555,3 +555,124 @@ async def test_a_restart_spawns_no_manager_for_a_hosted_draft(hosted, bot):
     with patch.object(DraftSetupManager, "keep_connection_alive", AsyncMock()):
         assert await reconnect_draft_setup_sessions(bot) == []
         assert await DraftSetupManager.spawn_for_existing_session(SID, bot) is None
+
+
+# --- a blip is not a disconnect ------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_a_disconnect_inside_the_grace_window_neither_pauses_nor_posts(hosted, bot, channel):
+    from services.draft_setup_manager import DISCONNECT_NOTICE_DELAY
+
+    await _seed()
+    hosted.stage = "drafting"
+    now = hosted.clock["now"]
+
+    def bob_away_since(since: float) -> list[HostedSeat]:
+        seats = everyone()
+        seats[1] = HostedSeat(name="Bob", user_id="seat-Bob", connected=False,
+                              disconnected_since=since, ready="unknown")
+        return seats
+
+    hosted.seats = bob_away_since(now - 2)
+    await hosted_draft.poll_hosted_drafts(bot)
+    hosted.clock["now"] += DISCONNECT_NOTICE_DELAY - 5
+    await hosted_draft.poll_hosted_drafts(bot)
+    hosted.seats = everyone()                      # back inside the window
+    await hosted_draft.poll_hosted_drafts(bot)
+    assert hosted.calls == [] and channel.messages == []
+
+    dropped = hosted.clock["now"]
+    hosted.seats = bob_away_since(dropped)
+    await hosted_draft.poll_hosted_drafts(bot)
+    assert hosted.calls == []
+    hosted.clock["now"] = dropped + DISCONNECT_NOTICE_DELAY
+    for _ in range(3):
+        await hosted_draft.poll_hosted_drafts(bot)
+    assert hosted.call_names() == ["pause"]
+    assert len(channel.sent("Draft paused")) == 1
+
+
+# --- players who share a display name ---------------------------------------------
+
+TWINS = {"111": "Alice", "222": "Bob", "333": "Bob", "444": "Dan"}
+
+
+def test_seat_names_are_unique_and_never_another_players_name():
+    from helpers.hosted_seats import seat_list, seat_names
+
+    assert seat_list(TWINS) == ["Alice", "Bob", "Bob (2)", "Dan"]
+    tricky = {"1": "Bob", "2": "Bob", "3": "Bob (2)"}
+    assert seat_names(tricky) == {"1": "Bob", "2": "Bob (3)", "3": "Bob (2)"}
+
+
+@pytest.mark.asyncio
+async def test_two_sign_ups_with_the_same_display_name_each_get_a_seat(hosted, bot, channel, monkeypatch):
+    await _seed(stage=None)
+    async with AsyncSessionLocal() as s:
+        await s.execute(update(DraftSession).where(DraftSession.session_id == SID)
+                        .values(sign_ups=dict(TWINS)))
+        await s.commit()
+    seats = ["Alice", "Bob", "Bob (2)", "Dan"]
+
+    created: list[dict[str, Any]] = []
+
+    async def create(spec: dict[str, Any]) -> None:
+        created.append(spec)
+
+    monkeypatch.setattr(hosted, "create", create, raising=False)
+    assert await hosted_draft.open_hosted_draft(await _row())
+    assert created[0]["players"] == seats
+
+    await hosted_draft.on_signups_changed(SID)
+    assert hosted.calls[-1] == ("set_players", DRAFT_ID, seats)
+
+    # The poller sees the seats as in step: no endless re-sending.
+    await hosted_draft.poll_hosted_drafts(bot)
+    assert hosted.call_names().count("set_players") == 1
+
+    # Teams: the seating is a permutation of exactly those seat names.
+    from helpers.hosted_seats import seat_list
+    reordered = {k: TWINS[k] for k in ("333", "111", "444", "222")}
+    seating = seat_list(reordered)
+    assert sorted(seating) == sorted(seats)
+    await hosted_draft.on_teams_formed(SID, seating)
+    assert hosted.calls[-1] == ("set_seating", DRAFT_ID, seating)
+
+
+@pytest.mark.asyncio
+async def test_each_players_link_carries_their_own_seat_name(test_db):
+    from urllib.parse import parse_qs, urlparse
+
+    from services.team_creator import _create_teams_embed
+
+    row = DraftSession(session_id=SID, draft_id=DRAFT_ID, sign_ups=dict(TWINS),
+                       draft_link=f"https://draft.example/?session=DB{DRAFT_ID}",
+                       draftmancer_route="hosted", session_type="random", cube="LSV")
+
+    def user_name(link: str) -> str:
+        return parse_qs(urlparse(link).query)["userName"][0]
+
+    assert user_name(row.get_draft_link_for_user("Bob", user_id="222")) == "Bob"
+    assert user_name(row.get_draft_link_for_user("Bob", user_id="333")) == "Bob (2)"
+
+    embed = await _create_teams_embed(row, None, None, [], "random")
+    links = "\n".join(f.value for f in embed.fields)
+    assert "userName=Bob%20%282%29" in links and "userName=Bob)" in links
+
+    # The manager route keeps the display name as it is.
+    row.draftmancer_route = None
+    assert user_name(row.get_draft_link_for_user("Bob", user_id="333")) == "Bob"
+
+
+@pytest.mark.asyncio
+async def test_the_pause_notice_mentions_each_twin_by_their_own_id(hosted, bot, channel):
+    await _seed()
+    async with AsyncSessionLocal() as s:
+        await s.execute(update(DraftSession).where(DraftSession.session_id == SID)
+                        .values(sign_ups=dict(TWINS)))
+        await s.commit()
+    hosted.stage = "drafting"
+    hosted.seats = [seat("Alice"), seat("Bob"), seat("Bob (2)", connected=False), seat("Dan")]
+    await hosted_draft.poll_hosted_drafts(bot)
+    [notice] = channel.sent("Draft paused")
+    assert "<@333>" in notice.content and "<@222>" not in notice.content

@@ -28,6 +28,7 @@ from config import (draftmancer_api_token, draftmancer_api_url, hosted_draftmanc
                     scheduler_base_url)
 from cube_views.pack_options import DEFAULT_CARDS_PER_PACK, DEFAULT_PACKS_PER_PLAYER
 from database.db_session import db_session
+from helpers.hosted_seats import discord_ids_by_seat, seat_list
 from models.draft_session import DraftSession
 from notification_service import send_ready_check_dms
 from services.draft_end import DraftLog, finish_draft
@@ -36,7 +37,6 @@ from services.draft_messages import (
     READY_CHECK_TIMEOUT_SECONDS,
     START_DELAY_SECONDS,
     format_status_message,
-    mention_names,
     ready_check_deadline_text,
     ready_check_left_text,
     ready_check_not_ready_text,
@@ -45,7 +45,11 @@ from services.draft_messages import (
     session_status,
     update_or_send_message,
 )
-from services.draft_setup_manager import DRAFT_LOG_UNLOCK_TIMER_MINUTES, DRAFT_PICK_TIMER_SECONDS
+from services.draft_setup_manager import (
+    DISCONNECT_NOTICE_DELAY,
+    DRAFT_LOG_UNLOCK_TIMER_MINUTES,
+    DRAFT_PICK_TIMER_SECONDS,
+)
 from services.hosted_draftmancer import (
     HostedDraftmancer,
     HostedRefused,
@@ -107,7 +111,7 @@ async def open_hosted_draft(draft_session: Any) -> bool:
         return False
     spec = build_session_spec(
         draft_id=draft_session.draft_id,
-        players=list((draft_session.sign_ups or {}).values()),
+        players=seat_list(draft_session.sign_ups or {}),
         cube_id=draft_session.cube,
         packs_per_player=draft_session.packs_per_player or DEFAULT_PACKS_PER_PLAYER,
         cards_per_pack=draft_session.cards_per_pack or DEFAULT_CARDS_PER_PACK,
@@ -145,13 +149,17 @@ async def on_signups_changed(session_id: str) -> None:
         row = await _hosted_row(session_id)
         if row is None:
             return
-        await hosted_client().set_players(row.draft_id, list((row.sign_ups or {}).values()))
+        await hosted_client().set_players(row.draft_id, seat_list(row.sign_ups or {}))
     except Exception as e:
         logger.warning(f"Could not update the hosted players of {session_id}: {e}")
 
 
 async def on_teams_formed(session_id: str, seating: list[str]) -> None:
-    """Seat the hosted session in the order the teams were drawn. Never raises."""
+    """Seat the hosted session in the order the teams were drawn. Never raises.
+
+    `seating` is seat names (helpers.hosted_seats.seat_list of the reordered
+    sign-ups), not display names.
+    """
     try:
         row = await _hosted_row(session_id)
         if row is None:
@@ -268,7 +276,7 @@ def _forget(session_id: str) -> None:
 
 async def _gathering(bot: discord.Client, row: Any, status: HostedStatus, st: _Tracked,
                      channel: Any) -> None:
-    expected = list((row.sign_ups or {}).values())
+    expected = seat_list(row.sign_ups or {})
     if [s.name for s in status.seats] != expected:
         # A missed sign-up update, or one made while the API was away. Setting the
         # players clears the in-app ready check, so ours goes with it.
@@ -385,7 +393,7 @@ async def _start(row: Any, st: _Tracked, channel: Any) -> None:
 
 async def _drafting(row: Any, status: HostedStatus, st: _Tracked, channel: Any) -> None:
     st.ready_check = None
-    away = sorted(s.name for s in status.seats if not s.connected)
+    away = _away_past_grace(status.seats)
     if away:
         if st.paused_for is None:
             await hosted_client().pause(row.draft_id)
@@ -398,6 +406,8 @@ async def _drafting(row: Any, status: HostedStatus, st: _Tracked, channel: Any) 
             st.paused_for = away
             await _edit_notice(channel, st, _paused_text(row, away))
         return
+    if any(not s.connected for s in status.seats):
+        return  # Only a blip so far, or still paused while someone's blip passes.
     if st.paused_for is not None:
         await hosted_client().resume(row.draft_id)
         logger.info(f"Resumed hosted draft {row.session_id}: every seat is back")
@@ -407,8 +417,28 @@ async def _drafting(row: Any, status: HostedStatus, st: _Tracked, channel: Any) 
         st.notice_id = None
 
 
+def _away_past_grace(seats: list[HostedSeat]) -> list[str]:
+    """Seats disconnected for at least DISCONNECT_NOTICE_DELAY, as the manager waits.
+
+    Short drops are common and self-correcting; pausing the table and posting
+    for each would train players to ignore the notice that matters. A seat
+    with no disconnect time cannot be measured, so it counts as gone.
+    """
+    now = _now()
+    return sorted(
+        s.name for s in seats
+        if not s.connected and (s.disconnected_since is None
+                                or now - s.disconnected_since >= DISCONNECT_NOTICE_DELAY))
+
+
+def _mentions(row: Any, seats: list[str]) -> list[str]:
+    """Each seat as its player's mention: seat names are unique, display names are not."""
+    ids = discord_ids_by_seat(row.sign_ups or {})
+    return [f"<@{ids[name]}>" if name in ids else name for name in seats]
+
+
 def _paused_text(row: Any, away: list[str]) -> str:
-    who = ", ".join(mention_names(row.sign_ups or {}, away))
+    who = ", ".join(_mentions(row, away))
     links = "that player's link" if len(away) == 1 else "the missing players' links"
     return (
         f"⏸️ **Draft paused** — {who} dropped out of Draftmancer, so the table is "
@@ -420,7 +450,7 @@ def _paused_text(row: Any, away: list[str]) -> str:
 
 
 def _resumed_text(row: Any, away: list[str]) -> str:
-    who = ", ".join(mention_names(row.sign_ups or {}, away))
+    who = ", ".join(_mentions(row, away))
     return f"▶️ **Draft resumed** — every seat is connected again ({who} dropped out for a while)."
 
 

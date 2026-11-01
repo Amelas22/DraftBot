@@ -14,6 +14,7 @@ project-includes = [
     "services/hosted_draftmancer.py",
     "services/draft_messages.py",
     "services/hosted_draft.py",
+    "helpers/hosted_seats.py",
     "services/availability.py",
     "services/round_weeks.py",
     "services/round_confirmation.py",
