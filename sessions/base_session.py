@@ -8,7 +8,7 @@ from views import PersistentView
 import discord
 from services.draft_setup_manager import DraftSetupManager
 from services.hosted_draft import FALLBACK_ROUTE, open_draft_room
-from config import hosted_draftmancer_enabled
+from config import hosted_draftmancer_enabled, public_draftmancer_session_url
 import asyncio
 from loguru import logger
 from config import get_session_deletion_hours
@@ -44,7 +44,13 @@ class BaseSession:
     async def create_draft_session(self, interaction, bot):
         async with self.session_factory() as session:
             async with session.begin():
-                # Step 1: Set up the draft session
+                # Step 1: Set up the draft session. A manager draft runs on the
+                # public draftmancer.com whatever DRAFTMANCER_BASE_URL says --
+                # that is our own server once hosting is on.
+                hosted = hosted_draftmancer_enabled()
+                if not hosted:
+                    self.session_details.draft_link = public_draftmancer_session_url(
+                        self.session_details.draft_id)
                 new_draft_session = self.setup_draft_session(session, self.session_details.friendly_id)
                 await session.commit()
 
@@ -53,7 +59,6 @@ class BaseSession:
                 # after the board is posted (step 5b): the hosted server can
                 # take seconds to answer, or not answer at all, and the
                 # interaction must be answered within three.
-                hosted = hosted_draftmancer_enabled()
                 if not hosted:
                     self.start_draft_manager(new_draft_session)
                 

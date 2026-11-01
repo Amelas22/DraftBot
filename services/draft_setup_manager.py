@@ -10,8 +10,10 @@ import pytz
 import discord
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from config import (get_draftmancer_websocket_url, get_draftmancer_base_url,
-                    get_draftmancer_bot_user_id, get_draftmancer_session_url,
+# A manager draft is a legacy (route NULL) one, which always runs on the public
+# draftmancer.com: never DRAFTMANCER_BASE_URL, our own server once hosting is on.
+from config import (get_draftmancer_websocket_url, get_draftmancer_bot_user_id,
+                    public_draftmancer_session_url,
                     is_disconnect_autopause_enabled, is_test_mode)
 from database.db_session import db_session
 from models.draft_session import DraftSession
@@ -791,7 +793,7 @@ class DraftSetupManager:
 
         who = mention_names(sign_ups, sorted(n for n in self.disconnected_users.values() if n))
 
-        session_url = get_draftmancer_session_url(self.draft_id)
+        session_url = public_draftmancer_session_url(self.draft_id)
         return (
             f"⏸️ **Draft paused** — {', '.join(who) or 'a player'} dropped out of "
             f"Draftmancer, which stalls the table.\n\n"
@@ -989,7 +991,7 @@ class DraftSetupManager:
         try:
             # Generate new draft_id (same format as SessionDetails)
             new_draft_id = ''.join(random.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') for _ in range(8))
-            new_draft_link = get_draftmancer_session_url(new_draft_id)
+            new_draft_link = public_draftmancer_session_url(new_draft_id)
 
             self.logger.info(f"Regenerating draft session: old={self.draft_id}, new={new_draft_id}")
 
@@ -1333,7 +1335,7 @@ class DraftSetupManager:
 
         # Add session URL so users can continue manually
         if include_session_url and self.draft_id:
-            session_url = get_draftmancer_session_url(self.draft_id)
+            session_url = public_draftmancer_session_url(self.draft_id)
             embed.add_field(
                 name="Draftmancer Session Link",
                 value=f"[Click here to join the session]({session_url})",

@@ -431,11 +431,14 @@ def get_draftmancer_bot_user_id(draft_id):
 def get_draftmancer_websocket_url(draft_id, guild_id=None, user_id=None, user_name="DraftBot"):
     """Get full websocket URL for a draft ID.
 
+    Only DraftSetupManager connects, and only to a legacy (route NULL) draft,
+    which runs on the public draftmancer.com -- never DRAFTMANCER_BASE_URL.
+
     `user_name` stays "DraftBot": every bot-vs-player filter in DraftSetupManager
     compares userName, never userID.
     """
     # Convert https:// to wss://
-    websocket_url = get_draftmancer_base_url().replace('https://', 'wss://')
+    websocket_url = public_draftmancer_url().replace('https://', 'wss://')
     user_id = user_id or get_draftmancer_bot_user_id(draft_id)
     return f"{websocket_url}?userID={user_id}&sessionID=DB{draft_id}&userName={user_name}"
 
