@@ -72,6 +72,8 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, fi
   let selected = null;
   // The cell last clicked, whose names the readout shows when the pointer is not on the grid.
   let clicked = null;
+  // The cell the pointer or focus is on, so a redraw leaves its counts alone.
+  let hovered = null;
   // User ids the viewer has switched off; kept across refreshes.
   let off = new Set();
 
@@ -109,6 +111,8 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, fi
     return `${formatCell(startUtc, zone, j)}: ${notes.join(", ")}`;
   };
   const whoLabel = (j) => `${formatCell(startUtc, zone, j)}: ${whoText(whoIsFree(shown(), freeSides, j))}`;
+  // Written only when it changes, so the polite live region does not re-announce an unchanged readout.
+  const setReadout = (text) => { if (readout.textContent !== text) readout.textContent = text; };
   const restingReadout = () => (clicked === null ? HOVER_HINT : whoLabel(clicked));
   const cellClass = (j) => {
     const booked = bookedCell();
@@ -124,11 +128,11 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, fi
     onPick: (j) => {
       selected = open() && bookable(j, state, now(), startUtc) ? j : null;
       clicked = j;
-      readout.textContent = whoLabel(j);
+      setReadout(whoLabel(j));
       renderActions();
       heat.update();
     },
-    onHover: (j) => { readout.textContent = j === null ? restingReadout() : label(j); },
+    onHover: (j) => { hovered = j; setReadout(j === null ? restingReadout() : label(j)); },
   });
   let heat = makeHeat();
 
@@ -184,7 +188,7 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, fi
     renderSides();
     renderLegend();
     renderActions();
-    if (clicked !== null) readout.textContent = whoLabel(clicked);
+    if (clicked !== null && hovered === null) setReadout(whoLabel(clicked));
     heat.update();
   }
 
@@ -233,7 +237,7 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, fi
         const hadClicked = clicked !== null;
         selected = shiftSelection(selected, startUtc, start);
         clicked = shiftSelection(clicked, startUtc, start);
-        if (hadClicked && clicked === null) readout.textContent = HOVER_HINT;
+        if (hadClicked && clicked === null && hovered === null) setReadout(HOVER_HINT);
         startUtc = start;
         heat = makeHeat();
       }

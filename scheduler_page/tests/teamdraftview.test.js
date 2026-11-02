@@ -164,15 +164,21 @@ test("clicking a half-hour writes who is free; hovering shows counts and leaving
     const cell = (j) => root.find((n) => n.attrs["data-j"] === String(j));
     cell(100).click();
     const names = readoutOf(root).textContent;
-    assert.match(names, /^.+: Rook's team — .+ · Ash's team — .+/);
+    const when = names.split(": ")[0];
+    const nobody = "Rook's team — nobody · Ash's team — nobody";
+    assert.equal(names, `${when}: ${nobody} (Ben, Rook, Wren, Ash, Pike, Fern, Moss not free)`);
     for (const fn of grid.listeners.pointerover) fn({ target: { closest: () => cell(101) } });
     assert.match(readoutOf(root).textContent, /\d–\d free$/);
     for (const fn of grid.listeners.pointerleave) fn({ pointerType: "mouse" });
     assert.equal(readoutOf(root).textContent, names);
     // Switching a player off recomputes the clicked names.
     root.find((n) => n.attrs["aria-pressed"] && n.children.includes("Ben")).click();
-    assert.notEqual(readoutOf(root).textContent, names);
-    assert.ok(!readoutOf(root).textContent.includes("Ben"));
+    assert.equal(readoutOf(root).textContent, `${when}: ${nobody} (Rook, Wren, Ash, Pike, Fern, Moss not free)`);
+    // With the pointer on a cell, a toggle leaves its counts alone.
+    for (const fn of grid.listeners.pointerover) fn({ target: { closest: () => cell(101) } });
+    const counts = readoutOf(root).textContent;
+    root.find((n) => n.attrs["aria-pressed"] && n.children.includes("Rook")).click();
+    assert.equal(readoutOf(root).textContent, counts);
   } finally {
     view.dispose();
   }

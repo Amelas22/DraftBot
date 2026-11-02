@@ -163,9 +163,11 @@ test("whoText has no parenthetical when everyone is free", () => {
   assert.equal(whoText(whoIsFree(state, [sets([0]), sets([0])], 0)), "Team A — Ann · Team B — Dee");
 });
 
+// Only Ann is ever free (cell 0).
+const freeBySideStub = (state) => state.sides.map((s) => s.people.map((p) => new Set(p.name === "Ann" ? [0] : [])));
+
 test("a person switched off appears in neither list", () => {
   const state = withoutPeople(whoState([["Team A", "Ann", "Bo"], ["Team B", "Dee"]]), new Set(["Bo"]));
   const groups = whoIsFree(state, freeBySideStub(state), 0);
   assert.equal(whoText(groups), "Team A — Ann · Team B — nobody (Dee not free)");
 });
-function freeBySideStub(state) { return state.sides.map((s) => s.people.map((p) => new Set(p.name === "Ann" ? [0] : []))); }
