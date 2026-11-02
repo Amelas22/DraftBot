@@ -1,5 +1,5 @@
 // Team draft, the view: the two sides, one heatmap of when they are free together with each run of the same people
-// boxed and its counts written once, Book / Move / Clear for the matchup's time, and a way to paint or edit the viewer's own usual week. Pressing a
+// boxed and its counts written once, Book / Move / Clear for the matchup's time, and a way to paint or edit the viewer's own usual week or this week. Pressing a
 // side or a player leaves them out of the grid until pressed again. Every decision lives in teamdraft.js; this file
 // only draws and wires.
 import { LinkExpired, checkDoc } from "./api.js";
@@ -7,6 +7,7 @@ import { CELLS, CELL_MS, addCells, isoSeconds } from "./week.js";
 import { mountHeatmap, formatCell, layoutWindow } from "./grid.js";
 import { appBar } from "./appbar.js";
 import { editWeekLabel, weekEditing } from "./usual.js";
+import { thisWeekEditing } from "./thisweek.js";
 import { el } from "./dom.js";
 import { expiredMessage } from "./messages.js";
 import { actionErrorText, createSync, hasAvailability, shadeLevel } from "./teams.js";
@@ -32,12 +33,13 @@ export async function mountTeamDraft(root, api, deps = {}) {
 
   // The matchup's refresh loop and listeners are disposed before the editor takes the page; show registers them
   // afresh when the matchup comes back, refetched so the viewer's new week is in it.
-  const show = (usualDoc, firstStatus) => showMatchup(root, api, paths, usualDoc, now, cleanups, notice, firstStatus, editWeek)
+  const show = (usualDoc, firstStatus) => showMatchup(root, api, paths, usualDoc, now, cleanups, notice, firstStatus, editors)
     .catch((e) => {
       if (e instanceof LinkExpired) notice(expiredMessage());
       else { console.error(e); notice(actionErrorText(e)); }
     });
-  const editWeek = weekEditing(root, api, { now, backLabel: BACK, dispose: controller.dispose, show });
+  const editing = { now, backLabel: BACK, dispose: controller.dispose, show };
+  const editors = { usual: weekEditing(root, api, editing), thisWeek: thisWeekEditing(root, api, editing) };
 
   root.replaceChildren(el("p", { class: "status", text: "Loading…" }));
   let usual;
@@ -47,11 +49,11 @@ export async function mountTeamDraft(root, api, deps = {}) {
     if (e instanceof LinkExpired) { notice(expiredMessage()); return controller; }
     throw e;
   }
-  await showMatchup(root, api, paths, usual, now, cleanups, notice, "", editWeek);
+  await showMatchup(root, api, paths, usual, now, cleanups, notice, "", editors);
   return controller;
 }
 
-async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, firstStatus, editWeek) {
+async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, firstStatus, editors) {
   root.replaceChildren(el("p", { class: "status", text: "Loading…" }));
   let state;
   try {
@@ -242,8 +244,10 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, fi
   const bar = appBar("Team draft");
   bar.classList.add("withaction");
   const editBtn = el("button", { type: "button", class: "secondary small", text: editWeekLabel(usualDoc) });
-  editBtn.addEventListener("click", () => { editWeek(usualDoc); });
-  bar.append(editBtn);
+  editBtn.addEventListener("click", () => { editors.usual(usualDoc); });
+  const thisWeekBtn = el("button", { type: "button", class: "secondary small", text: "Edit this week" });
+  thisWeekBtn.addEventListener("click", () => { editors.thisWeek(usualDoc); });
+  bar.append(editBtn, thisWeekBtn);
 
   root.classList.add("wide");
   root.replaceChildren(bar, heading, ledeEl, bookLine, threadLink, sidesBox, pane);

@@ -1,6 +1,6 @@
 // The page's only door to the bot: a JSON API on the same origin, authorised by the link token. No DOM;
 // fetch is injectable for tests.
-import { CELL_MS, isoSeconds } from "./week.js";
+import { CELL_MS, DAY_CELLS, decodeDayCells, encodeCells, isoSeconds } from "./week.js";
 
 export class LinkExpired extends Error {
   constructor(message = "link expired") { super(message); this.name = "LinkExpired"; }
@@ -28,6 +28,16 @@ const THIS_WEEK_PATH = "/api/this-week";
 
 // A player with no overrides: the server answers this on a first read, and the fixtures start from it.
 const emptyThisWeek = () => ({ format: "draftbot.scheduler.this_week", version: 1, zone: null, days: [] });
+// A this-week doc's days as a usual week: each date's cells become its weekday's.
+function daysAsWeek(days) {
+  const cells = new Set();
+  for (const d of days) {
+    const base = ((new Date(`${d.date}T12:00:00Z`).getUTCDay() + 6) % 7) * DAY_CELLS;
+    for (let h = 0; h < DAY_CELLS; h++) cells.delete(base + h);
+    for (const h of decodeDayCells(d.cells)) cells.add(base + h);
+  }
+  return cells;
+}
 // The in-memory this-week behaviour the fixture apis share; a saved doc comes back without its `also_usual`.
 function fixtureThisWeek() {
   let doc = emptyThisWeek();
@@ -232,7 +242,7 @@ function teamsFixtureApi(read, { file, usualFile, name }) {
 // `#fixture=team-draft`: Ben, on a link for Rook's team vs Ash's team. `#fixture=team-draft-new`: Fern, on the
 // same link, who has never painted a usual week. The window starts at the current half hour so cells are bookable
 // whenever the page is opened; book and clear change an in-memory booking and bump its version, answering like the
-// server. A saved week shows up as the viewer's row, as the server's next read would have it.
+// server. A saved week or this week shows up as the viewer's row, as the server's next read would have it.
 const TEAM_DRAFT_FIXTURES = {
   "team-draft": { user: null, usualFile: "fixtures/usual-week.json" },
   "team-draft-new": { user: "900000000000000023", usualFile: null },
@@ -252,6 +262,15 @@ function teamDraftFixtureApi(read, { user: viewer, usualFile }) {
   };
   const user = () => state.me.user;
   const answer = (code) => structuredClone({ ok: code === null, code, state });
+  const viewerRows = () => state.sides.flatMap((s) => s.people).filter((p) => p.user === user());
+  const thisWeek = fixtureThisWeek();
+  const setOverrides = (overrides) => { for (const p of viewerRows()) p.overrides = structuredClone(overrides); };
+  const putUsual = async (doc) => {
+    await load();
+    week = structuredClone(doc);
+    for (const p of viewerRows()) { p.zone = doc.zone; p.cells = doc.cells; }
+    return doc;
+  };
 
   async function act(body) {
     await load();
@@ -280,15 +299,18 @@ function teamDraftFixtureApi(read, { user: viewer, usualFile }) {
     fixture: true,
     me: async () => { await load(); return { user: user(), guild: "fixture", view: "team_draft", exp: null }; },
     getUsual: async () => { await load(); return structuredClone(week); },
-    putUsual: async (doc) => {
+    putUsual,
+    getThisWeek: thisWeek.getThisWeek,
+    putThisWeek: async (doc) => {
       await load();
-      week = structuredClone(doc);
-      for (const p of state.sides.flatMap((s) => s.people)) {
-        if (p.user === user()) { p.zone = doc.zone; p.cells = doc.cells; }
+      // As the server does: with also_usual and no usual week, the days first become the usual week.
+      if (doc.also_usual && week === null && doc.days.length) {
+        await putUsual({ format: "draftbot.scheduler.usual_week", version: 1, zone: doc.zone, cells: encodeCells(daysAsWeek(doc.days)), saved_at: isoSeconds(new Date()) });
       }
-      return doc;
+      setOverrides(doc.days.map((d) => ({ date: d.date, zone: doc.zone, cells: d.cells })));
+      return thisWeek.putThisWeek(doc);
     },
-    ...fixtureThisWeek(),
+    clearThisWeek: async () => { await load(); setOverrides([]); return thisWeek.clearThisWeek(); },
     get: async (path) => {
       if (path !== "/api/team-draft") throw new Error(`no fixture for ${path}`);
       return structuredClone(await load());
