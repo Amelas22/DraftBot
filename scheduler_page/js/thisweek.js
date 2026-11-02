@@ -9,7 +9,7 @@ import { LinkExpired, checkDoc } from "./api.js";
 import { expiredMessage } from "./messages.js";
 import { el } from "./dom.js";
 import { windowColumns } from "./grid.js";
-import { autosaver, paintGrid, saveFailedMessage, toFile, touchHint, zoneSelect } from "./usual.js";
+import { autosaver, paintGrid, paintLede, saveFailedMessage, toFile, touchHint, zoneSelect } from "./usual.js";
 
 const FORMAT = "draftbot.scheduler.this_week";
 const RESET_FAILED = "Could not reset. Check your connection and press Reset again.";
@@ -173,9 +173,9 @@ export async function mountThisWeek(root, api, deps) {
   });
 
   root.replaceChildren(
-    el("p", { class: "lede", text: usual
+    paintLede(usual
       ? "This starts from your usual week. Paint or erase the half-hours that are different this week. Your usual week stays as it is."
-      : "Drag or tap to paint the half-hours you can draft this week. Times are local to the zone below. To keep them for every week, press Save as my usual week." }),
+      : "A draft and its matches take a few hours. Drag or tap to paint this week. Times are local to the zone below. To keep them for every week, press Save as my usual week."),
     ...setup,
     paintBox,
     el("div", { class: "actions" }, ...(keep ? [keep] : []), reset),
