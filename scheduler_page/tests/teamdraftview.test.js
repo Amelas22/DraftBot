@@ -112,28 +112,44 @@ const freeAt = (root, when) => {
   return n.attrs["aria-label"].split(": ")[1].split(" ")[0].split("–").map(Number).reduce((a, b) => a + b, 0);
 };
 
-test("Edit this week paints a time, saves and comes back to a heatmap that counts it", async () => {
+// On team-draft-new (Fern, no usual week): opens Edit this week, ticks or unticks the also-usual box, paints the
+// last day's 12 PM and saves. Resolves with the root and that cell's free count before and after.
+// The fixture window starts at the real current half hour, so the view runs on the real clock (a run that spans
+// local midnight could pick the wrong day).
+async function paintAndSave(alsoUsual) {
   const api = createFixtureApi("team-draft-new", diskFetch);
   const root = new Node();
-  // The fixture window starts at the real current half hour, so the view runs on the real clock.
   const view = await mountTeamDraft(root, api, { now: () => new Date() });
   try {
     const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    const lastDay = editorDates(new Date(), zone)[6];
-    const when = `${columnLabel(lastDay)}, 12:00 PM`;
+    const when = `${columnLabel(editorDates(new Date(), zone)[6])}, 12:00 PM`;
     const before = freeAt(root, when);
 
     byText(root, "Edit this week").click();
     await tick();
+    root.find((n) => n.attrs.type === "checkbox").checked = alsoUsual;
     const grid = root.find((n) => n.attrs.role === "grid");
     const target = root.find((n) => n.attrs["data-i"] === String(6 * 48 + 24));
     for (const fn of grid.listeners.keydown) fn({ target, key: " ", preventDefault() {} });
     byText(root, "Save").click();
     await tick();
-
-    assert.ok(byText(root, "Saved."));
-    assert.equal(freeAt(root, when), before + 1);
+    return { root, before, after: freeAt(root, when) };
   } finally {
     view.dispose();
   }
+}
+
+test("Edit this week saves overrides alone and the heatmap counts them", async () => {
+  const { root, before, after } = await paintAndSave(false);
+  assert.ok(byText(root, "Saved."));
+  assert.equal(after, before + 1);
+  // Unticked, no usual week was written.
+  assert.ok(byText(root, "Set my usual week"));
+});
+
+test("Edit this week with the box ticked also keeps the week as the usual week", async () => {
+  const { root, before, after } = await paintAndSave(true);
+  assert.ok(byText(root, "Saved."));
+  assert.equal(after, before + 1);
+  assert.ok(byText(root, "Edit my usual week"));
 });

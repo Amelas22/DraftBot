@@ -1,21 +1,20 @@
 // The this-week editor: today and the six days after, as dated columns pre-filled from the usual week, saved as
 // dated overrides. A pure model (editorDates, columnLabel, prefill, toThisWeekFile) plus a thin DOM view.
-import { DAY_CELLS, decodeCells, decodeDayCells, encodeDayCells, localDateOf } from "./week.js";
+import { DAY_CELLS, decodeCells, decodeDayCells, encodeDayCells, localDateOf, weekdayOfDate } from "./week.js";
 import { LinkExpired, checkDoc } from "./api.js";
 import { expiredMessage } from "./messages.js";
 import { el } from "./dom.js";
 import { appBar } from "./appbar.js";
-import { paintGrid, saveFailedMessage } from "./usual.js";
+import { paintGrid, saveFailedMessage, touchHint, zoneSelect } from "./usual.js";
 
 const FORMAT = "draftbot.scheduler.this_week";
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const DAY_MS = 86400000;
+const RESET_FAILED = "Could not reset. Check your connection and press Reset again.";
 
 // A "YYYY-MM-DD" date as noon UTC, so day arithmetic never trips over a zone.
 const noonOf = (date) => new Date(`${date}T12:00:00Z`);
-// The usual-week day (Monday = 0) a date falls on.
-const weekdayOf = (date) => (noonOf(date).getUTCDay() + 6) % 7;
 
 // Today through today+6, as local dates in zone.
 export function editorDates(now, zone) {
@@ -37,7 +36,7 @@ export function prefill(dates, usual, overrides) {
   dates.forEach((date, d) => {
     const o = overrides.find((x) => x.date === date);
     for (let h = 0; h < DAY_CELLS; h++) {
-      const on = o ? o.cells.has(h) : Boolean(usual?.cells.has(weekdayOf(date) * DAY_CELLS + h));
+      const on = o ? o.cells.has(h) : Boolean(usual?.cells.has(weekdayOfDate(date) * DAY_CELLS + h));
       if (on) out.add(d * DAY_CELLS + h);
     }
   });
@@ -100,11 +99,7 @@ export async function mountThisWeek(root, api, deps) {
   const setup = [];
   let alsoUsual = null;
   if (!usual) {
-    const zoneList = deps.zones || (typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [zone]);
-    const zones = zoneList.includes(zone) ? zoneList : [zone, ...zoneList];
-    const select = el("select", { id: "zone", "aria-label": "Time zone" });
-    for (const z of zones) select.append(el("option", { value: z, text: z.replaceAll("_", " ") }));
-    select.value = zone;
+    const { select, row } = zoneSelect(zone, deps.zones);
     // Today may be another date in the new zone; the painting stays where it is.
     select.addEventListener("change", () => {
       zone = select.value;
@@ -112,7 +107,7 @@ export async function mountThisWeek(root, api, deps) {
       painter.setLabels(dates.map(columnLabel), dates.map(tabLabel));
       touched();
     });
-    setup.push(el("label", { class: "zonerow", for: "zone" }, "Time zone ", select));
+    setup.push(row);
     alsoUsual = el("input", { type: "checkbox", id: "alsousual" });
     alsoUsual.checked = true;
     alsoUsual.addEventListener("change", touched);
@@ -124,7 +119,7 @@ export async function mountThisWeek(root, api, deps) {
   back.addEventListener("click", () => deps.onBack());
 
   const busy = (on) => { save.disabled = on; reset.disabled = on; };
-  const failed = (e) => { status.textContent = e instanceof LinkExpired ? expiredMessage() : saveFailedMessage(e); };
+  const failed = (e, message) => { status.textContent = e instanceof LinkExpired ? expiredMessage() : message; };
   reset.addEventListener("click", async () => {
     busy(true);
     status.textContent = "Resetting…";
@@ -133,7 +128,7 @@ export async function mountThisWeek(root, api, deps) {
       painter.setCells(prefill(dates, usual, []));
       status.textContent = usual ? "This week is back to your usual week." : "This week is cleared.";
     } catch (e) {
-      failed(e);
+      failed(e, RESET_FAILED);
     } finally {
       busy(false);
     }
@@ -147,7 +142,7 @@ export async function mountThisWeek(root, api, deps) {
       status.textContent = "Saved.";
       deps.onSaved(doc);
     } catch (e) {
-      failed(e);
+      failed(e, saveFailedMessage(e));
     } finally {
       busy(false);
     }
@@ -160,7 +155,7 @@ export async function mountThisWeek(root, api, deps) {
       ? "This starts from your usual week. Paint or erase the half-hours that are different this week. Your usual week stays as it is."
       : "Drag or tap to paint the half-hours you can draft this week. Times are local to the zone below." }),
     ...setup,
-    painter.tabs, el("p", { class: "touchhint", text: "Drag on the grid to paint. Drag the times on the left to scroll." }), painter.grid,
+    painter.tabs, touchHint(), painter.grid,
     ...(alsoUsual ? [el("label", { class: "alsousual", for: "alsousual" }, alsoUsual, el("span", { text: "Also keep this as my usual week" }))] : []),
     el("div", { class: "actions" }, save, reset, back),
     status,

@@ -174,3 +174,11 @@ test("the back button leaves without saving", async () => {
   assert.equal(back, 1);
   assert.deepEqual(calls, []);
 });
+
+test("a failed Reset says to press Reset again", async () => {
+  const api = { ...fakeApi([]), clearThisWeek: async () => { throw new TypeError("fetch failed"); } };
+  const root = await mount(api, { usualDoc: USUAL });
+  byText(root, "Reset to usual week").click();
+  await tick();
+  assert.ok(byText(root, "Could not reset. Check your connection and press Reset again."));
+});

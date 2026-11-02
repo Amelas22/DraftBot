@@ -76,7 +76,7 @@ export function weekEditing(root, api, { now, backLabel, dispose, show }) {
 
 // The paintable 7-column grid both week editors draw, with its day tabs. labels name the columns (tabLabels the
 // tabs, default labels); onChange runs after every stroke or key toggle. setLabels renames the columns in place.
-// It opens on the first day with cells painted.
+// It opens on the first day's tab with the given cells painted.
 export function paintGrid({ labels, tabLabels = labels, gridLabel, cells: initial, onChange }) {
   let cells = initial;
   // Day tabs: only visible under 480px (CSS), where one day fills the screen.
@@ -191,6 +191,19 @@ export function paintGrid({ labels, tabLabels = labels, gridLabel, cells: initia
   };
 }
 
+// The time zone picker both editors show: zones (else every zone the browser knows, else fallback), with zone
+// first if missing, and zone selected. row is the labelled picker to place on the page.
+export function zoneSelect(zone, zones, fallback = zone) {
+  const list = zones || (typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [fallback]);
+  const select = el("select", { id: "zone", "aria-label": "Time zone" });
+  for (const z of list.includes(zone) ? list : [zone, ...list]) select.append(el("option", { value: z, text: z.replaceAll("_", " ") }));
+  select.value = zone;
+  return { select, row: el("label", { class: "zonerow", for: "zone" }, "Time zone ", select) };
+}
+
+// The hint shown above a paint grid on a touch screen.
+export const touchHint = () => el("p", { class: "touchhint", text: "Drag on the grid to paint. Drag the times on the left to scroll." });
+
 // deps: { now?: () => Date, zones?: string[], defaultZone?: string, intro?: string, onSaved?: (doc) => void,
 //         onBack?: () => void, backLabel?: string }
 // With onBack the editor also offers a back button (backLabel, else Back to teams), leaving without saving.
@@ -199,7 +212,6 @@ export async function mountUsual(root, api, deps = {}) {
   const onSaved = deps.onSaved;
   const now = deps.now || (() => new Date());
   const browserZone = deps.defaultZone || Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const zoneList = deps.zones || (typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [browserZone]);
 
   root.replaceChildren(el("p", { class: "status", text: "Loading your week…" }));
   let loaded;
@@ -211,11 +223,7 @@ export async function mountUsual(root, api, deps = {}) {
   }
 
   let zone = loaded.zone || browserZone;
-  const zones = zoneList.includes(zone) ? zoneList : [zone, ...zoneList];
-
-  const select = el("select", { id: "zone", "aria-label": "Time zone" });
-  for (const z of zones) select.append(el("option", { value: z, text: z.replaceAll("_", " ") }));
-  select.value = zone;
+  const { select, row: zoneRow } = zoneSelect(zone, deps.zones, browserZone);
 
   const status = el("p", { class: "status", role: "status", "aria-live": "polite" });
   const save = el("button", { type: "button", class: "primary", text: "Save" });
@@ -251,8 +259,8 @@ export async function mountUsual(root, api, deps = {}) {
     ...(deps.intro ? [el("p", { class: "notice intro", text: deps.intro })] : []),
     el("h1", { text: "When are you usually free?" }),
     el("p", { class: "lede", text: "Drag or tap to paint the half-hours you can usually draft. Times are local to the zone below. Drag again over painted cells to erase." }),
-    el("label", { class: "zonerow", for: "zone" }, "Time zone ", select),
-    tabs, el("p", { class: "touchhint", text: "Drag on the grid to paint. Drag the times on the left to scroll." }), grid,
+    zoneRow,
+    tabs, touchHint(), grid,
     el("div", { class: "actions" }, save, clear, ...(back ? [back] : [])),
     status,
   );

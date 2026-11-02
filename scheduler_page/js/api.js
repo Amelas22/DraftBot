@@ -1,6 +1,6 @@
 // The page's only door to the bot: a JSON API on the same origin, authorised by the link token. No DOM;
 // fetch is injectable for tests.
-import { CELL_MS, DAY_CELLS, decodeDayCells, encodeCells, isoSeconds } from "./week.js";
+import { CELL_MS, DAY_CELLS, decodeDayCells, encodeCells, isoSeconds, weekdayOfDate } from "./week.js";
 
 export class LinkExpired extends Error {
   constructor(message = "link expired") { super(message); this.name = "LinkExpired"; }
@@ -32,7 +32,7 @@ const emptyThisWeek = () => ({ format: "draftbot.scheduler.this_week", version: 
 function daysAsWeek(days) {
   const cells = new Set();
   for (const d of days) {
-    const base = ((new Date(`${d.date}T12:00:00Z`).getUTCDay() + 6) % 7) * DAY_CELLS;
+    const base = weekdayOfDate(d.date) * DAY_CELLS;
     for (let h = 0; h < DAY_CELLS; h++) cells.delete(base + h);
     for (const h of decodeDayCells(d.cells)) cells.add(base + h);
   }

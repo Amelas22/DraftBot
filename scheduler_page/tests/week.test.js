@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import {
   decodeCells, encodeCells, windowCells, usualCellOf, CELLS,
   decodeDayCells, encodeDayCells, effectiveWindowCells,
+  weekdayOfDate,
 } from "../js/week.js";
 
 const fx = (name) =>
@@ -70,4 +71,10 @@ test("addCells and isoSeconds place a window cell in time", async () => {
   assert.equal(CELL_MS, 30 * 60000);
   assert.equal(isoSeconds(addCells(new Date("2026-10-19T04:00:00Z"), 3)), "2026-10-19T05:30:00Z");
   assert.equal(isoSeconds(new Date("2026-10-19T05:30:00.123Z")), "2026-10-19T05:30:00Z");
+});
+
+test("weekdayOfDate counts from Monday", () => {
+  assert.equal(weekdayOfDate("2026-11-02"), 0);
+  assert.equal(weekdayOfDate("2026-11-08"), 6);
+  assert.equal(weekdayOfDate("2026-03-08"), 6); // a DST change day
 });
