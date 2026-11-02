@@ -37,7 +37,7 @@ from .trophy_quiz_submission import TrophyQuizSubmission
 from .mtgo_account import MtgoAccount
 from .mtgo_job import MtgoJob
 from .wallet_tx import WalletTx
-from .scheduler import PlayerAvailability, SchedulerLink
+from .scheduler import PlayerAvailability, PlayerDayOverride, SchedulerLink
 from .team_finder import LfgAction, LfgRequest, LfgTeam, LfgTeamMember
 from .team_draft import TeamDraft, TeamDraftAction
 
@@ -92,6 +92,7 @@ __all__ = [
     'CardLoan',
     'ACTIVE_STATES',
     'PlayerAvailability',
+    'PlayerDayOverride',
     'SchedulerLink',
     'LfgTeam',
     'LfgTeamMember',

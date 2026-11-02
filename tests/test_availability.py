@@ -10,13 +10,16 @@ from services.availability import (
     InvalidWeek,
     CELLS,
     UsualWeek,
+    clear_day_overrides,
     decode_cells,
     cells_to_bytes,
     day_cells_from_bytes,
     day_cells_to_bytes,
     effective_window_cells,
     iso_z,
+    load_day_overrides,
     load_usual_week,
+    replace_day_overrides,
     save_usual_week,
     usual_week_doc,
     next_week_lines,
@@ -174,3 +177,93 @@ def test_iso_z_reads_naive_as_utc_and_converts_aware():
     assert iso_z(datetime(2026, 10, 22, 12, 0, 5, 123456)) == "2026-10-22T12:00:05Z"
     assert iso_z(datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)) == "2026-10-22T12:00:00Z"
     assert iso_z(datetime(2026, 10, 22, 8, 0, tzinfo=ZoneInfo("America/New_York"))) == "2026-10-22T12:00:00Z"
+
+
+# --- dated overrides ---------------------------------------------------------
+
+NY = "America/New_York"
+TODAY = date(2026, 10, 22)  # NOW is Oct 22 08:00 in New York
+
+
+def _day(d: date, cells: set[int], zone: str = NY) -> DayOverride:
+    return DayOverride(zone, d, frozenset(cells))
+
+
+def _usual(*, weekday: int, cells: set[int]) -> UsualWeek:
+    return UsualWeek(NY, frozenset(weekday * 48 + c for c in cells))
+
+
+@pytest.mark.asyncio
+async def test_override_equal_to_usual_stores_nothing(test_db) -> None:
+    await save_usual_week("1", _usual(weekday=TODAY.weekday(), cells={20, 21}), NOW)
+    stored = await replace_day_overrides("1", [_day(TODAY, {20, 21})], False, NOW)
+    assert stored == []
+    assert await load_day_overrides("1", NOW) == []
+
+
+@pytest.mark.asyncio
+async def test_changed_day_is_stored_and_others_are_not(test_db) -> None:
+    usual = _usual(weekday=TODAY.weekday(), cells={20, 21})
+    await save_usual_week("1", usual, NOW)
+    other = date(2026, 10, 23)
+    changed = _day(TODAY, {30})
+    same = _day(other, set())
+    stored = await replace_day_overrides("1", [changed, same], False, NOW)
+    assert stored == [changed]
+    assert await load_day_overrides("1", NOW) == [changed]
+
+
+@pytest.mark.asyncio
+async def test_usual_edit_shows_through_untouched_days(test_db) -> None:
+    thu, fri = TODAY, date(2026, 10, 23)
+    both = {thu.weekday() * 48 + 20, fri.weekday() * 48 + 20}
+    await save_usual_week("1", UsualWeek(NY, frozenset(both)), NOW)
+    await replace_day_overrides("1", [_day(thu, {30})], False, NOW)
+    new_usual = UsualWeek(NY, frozenset({thu.weekday() * 48 + 22, fri.weekday() * 48 + 22}))
+    await save_usual_week("1", new_usual, NOW)
+    start = datetime(2026, 10, 22, 4, 0, tzinfo=timezone.utc)  # local midnight Oct 22 (EDT)
+    got = effective_window_cells(
+        await load_usual_week("1"), await load_day_overrides("1", NOW), start)
+    # Thursday follows its override (cell 30); Friday follows the new usual (cell 22).
+    assert got == frozenset({30, 48 + 22})
+
+
+@pytest.mark.asyncio
+async def test_replace_drops_rows_in_another_zone(test_db) -> None:
+    await replace_day_overrides("1", [_day(TODAY, {1}, "Europe/London")], False, NOW)
+    assert [o.zone for o in await load_day_overrides("1", NOW)] == ["Europe/London"]
+    await replace_day_overrides("1", [_day(TODAY, {2})], False, NOW)
+    assert [(o.zone, o.cells) for o in await load_day_overrides("1", NOW)] == [
+        (NY, frozenset({2}))]
+
+
+@pytest.mark.asyncio
+async def test_dead_rows_are_not_loaded(test_db) -> None:
+    old = _day(date(2026, 10, 20), {4})
+    live = _day(date(2026, 10, 21), {5})  # yesterday is still live
+    await replace_day_overrides("1", [old, live], False, NOW)
+    assert await load_day_overrides("1", NOW) == [live]
+
+
+@pytest.mark.asyncio
+async def test_also_usual_writes_usual_week_when_none(test_db) -> None:
+    stored = await replace_day_overrides("1", [_day(TODAY, {8, 9})], True, NOW)
+    assert stored == []
+    assert await load_usual_week("1") == _usual(weekday=TODAY.weekday(), cells={8, 9})
+    assert await load_day_overrides("1", NOW) == []
+
+
+@pytest.mark.asyncio
+async def test_also_usual_ignored_when_usual_exists(test_db) -> None:
+    usual = _usual(weekday=0, cells={3})
+    await save_usual_week("1", usual, NOW)
+    stored = await replace_day_overrides("1", [_day(TODAY, {8, 9})], True, NOW)
+    assert len(stored) == 1
+    assert await load_usual_week("1") == usual
+
+
+@pytest.mark.asyncio
+async def test_clear_day_overrides(test_db) -> None:
+    await replace_day_overrides("1", [_day(TODAY, {8})], False, NOW)
+    await clear_day_overrides("1")
+    assert await load_day_overrides("1", NOW) == []

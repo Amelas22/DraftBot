@@ -13,11 +13,11 @@ from datetime import date, datetime, timedelta, timezone
 from functools import cache
 from zoneinfo import ZoneInfo, available_timezones
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.db_session import db_session
-from models.scheduler import PlayerAvailability
+from models.scheduler import PlayerAvailability, PlayerDayOverride
 
 CELLS: int = 336
 CELL_MINUTES: int = 30
@@ -251,3 +251,112 @@ async def save_usual_week(user_id: str, week: UsualWeek, now_utc: datetime) -> N
         row.cells = cells_to_bytes(week.cells)
         row.version = _VERSION
         row.stored_utc = naive_utc(now_utc)
+
+
+def usual_day(week: UsualWeek, local_date: date) -> frozenset[int]:
+    """The 48 cells (0..47) the usual week gives ``local_date``'s weekday."""
+    base = local_date.weekday() * DAY_CELLS
+    return frozenset(c - base for c in week.cells if base <= c < base + DAY_CELLS)
+
+
+def _local_date(day: DayOverride) -> date:
+    return day.local_date
+
+
+def _override(row: PlayerDayOverride) -> DayOverride:
+    return DayOverride(
+        zone=str(row.zone),
+        local_date=row.local_date,
+        cells=day_cells_from_bytes(bytes(row.cells)),
+    )
+
+
+def _is_live(row: PlayerDayOverride, now_utc: datetime) -> bool:
+    """A day stays live until a day past its end in its own zone."""
+    today = now_utc.astimezone(ZoneInfo(str(row.zone))).date()
+    return row.local_date >= today - timedelta(days=1)
+
+
+async def day_overrides(
+    session: AsyncSession, users: list[str], now_utc: datetime
+) -> dict[str, list[DayOverride]]:
+    """The live dated overrides of ``users``, sorted by date; anyone without one is left out."""
+    if not users:
+        return {}
+    rows = (
+        await session.execute(
+            select(PlayerDayOverride)
+            .where(PlayerDayOverride.user_id.in_(users))
+            .order_by(PlayerDayOverride.local_date)
+        )
+    ).scalars()
+    out: dict[str, list[DayOverride]] = {}
+    for r in rows:
+        if _is_live(r, now_utc):
+            out.setdefault(str(r.user_id), []).append(_override(r))
+    return out
+
+
+async def load_day_overrides(user_id: str, now_utc: datetime) -> list[DayOverride]:
+    """A player's live dated overrides, sorted by date."""
+    async with db_session() as session:
+        return (await day_overrides(session, [user_id], now_utc)).get(user_id, [])
+
+
+async def replace_day_overrides(
+    user_id: str, days: Sequence[DayOverride], also_usual: bool, now_utc: datetime
+) -> list[DayOverride]:
+    """Make ``days`` the player's overrides, dropping every earlier row.
+
+    A day matching the usual week is not stored. With ``also_usual`` and no
+    saved usual week, the days first become the usual week (in the first day's zone).
+    """
+    async with db_session() as session:
+        await session.execute(
+            delete(PlayerDayOverride).where(PlayerDayOverride.user_id == user_id)
+        )
+        week_row = await session.get(PlayerAvailability, user_id)
+        usual = (
+            UsualWeek(str(week_row.zone), cells_from_bytes(bytes(week_row.cells)))
+            if week_row is not None
+            else None
+        )
+        if also_usual and usual is None and days:
+            cells: set[int] = set()
+            for d in days:
+                base = d.local_date.weekday() * DAY_CELLS
+                cells.difference_update(range(base, base + DAY_CELLS))
+                cells.update(base + c for c in d.cells)
+            usual = UsualWeek(days[0].zone, frozenset(cells))
+            session.add(
+                PlayerAvailability(
+                    user_id=user_id,
+                    zone=usual.zone,
+                    cells=cells_to_bytes(usual.cells),
+                    version=_VERSION,
+                    stored_utc=naive_utc(now_utc),
+                )
+            )
+        stored: list[DayOverride] = []
+        for d in sorted(days, key=_local_date):
+            if d.cells == (usual_day(usual, d.local_date) if usual else frozenset()):
+                continue
+            session.add(
+                PlayerDayOverride(
+                    user_id=user_id,
+                    local_date=d.local_date,
+                    zone=d.zone,
+                    cells=day_cells_to_bytes(d.cells),
+                    stored_utc=naive_utc(now_utc),
+                )
+            )
+            stored.append(d)
+        return stored
+
+
+async def clear_day_overrides(user_id: str) -> None:
+    """Drop all of a player's dated overrides."""
+    async with db_session() as session:
+        await session.execute(
+            delete(PlayerDayOverride).where(PlayerDayOverride.user_id == user_id)
+        )
