@@ -8,7 +8,7 @@ import pytest
 import pytest_asyncio
 from aiohttp.test_utils import TestClient, TestServer
 
-from services.availability import MAX_FILE_BYTES, UsualWeek, cells_to_bytes, load_usual_week, save_usual_week
+from services.availability import MAX_FILE_BYTES, day_cells_to_bytes, UsualWeek, cells_to_bytes, load_usual_week, save_usual_week
 from services.scheduler_links import issue_link
 from services.scheduler_web import build_app, client_ip
 
@@ -278,3 +278,74 @@ def test_rate_limiter_is_bounded():
     for i in range(sw.MAX_KEYS + 50):
         limiter.over_limit(f"k{i}", 5, NOW)
     assert len(limiter._hits) <= sw.MAX_KEYS
+
+
+def _tw_doc(*dates: str, cells: tuple[int, ...] = (1, 2), also_usual: bool = False) -> dict:
+    b64 = base64.b64encode(day_cells_to_bytes(cells)).decode("ascii")
+    return {
+        "format": "draftbot.scheduler.this_week",
+        "version": 1,
+        "zone": "UTC",
+        "also_usual": also_usual,
+        "days": [{"date": d, "cells": b64} for d in dates],
+    }
+
+
+@pytest.mark.asyncio
+async def test_this_week_get_is_empty_not_404(client):
+    resp = await client.get("/api/this-week", headers=await _auth())
+    assert resp.status == 200
+    assert await resp.json() == {"format": "draftbot.scheduler.this_week", "version": 1, "zone": None, "days": []}
+
+
+@pytest.mark.asyncio
+async def test_put_then_get_this_week(client):
+    headers = await _auth()
+    doc = _tw_doc("2026-10-22", "2026-10-24")
+    resp = await client.put("/api/this-week", data=json.dumps(doc), headers=headers)
+    assert resp.status == 200
+    expected = {k: v for k, v in doc.items() if k != "also_usual"}
+    assert await resp.json() == expected
+    resp = await client.get("/api/this-week", headers=headers)
+    assert await resp.json() == expected
+
+
+@pytest.mark.asyncio
+async def test_put_this_week_accepts_yesterday_refuses_eight_days_out(client):
+    headers = await _auth()
+    resp = await client.put("/api/this-week", data=json.dumps(_tw_doc("2026-10-21", "2026-10-29")), headers=headers)
+    assert resp.status == 200
+    for bad in ("2026-10-30", "2026-10-20"):
+        resp = await client.put("/api/this-week", data=json.dumps(_tw_doc(bad)), headers=headers)
+        assert resp.status == 400
+        assert await resp.json() == {"error": "bad_input"}
+    resp = await client.put("/api/this-week", data=json.dumps(_tw_doc("2026-10-22", "2026-10-22")), headers=headers)
+    assert resp.status == 400
+    resp = await client.put("/api/this-week", data=b" " * (MAX_FILE_BYTES + 1), headers=headers)
+    assert resp.status == 413
+    assert await resp.json() == {"error": "too_large"}
+
+
+@pytest.mark.asyncio
+async def test_delete_this_week_clears(client):
+    headers = await _auth()
+    await client.put("/api/this-week", data=json.dumps(_tw_doc("2026-10-22")), headers=headers)
+    resp = await client.delete("/api/this-week", headers=headers)
+    assert resp.status == 204
+    assert (await (await client.get("/api/this-week", headers=headers)).json())["days"] == []
+
+
+@pytest.mark.asyncio
+async def test_this_week_requires_token(client):
+    for method in (client.get, client.put, client.delete):
+        resp = await method("/api/this-week")
+        assert resp.status == 401
+        assert await resp.json() == {"error": "expired"}
+
+
+@pytest.mark.asyncio
+async def test_this_week_writes_are_rate_limited_like_usual_week(client):
+    headers = await _auth()
+    codes = [(await client.delete("/api/this-week", headers=headers)).status for _ in range(61)]
+    assert codes[:60] == [204] * 60
+    assert codes[60] == 429

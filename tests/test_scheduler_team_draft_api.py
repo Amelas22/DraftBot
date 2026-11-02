@@ -1,7 +1,8 @@
 """The team-draft JSON API on draftbot.fyi: one matchup's sides, booking and actions."""
+import base64
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -14,13 +15,17 @@ from database.db_session import db_session
 from helpers.matchup import Roster
 from models.team_draft import TeamDraft
 from models.tournament import Tournament
-from services.availability import UsualWeek, save_usual_week
+from services.availability import DayOverride, UsualWeek, day_cells_to_bytes, replace_day_overrides, save_usual_week
 from services.scheduler_links import issue_link
 from services.scheduler_web import build_app
 from services import team_draft
 from services.team_draft import Picks, create_team_draft
 
 NOW = datetime(2026, 10, 26, 12, 10, tzinfo=timezone.utc)
+
+
+def _b64_day(cells):
+    return base64.b64encode(day_cells_to_bytes(cells)).decode("ascii")
 START = "2026-10-28T19:30:00Z"
 GUILD = "222"
 ROSTERS = (
@@ -104,15 +109,31 @@ async def test_state_lists_both_sides_people_and_the_booking(client):
         "rules": {"min_per_side": 2, "draft_cells": 2},
         "sides": [
             {"label": "Team Garruk", "people": [
-                {"user": "101", "name": "Ann", "zone": None, "cells": None}]},
+                {"user": "101", "name": "Ann", "zone": None, "cells": None, "overrides": []}]},
             {"label": "Ash, Bo", "people": [
                 {"user": "201", "name": "Ash", "zone": "Europe/London",
-                 "cells": "wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},
-                {"user": "202", "name": "Bo", "zone": None, "cells": None}]},
+                 "cells": "wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "overrides": []},
+                {"user": "202", "name": "Bo", "zone": None, "cells": None, "overrides": []}]},
         ],
         "booking": {"start_utc": START, "by_name": "Bo", "version": 3},
         "me": {"user": "111"},
     }
+
+
+@pytest.mark.asyncio
+async def test_team_draft_state_ships_live_overrides(client):
+    team_draft_id = await seed()
+    day = DayOverride("Europe/London", date(2026, 10, 27), frozenset({38, 39}))
+    stale = DayOverride("Europe/London", date(2026, 10, 1), frozenset({1}))
+    await replace_day_overrides("202", [stale, day], False, NOW)
+
+    body = await (await client.get("/api/team-draft", headers=await _auth(team_draft_id))).json()
+
+    bo = body["sides"][1]["people"][1]
+    assert bo["cells"] is None
+    assert bo["overrides"] == [
+        {"date": "2026-10-27", "zone": "Europe/London", "cells": _b64_day({38, 39})}]
+    assert body["sides"][1]["people"][0]["overrides"] == []
 
 
 @pytest.mark.asyncio

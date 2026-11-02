@@ -1,7 +1,8 @@
 """The tournament-match JSON API on draftbot.fyi: a match's sides, booking and actions."""
+import base64
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
@@ -16,7 +17,7 @@ from helpers.matchup import Roster
 from match_control_view import match_side_rosters
 from models.team_draft import TeamDraftAction
 from models.tournament import Tournament, TournamentMatch
-from services.availability import UsualWeek, save_usual_week
+from services.availability import DayOverride, UsualWeek, day_cells_to_bytes, replace_day_overrides, save_usual_week
 from services.scheduler_links import issue_link
 from services.scheduler_web import build_app
 from services.team_draft import Picks, create_team_draft
@@ -99,6 +100,20 @@ async def test_state_lists_both_sides_and_the_booking(client):
     assert body["rules"] == {"min_per_side": 2, "draft_cells": 2}
     assert body["booking"] == {"start_utc": START, "by_name": "Bo", "version": 3}
     assert body["me"] == {"user": "101"}
+
+
+@pytest.mark.asyncio
+async def test_match_state_ships_live_overrides(client):
+    match_id = await seed()
+    day = DayOverride("Europe/London", date(2026, 10, 27), frozenset({38, 39}))
+    await replace_day_overrides("202", [day], False, NOW)
+
+    body = await (await client.get("/api/tournament-match", headers=await _auth(match_id))).json()
+
+    cells = base64.b64encode(day_cells_to_bytes({38, 39})).decode("ascii")
+    assert body["sides"][1]["people"][1]["overrides"] == [
+        {"date": "2026-10-27", "zone": "Europe/London", "cells": cells}]
+    assert body["sides"][1]["people"][0]["overrides"] == []
 
 
 @pytest.mark.asyncio

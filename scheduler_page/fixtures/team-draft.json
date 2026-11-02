@@ -24,19 +24,22 @@
           "user": "900000000000000002",
           "name": "Ben",
           "zone": "America/New_York",
-          "cells": "AAAAAAAAAAAAAAD8AAAAAAD8AAAAAAD8AAAAAAD8AAAAAAD8AAAAAAD8"
+          "cells": "AAAAAAAAAAAAAAD8AAAAAAD8AAAAAAD8AAAAAAD8AAAAAAD8AAAAAAD8",
+          "overrides": []
         },
         {
           "user": "900000000000000011",
           "name": "Rook",
           "zone": "America/New_York",
-          "cells": "AAAAAAP8AAAAAAP8AAAAAAP8AAAAAAP8AAAAAAP8AAAAAAP8AAAAAAP8"
+          "cells": "AAAAAAP8AAAAAAP8AAAAAAP8AAAAAAP8AAAAAAP8AAAAAAP8AAAAAAP8",
+          "overrides": []
         },
         {
           "user": "900000000000000012",
           "name": "Wren",
           "zone": "America/Chicago",
-          "cells": "AAAAAAAAAAAAAA/wAAAAAA/wAAAAAA/wAAAAAA/wAAAAAA/wAAAAAA/w"
+          "cells": "AAAAAAAAAAAAAA/wAAAAAA/wAAAAAA/wAAAAAA/wAAAAAA/wAAAAAA/w",
+          "overrides": []
         }
       ]
     },
@@ -47,19 +50,35 @@
           "user": "900000000000000021",
           "name": "Ash",
           "zone": "America/New_York",
-          "cells": "AAAAAAAAAAAAAAD/AAAAAAD/AAAAAAD/AAAAAAD/AAAAAAD/AAAAAAD/"
+          "cells": "AAAAAAAAAAAAAAD/AAAAAAD/AAAAAAD/AAAAAAD/AAAAAAD/AAAAAAD/",
+          "overrides": []
         },
         {
           "user": "900000000000000022",
           "name": "Pike",
           "zone": "America/New_York",
-          "cells": "AAAAAAAAAAAAAAA8AAAAAAA8AAAAAAA8AAAAAAAAAAAAAAA8AAAAAAA8"
+          "cells": "AAAAAAAAAAAAAAA8AAAAAAA8AAAAAAA8AAAAAAAAAAAAAAA8AAAAAAA8",
+          "overrides": []
         },
         {
           "user": "900000000000000023",
           "name": "Fern",
           "zone": null,
-          "cells": null
+          "cells": null,
+          "overrides": []
+        },
+        {
+          "user": "900000000000000024",
+          "name": "Moss",
+          "zone": null,
+          "cells": null,
+          "overrides": [
+            {
+              "date": "2026-10-27",
+              "zone": "America/New_York",
+              "cells": "AAAAAAPA"
+            }
+          ]
         }
       ]
     }

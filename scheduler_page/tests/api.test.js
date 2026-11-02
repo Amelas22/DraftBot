@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createApi, createFixtureApi, apiFromHash, checkDoc, LinkExpired, NeedsUpdate, NotEnabled, NEEDS_UPDATE } from "../js/api.js";
+import { decodeCells, encodeDayCells, localDateOf } from "../js/week.js";
 
 const TOKEN = "abcdefghijklmnopqrstuv"; // 22 chars, like a real link token
 const reply = (status, body) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
@@ -311,4 +312,56 @@ test("the team-draft fixture books, moves and clears in memory, bumping the vers
   assert.deepEqual([r.ok, r.code], [false, "not_booked"]);
   assert.equal((await api.get("/api/team-draft")).booking.version, 3);
   assert.equal(fake.calls.length, before);
+});
+
+test("putThisWeek, getThisWeek and clearThisWeek hit /api/this-week", async () => {
+  const fake = recorder(200, { format: "draftbot.scheduler.this_week", version: 1, zone: null, days: [] });
+  const api = createApi(TOKEN, fake);
+  await api.getThisWeek();
+  await api.putThisWeek({ days: [], also_usual: false });
+  await api.clearThisWeek();
+  assert.deepEqual(fake.calls.map(([u, o]) => [o.method, u]), [
+    ["GET", "/api/this-week"], ["PUT", "/api/this-week"], ["DELETE", "/api/this-week"],
+  ]);
+  assert.equal(fake.calls[1][1].headers["Content-Type"], "application/json");
+  assert.equal(fake.calls[1][1].body, '{"days":[],"also_usual":false}');
+  assert.equal(fake.calls[2][1].body, undefined);
+});
+
+test("clearThisWeek accepts a 204 with no body", async () => {
+  const api = createApi(TOKEN, async () => ({ ok: true, status: 204, json: async () => { throw new Error("no body"); } }));
+  assert.equal(await api.clearThisWeek(), null);
+});
+
+test("every fixture api keeps an in-memory this-week doc", async () => {
+  for (const name of ["usual-week", "teams", "team-draft"]) {
+    const api = createFixtureApi(name, diskFetch());
+    const empty = { format: "draftbot.scheduler.this_week", version: 1, zone: null, days: [] };
+    assert.deepEqual(await api.getThisWeek(), empty);
+    const doc = { ...empty, zone: "UTC", days: [{ date: "2026-10-22", cells: "AAAAAAAA" }] };
+    assert.deepEqual(await api.putThisWeek({ ...doc, also_usual: false }), doc);
+    assert.deepEqual(await api.getThisWeek(), doc);
+    assert.equal(await api.clearThisWeek(), null);
+    assert.deepEqual(await api.getThisWeek(), empty);
+  }
+});
+
+test("the team-draft fixture's overrides fall inside its now-based window", async () => {
+  const api = createFixtureApi("team-draft", diskFetch());
+  const state = await api.get("/api/team-draft");
+  const moss = state.sides.flatMap((s) => s.people).find((p) => p.name === "Moss");
+  const start = Date.parse(state.window.start_utc);
+  const dates = new Set([0, 1, 2, 3, 4, 5, 6, 7].map((n) => localDateOf(new Date(start + n * 86400000), "America/New_York")));
+  assert.equal(moss.overrides.length, 1);
+  assert.ok(dates.has(moss.overrides[0].date));
+});
+
+test("the team-draft fixture stores only the days that differ from the usual week", async () => {
+  const api = createFixtureApi("team-draft", diskFetch());
+  const usual = await api.getUsual();
+  const monday = decodeCells(usual.cells);
+  const same = encodeDayCells([...monday].filter((c) => c < 48));
+  await api.putThisWeek({ zone: usual.zone, also_usual: false, days: [{ date: "2026-10-26", cells: same }, { date: "2026-10-27", cells: encodeDayCells([1]) }] });
+  const ben = (await api.get("/api/team-draft")).sides.flatMap((s) => s.people).find((p) => p.user === "900000000000000002");
+  assert.deepEqual(ben.overrides.map((o) => o.date), ["2026-10-27"]);
 });

@@ -1,5 +1,5 @@
 // Team draft, the view: the two sides, one heatmap of when they are free together with each run of the same people
-// boxed and its counts written once, Book / Move / Clear for the matchup's time, and a way to paint or edit the viewer's own usual week. Pressing a
+// boxed and its counts written once, Book / Move / Clear for the matchup's time, and a way to paint or edit the viewer's own usual week or this week. Pressing a
 // side or a player leaves them out of the grid until pressed again. Every decision lives in teamdraft.js; this file
 // only draws and wires.
 import { LinkExpired, checkDoc } from "./api.js";
@@ -7,19 +7,20 @@ import { CELLS, CELL_MS, addCells, isoSeconds } from "./week.js";
 import { mountHeatmap, formatCell, layoutWindow } from "./grid.js";
 import { appBar } from "./appbar.js";
 import { editWeekLabel, weekEditing } from "./usual.js";
+import { thisWeekEditing } from "./thisweek.js";
 import { el } from "./dom.js";
 import { expiredMessage } from "./messages.js";
-import { actionErrorText, createSync, shadeLevel } from "./teams.js";
+import { actionErrorText, createSync, hasAvailability, shadeLevel } from "./teams.js";
 import {
   FORMAT, bookable, bookingLine, countText, freeBySide, freeRuns, refusalText, shiftSelection, sideCounts, toggleSide,
-  togglePerson, withoutPeople,
+  togglePerson, whoIsFree, whoText, withoutPeople,
 } from "./teamdraft.js";
 
 const TEAM_DRAFT_PATHS = { get: "/api/team-draft", actions: "/api/team-draft/actions" };
 const REFRESH_MS = 30000;
 const HOVER_HINT = "Hover or tap a half-hour to see who's free on each side. Tap a time to pick it.";
 const TOGGLE_HINT = "Tap a team or a player to leave them out of the grid; tap again to bring them back.";
-const NO_WEEK = "no usual week set";
+const NO_WEEK = "no availability entered";
 const BACK = "Back to the matchup";
 
 // deps: { now?: () => Date, paths?: { get, actions } } (paths default to the team-draft API; a match link passes its own). Returns { dispose } which stops the refresh timer.
@@ -32,12 +33,13 @@ export async function mountTeamDraft(root, api, deps = {}) {
 
   // The matchup's refresh loop and listeners are disposed before the editor takes the page; show registers them
   // afresh when the matchup comes back, refetched so the viewer's new week is in it.
-  const show = (usualDoc, firstStatus) => showMatchup(root, api, paths, usualDoc, now, cleanups, notice, firstStatus, editWeek)
+  const show = (usualDoc, firstStatus) => showMatchup(root, api, paths, usualDoc, now, cleanups, notice, firstStatus, editors)
     .catch((e) => {
       if (e instanceof LinkExpired) notice(expiredMessage());
       else { console.error(e); notice(actionErrorText(e)); }
     });
-  const editWeek = weekEditing(root, api, { now, backLabel: BACK, dispose: controller.dispose, show });
+  const editing = { now, backLabel: BACK, dispose: controller.dispose, show };
+  const editors = { usual: weekEditing(root, api, editing), thisWeek: thisWeekEditing(root, api, editing) };
 
   root.replaceChildren(el("p", { class: "status", text: "Loading…" }));
   let usual;
@@ -47,11 +49,11 @@ export async function mountTeamDraft(root, api, deps = {}) {
     if (e instanceof LinkExpired) { notice(expiredMessage()); return controller; }
     throw e;
   }
-  await showMatchup(root, api, paths, usual, now, cleanups, notice, "", editWeek);
+  await showMatchup(root, api, paths, usual, now, cleanups, notice, "", editors);
   return controller;
 }
 
-async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, firstStatus, editWeek) {
+async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, firstStatus, editors) {
   root.replaceChildren(el("p", { class: "status", text: "Loading…" }));
   let state;
   try {
@@ -68,6 +70,10 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, fi
   let freeSides = [];
   let runs = [];
   let selected = null;
+  // The cell last clicked, whose names the readout shows when the pointer is not on the grid.
+  let clicked = null;
+  // The cell a mouse is over, so a redraw leaves its counts alone; touch and keyboard focus never hold it.
+  let hovered = null;
   // User ids the viewer has switched off; kept across refreshes.
   let off = new Set();
 
@@ -104,6 +110,10 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, fi
     if (j === bookedCell()) notes.push("booked");
     return `${formatCell(startUtc, zone, j)}: ${notes.join(", ")}`;
   };
+  const whoLabel = (j) => `${formatCell(startUtc, zone, j)}: ${whoText(whoIsFree(shown(), freeSides, j))}`;
+  // Written only when it changes, so the polite live region does not re-announce an unchanged readout.
+  const setReadout = (text) => { if (readout.textContent !== text) readout.textContent = text; };
+  const restingReadout = () => (clicked === null ? HOVER_HINT : whoLabel(clicked));
   const cellClass = (j) => {
     const booked = bookedCell();
     const classes = [`s${shadeLevel(freeCount(j), Math.max(1, total()))}`];
@@ -117,11 +127,13 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, fi
     startUtc, zone, cellClass, cellLabel: label, cellText: (j) => (runs[j]?.first ? countText(sideCounts(freeSides, j)) : ""),
     onPick: (j) => {
       selected = open() && bookable(j, state, now(), startUtc) ? j : null;
-      readout.textContent = label(j);
+      clicked = j;
+      hovered = null;
+      setReadout(whoLabel(j));
       renderActions();
       heat.update();
     },
-    onHover: (j) => { readout.textContent = j === null ? HOVER_HINT : label(j); },
+    onHover: (j, byMouse) => { hovered = byMouse ? j : null; setReadout(j === null ? restingReadout() : label(j)); },
   });
   let heat = makeHeat();
 
@@ -141,7 +153,7 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, fi
           const b = chip(p.name, on);
           b.addEventListener("click", () => toggle(togglePerson(off, p.user)));
           const li = el("li", {}, b);
-          if (!p.cells || !p.zone) li.append(el("span", { class: "noweek", text: ` (${NO_WEEK})` }));
+          if (!hasAvailability(p)) li.append(el("span", { class: "noweek", text: ` (${NO_WEEK})` }));
           return li;
         })));
     }));
@@ -177,6 +189,7 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, fi
     renderSides();
     renderLegend();
     renderActions();
+    if (clicked !== null && hovered === null) setReadout(whoLabel(clicked));
     heat.update();
   }
 
@@ -222,9 +235,10 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, fi
       const start = new Date(state.window.start_utc);
       if (start.getTime() !== startUtc.getTime()) {
         // The window slid forward: keep the picked moment, not its cell index.
-        const had = selected !== null;
         selected = shiftSelection(selected, startUtc, start);
-        if (had && selected === null) readout.textContent = HOVER_HINT;
+        clicked = shiftSelection(clicked, startUtc, start);
+        hovered = null;
+        if (clicked === null) setReadout(HOVER_HINT);
         startUtc = start;
         heat = makeHeat();
       }
@@ -242,8 +256,10 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, fi
   const bar = appBar("Team draft");
   bar.classList.add("withaction");
   const editBtn = el("button", { type: "button", class: "secondary small", text: editWeekLabel(usualDoc) });
-  editBtn.addEventListener("click", () => { editWeek(usualDoc); });
-  bar.append(editBtn);
+  editBtn.addEventListener("click", () => { editors.usual(usualDoc); });
+  const thisWeekBtn = el("button", { type: "button", class: "secondary small", text: "Edit this week" });
+  thisWeekBtn.addEventListener("click", () => { editors.thisWeek(usualDoc); });
+  bar.append(editBtn, thisWeekBtn);
 
   root.classList.add("wide");
   root.replaceChildren(bar, heading, ledeEl, bookLine, threadLink, sidesBox, pane);

@@ -19,7 +19,16 @@ from database.db_session import db_session
 from helpers.matchup import Roster, matchup_state
 from models.team_draft import TeamDraft, TeamDraftAction
 from services import team_draft
-from services.availability import CELL_MINUTES, cells_b64, floor_half_hour, iso_z, naive_utc, usual_weeks
+from services.availability import (
+    CELL_MINUTES,
+    cells_b64,
+    day_cells_b64,
+    day_overrides,
+    floor_half_hour,
+    iso_z,
+    naive_utc,
+    usual_weeks,
+)
 from services.booking import WINDOW_CELLS, BookingChange
 from services.scheduler_http import (
     ANNOUNCE,
@@ -81,9 +90,9 @@ async def build_state(
     now: datetime = request.app[NOW]()
     # Rosters are read outside any session: resolving them may reach Discord.
     async with db_session() as session:
-        weeks = await usual_weeks(
-            session, sorted({user for roster in rosters for user, _name in roster.people})
-        )
+        users = sorted({user for roster in rosters for user, _name in roster.people})
+        weeks = await usual_weeks(session, users)
+        overrides = await day_overrides(session, users, now)
     return {
         "format": FORMAT,
         "version": _VERSION,
@@ -103,6 +112,14 @@ async def build_state(
                         "name": name,
                         "zone": w.zone if (w := weeks.get(user)) else None,
                         "cells": cells_b64(weeks.get(user)),
+                        "overrides": [
+                            {
+                                "date": o.local_date.isoformat(),
+                                "zone": o.zone,
+                                "cells": day_cells_b64(o.cells),
+                            }
+                            for o in overrides.get(user, [])
+                        ],
                     }
                     for user, name in roster.people
                 ],

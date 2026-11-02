@@ -30,6 +30,7 @@ button { font: inherit; }
 .appbar .context { color: var(--muted); font-weight: 500; }
 
 .zonerow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; font-weight: 700; }
+.alsousual { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-weight: 700; }
 select { font: inherit; max-width: 100%; padding: 6px 10px; border: 2px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--fg); }
 
 .grid { display: flex; gap: 2px; background: var(--surface); border-radius: 12px; padding: 12px; touch-action: pan-y; user-select: none; -webkit-user-select: none; font-variant-numeric: tabular-nums; }

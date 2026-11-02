@@ -55,8 +55,9 @@ export const formatCell = (startUtc, zone, j) => formatTime(addCells(startUtc, j
 // "7 PM" for hour h (0-23): the hour column of every grid.
 export const hourLabel = (h) => `${h % 12 === 0 ? 12 : h % 12} ${h < 12 ? "AM" : "PM"}`;
 
-// opts: { startUtc, zone, cellClass(j) -> string, cellLabel(j) -> string, onPick?(j), onHover?(j | null) }
-// onPick makes cells buttons (tap or Enter); onHover follows the pointer and keyboard focus.
+// opts: { startUtc, zone, cellClass(j) -> string, cellLabel(j) -> string, onPick?(j), onHover?(j | null, byMouse) }
+// onPick makes cells buttons (tap or Enter); onHover(j, byMouse) follows the pointer and keyboard focus, and onHover(null)
+// fires when a mouse leaves (byMouse says whether a mouse is over the cell now, as opposed to a finger or the keyboard).
 export function mountHeatmap(container, opts) {
   const { startUtc, zone, cellClass, cellLabel, cellText, onPick, onHover } = opts;
   const days = layoutWindow(startUtc, zone);
@@ -106,7 +107,7 @@ export function mountHeatmap(container, opts) {
   };
 
   if (onHover) {
-    const hovered = (e) => { const c = e.target.closest?.(".hcell[data-j]"); if (c) onHover(Number(c.dataset.j)); };
+    const hovered = (e) => { const c = e.target.closest?.(".hcell[data-j]"); if (c) onHover(Number(c.dataset.j), e.type === "pointerover" && e.pointerType === "mouse"); };
     grid.addEventListener("pointerover", hovered);
     grid.addEventListener("focusin", hovered);
     // A finger lifting also "leaves": only a mouse leaving clears the readout, so a tap stays shown.

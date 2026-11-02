@@ -31,7 +31,7 @@ from preference_service import (
     update_player_bet_capping_preference,
     update_player_dm_notification_preference,
 )
-from services.availability import load_usual_week, next_week_lines
+from services.availability import load_day_overrides, load_usual_week, next_week_lines
 from services.library_access_service import may_borrow
 from services.library_prompt import COULD_NOT_CHECK, library_to_ask_about, reserve_and_say
 from services.library_reservation import queue_link
@@ -77,13 +77,15 @@ async def _library_offered(player_id: str, guild_id: str) -> bool:
 
 
 async def _usual_week(player_id: str) -> list[str] | None:
-    """The saved week as timestamp lines; None if never saved or unreadable.
+    """The saved week and this week's overrides as timestamp lines; None if neither exists or unreadable.
 
     A failure only leaves the week out; the rest of /settings still loads.
     """
     try:
+        now = datetime.now(timezone.utc)
         week = await load_usual_week(player_id)
-        return None if week is None else next_week_lines(week, datetime.now(timezone.utc))
+        overrides = await load_day_overrides(player_id, now)
+        return None if week is None and not overrides else next_week_lines(week, overrides, now)
     except Exception:
         logger.exception("settings: couldn't read the usual week for {}", player_id)
         return None

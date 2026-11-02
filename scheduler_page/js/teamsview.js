@@ -19,7 +19,7 @@ const USUAL_FORMAT = "draftbot.scheduler.usual_week";
 const TEAMS_PATH = "/api/teams";
 const ACTIONS_PATH = "/api/teams/actions";
 const REFRESH_MS = 30000;
-const PAINT_FIRST = "Paint your usual week first, so teams can be ranked by how well you fit.";
+const PAINT_FIRST = "Enter your availability first, so teams can be ranked by how well you fit.";
 const HOVER_HINT = "Hover or tap a half-hour to see who's free.";
 
 const hoursShort = (h) => `${h} h`;

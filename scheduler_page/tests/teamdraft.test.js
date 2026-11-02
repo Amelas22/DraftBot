@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   FORMAT, bookable, bookingLine, countText, freeBySide, freeRuns, refusalText, shiftSelection, sideCounts, toggleSide,
-  togglePerson, withoutPeople,
+  togglePerson, whoIsFree, whoText, withoutPeople,
 } from "../js/teamdraft.js";
 import { encodeCells, CELLS } from "../js/week.js";
 
@@ -23,7 +23,8 @@ test("freeBySide gives one set per person, in order; no week is never free", () 
   assert.deepEqual(free.map((s) => s.length), base.sides.map((s) => s.people.length));
   const noWeek = base.sides.flatMap((s, i) => s.people.map((p, k) => [p, free[i][k]])).filter(([p]) => p.cells === null);
   assert.ok(noWeek.length > 0);
-  for (const [, f] of noWeek) assert.equal(f.size, 0);
+  // A person with only a this-week override is free just for that day's cells.
+  for (const [p, f] of noWeek) assert.equal(f.size, p.overrides.length ? 4 : 0);
 });
 
 test("bookable: future, inside the window, matchup open", () => {
@@ -134,4 +135,39 @@ test("freeRuns: a run stops at the end of a day column", () => {
 test("freeRuns: nobody free is never a run", () => {
   assert.ok(freeRuns(sidesOf([[1, 1]], []), new Set([0])).every((r, j) => (j === 1 ? r !== null : r === null)));
   assert.ok(freeRuns(sidesOf([], []), new Set([0])).every((r) => r === null));
+});
+
+// Everyone on `sides` (arrays of names) free only in the cells given for them; the rest are never free.
+const whoState = (sides) => ({ sides: sides.map(([label, ...names]) => ({ label, people: names.map((n) => ({ user: n, name: n })) })) });
+const sets = (...cells) => cells.map((c) => new Set(c));
+
+test("whoIsFree and whoText name who is free and who is not", () => {
+  const state = whoState([["Team A", "Ann", "Bo", "Cy"], ["Team B", "Dee", "Eli", "Fay", "Gus"]]);
+  const free = [sets([1], [1], [1]), sets([1], [1], [], [])];
+  const groups = whoIsFree(state, free, 1);
+  assert.deepEqual(groups, [
+    { label: "Team A", free: ["Ann", "Bo", "Cy"], notFree: [] },
+    { label: "Team B", free: ["Dee", "Eli"], notFree: ["Fay", "Gus"] },
+  ]);
+  assert.equal(whoText(groups), "Team A — Ann, Bo, Cy · Team B — Dee, Eli (Fay, Gus not free)");
+});
+
+test("whoText says nobody for a side with no one free", () => {
+  const state = whoState([["Team A", "Ann"], ["Team B", "Dee"]]);
+  const groups = whoIsFree(state, [sets([2]), sets([])], 2);
+  assert.equal(whoText(groups), "Team A — Ann · Team B — nobody (Dee not free)");
+});
+
+test("whoText has no parenthetical when everyone is free", () => {
+  const state = whoState([["Team A", "Ann"], ["Team B", "Dee"]]);
+  assert.equal(whoText(whoIsFree(state, [sets([0]), sets([0])], 0)), "Team A — Ann · Team B — Dee");
+});
+
+// Only Ann is ever free (cell 0).
+const freeBySideStub = (state) => state.sides.map((s) => s.people.map((p) => new Set(p.name === "Ann" ? [0] : [])));
+
+test("a person switched off appears in neither list", () => {
+  const state = withoutPeople(whoState([["Team A", "Ann", "Bo"], ["Team B", "Dee"]]), new Set(["Bo"]));
+  const groups = whoIsFree(state, freeBySideStub(state), 0);
+  assert.equal(whoText(groups), "Team A — Ann · Team B — nobody (Dee not free)");
 });

@@ -1,30 +1,35 @@
 """Week bitmaps, the usual-week -> window conversion, and usual-week storage.
 
 Python twin of scheduler_page/js/week.js; both reproduce
-scheduler_page/fixtures/conversion.json exactly.
+scheduler_page/fixtures/conversion.json and scheduler_page/fixtures/override.json
+exactly.
 """
 
 import base64
 import binascii
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from functools import cache
 from zoneinfo import ZoneInfo, available_timezones
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.db_session import db_session
-from models.scheduler import PlayerAvailability
+from models.scheduler import PlayerAvailability, PlayerDayOverride
 
 CELLS: int = 336
 CELL_MINUTES: int = 30
 MAX_FILE_BYTES: int = 4096
+DAY_CELLS: int = 48
 _BYTES = CELLS // 8
+_DAY_BYTES = DAY_CELLS // 8
 _FORMAT = "draftbot.scheduler.usual_week"
 _VERSION = 1
+_THIS_WEEK_FORMAT = "draftbot.scheduler.this_week"
+MAX_THIS_WEEK_DAYS = 9
 
 
 class InvalidWeek(ValueError):
@@ -35,6 +40,15 @@ class InvalidWeek(ValueError):
 class UsualWeek:
     zone: str
     cells: frozenset[int]
+
+
+@dataclass(frozen=True)
+class DayOverride:
+    """One local calendar day's availability, replacing the usual week for that day."""
+
+    zone: str
+    local_date: date
+    cells: frozenset[int]  # half-hours of the day, 0..47
 
 
 def naive_utc(moment: datetime) -> datetime:
@@ -96,6 +110,42 @@ def window_cells(
     return frozenset(out)
 
 
+def day_cells_to_bytes(cells: Iterable[int]) -> bytes:
+    data = bytearray(_DAY_BYTES)
+    for i in cells:
+        data[i // 8] |= 0x80 >> (i % 8)
+    return bytes(data)
+
+
+def day_cells_from_bytes(data: bytes) -> frozenset[int]:
+    if len(data) != _DAY_BYTES:
+        raise InvalidWeek(f"expected {_DAY_BYTES} bytes, got {len(data)}")
+    return frozenset(i for i in range(DAY_CELLS) if data[i // 8] & (0x80 >> (i % 8)))
+
+
+def effective_window_cells(
+    usual: UsualWeek | None, overrides: Sequence[DayOverride], start_utc: datetime
+) -> frozenset[int]:
+    """Window cells a person is free: a dated override wins over the usual week for its local day."""
+    base = window_cells(usual.zone, usual.cells, start_utc) if usual else frozenset()
+    if not overrides:
+        return base
+    zones = {o.zone: ZoneInfo(o.zone) for o in overrides}
+    out: set[int] = set()
+    for j in range(CELLS):
+        moment = start_utc + timedelta(minutes=CELL_MINUTES * j)
+        for o in overrides:
+            local = moment.astimezone(zones[o.zone])
+            if local.date() == o.local_date:
+                if local.hour * 2 + local.minute // CELL_MINUTES in o.cells:
+                    out.add(j)
+                break
+        else:
+            if j in base:
+                out.add(j)
+    return frozenset(out)
+
+
 def merge_blocks(cells: Iterable[int]) -> list[tuple[int, int]]:
     """Half-open [start, end) runs of consecutive cells, sorted."""
     blocks: list[tuple[int, int]] = []
@@ -130,16 +180,100 @@ def parse_usual_week(raw: bytes) -> UsualWeek:
     return UsualWeek(zone=zone, cells=decode_cells(cells))
 
 
-def next_week_lines(week: UsualWeek, now_utc: datetime) -> list[str]:
-    """One line per local day with free time over the next 7 days."""
+@dataclass(frozen=True)
+class ThisWeek:
+    """A saved this-week edit: the dated days, and whether to also keep them as the usual week."""
+
+    zone: str
+    days: tuple[DayOverride, ...]
+    also_usual: bool
+
+
+def parse_this_week(raw: bytes, now_utc: datetime) -> ThisWeek:
+    """Validate a ``draftbot.scheduler.this_week`` v1 body; dates must fall in today-1 .. today+7 in its zone."""
+    if len(raw) > MAX_FILE_BYTES:
+        raise InvalidWeek("file too large")
+    try:
+        doc = json.loads(raw)
+    except (ValueError, RecursionError) as exc:
+        raise InvalidWeek("not JSON") from exc
+    if not isinstance(doc, dict):
+        raise InvalidWeek("not a JSON object")
+    if doc.get("format") != _THIS_WEEK_FORMAT:
+        raise InvalidWeek("unknown format")
+    version = doc.get("version")
+    if type(version) is not int or version != _VERSION:
+        raise InvalidWeek("unsupported version")
+    zone = doc.get("zone")
+    if not isinstance(zone, str) or zone not in _known_zones():
+        raise InvalidWeek("unknown zone")
+    also_usual = doc.get("also_usual", False)
+    if type(also_usual) is not bool:
+        raise InvalidWeek("also_usual is not a boolean")
+    entries = doc.get("days")
+    if not isinstance(entries, list) or len(entries) > MAX_THIS_WEEK_DAYS:
+        raise InvalidWeek("days missing or too many")
+    today = now_utc.astimezone(ZoneInfo(zone)).date()
+    seen: set[date] = set()
+    days: list[DayOverride] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise InvalidWeek("day is not an object")
+        text, cells = entry.get("date"), entry.get("cells")
+        if not isinstance(text, str) or len(text) != 10 or not isinstance(cells, str):
+            raise InvalidWeek("day needs a date and cells")
+        try:
+            local = date.fromisoformat(text)
+            data = base64.b64decode(cells, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise InvalidWeek("bad date or cells") from exc
+        if not today - timedelta(days=1) <= local <= today + timedelta(days=7):
+            raise InvalidWeek("date out of range")
+        if local in seen:
+            raise InvalidWeek("date repeated")
+        seen.add(local)
+        days.append(DayOverride(zone, local, day_cells_from_bytes(data)))
+    return ThisWeek(zone, tuple(days), also_usual)
+
+
+def this_week_doc(days: Sequence[DayOverride]) -> dict[str, object]:
+    """The ``draftbot.scheduler.this_week`` v1 document for a player's overrides."""
+    return {
+        "format": _THIS_WEEK_FORMAT,
+        "version": _VERSION,
+        "zone": days[0].zone if days else None,
+        "days": [
+            {
+                "date": d.local_date.isoformat(),
+                "cells": day_cells_b64(d.cells),
+            }
+            for d in days
+        ],
+    }
+
+
+def next_week_lines(
+    week: UsualWeek | None, overrides: Sequence[DayOverride], now_utc: datetime
+) -> list[str]:
+    """One line per local day with free time over the next 7 days.
+
+    Dated overrides replace the usual week for their day; the days are in the
+    week's zone, else the first override's. No week and no override gives [].
+    """
+    if week is not None:
+        zone = week.zone
+    elif overrides:
+        zone = overrides[0].zone
+    else:
+        return []
     now = now_utc.astimezone(timezone.utc)
     start = now.replace(
         minute=now.minute - now.minute % CELL_MINUTES, second=0, microsecond=0
     )
-    tz = ZoneInfo(week.zone)
+    tz = ZoneInfo(zone)
     by_day: dict[date, list[str]] = {}
     day_start: dict[date, int] = {}
-    for first, end in merge_blocks(window_cells(week.zone, week.cells, start)):
+    for first, end in merge_blocks(effective_window_cells(week, overrides, start)):
         begin = start + timedelta(minutes=CELL_MINUTES * first)
         finish = start + timedelta(minutes=CELL_MINUTES * end)
         day = begin.astimezone(tz).date()
@@ -167,6 +301,11 @@ def cells_b64(week: UsualWeek | None) -> str | None:
     if week is None:
         return None
     return base64.b64encode(cells_to_bytes(week.cells)).decode("ascii")
+
+
+def day_cells_b64(cells: frozenset[int]) -> str:
+    """A day's half-hours as the page reads them (base64)."""
+    return base64.b64encode(day_cells_to_bytes(cells)).decode("ascii")
 
 
 async def usual_weeks(session: AsyncSession, users: list[str]) -> dict[str, UsualWeek]:
@@ -204,3 +343,112 @@ async def save_usual_week(user_id: str, week: UsualWeek, now_utc: datetime) -> N
         row.cells = cells_to_bytes(week.cells)
         row.version = _VERSION
         row.stored_utc = naive_utc(now_utc)
+
+
+def usual_day(week: UsualWeek, local_date: date) -> frozenset[int]:
+    """The 48 cells (0..47) the usual week gives ``local_date``'s weekday."""
+    base = local_date.weekday() * DAY_CELLS
+    return frozenset(c - base for c in week.cells if base <= c < base + DAY_CELLS)
+
+
+def _local_date(day: DayOverride) -> date:
+    return day.local_date
+
+
+def _override(row: PlayerDayOverride) -> DayOverride:
+    return DayOverride(
+        zone=str(row.zone),
+        local_date=row.local_date,
+        cells=day_cells_from_bytes(bytes(row.cells)),
+    )
+
+
+def _is_live(row: PlayerDayOverride, now_utc: datetime) -> bool:
+    """A day stays live until a day past its end in its own zone."""
+    today = now_utc.astimezone(ZoneInfo(str(row.zone))).date()
+    return row.local_date >= today - timedelta(days=1)
+
+
+async def day_overrides(
+    session: AsyncSession, users: list[str], now_utc: datetime
+) -> dict[str, list[DayOverride]]:
+    """The live dated overrides of ``users``, sorted by date; anyone without one is left out."""
+    if not users:
+        return {}
+    rows = (
+        await session.execute(
+            select(PlayerDayOverride)
+            .where(PlayerDayOverride.user_id.in_(users))
+            .order_by(PlayerDayOverride.local_date)
+        )
+    ).scalars()
+    out: dict[str, list[DayOverride]] = {}
+    for r in rows:
+        if _is_live(r, now_utc):
+            out.setdefault(str(r.user_id), []).append(_override(r))
+    return out
+
+
+async def load_day_overrides(user_id: str, now_utc: datetime) -> list[DayOverride]:
+    """A player's live dated overrides, sorted by date."""
+    async with db_session() as session:
+        return (await day_overrides(session, [user_id], now_utc)).get(user_id, [])
+
+
+async def replace_day_overrides(
+    user_id: str, days: Sequence[DayOverride], also_usual: bool, now_utc: datetime
+) -> list[DayOverride]:
+    """Make ``days`` the player's overrides, dropping every earlier row.
+
+    A day matching the usual week is not stored. With ``also_usual`` and no
+    saved usual week, the days first become the usual week (in the first day's zone).
+    """
+    async with db_session() as session:
+        await session.execute(
+            delete(PlayerDayOverride).where(PlayerDayOverride.user_id == user_id)
+        )
+        week_row = await session.get(PlayerAvailability, user_id)
+        usual = (
+            UsualWeek(str(week_row.zone), cells_from_bytes(bytes(week_row.cells)))
+            if week_row is not None
+            else None
+        )
+        if also_usual and usual is None and days:
+            cells: set[int] = set()
+            for d in days:
+                base = d.local_date.weekday() * DAY_CELLS
+                cells.difference_update(range(base, base + DAY_CELLS))
+                cells.update(base + c for c in d.cells)
+            usual = UsualWeek(days[0].zone, frozenset(cells))
+            await session.merge(
+                PlayerAvailability(
+                    user_id=user_id,
+                    zone=usual.zone,
+                    cells=cells_to_bytes(usual.cells),
+                    version=_VERSION,
+                    stored_utc=naive_utc(now_utc),
+                )
+            )
+        stored: list[DayOverride] = []
+        for d in sorted(days, key=_local_date):
+            if d.cells == (usual_day(usual, d.local_date) if usual else frozenset()):
+                continue
+            session.add(
+                PlayerDayOverride(
+                    user_id=user_id,
+                    local_date=d.local_date,
+                    zone=d.zone,
+                    cells=day_cells_to_bytes(d.cells),
+                    stored_utc=naive_utc(now_utc),
+                )
+            )
+            stored.append(d)
+        return stored
+
+
+async def clear_day_overrides(user_id: str) -> None:
+    """Drop all of a player's dated overrides."""
+    async with db_session() as session:
+        await session.execute(
+            delete(PlayerDayOverride).where(PlayerDayOverride.user_id == user_id)
+        )

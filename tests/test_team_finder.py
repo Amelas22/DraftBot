@@ -289,6 +289,25 @@ async def test_member_without_week_gives_zero_hours(test_db):
         assert "overlap 0 hours a week" in r.notices[0].text
 
 
+@pytest.mark.asyncio
+async def test_team_finder_ignores_overrides(test_db):
+    from datetime import date
+    from services.availability import DayOverride, replace_day_overrides
+    async with db_session() as s:
+        await _save_week(s, "cap", range(0, 24))
+        await _save_week(s, "ben", range(0, 24))
+        tid = await _open(s)
+        before = (await teams_state(s, G, "cap"))["teams"]
+    await replace_day_overrides("ben", [DayOverride("UTC", date(2026, 10, 23), frozenset())], False, NOW)
+    async with db_session() as s:
+        r = await request_join(s, G, "ben", "Ben", tid, "", NOW)
+        assert "overlap 12 hours a week" in r.notices[0].text
+        await s.flush()
+        after = (await teams_state(s, G, "cap"))["teams"]
+    assert all("overrides" not in m for t in after for m in t["members"])
+    assert after == before
+
+
 MULTI = "Being on more than one team needs a mod's permission. DM a mod first."
 
 

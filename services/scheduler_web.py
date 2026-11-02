@@ -12,10 +12,15 @@ from helpers.matchup import Roster
 from services.availability import (
     MAX_FILE_BYTES,
     InvalidWeek,
+    clear_day_overrides,
+    load_day_overrides,
     load_usual_week,
+    parse_this_week,
     parse_usual_week,
+    replace_day_overrides,
     save_usual_week,
     iso_z,
+    this_week_doc,
     usual_week_doc,
 )
 from services.booking import BookingChange
@@ -160,6 +165,32 @@ async def put_usual_week(request: web.Request) -> web.Response:
         return error(400, "bad_input")
     await save_usual_week(identity(request).user_id, week, request.app[NOW]())
     return web.json_response(usual_week_doc(week))
+
+
+@routes.get("/api/this-week")
+async def get_this_week(request: web.Request) -> web.Response:
+    days = await load_day_overrides(identity(request).user_id, request.app[NOW]())
+    return web.json_response(this_week_doc(days))
+
+
+@routes.put("/api/this-week")
+async def put_this_week(request: web.Request) -> web.Response:
+    raw = await read_body(request, MAX_FILE_BYTES)
+    if raw is None:
+        return error(413, "too_large")
+    now = request.app[NOW]()
+    try:
+        week = parse_this_week(raw, now)
+    except InvalidWeek:
+        return error(400, "bad_input")
+    stored = await replace_day_overrides(identity(request).user_id, week.days, week.also_usual, now)
+    return web.json_response(this_week_doc(stored))
+
+
+@routes.delete("/api/this-week")
+async def delete_this_week(request: web.Request) -> web.Response:
+    await clear_day_overrides(identity(request).user_id)
+    return web.Response(status=204)
 
 
 _STATIC_TYPES = {

@@ -5,9 +5,9 @@ import {
   fitTeam, rankTeams, halfHourFloor, onOtherTeam, joinState, noteError, refusalText, actionErrorText,
   cellText, declinedText, joinNote, modeAfterSelect, shadeLevel, teamName, MULTI_TEAM_WARNING, NETWORK_FAILED,
   isFull, requestsFor, myTeams, requestHeading, slotsText, createSync, windowStart, noteDrafts,
-  CLOSE_CONFIRM, leaveConfirm, membersText,
+  CLOSE_CONFIRM, leaveConfirm, membersText, memberFree, hasAvailability,
 } from "../js/teams.js";
-import { decodeCells, usualCellOf, CELLS } from "../js/week.js";
+import { decodeCells, usualCellOf, CELLS, encodeDayCells } from "../js/week.js";
 import { LinkExpired, NeedsUpdate, NEEDS_UPDATE } from "../js/api.js";
 import { EXPIRED } from "../js/messages.js";
 
@@ -261,4 +261,26 @@ test("picking a request switches the grid to everyone; picking a team keeps the 
   assert.equal(modeAfterSelect("r:101:55", "everyone"), "everyone");
   assert.equal(modeAfterSelect("t:101", "mine"), "mine");
   assert.equal(modeAfterSelect("t:101", "everyone"), "everyone");
+});
+
+test("memberFree counts a dated override with no usual week", () => {
+  const start = new Date("2026-10-26T04:00:00Z"); // Monday 00:00 in New York
+  const m = {
+    cells: null, zone: null,
+    overrides: [{ date: "2026-10-27", zone: "America/New_York", cells: encodeDayCells([38, 39]) }],
+  };
+  // Tuesday 19:00-20:00 local is cells 48 + 38 and 48 + 39 from Monday's start.
+  assert.deepEqual([...memberFree(m, start)], [86, 87]);
+});
+
+test("memberFree treats a missing overrides field as none", () => {
+  const start = new Date("2026-10-26T04:00:00Z");
+  assert.equal(memberFree({ cells: null, zone: null }, start).size, 0);
+});
+
+test("hasAvailability is true for a usual week or any override", () => {
+  assert.equal(hasAvailability({ cells: null, zone: null, overrides: [] }), false);
+  assert.equal(hasAvailability({ cells: null, zone: null }), false);
+  assert.equal(hasAvailability({ cells: "AA", zone: "UTC" }), true);
+  assert.equal(hasAvailability({ cells: null, zone: null, overrides: [{}] }), true);
 });

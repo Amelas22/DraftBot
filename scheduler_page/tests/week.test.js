@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import {
   decodeCells, encodeCells, windowCells, usualCellOf, CELLS,
+  decodeDayCells, encodeDayCells, effectiveWindowCells,
+  weekdayOfDate,
 } from "../js/week.js";
 
 const fx = (name) =>
@@ -15,6 +17,21 @@ test("conversion fixture cases match", () => {
     const got = encodeCells(windowCells(c.zone, decodeCells(c.usual_cells), new Date(c.window_start_utc)));
     assert.equal(got, c.expected_window_cells, c.name);
   }
+});
+
+test("override fixture cases match", () => {
+  for (const c of fx("override.json").cases) {
+    const usual = c.usual && { zone: c.usual.zone, cells: decodeCells(c.usual.cells) };
+    const overrides = c.overrides.map((o) => ({ zone: o.zone, date: o.date, cells: decodeDayCells(o.cells) }));
+    const got = encodeCells(effectiveWindowCells(usual, overrides, new Date(c.window_start_utc)));
+    assert.equal(got, c.expected_window_cells, c.name);
+  }
+});
+
+test("day cells round trip", () => {
+  const cells = new Set([0, 7, 47]);
+  assert.deepEqual(decodeDayCells(encodeDayCells(cells)), cells);
+  assert.throws(() => decodeDayCells(btoa("\0\0\0\0\0")));
 });
 
 test("round trip", () => {
@@ -54,4 +71,10 @@ test("addCells and isoSeconds place a window cell in time", async () => {
   assert.equal(CELL_MS, 30 * 60000);
   assert.equal(isoSeconds(addCells(new Date("2026-10-19T04:00:00Z"), 3)), "2026-10-19T05:30:00Z");
   assert.equal(isoSeconds(new Date("2026-10-19T05:30:00.123Z")), "2026-10-19T05:30:00Z");
+});
+
+test("weekdayOfDate counts from Monday", () => {
+  assert.equal(weekdayOfDate("2026-11-02"), 0);
+  assert.equal(weekdayOfDate("2026-11-08"), 6);
+  assert.equal(weekdayOfDate("2026-03-08"), 6); // a DST change day
 });

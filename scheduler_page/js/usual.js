@@ -49,20 +49,21 @@ const SAVE_MESSAGES = {
   too_large: "That week is too big to save.",
   rate_limited: "Too many saves just now. Wait a minute and press Save again.",
   not_enabled: NOT_ENABLED,
+  bad_input: "That week couldn't be saved. Reload the page and try again.",
 };
 export const saveFailedMessage = (e) => (e && Object.hasOwn(SAVE_MESSAGES, e.code) ? SAVE_MESSAGES[e.code] : SAVE_FAILED);
 
-const cellLabel = (i) => {
+const cellLabel = (labels, i) => {
   const d = Math.floor(i / PER_DAY), h = i % PER_DAY;
   const hh = Math.floor(h / 2), mm = h % 2 ? "30" : "00";
-  return `${DAYS[d]} ${hourLabel(hh).replace(" ", ":" + mm + " ")}`;
+  return `${labels[d]} ${hourLabel(hh).replace(" ", ":" + mm + " ")}`;
 };
 
 // The editor's bottom buttons: the back button appears only when the caller can take the user back.
 export const actionButtons = (onBack, backLabel = "Back to teams") => ["Save", "Clear", ...(onBack ? [backLabel] : [])];
 
 // The button another page offers for opening the editor: null is a week never saved.
-export const editWeekLabel = (usualDoc) => (usualDoc === null ? "Set my usual week" : "Edit my usual week");
+export const editWeekLabel = (usualDoc) => (usualDoc === null ? "Enter my availability" : "Edit my usual week");
 
 // A page's way into the editor and back. dispose stops the page's timers and listeners before the editor takes
 // over; show(doc, status) draws the page again, with the saved week and "Saved." or with the old week on Back.
@@ -74,43 +75,14 @@ export function weekEditing(root, api, { now, backLabel, dispose, show }) {
   };
 }
 
-// deps: { now?: () => Date, zones?: string[], defaultZone?: string, intro?: string, onSaved?: (doc) => void,
-//         onBack?: () => void, backLabel?: string }
-// With onBack the editor also offers a back button (backLabel, else Back to teams), leaving without saving.
-// With onSaved the editor is a step in another flow: a save says "Saved." and hands the saved file on.
-export async function mountUsual(root, api, deps = {}) {
-  const onSaved = deps.onSaved;
-  const now = deps.now || (() => new Date());
-  const browserZone = deps.defaultZone || Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const zoneList = deps.zones || (typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [browserZone]);
-
-  root.replaceChildren(el("p", { class: "status", text: "Loading your week…" }));
-  let loaded;
-  try {
-    loaded = await loadWeek(api);
-  } catch (e) {
-    if (e instanceof LinkExpired) { root.replaceChildren(el("p", { class: "notice", text: expiredMessage() })); return; }
-    throw e;
-  }
-
-  let cells = loaded.cells;
-  let zone = loaded.zone || browserZone;
-  const zones = zoneList.includes(zone) ? zoneList : [zone, ...zoneList];
-
-  const select = el("select", { id: "zone", "aria-label": "Time zone" });
-  for (const z of zones) select.append(el("option", { value: z, text: z.replaceAll("_", " ") }));
-  select.value = zone;
-
-  const status = el("p", { class: "status", role: "status", "aria-live": "polite" });
-  const save = el("button", { type: "button", class: "primary", text: "Save" });
-  const clear = el("button", { type: "button", class: "secondary", text: "Clear" });
-  const backLabel = actionButtons(deps.onBack, deps.backLabel)[2];
-  const back = backLabel ? el("button", { type: "button", class: "secondary", text: backLabel }) : null;
-  if (back) back.addEventListener("click", () => deps.onBack());
-
+// The paintable 7-column grid both week editors draw, with its day tabs. labels name the columns (tabLabels the
+// tabs, default labels); onChange runs after every stroke or key toggle. setLabels renames the columns in place.
+// It opens on the first day's tab with the given cells painted.
+export function paintGrid({ labels, tabLabels = labels, gridLabel, cells: initial, onChange }) {
+  let cells = initial;
   // Day tabs: only visible under 480px (CSS), where one day fills the screen.
   const tabs = el("div", { class: "daytabs", role: "tablist", "aria-label": "Day" });
-  const tabButtons = DAYS.map((d, i) => {
+  const tabButtons = tabLabels.map((d, i) => {
     const b = el("button", { type: "button", role: "tab", text: d });
     b.addEventListener("click", () => setDay(i));
     tabs.append(b);
@@ -121,18 +93,21 @@ export async function mountUsual(root, api, deps = {}) {
     tabButtons.forEach((b, i) => b.setAttribute("aria-selected", String(i === day)));
   };
 
-  const grid = el("div", { class: "grid", role: "grid", "aria-label": "Usual week, half-hour cells", "aria-multiselectable": "true" });
+  const grid = el("div", { class: "grid", role: "grid", "aria-label": gridLabel, "aria-multiselectable": "true" });
   const hours = el("div", { class: "col hours", "aria-hidden": "true" });
   for (let h = 0; h < PER_DAY; h++) hours.append(el("div", { class: "hour", text: h % 2 === 0 ? hourLabel(h / 2) : "" }));
   grid.append(hours);
 
   const nodes = [];
+  const names = [];
   for (let d = 0; d < 7; d++) {
     const col = el("div", { class: "col day", "data-day": String(d), role: "row" });
-    col.append(el("div", { class: "dayname", text: DAYS[d], "aria-hidden": "true" }));
+    const name = el("div", { class: "dayname", text: labels[d], "aria-hidden": "true" });
+    names.push(name);
+    col.append(name);
     for (let h = 0; h < PER_DAY; h++) {
       const i = d * PER_DAY + h;
-      const b = el("button", { type: "button", class: "cell", "data-i": String(i), role: "gridcell", tabindex: "-1", "aria-label": cellLabel(i) });
+      const b = el("button", { type: "button", class: "cell", "data-i": String(i), role: "gridcell", tabindex: "-1", "aria-label": cellLabel(labels, i) });
       nodes[i] = b;
       col.append(b);
     }
@@ -157,13 +132,12 @@ export async function mountUsual(root, api, deps = {}) {
   };
 
   let stroke = null; // { anchor, paint, base, current }
-  const touched = () => { status.textContent = ""; };
   const endStroke = (commit) => {
     if (!stroke) return;
     if (commit) cells = applyStroke(stroke.base, stroke.anchor, stroke.current, stroke.paint);
     stroke = null;
     paintView(cells);
-    touched();
+    onChange();
   };
   grid.addEventListener("pointerdown", (e) => {
     if (e.button !== 0 && e.pointerType === "mouse") return;
@@ -200,18 +174,77 @@ export async function mountUsual(root, api, deps = {}) {
       e.preventDefault();
       cells = applyStroke(cells, i, i, !cells.has(i));
       paintView(cells);
-      touched();
+      onChange();
     }
   });
 
+  const setLabels = (next, nextTabs = next) => {
+    names.forEach((n, d) => { n.textContent = next[d]; });
+    tabButtons.forEach((b, d) => { b.textContent = nextTabs[d]; });
+    nodes.forEach((n, i) => n.setAttribute("aria-label", cellLabel(next, i)));
+  };
+  setDay(0);
+  paintView(cells);
+  return {
+    tabs, grid, setLabels,
+    cells: () => cells,
+    setCells: (next) => { cells = next; paintView(cells); },
+  };
+}
+
+// The time zone picker both editors show: zones (else every zone the browser knows, else fallback), with zone
+// first if missing, and zone selected. row is the labelled picker to place on the page.
+export function zoneSelect(zone, zones, fallback = zone) {
+  const list = zones || (typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [fallback]);
+  const select = el("select", { id: "zone", "aria-label": "Time zone" });
+  for (const z of list.includes(zone) ? list : [zone, ...list]) select.append(el("option", { value: z, text: z.replaceAll("_", " ") }));
+  select.value = zone;
+  return { select, row: el("label", { class: "zonerow", for: "zone" }, "Time zone ", select) };
+}
+
+// The hint shown above a paint grid on a touch screen.
+export const touchHint = () => el("p", { class: "touchhint", text: "Drag on the grid to paint. Drag the times on the left to scroll." });
+
+// deps: { now?: () => Date, zones?: string[], defaultZone?: string, intro?: string, onSaved?: (doc) => void,
+//         onBack?: () => void, backLabel?: string }
+// With onBack the editor also offers a back button (backLabel, else Back to teams), leaving without saving.
+// With onSaved the editor is a step in another flow: a save says "Saved." and hands the saved file on.
+export async function mountUsual(root, api, deps = {}) {
+  const onSaved = deps.onSaved;
+  const now = deps.now || (() => new Date());
+  const browserZone = deps.defaultZone || Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+  root.replaceChildren(el("p", { class: "status", text: "Loading your week…" }));
+  let loaded;
+  try {
+    loaded = await loadWeek(api);
+  } catch (e) {
+    if (e instanceof LinkExpired) { root.replaceChildren(el("p", { class: "notice", text: expiredMessage() })); return; }
+    throw e;
+  }
+
+  let zone = loaded.zone || browserZone;
+  const { select, row: zoneRow } = zoneSelect(zone, deps.zones, browserZone);
+
+  const status = el("p", { class: "status", role: "status", "aria-live": "polite" });
+  const save = el("button", { type: "button", class: "primary", text: "Save" });
+  const clear = el("button", { type: "button", class: "secondary", text: "Clear" });
+  const backLabel = actionButtons(deps.onBack, deps.backLabel)[2];
+  const back = backLabel ? el("button", { type: "button", class: "secondary", text: backLabel }) : null;
+  if (back) back.addEventListener("click", () => deps.onBack());
+  const touched = () => { status.textContent = ""; };
+
+  const painter = paintGrid({ labels: DAYS, gridLabel: "Usual week, half-hour cells", cells: loaded.cells, onChange: touched });
+  const { tabs, grid } = painter;
+
   select.addEventListener("change", () => { zone = select.value; touched(); });
-  clear.addEventListener("click", () => { cells = new Set(); paintView(cells); touched(); });
+  clear.addEventListener("click", () => { painter.setCells(new Set()); touched(); });
   save.addEventListener("click", async () => {
     if (api.fixture && !onSaved) { status.textContent = "Saved (fixture mode: nothing was sent)."; return; }
     save.disabled = true;
     status.textContent = "Saving…";
     try {
-      const doc = toFile(zone, cells, now());
+      const doc = toFile(zone, painter.cells(), now());
       await api.putUsual(doc);
       status.textContent = onSaved ? "Saved." : "Saved. It shows in /settings straight away.";
       if (onSaved) onSaved(doc);
@@ -227,11 +260,9 @@ export async function mountUsual(root, api, deps = {}) {
     ...(deps.intro ? [el("p", { class: "notice intro", text: deps.intro })] : []),
     el("h1", { text: "When are you usually free?" }),
     el("p", { class: "lede", text: "Drag or tap to paint the half-hours you can usually draft. Times are local to the zone below. Drag again over painted cells to erase." }),
-    el("label", { class: "zonerow", for: "zone" }, "Time zone ", select),
-    tabs, el("p", { class: "touchhint", text: "Drag on the grid to paint. Drag the times on the left to scroll." }), grid,
+    zoneRow,
+    tabs, touchHint(), grid,
     el("div", { class: "actions" }, save, clear, ...(back ? [back] : [])),
     status,
   );
-  setDay(0);
-  paintView(cells);
 }
