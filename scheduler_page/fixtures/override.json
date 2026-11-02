@@ -1,0 +1,102 @@
+{
+  "format": "draftbot.scheduler.test_override",
+  "version": 1,
+  "cases": [
+    {
+      "name": "no-overrides-equals-usual",
+      "usual": {
+        "zone": "America/New_York",
+        "cells": "AAAAAAPAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/AAAAAPA"
+      },
+      "overrides": [],
+      "window_start_utc": "2026-10-26T04:00:00Z",
+      "expected_window_cells": "AAAAAAPAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/wAAAADw",
+      "expected_free_utc": [
+        "2026-10-26T23:00:00Z",
+        "2026-10-26T23:30:00Z",
+        "2026-10-27T00:00:00Z",
+        "2026-10-27T00:30:00Z",
+        "2026-11-01T04:00:00Z",
+        "2026-11-01T04:30:00Z",
+        "2026-11-01T05:00:00Z",
+        "2026-11-01T05:30:00Z",
+        "2026-11-01T06:00:00Z",
+        "2026-11-01T06:30:00Z",
+        "2026-11-01T07:00:00Z",
+        "2026-11-01T07:30:00Z",
+        "2026-11-02T00:00:00Z",
+        "2026-11-02T00:30:00Z",
+        "2026-11-02T01:00:00Z",
+        "2026-11-02T01:30:00Z"
+      ]
+    },
+    {
+      "name": "override-clears-an-evening",
+      "usual": {
+        "zone": "America/New_York",
+        "cells": "AAAAAAPAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/AAAAAPA"
+      },
+      "overrides": [
+        {
+          "zone": "America/New_York",
+          "date": "2026-10-26",
+          "cells": "AAAAAAAA"
+        }
+      ],
+      "window_start_utc": "2026-10-26T04:00:00Z",
+      "expected_window_cells": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/wAAAADw",
+      "expected_free_utc": [
+        "2026-11-01T04:00:00Z",
+        "2026-11-01T04:30:00Z",
+        "2026-11-01T05:00:00Z",
+        "2026-11-01T05:30:00Z",
+        "2026-11-01T06:00:00Z",
+        "2026-11-01T06:30:00Z",
+        "2026-11-01T07:00:00Z",
+        "2026-11-01T07:30:00Z",
+        "2026-11-02T00:00:00Z",
+        "2026-11-02T00:30:00Z",
+        "2026-11-02T01:00:00Z",
+        "2026-11-02T01:30:00Z"
+      ]
+    },
+    {
+      "name": "override-without-usual",
+      "usual": null,
+      "overrides": [
+        {
+          "zone": "Europe/London",
+          "date": "2026-10-28",
+          "cells": "AAAAAAPA"
+        }
+      ],
+      "window_start_utc": "2026-10-26T00:00:00Z",
+      "expected_window_cells": "AAAAAAAAAAAAAAAAAAAAAAPAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "expected_free_utc": [
+        "2026-10-28T19:00:00Z",
+        "2026-10-28T19:30:00Z",
+        "2026-10-28T20:00:00Z",
+        "2026-10-28T20:30:00Z"
+      ]
+    },
+    {
+      "name": "dst-fall-back-override",
+      "usual": null,
+      "overrides": [
+        {
+          "zone": "America/New_York",
+          "date": "2026-11-01",
+          "cells": "MAAAAAAA"
+        }
+      ],
+      "window_start_utc": "2026-11-01T04:00:00Z",
+      "expected_window_cells": "PAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "expected_free_utc": [
+        "2026-11-01T05:00:00Z",
+        "2026-11-01T05:30:00Z",
+        "2026-11-01T06:00:00Z",
+        "2026-11-01T06:30:00Z"
+      ]
+    }
+  ]
+}

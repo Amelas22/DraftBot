@@ -7,7 +7,7 @@ scheduler_page/fixtures/conversion.json exactly.
 import base64
 import binascii
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from functools import cache
@@ -22,7 +22,9 @@ from models.scheduler import PlayerAvailability
 CELLS: int = 336
 CELL_MINUTES: int = 30
 MAX_FILE_BYTES: int = 4096
+DAY_CELLS: int = 48
 _BYTES = CELLS // 8
+_DAY_BYTES = DAY_CELLS // 8
 _FORMAT = "draftbot.scheduler.usual_week"
 _VERSION = 1
 
@@ -35,6 +37,15 @@ class InvalidWeek(ValueError):
 class UsualWeek:
     zone: str
     cells: frozenset[int]
+
+
+@dataclass(frozen=True)
+class DayOverride:
+    """One local calendar day's availability, replacing the usual week for that day."""
+
+    zone: str
+    local_date: date
+    cells: frozenset[int]  # half-hours of the day, 0..47
 
 
 def naive_utc(moment: datetime) -> datetime:
@@ -93,6 +104,42 @@ def window_cells(
         cell = local.weekday() * 48 + (local.hour * 60 + local.minute) // CELL_MINUTES
         if cell in usual:
             out.add(j)
+    return frozenset(out)
+
+
+def day_cells_to_bytes(cells: Iterable[int]) -> bytes:
+    data = bytearray(_DAY_BYTES)
+    for i in cells:
+        data[i // 8] |= 0x80 >> (i % 8)
+    return bytes(data)
+
+
+def day_cells_from_bytes(data: bytes) -> frozenset[int]:
+    if len(data) != _DAY_BYTES:
+        raise InvalidWeek(f"expected {_DAY_BYTES} bytes, got {len(data)}")
+    return frozenset(i for i in range(DAY_CELLS) if data[i // 8] & (0x80 >> (i % 8)))
+
+
+def effective_window_cells(
+    usual: UsualWeek | None, overrides: Sequence[DayOverride], start_utc: datetime
+) -> frozenset[int]:
+    """Window cells a person is free: a dated override wins over the usual week for its local day."""
+    base = window_cells(usual.zone, usual.cells, start_utc) if usual else frozenset()
+    if not overrides:
+        return base
+    zones = {o.zone: ZoneInfo(o.zone) for o in overrides}
+    out: set[int] = set()
+    for j in range(CELLS):
+        moment = start_utc + timedelta(minutes=CELL_MINUTES * j)
+        for o in overrides:
+            local = moment.astimezone(zones[o.zone])
+            if local.date() == o.local_date:
+                if local.hour * 2 + local.minute // CELL_MINUTES in o.cells:
+                    out.add(j)
+                break
+        else:
+            if j in base:
+                out.add(j)
     return frozenset(out)
 
 

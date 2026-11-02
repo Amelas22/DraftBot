@@ -1,16 +1,20 @@
 import base64
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from services.availability import (
+    DayOverride,
     InvalidWeek,
     CELLS,
     UsualWeek,
     decode_cells,
     cells_to_bytes,
+    day_cells_from_bytes,
+    day_cells_to_bytes,
+    effective_window_cells,
     iso_z,
     load_usual_week,
     save_usual_week,
@@ -41,6 +45,32 @@ def test_conversion_fixture_cases() -> None:
             _utc(case["window_start_utc"]),
         )
         assert got == decode_cells(case["expected_window_cells"]), case["name"]
+
+
+def test_override_fixture_cases() -> None:
+    data = json.loads((FIXTURES / "override.json").read_text())
+    assert data["cases"]
+    for case in data["cases"]:
+        usual = case["usual"]
+        week = UsualWeek(usual["zone"], decode_cells(usual["cells"])) if usual else None
+        overrides = [
+            DayOverride(
+                o["zone"],
+                date.fromisoformat(o["date"]),
+                day_cells_from_bytes(base64.b64decode(o["cells"])),
+            )
+            for o in case["overrides"]
+        ]
+        got = effective_window_cells(week, overrides, _utc(case["window_start_utc"]))
+        assert got == decode_cells(case["expected_window_cells"]), case["name"]
+
+
+def test_day_cells_round_trip() -> None:
+    assert day_cells_from_bytes(day_cells_to_bytes({0, 7, 47})) == {0, 7, 47}
+    assert day_cells_to_bytes({0})[0] == 0x80
+    assert len(day_cells_to_bytes(set())) == 6
+    with pytest.raises(InvalidWeek):
+        day_cells_from_bytes(b"\x00" * 5)
 
 
 def test_round_trip_and_bit_order() -> None:
