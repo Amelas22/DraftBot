@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { layoutWindow, formatCell, formatTime, hourLabel } from "../js/grid.js";
+import { layoutWindow, formatCell, formatTime, hourLabel, rowClass, windowColumns } from "../js/grid.js";
 import { CELLS } from "../js/week.js";
 
 const start = new Date("2026-10-21T04:00:00Z");
@@ -46,4 +46,19 @@ test("hourLabel", () => {
   assert.equal(hourLabel(0), "12 AM");
   assert.equal(hourLabel(12), "12 PM");
   assert.equal(hourLabel(19), "7 PM");
+});
+
+test("windowColumns is the window by local date, keyed by window cell, padded to its first half-hour", () => {
+  const start = new Date("2026-11-02T15:00:00Z"); // Monday 10 AM in New York
+  const cols = windowColumns(start, "America/New_York");
+  assert.deepEqual(cols.map((c) => c.label), ["Mon 2", "Tue 3", "Wed 4", "Thu 5", "Fri 6", "Sat 7", "Sun 8", "Mon 9"]);
+  assert.equal(cols[0].start, 20);
+  assert.equal(cols[7].start, 0);
+  assert.deepEqual(cols.flatMap((c) => c.cells.map((x) => x.key)), Array.from({ length: CELLS }, (_, j) => j));
+  assert.equal(cols[0].cells[0].label, "Mon 2 Nov, 10:00 AM");
+  assert.equal(cols[0].date, "2026-11-02");
+});
+
+test("rowClass opens each hour, closes it with its half-hour, and shades every other hour", () => {
+  assert.deepEqual([0, 1, 2, 3, 4].map(rowClass), ["hr", "half", "hr alt", "half alt", "hr"]);
 });

@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import {
   decodeCells, encodeCells, windowCells, usualCellOf, CELLS,
   decodeDayCells, encodeDayCells, effectiveWindowCells,
-  weekdayOfDate,
+  weekdayOfDate, usualWithWindow,
 } from "../js/week.js";
 
 const fx = (name) =>
@@ -77,4 +77,16 @@ test("weekdayOfDate counts from Monday", () => {
   assert.equal(weekdayOfDate("2026-11-02"), 0);
   assert.equal(weekdayOfDate("2026-11-08"), 6);
   assert.equal(weekdayOfDate("2026-03-08"), 6); // a DST change day
+});
+
+test("usualWithWindow writes window cells back to their usual-week cells and keeps the rest", () => {
+  const NY = "America/New_York";
+  const start = new Date("2026-11-02T15:00:00Z"); // Monday 10 AM in New York
+  // Window cell 0 is Monday 10 AM (usual cell 20); cell 2 is Monday 11 AM (22), painted before and now cleared.
+  const out = usualWithWindow(new Set([22, 100]), new Set([0]), NY, start);
+  assert.ok(out.has(20));
+  assert.ok(!out.has(22));
+  // Painting the whole window and then nothing round-trips through windowCells.
+  assert.deepEqual(windowCells(NY, usualWithWindow(new Set(), new Set([0, 5, 300]), NY, start), start), new Set([0, 5, 300]));
+  assert.ok(!out.has(100));
 });

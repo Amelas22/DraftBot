@@ -1,13 +1,14 @@
 // Team draft, the view: the two sides, one heatmap of when they are free together with each run of the same people
-// boxed and its counts written once, Book / Move / Clear for the matchup's time, and a way to paint or edit the viewer's own usual week or this week. Pressing a
+// boxed and its counts written once, Book / Move / Clear for the matchup's time, and a card saying how the grid counts
+// the viewer, whose Everyone | My availability swaps the heatmap for their own this week or usual week. Pressing a
 // side or a player leaves them out of the grid until pressed again. Every decision lives in teamdraft.js; this file
 // only draws and wires.
 import { LinkExpired, checkDoc } from "./api.js";
 import { CELLS, CELL_MS, addCells, isoSeconds } from "./week.js";
 import { mountHeatmap, formatCell, layoutWindow } from "./grid.js";
 import { appBar } from "./appbar.js";
-import { editWeekLabel, weekEditing } from "./usual.js";
-import { thisWeekEditing } from "./thisweek.js";
+import { mountUsual } from "./usual.js";
+import { mountThisWeek } from "./thisweek.js";
 import { el } from "./dom.js";
 import { expiredMessage } from "./messages.js";
 import { actionErrorText, createSync, hasAvailability, shadeLevel } from "./teams.js";
@@ -21,7 +22,42 @@ const REFRESH_MS = 30000;
 const HOVER_HINT = "Hover or tap a half-hour to see who's free on each side. Tap a time to pick it.";
 const TOGGLE_HINT = "Tap a team or a player to leave them out of the grid; tap again to bring them back.";
 const NO_WEEK = "no availability entered";
-const BACK = "Back to the matchup";
+// The card's words in My availability, per week being changed.
+const MINE_TEXT = {
+  thisWeek: { title: "Changing this week only", sub: "Just these days, for this matchup and every other." },
+  usual: { title: "Changing your usual week", sub: "It repeats every week you haven't changed." },
+};
+
+// The viewer's card on Everyone: how the grid counts them. me is their place on a side, or undefined.
+export function everyoneText(me) {
+  if (!me) return { tone: "", title: "Your availability", sub: "You aren't on either side of this matchup." };
+  if (!hasAvailability(me)) {
+    return { tone: "warn", title: "The grid can't count you yet",
+      sub: "You haven't entered when you're free, so every half-hour shows you as not free." };
+  }
+  if (me.overrides?.length) return { tone: "", title: "You're counted from this week's changes", sub: "Your usual week, with the days you changed this week." };
+  return { tone: "", title: "You're counted from your usual week", sub: "Busy one night? Open My availability to change this week only." };
+}
+
+// A row of pressable choices, [text, on, go] each; pressing the one already on does nothing.
+const segmented = (label, items) => el("div", { class: "seg", role: "group", "aria-label": label }, ...items.map(([text, on, go]) => {
+  const b = el("button", { type: "button", "aria-pressed": String(on), text });
+  b.addEventListener("click", () => { if (!on) go(); });
+  return b;
+}));
+
+// The card: its words, and Everyone | My availability (which is null on Everyone, else the week being changed).
+// Every view's words are laid in the same spot and only the current one shows, so the card is as tall as its longest
+// words in every view and switching never moves the pane below it.
+function statusCard({ everyoneWords, which, onEveryone, onMine }) {
+  const views = [[null, everyoneWords], ...Object.entries(MINE_TEXT).map(([w, words]) => [w, { ...words, tone: "mine" }])];
+  const tone = views.find(([w]) => w === which)[1].tone;
+  return el("section", { class: `mecard ${tone}`.trim(), "aria-label": "Your availability" },
+    el("div", { class: "mehead" },
+      el("div", { class: "metext" }, ...views.map(([w, { title, sub }]) => el("div", { class: "words", "aria-hidden": String(w !== which) },
+        el("strong", { text: title }), el("span", { text: sub })))),
+      segmented("Show", [["Everyone", which === null, onEveryone], ["My availability", which !== null, onMine]])));
+}
 
 // deps: { now?: () => Date, paths?: { get, actions } } (paths default to the team-draft API; a match link passes its own). Returns { dispose } which stops the refresh timer.
 export async function mountTeamDraft(root, api, deps = {}) {
@@ -31,16 +67,6 @@ export async function mountTeamDraft(root, api, deps = {}) {
   const controller = { dispose: () => { while (cleanups.length) cleanups.pop()(); } };
   const notice = (text) => { controller.dispose(); root.classList.remove("wide"); root.replaceChildren(el("p", { class: "notice", text })); };
 
-  // The matchup's refresh loop and listeners are disposed before the editor takes the page; show registers them
-  // afresh when the matchup comes back, refetched so the viewer's new week is in it.
-  const show = (usualDoc, firstStatus) => showMatchup(root, api, paths, usualDoc, now, cleanups, notice, firstStatus, editors)
-    .catch((e) => {
-      if (e instanceof LinkExpired) notice(expiredMessage());
-      else { console.error(e); notice(actionErrorText(e)); }
-    });
-  const editing = { now, backLabel: BACK, dispose: controller.dispose, show };
-  const editors = { usual: weekEditing(root, api, editing), thisWeek: thisWeekEditing(root, api, editing) };
-
   root.replaceChildren(el("p", { class: "status", text: "Loading…" }));
   let usual;
   try {
@@ -49,11 +75,11 @@ export async function mountTeamDraft(root, api, deps = {}) {
     if (e instanceof LinkExpired) { notice(expiredMessage()); return controller; }
     throw e;
   }
-  await showMatchup(root, api, paths, usual, now, cleanups, notice, "", editors);
+  await showMatchup(root, api, paths, usual, now, cleanups, notice);
   return controller;
 }
 
-async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, firstStatus, editors) {
+async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice) {
   root.replaceChildren(el("p", { class: "status", text: "Loading…" }));
   let state;
   try {
@@ -76,11 +102,17 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, fi
   let hovered = null;
   // User ids the viewer has switched off; kept across refreshes.
   let off = new Set();
+  // The week the viewer is changing in My availability, or null on Everyone; and that week's editor, once mounted.
+  let which = null;
+  let editor = Promise.resolve(null);
+  // The viewer's usual week, re-read after they change it.
+  let usualNow = usualDoc;
 
   const heading = el("h1");
   const ledeEl = el("p", { class: "lede" });
   const bookLine = el("p", { class: "bookline", role: "status", "aria-live": "polite" });
   const threadLink = el("a", { class: "threadlink", text: "Open the thread", target: "_blank", rel: "noopener" });
+  const cardBox = el("div");
   const sidesBox = el("div", { class: "sides" });
   const heatBox = el("div", { class: "heatbox" });
   const legend = el("div", { class: "legend" });
@@ -89,8 +121,12 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, fi
   const moveBtn = el("button", { type: "button", class: "primary", text: "Move here" });
   const clearBtn = el("button", { type: "button", class: "secondary", text: "Clear" });
   const actions = el("div", { class: "actions" }, bookBtn, moveBtn, clearBtn);
-  const status = el("p", { class: "status", role: "status", "aria-live": "polite", text: firstStatus });
-  const pane = el("section", { class: "pane", "aria-label": "Pick a time" }, heatBox, legend, readout, actions, status);
+  const status = el("p", { class: "status", role: "status", "aria-live": "polite" });
+  // Everyone and My availability share the pane: one is hidden, so the page around it never moves.
+  const everyoneBox = el("div", { class: "everyone" }, heatBox, legend, readout, actions, status);
+  const mineBox = el("div", { class: "minehost" });
+  mineBox.hidden = true;
+  const pane = el("section", { class: "pane", "aria-label": "Pick a time" }, everyoneBox, mineBox);
 
   const open = () => state.matchup.state === "open";
   const shown = () => withoutPeople(state, off);
@@ -159,6 +195,50 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, fi
     }));
   };
 
+  const me = () => everyone().find((p) => p.user === state.me?.user);
+  const renderCard = () => {
+    cardBox.replaceChildren(statusCard({ everyoneWords: everyoneText(me()), which, onEveryone: toEveryone, onMine: () => toMine(firstWeek()) }));
+  };
+  // My availability opens on this week, or on the usual week for a viewer with nothing entered yet.
+  const firstWeek = () => (me() && !hasAvailability(me()) ? "usual" : "thisWeek");
+
+  // The editors save as the player paints. Leaving one lets its last save land first, then re-reads the usual week
+  // (a save may have written it) for the next editor, and the matchup for Everyone.
+  const leave = async () => {
+    await (await editor)?.flush();
+    usualNow = await api.getUsual().catch(() => usualNow);
+  };
+  const toMine = async (w) => {
+    if (which !== null) await leave();
+    which = w;
+    renderCard();
+    everyoneBox.hidden = true;
+    mineBox.hidden = false;
+    pane.setAttribute("aria-label", "Your availability");
+    // This week | Usual week heads the pane; under it a fresh box per editor, so one still loading when the week
+    // changes draws into a box no longer shown.
+    const box = el("div");
+    mineBox.replaceChildren(segmented("Which week", [
+      ["This week", w === "thisWeek", () => toMine("thisWeek")], ["Usual week", w === "usual", () => toMine("usual")],
+    ]), box);
+    editor = (w === "usual" ? mountUsual : mountThisWeek)(box, api, { now, usualDoc: usualNow, startUtc, onKeptAsUsual: () => toMine("usual") }).catch((e) => {
+      if (e instanceof LinkExpired) notice(expiredMessage());
+      else { console.error(e); box.replaceChildren(el("p", { class: "status", text: actionErrorText(e) })); }
+      return null;
+    });
+  };
+  const toEveryone = async () => {
+    await leave();
+    editor = Promise.resolve(null);
+    await refresh();
+    which = null;
+    renderCard();
+    mineBox.hidden = true;
+    mineBox.replaceChildren();
+    everyoneBox.hidden = false;
+    pane.setAttribute("aria-label", "Pick a time");
+  };
+
   // A key and its words, kept together when the legend wraps on a narrow screen.
   const keyItem = (kind, text) => el("span", { class: "keyitem" }, el("i", { class: `key ${kind}` }), el("span", { text }));
   const renderLegend = () => {
@@ -186,6 +266,7 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, fi
     freeSides = freeBySide(shown(), startUtc);
     runs = freeRuns(freeSides, new Set(layoutWindow(startUtc, zone).map((d) => d.cells[0].j)));
     ledeEl.textContent = ledeText();
+    renderCard();
     renderSides();
     renderLegend();
     renderActions();
@@ -253,15 +334,7 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, fi
   document.addEventListener("visibilitychange", onVisible);
   cleanups.push(() => clearInterval(timer), () => document.removeEventListener("visibilitychange", onVisible));
 
-  const bar = appBar("Team draft");
-  bar.classList.add("withaction");
-  const editBtn = el("button", { type: "button", class: "secondary small", text: editWeekLabel(usualDoc) });
-  editBtn.addEventListener("click", () => { editors.usual(usualDoc); });
-  const thisWeekBtn = el("button", { type: "button", class: "secondary small", text: "Edit this week" });
-  thisWeekBtn.addEventListener("click", () => { editors.thisWeek(usualDoc); });
-  bar.append(editBtn, thisWeekBtn);
-
   root.classList.add("wide");
-  root.replaceChildren(bar, heading, ledeEl, bookLine, threadLink, sidesBox, pane);
+  root.replaceChildren(appBar("Team draft"), heading, ledeEl, bookLine, threadLink, cardBox, sidesBox, pane);
   render();
 }
