@@ -236,6 +236,11 @@ export function zoneSelect(zone, zones, fallback = zone) {
   return { select, row: el("label", { class: "zonerow", for: "zone" }, "Time zone ", select) };
 }
 
+// An editor's lede. It opens with the rule people most often miss: paint the whole time you're free, not just the
+// half-hour you'd like to start, since every grid counts you free only on the half-hours you painted.
+export const paintLede = (text) => el("p", { class: "lede" },
+  el("strong", { text: "Paint every half-hour you're free to play, not just when you'd like to start." }), ` ${text}`);
+
 // The hint shown above a paint grid on a touch screen.
 export const touchHint = () => el("p", { class: "touchhint", text: "Drag on the grid to paint. Drag the times on the left to scroll." });
 
@@ -320,7 +325,7 @@ export async function mountUsual(root, api, deps = {}) {
     ...(startUtc ? [] : [appBar("Your usual week")]),
     ...(deps.intro ? [el("p", { class: "notice intro", text: deps.intro })] : []),
     ...(startUtc ? [] : [el("h1", { text: "When are you usually free?" })]),
-    el("p", { class: "lede", text: "Drag or tap to paint the half-hours you can usually draft. Times are local to the zone below. Drag again over painted cells to erase." }),
+    paintLede("A draft and its matches take a few hours. Drag or tap to paint; drag again over painted cells to erase. Times are local to the zone below."),
     zoneRow,
     paintBox,
     el("div", { class: "actions" }, ...(auto ? [] : [save]), clear, ...(back ? [back] : [])),
