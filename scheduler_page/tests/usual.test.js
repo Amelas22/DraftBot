@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { applyStroke, toFile, loadWeek, saveFailedMessage, actionButtons, editWeekLabel } from "../js/usual.js";
+import { applyStroke, toFile, loadWeek, saveFailedMessage, actionButtons, autosaver } from "../js/usual.js";
 import { decodeCells } from "../js/week.js";
 import { NeedsUpdate } from "../js/api.js";
 
@@ -68,7 +68,65 @@ test("actionButtons names the page the back button returns to", () => {
   assert.deepEqual(actionButtons(undefined, "Back to the matchup"), ["Save", "Clear"]);
 });
 
-test("editWeekLabel offers to set a week nobody has painted yet, else to edit it", () => {
-  assert.equal(editWeekLabel(null), "Enter my availability");
-  assert.equal(editWeekLabel({ zone: "Europe/London", cells: "" }), "Edit my usual week");
+
+// An autosaver over a recording save; fail makes the next save throw once.
+function recorder() {
+  const r = { saves: 0, said: [], fail: false, during: null };
+  r.auto = autosaver(async () => {
+    r.during?.();
+    r.during = null;
+    if (r.fail) { r.fail = false; throw new TypeError("fetch failed"); }
+    r.saves += 1;
+  }, (text) => r.said.push(text));
+  return r;
+}
+
+test("autosaver saves a run of changes once, and nothing when nothing changed", async () => {
+  const r = recorder();
+  await r.auto.flush();
+  assert.equal(r.saves, 0);
+  r.auto.touch();
+  r.auto.touch();
+  await r.auto.flush();
+  assert.equal(r.saves, 1);
+  assert.deepEqual(r.said, ["Saving…", "Saved."]);
+});
+
+test("autosaver keeps a failed change and saves it on the next try", async () => {
+  const r = recorder();
+  r.fail = true;
+  r.auto.touch();
+  await r.auto.flush();
+  assert.equal(r.saves, 0);
+  assert.equal(r.said.at(-1), "Couldn't save just now. Trying again shortly.");
+  await r.auto.flush();
+  assert.equal(r.saves, 1);
+});
+
+test("autosaver keeps saving until nothing is pending, so a flush covers a change made while it ran", async () => {
+  const r = recorder();
+  r.auto.touch();
+  r.during = () => r.auto.touch();
+  await r.auto.flush();
+  assert.equal(r.saves, 2);
+  assert.deepEqual(r.said, ["Saving…", "Saving…", "Saved."]);
+});
+
+test("autosaver says why a refused save failed and does not retry it", async () => {
+  const said = [];
+  let tries = 0;
+  const auto = autosaver(async () => { tries += 1; throw Object.assign(new Error("bad"), { code: "bad_input" }); }, (t) => said.push(t));
+  auto.touch();
+  await auto.flush();
+  await auto.flush();
+  assert.equal(tries, 1);
+  assert.equal(said.at(-1), "That week couldn't be saved. Reload the page and try again.");
+});
+
+test("autosaver cancel drops a pending change", async () => {
+  const r = recorder();
+  r.auto.touch();
+  r.auto.cancel();
+  await r.auto.flush();
+  assert.equal(r.saves, 0);
 });

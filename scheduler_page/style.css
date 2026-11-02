@@ -30,7 +30,6 @@ button { font: inherit; }
 .appbar .context { color: var(--muted); font-weight: 500; }
 
 .zonerow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; font-weight: 700; }
-.alsousual { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-weight: 700; }
 select { font: inherit; max-width: 100%; padding: 6px 10px; border: 2px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--fg); }
 
 .grid { display: flex; gap: 2px; background: var(--surface); border-radius: 12px; padding: 12px; touch-action: pan-y; user-select: none; -webkit-user-select: none; font-variant-numeric: tabular-nums; }
@@ -43,6 +42,7 @@ select { font: inherit; max-width: 100%; padding: 6px 10px; border: 2px solid va
 .cell.on { background: var(--accent); }
 .cell.stroke { outline: 2px solid var(--fg); outline-offset: -1px; }
 .cell:focus-visible { outline-offset: 0; z-index: 1; }
+.gap { height: 13px; }
 
 .daytabs { display: none; gap: 6px; margin-bottom: 8px; }
 .daytabs button { flex: 1; min-height: 44px; padding: 0; border: 0; border-radius: 999px; background: var(--chip); color: var(--fg); font-weight: 700; cursor: pointer; }
@@ -99,7 +99,6 @@ textarea { font: inherit; width: 100%; border: 2px solid var(--line); border-rad
 .heat { touch-action: auto; padding: 8px; }
 .hcell { height: 13px; padding: 0; border: 0; border-radius: 2px; background: var(--empty); }
 button.hcell { cursor: pointer; }
-.hcell.gap { background: transparent; }
 /* A grid with numbers in its cells (team draft: "3–2"): dark text on the light shades, light on the dark ones */
 .counted .hcell { font: 700 10px/13px var(--font); color: var(--fg); text-align: center; white-space: nowrap; }
 .counted .hcell.s4, .counted .hcell.s5, .counted .hcell.s6 { color: var(--accent-fg); }
@@ -139,8 +138,8 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
   .grid[data-active="0"] .day[data-day="0"], .grid[data-active="1"] .day[data-day="1"],
   .grid[data-active="2"] .day[data-day="2"], .grid[data-active="3"] .day[data-day="3"],
   .grid[data-active="4"] .day[data-day="4"], .grid[data-active="5"] .day[data-day="5"],
-  .grid[data-active="6"] .day[data-day="6"] { display: flex; }
-  .cell, .hour, .hcell { height: 24px; line-height: 24px; }
+  .grid[data-active="6"] .day[data-day="6"], .grid[data-active="7"] .day[data-day="7"] { display: flex; }
+  .cell, .gap, .hour, .hcell { height: 24px; line-height: 24px; }
   .counted .hcell { font-size: 13px; line-height: 24px; }
   .dayname { display: none; }
   .hours::before { display: none; }
@@ -186,3 +185,20 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 .legend .key.booked { outline: 3px solid var(--warn); outline-offset: -3px; }
 .pane .actions { margin: 0; flex-wrap: wrap; }
 @media (max-width: 479px) { .sides { grid-template-columns: 1fr; } }
+
+/* Team draft: the viewer's card, how the grid counts them, with Everyone | My availability and then which week */
+.mecard { border: 2px solid var(--accent); background: var(--surface); border-radius: 12px; padding: 12px 14px; margin: 12px 0; display: grid; gap: 10px; }
+.mecard.warn { border-color: var(--warn); background: var(--warnbg); }
+.mecard.mine { border-color: var(--fg); }
+.mecard .mehead { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.mecard .metext { flex: 1 1 260px; display: grid; }
+.mecard .words { grid-area: 1 / 1; display: grid; gap: 2px; align-content: start; }
+.mecard .words[aria-hidden="true"] { visibility: hidden; }
+.mecard .words span { color: var(--muted); font-size: 14px; }
+.mecard .seg { font-size: 15px; }
+.mecard .seg button { padding: 8px 16px; min-height: 44px; }
+.mecard.warn .seg { border-color: var(--warn); }
+.mecard.warn .seg button[aria-pressed="true"] { background: var(--warn); }
+.minehost { display: grid; gap: 10px; }
+.minehost > .seg { justify-self: start; font-size: 15px; }
+.minehost > .seg button { padding: 8px 16px; min-height: 44px; }

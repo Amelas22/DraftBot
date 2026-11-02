@@ -52,19 +52,25 @@ export function formatTime(date, zone) {
 // The label of window cell j, in zone.
 export const formatCell = (startUtc, zone, j) => formatTime(addCells(startUtc, j), zone);
 
+// The window as a grid's columns (see weekColumns in usual.js), one per local date, keyed by window cell: the
+// heatmap and both week editors on a matchup draw these, so all three show the same days and times. A partial first
+// day starts part-way down (start, in half-hours after local midnight); date is the column's "YYYY-MM-DD".
+export const windowColumns = (startUtc, zone) => layoutWindow(startUtc, zone).map((d) => ({
+  label: d.label, date: d.date, start: Math.floor(d.cells[0].minutes / CELL_MINUTES),
+  cells: d.cells.map((c) => ({ key: c.j, label: formatCell(startUtc, zone, c.j) })),
+}));
+
 // "7 PM" for hour h (0-23): the hour column of every grid.
 export const hourLabel = (h) => `${h % 12 === 0 ? 12 : h % 12} ${h < 12 ? "AM" : "PM"}`;
 
-// opts: { startUtc, zone, cellClass(j) -> string, cellLabel(j) -> string, onPick?(j), onHover?(j | null, byMouse) }
-// onPick makes cells buttons (tap or Enter); onHover(j, byMouse) follows the pointer and keyboard focus, and onHover(null)
-// fires when a mouse leaves (byMouse says whether a mouse is over the cell now, as opposed to a finger or the keyboard).
-export function mountHeatmap(container, opts) {
-  const { startUtc, zone, cellClass, cellLabel, cellText, onPick, onHover } = opts;
-  const days = layoutWindow(startUtc, zone);
-
+// The frame both grids draw from a layout's columns (see windowColumns): day tabs (shown under 480px, where one day
+// fills the screen), the hour column, and a column per layout column with its name and the padding down to its first
+// row. makeCell(cell) builds each cell's element; attrs are the grid's own. It opens on the first day's tab.
+export function gridFrame(columns, attrs, makeCell) {
   const tabs = el("div", { class: "daytabs", role: "tablist", "aria-label": "Day" });
-  const tabButtons = days.map((d, i) => {
-    const b = el("button", { type: "button", role: "tab", text: d.label });
+  const grid = el("div", attrs);
+  const tabButtons = columns.map((c, i) => {
+    const b = el("button", { type: "button", role: "tab", text: c.label });
     b.addEventListener("click", () => setDay(i));
     tabs.append(b);
     return b;
@@ -73,25 +79,34 @@ export function mountHeatmap(container, opts) {
     grid.dataset.active = String(day);
     tabButtons.forEach((b, i) => b.setAttribute("aria-selected", String(i === day)));
   };
-
-  const grid = el("div", { class: cellText ? "grid heat counted" : "grid heat", role: "grid", "aria-label": `Next 7 days, half-hour cells, times in ${zone.replaceAll("_", " ")}` });
   const hours = el("div", { class: "col hours", "aria-hidden": "true" });
   for (let h = 0; h < 48; h++) hours.append(el("div", { class: "hour", text: h % 2 === 0 ? hourLabel(h / 2) : "" }));
   grid.append(hours);
-
-  const nodes = new Map();
-  days.forEach((d, i) => {
-    const col = el("div", { class: "col day", "data-day": String(i), role: "row" });
-    col.append(el("div", { class: "dayname", text: d.label, "aria-hidden": "true" }));
-    // A partial first day starts part-way down: pad to its local time.
-    for (let g = 0; g < Math.floor(d.cells[0].minutes / CELL_MINUTES); g++) col.append(el("div", { class: "hcell gap", "aria-hidden": "true" }));
-    for (const c of d.cells) {
-      const n = el(onPick ? "button" : "div", { class: "hcell", role: "gridcell", "data-j": String(c.j) });
-      if (onPick) { n.type = "button"; n.addEventListener("click", () => onPick(c.j)); }
-      nodes.set(c.j, n);
-      col.append(n);
-    }
+  columns.forEach((c, d) => {
+    const col = el("div", { class: "col day", "data-day": String(d), role: "row" });
+    col.append(el("div", { class: "dayname", text: c.label, "aria-hidden": "true" }));
+    for (let g = 0; g < c.start; g++) col.append(el("div", { class: "gap", "aria-hidden": "true" }));
+    for (const cell of c.cells) col.append(makeCell(cell));
     grid.append(col);
+  });
+  setDay(0);
+  return { tabs, grid, setDay };
+}
+
+// opts: { startUtc, zone, cellClass(j) -> string, cellLabel(j) -> string, onPick?(j), onHover?(j | null, byMouse) }
+// onPick makes cells buttons (tap or Enter); onHover(j, byMouse) follows the pointer and keyboard focus, and onHover(null)
+// fires when a mouse leaves (byMouse says whether a mouse is over the cell now, as opposed to a finger or the keyboard).
+export function mountHeatmap(container, opts) {
+  const { startUtc, zone, cellClass, cellLabel, cellText, onPick, onHover } = opts;
+  const nodes = new Map();
+  const { tabs, grid } = gridFrame(windowColumns(startUtc, zone), {
+    class: cellText ? "grid heat counted" : "grid heat", role: "grid",
+    "aria-label": `Next 7 days, half-hour cells, times in ${zone.replaceAll("_", " ")}`,
+  }, ({ key: j }) => {
+    const n = el(onPick ? "button" : "div", { class: "hcell", role: "gridcell", "data-j": String(j) });
+    if (onPick) { n.type = "button"; n.addEventListener("click", () => onPick(j)); }
+    nodes.set(j, n);
+    return n;
   });
 
   // Touch the DOM only for cells whose look or words changed: 336 cells redraw on every tap.
@@ -115,7 +130,6 @@ export function mountHeatmap(container, opts) {
   }
 
   container.replaceChildren(tabs, grid);
-  setDay(0);
   update();
   return { update };
 }

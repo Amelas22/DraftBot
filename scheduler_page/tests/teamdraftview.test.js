@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { LinkExpired, createFixtureApi } from "../js/api.js";
 import { mountTeamDraft } from "../js/teamdraftview.js";
-import { columnLabel, editorDates } from "../js/thisweek.js";
+import { windowColumns } from "../js/grid.js";
 
 const doc = JSON.parse(readFileSync(new URL("../fixtures/team-draft.json", import.meta.url)));
 // Before the fixture window opens, so every cell can still be booked.
@@ -104,54 +104,101 @@ const diskFetch = async (url) => {
     return { ok: false, status: 404, json: async () => null };
   }
 };
-const tick = async () => { for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r)); };
+const tick = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)); };
 const byText = (root, text) => root.find((n) => n.textContent === text);
+// My availability's part of the pane, which holds the editor while the heatmap is hidden beside it.
+const mineBox = (root) => root.find((n) => n.className === "minehost");
+// The card's words now showing; the other views' words sit hidden beside them.
+const cardTitle = (root) => root.find((n) => n.className === "words" && n.attrs["aria-hidden"] === "false").children[0].textContent;
 // The free count a heatmap cell's label gives ("Sun 8 Nov, 12:00 PM: 0–1 free").
 const freeAt = (root, when) => {
   const n = root.find((x) => x.attrs["aria-label"]?.startsWith(`${when}:`));
   return n.attrs["aria-label"].split(": ")[1].split(" ")[0].split("–").map(Number).reduce((a, b) => a + b, 0);
 };
 
-// On team-draft-new (Fern, no usual week): opens Edit this week, ticks or unticks the also-usual box, paints the
-// last day's 12 PM and saves. Resolves with the root and that cell's free count before and after.
+// On team-draft-new (Fern, no usual week): opens My availability, picks This week, paints the last day's 12 PM, and
+// either presses Save as my usual week or leaves it saved as painted, then goes back to Everyone. Resolves with the
+// root, the api, and that cell's free count before and after.
 // The fixture window starts at the real current half hour, so the view runs on the real clock (a run that spans
 // local midnight could pick the wrong day).
-async function paintAndSave(alsoUsual) {
+async function paintAndSave(keepAsUsual) {
   const api = createFixtureApi("team-draft-new", diskFetch);
   const root = new Node();
   const view = await mountTeamDraft(root, api, { now: () => new Date() });
   try {
+    // Noon on the window's last whole date, its cell taken from the same layout the editor draws.
     const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    const when = `${columnLabel(editorDates(new Date(), zone)[6])}, 12:00 PM`;
+    const cols = windowColumns(new Date(Math.floor(Date.now() / 1800000) * 1800000), zone);
+    const noon = cols.at(-2).cells.find((c) => c.label.endsWith(", 12:00 PM"));
+    const when = noon.label;
     const before = freeAt(root, when);
 
-    byText(root, "Edit this week").click();
+    byText(root, "My availability").click();
     await tick();
-    root.find((n) => n.attrs.type === "checkbox").checked = alsoUsual;
-    const grid = root.find((n) => n.attrs.role === "grid");
-    const target = root.find((n) => n.attrs["data-i"] === String(6 * 48 + 24));
+    byText(root, "This week").click();
+    await tick();
+    const grid = mineBox(root).find((n) => n.attrs.role === "grid");
+    const target = mineBox(root).find((n) => n.attrs["data-i"] === String(noon.key));
     for (const fn of grid.listeners.keydown) fn({ target, key: " ", preventDefault() {} });
-    byText(root, "Save").click();
+    if (keepAsUsual) {
+      byText(root, "Save as my usual week").click();
+      await tick();
+    }
+    byText(root, "Everyone").click();
     await tick();
-    return { root, before, after: freeAt(root, when) };
+    return { root, api, before, after: freeAt(root, when) };
   } finally {
     view.dispose();
   }
 }
 
-test("Edit this week saves overrides alone and the heatmap counts them", async () => {
-  const { root, before, after } = await paintAndSave(false);
-  assert.ok(byText(root, "Saved."));
+test("changing this week saves overrides alone and the heatmap counts them", async () => {
+  const { root, api, before, after } = await paintAndSave(false);
   assert.equal(after, before + 1);
-  // Unticked, no usual week was written.
-  assert.ok(byText(root, "Enter my availability"));
+  assert.equal(cardTitle(root), "You're counted from this week's changes");
+  assert.equal(await api.getUsual(), null);
 });
 
-test("Edit this week with the box ticked also keeps the week as the usual week", async () => {
-  const { root, before, after } = await paintAndSave(true);
-  assert.ok(byText(root, "Saved."));
+test("Save as my usual week turns this week into the usual week and drops the changes", async () => {
+  const { root, api, before, after } = await paintAndSave(true);
   assert.equal(after, before + 1);
-  assert.ok(byText(root, "Edit my usual week"));
+  assert.notEqual(await api.getUsual(), null);
+  assert.equal((await api.getThisWeek()).days.length, 0);
+  assert.equal(cardTitle(root), "You're counted from your usual week");
+});
+
+test("the card warns a viewer with nothing entered and opens My availability on the usual week", async () => {
+  const api = createFixtureApi("team-draft-new", diskFetch);
+  const root = new Node();
+  const view = await mountTeamDraft(root, api, { now: () => new Date() });
+  try {
+    assert.equal(cardTitle(root), "The grid can't count you yet");
+    const heading = root.children[1];
+    byText(root, "My availability").click();
+    await tick();
+    assert.equal(cardTitle(root), "Changing your usual week");
+    assert.equal(byText(root, "Usual week").attrs["aria-pressed"], "true");
+    assert.equal(byText(root, "Save"), undefined);
+    // The usual week is drawn as the matchup's window, the same days as Everyone's heatmap.
+    const names = [];
+    const walk = (n) => { if (n.className === "dayname") names.push(n.textContent); (n.children || []).forEach(walk); };
+    walk(mineBox(root));
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const start = new Date(Math.floor(Date.now() / 1800000) * 1800000);
+    assert.deepEqual(names, windowColumns(start, zone).map((c) => c.label));
+    // A painted cell is saved without a Save press, once the viewer goes back to Everyone.
+    const grid = mineBox(root).find((n) => n.attrs.role === "grid");
+    const target = mineBox(root).find((n) => n.attrs["data-i"] === "24");
+    for (const fn of grid.listeners.keydown) fn({ target, key: " ", preventDefault() {} });
+    byText(root, "Everyone").click();
+    await tick();
+    assert.notEqual(await api.getUsual(), null);
+    assert.equal(cardTitle(root), "You're counted from your usual week");
+    // The page around the pane was never redrawn: the same heading node throughout.
+    assert.equal(root.children[1], heading);
+  } finally {
+    view.dispose();
+  }
 });
 
 // The readout text; the view sets it as a plain string.

@@ -91,6 +91,18 @@ export function windowCells(zone, usual, startUtc) {
   return out;
 }
 
+// The usual week with window cells painted in as instants: each window cell's usual-week cell (its local time in zone)
+// is set or cleared as `painted` has it; usual-week cells the window never reaches keep their value.
+export function usualWithWindow(usual, painted, zone, startUtc) {
+  const out = new Set(usual);
+  for (let j = 0; j < CELLS; j++) {
+    const u = usualCellOf(addCells(startUtc, j), zone);
+    if (painted.has(j)) out.add(u);
+    else out.delete(u);
+  }
+  return out;
+}
+
 // A dated override replaces the usual week for its local day; with no usual week, other days are busy.
 export function effectiveWindowCells(usual, overrides, startUtc) {
   const base = usual ? windowCells(usual.zone, usual.cells, startUtc) : new Set();

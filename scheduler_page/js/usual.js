@@ -1,26 +1,27 @@
 // The usual-week editor: a pure model (applyStroke, toFile, loadWeek) plus a thin DOM view (mountUsual).
-import { CELLS, decodeCells, encodeCells, isoSeconds } from "./week.js";
+import { decodeCells, encodeCells, isoSeconds, usualWithWindow, windowCells } from "./week.js";
 import { LinkExpired, checkDoc } from "./api.js";
 import { expiredMessage, NOT_ENABLED } from "./messages.js";
 import { el } from "./dom.js";
 import { appBar } from "./appbar.js";
-import { hourLabel } from "./grid.js";
+import { gridFrame, hourLabel, windowColumns } from "./grid.js";
 
 const FORMAT = "draftbot.scheduler.usual_week";
 const PER_DAY = 48;
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
-// Fill the rectangle between two grid positions (same days range x same half-hour range).
-export function applyStroke(cells, from, to, paint) {
+// Fill the rectangle between two cells of a paint grid (the same columns range x the same rows range), by key.
+// geo (from gridGeometry) is the grid's layout; the default is the usual Mon-Sun week.
+export function applyStroke(cells, from, to, paint, geo = WEEK_GEOMETRY) {
   const out = new Set(cells);
-  const d0 = Math.min(Math.floor(from / PER_DAY), Math.floor(to / PER_DAY));
-  const d1 = Math.max(Math.floor(from / PER_DAY), Math.floor(to / PER_DAY));
-  const h0 = Math.min(from % PER_DAY, to % PER_DAY);
-  const h1 = Math.max(from % PER_DAY, to % PER_DAY);
-  for (let d = d0; d <= d1; d++) {
-    for (let h = h0; h <= h1; h++) {
-      if (paint) out.add(d * PER_DAY + h);
-      else out.delete(d * PER_DAY + h);
+  const [x0, y0] = geo.pos.get(from);
+  const [x1, y1] = geo.pos.get(to);
+  for (let x = Math.min(x0, x1); x <= Math.max(x0, x1); x++) {
+    for (let y = Math.min(y0, y1); y <= Math.max(y0, y1); y++) {
+      const k = geo.keyAt(x, y);
+      if (k === undefined) continue;
+      if (paint) out.add(k);
+      else out.delete(k);
     }
   }
   return out;
@@ -53,17 +54,79 @@ const SAVE_MESSAGES = {
 };
 export const saveFailedMessage = (e) => (e && Object.hasOwn(SAVE_MESSAGES, e.code) ? SAVE_MESSAGES[e.code] : SAVE_FAILED);
 
+const AUTOSAVE_MS = 1200;
+const RETRY_MS = 15000;
+const AUTOSAVE_FAILED = "Couldn't save just now. Trying again shortly.";
+
+// A failed save worth trying again: a dropped connection (no code), a failing server, or the rate limit. Anything
+// else (a refused week, an expired link) fails the same way every time.
+const retryable = (e) => !(e instanceof LinkExpired) && (!e?.code || e.code === "rate_limited" || e.code.startsWith("http_5"));
+
+// Saving as the player paints. touch() after each change restarts the delay, so a run of strokes is one save; one
+// save runs at a time and a change made during it is saved after it. A failed save is tried again after RETRY_MS
+// when retrying can help, else it says why and waits for the next change. flush() saves anything pending now and
+// resolves once nothing is pending (or a save failed); cancel() drops it. save() does the PUT and throws on failure;
+// status(text) reports.
+export function autosaver(save, status, delay = AUTOSAVE_MS) {
+  let timer = null;
+  let dirty = false;
+  let running = Promise.resolve();
+  const later = (ms) => { clearTimeout(timer); timer = setTimeout(flush, ms); };
+  function flush() {
+    clearTimeout(timer);
+    timer = null;
+    running = running.then(async () => {
+      if (!dirty) return;
+      while (dirty) {
+        dirty = false;
+        status("Saving…");
+        try {
+          await save();
+        } catch (e) {
+          if (e instanceof LinkExpired) status(expiredMessage());
+          else if (retryable(e)) { dirty = true; status(AUTOSAVE_FAILED); later(RETRY_MS); }
+          else status(saveFailedMessage(e));
+          return;
+        }
+      }
+      status("Saved.");
+    });
+    return running;
+  }
+  return {
+    touch: () => { dirty = true; later(delay); },
+    flush,
+    cancel: () => { clearTimeout(timer); timer = null; dirty = false; },
+  };
+}
+
 const cellLabel = (labels, i) => {
   const d = Math.floor(i / PER_DAY), h = i % PER_DAY;
   const hh = Math.floor(h / 2), mm = h % 2 ? "30" : "00";
   return `${labels[d]} ${hourLabel(hh).replace(" ", ":" + mm + " ")}`;
 };
 
+// A paint grid's layout: columns, each { label, start, cells: [{ key, label }] }, whose cells run down
+// from row start (half-hours after local midnight). The key is what the editor stores. weekColumns is the usual
+// Mon-Sun week (key day * 48 + half-hour); windowColumns (grid.js) is a matchup's window, keyed by window cell.
+export const weekColumns = (labels = DAYS) => labels.map((label, d) => ({
+  label, start: 0, cells: Array.from({ length: PER_DAY }, (_, h) => ({ key: d * PER_DAY + h, label: cellLabel(labels, d * PER_DAY + h) })),
+}));
+
+// Where each key sits: pos maps a key to [column, row]; keyAt(column, row) is the key there, or undefined.
+export function gridGeometry(columns) {
+  const pos = new Map();
+  const at = new Map();
+  columns.forEach((c, x) => c.cells.forEach((cell, i) => {
+    pos.set(cell.key, [x, c.start + i]);
+    at.set(`${x},${c.start + i}`, cell.key);
+  }));
+  return { pos, keyAt: (x, y) => at.get(`${x},${y}`) };
+}
+const WEEK_GEOMETRY = gridGeometry(weekColumns());
+
 // The editor's bottom buttons: the back button appears only when the caller can take the user back.
 export const actionButtons = (onBack, backLabel = "Back to teams") => ["Save", "Clear", ...(onBack ? [backLabel] : [])];
-
-// The button another page offers for opening the editor: null is a week never saved.
-export const editWeekLabel = (usualDoc) => (usualDoc === null ? "Enter my availability" : "Edit my usual week");
 
 // A page's way into the editor and back. dispose stops the page's timers and listeners before the editor takes
 // over; show(doc, status) draws the page again, with the saved week and "Saved." or with the old week on Back.
@@ -75,53 +138,28 @@ export function weekEditing(root, api, { now, backLabel, dispose, show }) {
   };
 }
 
-// The paintable 7-column grid both week editors draw, with its day tabs. labels name the columns (tabLabels the
-// tabs, default labels); onChange runs after every stroke or key toggle. setLabels renames the columns in place.
-// It opens on the first day's tab with the given cells painted.
-export function paintGrid({ labels, tabLabels = labels, gridLabel, cells: initial, onChange }) {
+// The paintable grid both week editors draw, in gridFrame's frame, laid out by columns (see weekColumns).
+// onChange runs after every stroke or key toggle. It opens on the first day's tab with the given cells (keys) painted.
+export function paintGrid({ columns, gridLabel, cells: initial, onChange }) {
   let cells = initial;
-  // Day tabs: only visible under 480px (CSS), where one day fills the screen.
-  const tabs = el("div", { class: "daytabs", role: "tablist", "aria-label": "Day" });
-  const tabButtons = tabLabels.map((d, i) => {
-    const b = el("button", { type: "button", role: "tab", text: d });
-    b.addEventListener("click", () => setDay(i));
-    tabs.append(b);
+  const geo = gridGeometry(columns);
+  const nodes = new Map();
+  const { tabs, grid, setDay } = gridFrame(columns, {
+    class: "grid", role: "grid", "aria-label": gridLabel, "aria-multiselectable": "true",
+  }, ({ key, label }) => {
+    const b = el("button", { type: "button", class: "cell", "data-i": String(key), role: "gridcell", tabindex: "-1", "aria-label": label });
+    nodes.set(key, b);
     return b;
   });
-  const setDay = (day) => {
-    grid.dataset.active = String(day);
-    tabButtons.forEach((b, i) => b.setAttribute("aria-selected", String(i === day)));
-  };
-
-  const grid = el("div", { class: "grid", role: "grid", "aria-label": gridLabel, "aria-multiselectable": "true" });
-  const hours = el("div", { class: "col hours", "aria-hidden": "true" });
-  for (let h = 0; h < PER_DAY; h++) hours.append(el("div", { class: "hour", text: h % 2 === 0 ? hourLabel(h / 2) : "" }));
-  grid.append(hours);
-
-  const nodes = [];
-  const names = [];
-  for (let d = 0; d < 7; d++) {
-    const col = el("div", { class: "col day", "data-day": String(d), role: "row" });
-    const name = el("div", { class: "dayname", text: labels[d], "aria-hidden": "true" });
-    names.push(name);
-    col.append(name);
-    for (let h = 0; h < PER_DAY; h++) {
-      const i = d * PER_DAY + h;
-      const b = el("button", { type: "button", class: "cell", "data-i": String(i), role: "gridcell", tabindex: "-1", "aria-label": cellLabel(labels, i) });
-      nodes[i] = b;
-      col.append(b);
-    }
-    grid.append(col);
-  }
-  nodes[0].tabIndex = 0;
+  nodes.values().next().value.tabIndex = 0;
 
   const paintView = (set, preview) => {
-    for (let i = 0; i < CELLS; i++) {
-      const on = set.has(i);
-      nodes[i].classList.toggle("on", on);
-      nodes[i].setAttribute("aria-selected", String(on));
+    for (const [k, n] of nodes) {
+      const on = set.has(k);
+      n.classList.toggle("on", on);
+      n.setAttribute("aria-selected", String(on));
     }
-    if (preview) for (const i of preview) nodes[i].classList.add("stroke");
+    if (preview) for (const k of preview) nodes.get(k).classList.add("stroke");
     else nodes.forEach((n) => n.classList.remove("stroke"));
   };
 
@@ -130,12 +168,13 @@ export function paintGrid({ labels, tabLabels = labels, gridLabel, cells: initia
     const c = t && t.closest && t.closest(".cell");
     return c ? Number(c.dataset.i) : null;
   };
+  const stroke = (base, from, to, paint) => applyStroke(base, from, to, paint, geo);
 
-  let stroke = null; // { anchor, paint, base, current }
+  let drag = null; // { anchor, paint, base, current }
   const endStroke = (commit) => {
-    if (!stroke) return;
-    if (commit) cells = applyStroke(stroke.base, stroke.anchor, stroke.current, stroke.paint);
-    stroke = null;
+    if (!drag) return;
+    if (commit) cells = stroke(drag.base, drag.anchor, drag.current, drag.paint);
+    drag = null;
     paintView(cells);
     onChange();
   };
@@ -143,50 +182,45 @@ export function paintGrid({ labels, tabLabels = labels, gridLabel, cells: initia
     if (e.button !== 0 && e.pointerType === "mouse") return;
     const i = cellAt(e);
     if (i === null) return;
-    stroke = { anchor: i, current: i, paint: !cells.has(i), base: new Set(cells) };
+    drag = { anchor: i, current: i, paint: !cells.has(i), base: new Set(cells) };
     if (e.pointerType === "mouse") e.preventDefault();
     grid.setPointerCapture?.(e.pointerId);
-    paintView(cells, applyStroke(new Set(), i, i, true));
+    paintView(cells, stroke(new Set(), i, i, true));
   });
   grid.addEventListener("pointermove", (e) => {
-    if (!stroke) return;
+    if (!drag) return;
     const i = cellAt(e);
-    if (i === null || i === stroke.current) return;
-    stroke.current = i;
-    paintView(applyStroke(stroke.base, stroke.anchor, i, stroke.paint), applyStroke(new Set(), stroke.anchor, i, true));
+    if (i === null || i === drag.current) return;
+    drag.current = i;
+    paintView(stroke(drag.base, drag.anchor, i, drag.paint), stroke(new Set(), drag.anchor, i, true));
   });
   grid.addEventListener("pointerup", () => endStroke(true));
   grid.addEventListener("pointercancel", () => endStroke(false));
 
-  // Keyboard: arrows move, Space/Enter toggles the focused cell.
+  // Keyboard: arrows move to the cell beside, Space/Enter toggles the focused cell.
   grid.addEventListener("keydown", (e) => {
     const c = e.target.closest?.(".cell");
     if (!c) return;
     const i = Number(c.dataset.i);
-    const step = { ArrowUp: -1, ArrowDown: 1, ArrowLeft: -PER_DAY, ArrowRight: PER_DAY }[e.key];
+    const step = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] }[e.key];
     if (step !== undefined) {
       e.preventDefault();
-      const j = i + step;
-      if (j < 0 || j >= CELLS || (Math.abs(step) === 1 && Math.floor(j / PER_DAY) !== Math.floor(i / PER_DAY))) return;
-      setDay(Math.floor(j / PER_DAY));
-      c.tabIndex = -1; nodes[j].tabIndex = 0; nodes[j].focus();
+      const [x, y] = geo.pos.get(i);
+      const j = geo.keyAt(x + step[0], y + step[1]);
+      if (j === undefined) return;
+      setDay(x + step[0]);
+      c.tabIndex = -1; nodes.get(j).tabIndex = 0; nodes.get(j).focus();
     } else if (e.key === " " || e.key === "Enter") {
       e.preventDefault();
-      cells = applyStroke(cells, i, i, !cells.has(i));
+      cells = stroke(cells, i, i, !cells.has(i));
       paintView(cells);
       onChange();
     }
   });
 
-  const setLabels = (next, nextTabs = next) => {
-    names.forEach((n, d) => { n.textContent = next[d]; });
-    tabButtons.forEach((b, d) => { b.textContent = nextTabs[d]; });
-    nodes.forEach((n, i) => n.setAttribute("aria-label", cellLabel(next, i)));
-  };
-  setDay(0);
   paintView(cells);
   return {
-    tabs, grid, setLabels,
+    tabs, grid,
     cells: () => cells,
     setCells: (next) => { cells = next; paintView(cells); },
   };
@@ -206,8 +240,11 @@ export function zoneSelect(zone, zones, fallback = zone) {
 export const touchHint = () => el("p", { class: "touchhint", text: "Drag on the grid to paint. Drag the times on the left to scroll." });
 
 // deps: { now?: () => Date, zones?: string[], defaultZone?: string, intro?: string, onSaved?: (doc) => void,
-//         onBack?: () => void, backLabel?: string }
+//         onBack?: () => void, backLabel?: string, startUtc?: Date, saveDelay?: number }
 // With onBack the editor also offers a back button (backLabel, else Back to teams), leaving without saving.
+// With startUtc it sits on a matchup page under the matchup's heading: no app bar or heading of its own, the grid
+// laid out as that matchup's window (windowColumns) instead of Mon-Sun, and no Save button, since it saves as the
+// player paints (saveDelay ms after the last change). Returns { flush } (see autosaver).
 // With onSaved the editor is a step in another flow: a save says "Saved." and hands the saved file on.
 export async function mountUsual(root, api, deps = {}) {
   const onSaved = deps.onSaved;
@@ -232,22 +269,46 @@ export async function mountUsual(root, api, deps = {}) {
   const backLabel = actionButtons(deps.onBack, deps.backLabel)[2];
   const back = backLabel ? el("button", { type: "button", class: "secondary", text: backLabel }) : null;
   if (back) back.addEventListener("click", () => deps.onBack());
-  const touched = () => { status.textContent = ""; };
+  // On a matchup the grid paints window cells as instants; week is the usual week behind them, which keeps any cell
+  // the window never reaches. Off a matchup the grid's keys are the usual week's own cells.
+  const startUtc = deps.startUtc;
+  let week = loaded.cells;
+  const weekOf = () => (startUtc ? usualWithWindow(week, painter.cells(), zone, startUtc) : painter.cells());
+  const write = async () => {
+    week = weekOf();
+    const doc = toFile(zone, week, now());
+    await api.putUsual(doc);
+    if (onSaved) onSaved(doc);
+  };
+  const auto = startUtc ? autosaver(write, (text) => { status.textContent = text; }, deps.saveDelay) : null;
+  const touched = () => { status.textContent = ""; auto?.touch(); };
 
-  const painter = paintGrid({ labels: DAYS, gridLabel: "Usual week, half-hour cells", cells: loaded.cells, onChange: touched });
-  const { tabs, grid } = painter;
+  let painter;
+  const paintBox = el("div");
+  const draw = () => {
+    painter = paintGrid({
+      columns: startUtc ? windowColumns(startUtc, zone) : weekColumns(), gridLabel: "Usual week, half-hour cells",
+      cells: startUtc ? windowCells(zone, week, startUtc) : week, onChange: touched,
+    });
+    paintBox.replaceChildren(painter.tabs, touchHint(), painter.grid);
+  };
+  draw();
 
-  select.addEventListener("change", () => { zone = select.value; touched(); });
-  clear.addEventListener("click", () => { painter.setCells(new Set()); touched(); });
+  // A new zone keeps the painted wall times; on a matchup that moves them within the window, so it is drawn again.
+  select.addEventListener("change", () => {
+    week = weekOf();
+    zone = select.value;
+    if (startUtc) draw();
+    touched();
+  });
+  clear.addEventListener("click", () => { week = new Set(); painter.setCells(new Set()); touched(); });
   save.addEventListener("click", async () => {
     if (api.fixture && !onSaved) { status.textContent = "Saved (fixture mode: nothing was sent)."; return; }
     save.disabled = true;
     status.textContent = "Saving…";
     try {
-      const doc = toFile(zone, painter.cells(), now());
-      await api.putUsual(doc);
+      await write();
       status.textContent = onSaved ? "Saved." : "Saved. It shows in /settings straight away.";
-      if (onSaved) onSaved(doc);
     } catch (e) {
       status.textContent = e instanceof LinkExpired ? expiredMessage() : saveFailedMessage(e);
     } finally {
@@ -256,13 +317,14 @@ export async function mountUsual(root, api, deps = {}) {
   });
 
   root.replaceChildren(
-    appBar("Your usual week"),
+    ...(startUtc ? [] : [appBar("Your usual week")]),
     ...(deps.intro ? [el("p", { class: "notice intro", text: deps.intro })] : []),
-    el("h1", { text: "When are you usually free?" }),
+    ...(startUtc ? [] : [el("h1", { text: "When are you usually free?" })]),
     el("p", { class: "lede", text: "Drag or tap to paint the half-hours you can usually draft. Times are local to the zone below. Drag again over painted cells to erase." }),
     zoneRow,
-    tabs, touchHint(), grid,
-    el("div", { class: "actions" }, save, clear, ...(back ? [back] : [])),
+    paintBox,
+    el("div", { class: "actions" }, ...(auto ? [] : [save]), clear, ...(back ? [back] : [])),
     status,
   );
+  return { flush: () => auto?.flush() ?? Promise.resolve() };
 }
