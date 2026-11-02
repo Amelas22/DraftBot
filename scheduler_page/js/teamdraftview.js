@@ -20,7 +20,7 @@ const TEAM_DRAFT_PATHS = { get: "/api/team-draft", actions: "/api/team-draft/act
 const REFRESH_MS = 30000;
 const HOVER_HINT = "Hover or tap a half-hour to see who's free on each side. Tap a time to pick it.";
 const TOGGLE_HINT = "Tap a team or a player to leave them out of the grid; tap again to bring them back.";
-const NO_WEEK = "no usual week set";
+const NO_WEEK = "no availability entered";
 const BACK = "Back to the matchup";
 
 // deps: { now?: () => Date, paths?: { get, actions } } (paths default to the team-draft API; a match link passes its own). Returns { dispose } which stops the refresh timer.

@@ -648,7 +648,7 @@ def _week_field(embed):
 
 async def test_settings_line_for_unset_and_empty_week():
     unset = _week_field(settings_embed("Lounge", _week_settings(scheduler=True, usual_week=None)))
-    assert unset.value.startswith("Not set.")
+    assert unset.value.startswith("No availability entered.")
     empty = _week_field(settings_embed("Lounge", _week_settings(scheduler=True, usual_week=[])))
     assert empty.value == "No usual times."
     two = _week_field(settings_embed(

@@ -69,6 +69,6 @@ test("actionButtons names the page the back button returns to", () => {
 });
 
 test("editWeekLabel offers to set a week nobody has painted yet, else to edit it", () => {
-  assert.equal(editWeekLabel(null), "Set my usual week");
+  assert.equal(editWeekLabel(null), "Enter my availability");
   assert.equal(editWeekLabel({ zone: "Europe/London", cells: "" }), "Edit my usual week");
 });

@@ -63,7 +63,7 @@ const cellLabel = (labels, i) => {
 export const actionButtons = (onBack, backLabel = "Back to teams") => ["Save", "Clear", ...(onBack ? [backLabel] : [])];
 
 // The button another page offers for opening the editor: null is a week never saved.
-export const editWeekLabel = (usualDoc) => (usualDoc === null ? "Set my usual week" : "Edit my usual week");
+export const editWeekLabel = (usualDoc) => (usualDoc === null ? "Enter my availability" : "Edit my usual week");
 
 // A page's way into the editor and back. dispose stops the page's timers and listeners before the editor takes
 // over; show(doc, status) draws the page again, with the saved week and "Saved." or with the old week on Back.

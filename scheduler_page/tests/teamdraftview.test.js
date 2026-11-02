@@ -144,7 +144,7 @@ test("Edit this week saves overrides alone and the heatmap counts them", async (
   assert.ok(byText(root, "Saved."));
   assert.equal(after, before + 1);
   // Unticked, no usual week was written.
-  assert.ok(byText(root, "Set my usual week"));
+  assert.ok(byText(root, "Enter my availability"));
 });
 
 test("Edit this week with the box ticked also keeps the week as the usual week", async () => {

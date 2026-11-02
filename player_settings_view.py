@@ -30,7 +30,7 @@ DMS_LABEL = "DM me when a ready check starts"
 HIDE_LABEL = "Hide me from the Skill Rating Ladder"
 ANONYMOUS_LABEL = "Show me as Anonymous on donation pages"
 
-WEEK_NOT_SET = "Not set. Press My usual week to add it."
+WEEK_NOT_SET = "No availability entered. Press My usual week to add it."
 WEEK_EMPTY = "No usual times."
 WEEK_INTRO = ("Paint your usual week, then save. It shows here straight away. "
               "The link works for 7 days.")
