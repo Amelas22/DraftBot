@@ -4,7 +4,6 @@ A ``team_draft`` link names its matchup in the link's subject. Every action is
 announced in the matchup's thread once it is committed; an announcement that
 fails is logged and never fails the booking.
 """
-import base64
 import json
 import uuid
 from collections.abc import Awaitable, Callable
@@ -23,7 +22,7 @@ from services import team_draft
 from services.availability import (
     CELL_MINUTES,
     cells_b64,
-    day_cells_to_bytes,
+    day_cells_b64,
     day_overrides,
     floor_half_hour,
     iso_z,
@@ -117,7 +116,7 @@ async def build_state(
                             {
                                 "date": o.local_date.isoformat(),
                                 "zone": o.zone,
-                                "cells": base64.b64encode(day_cells_to_bytes(o.cells)).decode("ascii"),
+                                "cells": day_cells_b64(o.cells),
                             }
                             for o in overrides.get(user, [])
                         ],

@@ -73,8 +73,11 @@ export function localDateOf(date, zone) {
   return `${parts.year}-${parts.month}-${parts.day}`;
 }
 
+// A "YYYY-MM-DD" date as noon UTC, so day arithmetic never trips over a zone.
+export const noonOf = (date) => new Date(`${date}T12:00:00Z`);
+
 // The usual-week day (Monday = 0) a "YYYY-MM-DD" date falls on.
-export const weekdayOfDate = (date) => (new Date(`${date}T12:00:00Z`).getUTCDay() + 6) % 7;
+export const weekdayOfDate = (date) => (noonOf(date).getUTCDay() + 6) % 7;
 
 // The half-hour of the local day (0..47) that a real instant falls in.
 export const dayCellOf = (date, zone) => usualCellOf(date, zone) % 48;

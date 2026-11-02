@@ -245,7 +245,7 @@ def this_week_doc(days: Sequence[DayOverride]) -> dict[str, object]:
         "days": [
             {
                 "date": d.local_date.isoformat(),
-                "cells": base64.b64encode(day_cells_to_bytes(d.cells)).decode("ascii"),
+                "cells": day_cells_b64(d.cells),
             }
             for d in days
         ],
@@ -260,8 +260,11 @@ def next_week_lines(
     Dated overrides replace the usual week for their day; the days are in the
     week's zone, else the first override's. No week and no override gives [].
     """
-    zone = week.zone if week else overrides[0].zone if overrides else None
-    if zone is None:
+    if week is not None:
+        zone = week.zone
+    elif overrides:
+        zone = overrides[0].zone
+    else:
         return []
     now = now_utc.astimezone(timezone.utc)
     start = now.replace(
@@ -298,6 +301,11 @@ def cells_b64(week: UsualWeek | None) -> str | None:
     if week is None:
         return None
     return base64.b64encode(cells_to_bytes(week.cells)).decode("ascii")
+
+
+def day_cells_b64(cells: frozenset[int]) -> str:
+    """A day's half-hours as the page reads them (base64)."""
+    return base64.b64encode(day_cells_to_bytes(cells)).decode("ascii")
 
 
 async def usual_weeks(session: AsyncSession, users: list[str]) -> dict[str, UsualWeek]:

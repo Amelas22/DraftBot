@@ -1,6 +1,6 @@
 // The this-week editor: today and the six days after, as dated columns pre-filled from the usual week, saved as
 // dated overrides. A pure model (editorDates, columnLabel, prefill, toThisWeekFile) plus a thin DOM view.
-import { DAY_CELLS, decodeCells, decodeDayCells, encodeDayCells, localDateOf, weekdayOfDate } from "./week.js";
+import { DAY_CELLS, decodeCells, decodeDayCells, encodeDayCells, localDateOf, noonOf, weekdayOfDate } from "./week.js";
 import { LinkExpired, checkDoc } from "./api.js";
 import { expiredMessage } from "./messages.js";
 import { el } from "./dom.js";
@@ -12,9 +12,6 @@ const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const DAY_MS = 86400000;
 const RESET_FAILED = "Could not reset. Check your connection and press Reset again.";
-
-// A "YYYY-MM-DD" date as noon UTC, so day arithmetic never trips over a zone.
-const noonOf = (date) => new Date(`${date}T12:00:00Z`);
 
 // Today through today+6, as local dates in zone.
 export function editorDates(now, zone) {
