@@ -23,6 +23,8 @@ from services.availability import (
     save_usual_week,
     usual_week_doc,
     next_week_lines,
+    parse_this_week,
+    this_week_doc,
     parse_usual_week,
     window_cells,
 )
@@ -267,3 +269,72 @@ async def test_clear_day_overrides(test_db) -> None:
     await replace_day_overrides("1", [_day(TODAY, {8})], False, NOW)
     await clear_day_overrides("1")
     assert await load_day_overrides("1", NOW) == []
+
+
+TW_NOW = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
+
+
+def _day_b64(cells: set[int]) -> str:
+    return base64.b64encode(day_cells_to_bytes(cells)).decode("ascii")
+
+
+def _tw(**over: object) -> bytes:
+    d: dict[str, object] = {
+        "format": "draftbot.scheduler.this_week",
+        "version": 1,
+        "zone": "UTC",
+        "also_usual": False,
+        "days": [{"date": "2026-10-22", "cells": _day_b64({1})}],
+    }
+    d.update(over)
+    return json.dumps(d).encode()
+
+
+def _days(*dates: str) -> list[dict[str, str]]:
+    return [{"date": d, "cells": _day_b64({1})} for d in dates]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b" " * 4097,
+        b"[]",
+        b"[" * 4000,
+        _tw(version=1.0),
+        _tw(version=2),
+        _tw(format="other"),
+        _tw(zone="Mars/Olympus"),
+        _tw(zone=None),
+        _tw(also_usual="yes"),
+        _tw(days="nope"),
+        _tw(days=["2026-10-22"]),
+        _tw(days=_days("2026-10-21", "2026-10-21")),
+        _tw(days=_days("2026-10-20")),
+        _tw(days=_days("2026-10-30")),
+        _tw(days=_days("not-a-date")),
+        _tw(days=_days("20261022")),
+        _tw(days=[{"date": "2026-10-22", "cells": base64.b64encode(bytes(7)).decode()}]),
+        _tw(days=[{"date": "2026-10-22", "cells": "!!!not base64!!!"}]),
+        _tw(days=_days(*[f"2026-10-{d}" for d in range(21, 31)])),
+    ],
+)
+def test_parse_this_week_refuses(raw: bytes) -> None:
+    with pytest.raises(InvalidWeek):
+        parse_this_week(raw, TW_NOW)
+
+
+def test_parse_this_week_accepts_window_edges_in_the_zone() -> None:
+    week = parse_this_week(_tw(zone="Asia/Tokyo", also_usual=True, days=_days("2026-10-21", "2026-10-29")), TW_NOW)
+    assert week.zone == "Asia/Tokyo" and week.also_usual
+    assert [d.local_date for d in week.days] == [date(2026, 10, 21), date(2026, 10, 29)]
+    assert week.days[0].cells == frozenset({1})
+    assert len(parse_this_week(_tw(days=_days(*[f"2026-10-{d}" for d in range(21, 30)])), TW_NOW).days) == 9
+
+
+def test_this_week_doc_shape() -> None:
+    assert this_week_doc([]) == {
+        "format": "draftbot.scheduler.this_week", "version": 1, "zone": None, "days": [],
+    }
+    doc = this_week_doc([DayOverride("UTC", date(2026, 10, 22), frozenset({1}))])
+    assert doc["zone"] == "UTC"
+    assert doc["days"] == [{"date": "2026-10-22", "cells": _day_b64({1})}]

@@ -27,6 +27,8 @@ _BYTES = CELLS // 8
 _DAY_BYTES = DAY_CELLS // 8
 _FORMAT = "draftbot.scheduler.usual_week"
 _VERSION = 1
+_THIS_WEEK_FORMAT = "draftbot.scheduler.this_week"
+MAX_THIS_WEEK_DAYS = 9
 
 
 class InvalidWeek(ValueError):
@@ -175,6 +177,78 @@ def parse_usual_week(raw: bytes) -> UsualWeek:
     if not isinstance(cells, str):
         raise InvalidWeek("cells missing")
     return UsualWeek(zone=zone, cells=decode_cells(cells))
+
+
+@dataclass(frozen=True)
+class ThisWeek:
+    """A saved this-week edit: the dated days, and whether to also keep them as the usual week."""
+
+    zone: str
+    days: tuple[DayOverride, ...]
+    also_usual: bool
+
+
+def parse_this_week(raw: bytes, now_utc: datetime) -> ThisWeek:
+    """Validate a ``draftbot.scheduler.this_week`` v1 body; dates must fall in today-1 .. today+7 in its zone."""
+    if len(raw) > MAX_FILE_BYTES:
+        raise InvalidWeek("file too large")
+    try:
+        doc = json.loads(raw)
+    except (ValueError, RecursionError) as exc:
+        raise InvalidWeek("not JSON") from exc
+    if not isinstance(doc, dict):
+        raise InvalidWeek("not a JSON object")
+    if doc.get("format") != _THIS_WEEK_FORMAT:
+        raise InvalidWeek("unknown format")
+    version = doc.get("version")
+    if type(version) is not int or version != _VERSION:
+        raise InvalidWeek("unsupported version")
+    zone = doc.get("zone")
+    if not isinstance(zone, str) or zone not in _known_zones():
+        raise InvalidWeek("unknown zone")
+    also_usual = doc.get("also_usual", False)
+    if type(also_usual) is not bool:
+        raise InvalidWeek("also_usual is not a boolean")
+    entries = doc.get("days")
+    if not isinstance(entries, list) or len(entries) > MAX_THIS_WEEK_DAYS:
+        raise InvalidWeek("days missing or too many")
+    today = now_utc.astimezone(ZoneInfo(zone)).date()
+    seen: set[date] = set()
+    days: list[DayOverride] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise InvalidWeek("day is not an object")
+        text, cells = entry.get("date"), entry.get("cells")
+        if not isinstance(text, str) or len(text) != 10 or not isinstance(cells, str):
+            raise InvalidWeek("day needs a date and cells")
+        try:
+            local = date.fromisoformat(text)
+            data = base64.b64decode(cells, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise InvalidWeek("bad date or cells") from exc
+        if not today - timedelta(days=1) <= local <= today + timedelta(days=7):
+            raise InvalidWeek("date out of range")
+        if local in seen:
+            raise InvalidWeek("date repeated")
+        seen.add(local)
+        days.append(DayOverride(zone, local, day_cells_from_bytes(data)))
+    return ThisWeek(zone, tuple(days), also_usual)
+
+
+def this_week_doc(days: Sequence[DayOverride]) -> dict[str, object]:
+    """The ``draftbot.scheduler.this_week`` v1 document for a player's overrides."""
+    return {
+        "format": _THIS_WEEK_FORMAT,
+        "version": _VERSION,
+        "zone": days[0].zone if days else None,
+        "days": [
+            {
+                "date": d.local_date.isoformat(),
+                "cells": base64.b64encode(day_cells_to_bytes(d.cells)).decode("ascii"),
+            }
+            for d in days
+        ],
+    }
 
 
 def next_week_lines(week: UsualWeek, now_utc: datetime) -> list[str]:

@@ -312,3 +312,35 @@ test("the team-draft fixture books, moves and clears in memory, bumping the vers
   assert.equal((await api.get("/api/team-draft")).booking.version, 3);
   assert.equal(fake.calls.length, before);
 });
+
+test("putThisWeek, getThisWeek and clearThisWeek hit /api/this-week", async () => {
+  const fake = recorder(200, { format: "draftbot.scheduler.this_week", version: 1, zone: null, days: [] });
+  const api = createApi(TOKEN, fake);
+  await api.getThisWeek();
+  await api.putThisWeek({ days: [], also_usual: false });
+  await api.clearThisWeek();
+  assert.deepEqual(fake.calls.map(([u, o]) => [o.method, u]), [
+    ["GET", "/api/this-week"], ["PUT", "/api/this-week"], ["DELETE", "/api/this-week"],
+  ]);
+  assert.equal(fake.calls[1][1].headers["Content-Type"], "application/json");
+  assert.equal(fake.calls[1][1].body, '{"days":[],"also_usual":false}');
+  assert.equal(fake.calls[2][1].body, undefined);
+});
+
+test("clearThisWeek accepts a 204 with no body", async () => {
+  const api = createApi(TOKEN, async () => ({ ok: true, status: 204, json: async () => { throw new Error("no body"); } }));
+  assert.equal(await api.clearThisWeek(), null);
+});
+
+test("every fixture api keeps an in-memory this-week doc", async () => {
+  for (const name of ["usual-week", "teams", "team-draft"]) {
+    const api = createFixtureApi(name, diskFetch());
+    const empty = { format: "draftbot.scheduler.this_week", version: 1, zone: null, days: [] };
+    assert.deepEqual(await api.getThisWeek(), empty);
+    const doc = { ...empty, zone: "UTC", days: [{ date: "2026-10-22", cells: "AAAAAAAA" }] };
+    assert.deepEqual(await api.putThisWeek({ ...doc, also_usual: false }), doc);
+    assert.deepEqual(await api.getThisWeek(), doc);
+    assert.equal(await api.clearThisWeek(), null);
+    assert.deepEqual(await api.getThisWeek(), empty);
+  }
+});

@@ -24,6 +24,19 @@ export function checkDoc(body, format) {
 const FIXTURE_RE = /^[A-Za-z0-9._-]+$/;
 const TOKEN_RE = /^[A-Za-z0-9_-]{20,64}$/;
 const USUAL_PATH = "/api/usual-week";
+const THIS_WEEK_PATH = "/api/this-week";
+
+// A player with no overrides: the server answers this on a first read, and the fixtures start from it.
+const emptyThisWeek = () => ({ format: "draftbot.scheduler.this_week", version: 1, zone: null, days: [] });
+// The in-memory this-week behaviour the fixture apis share; a saved doc comes back without its `also_usual`.
+function fixtureThisWeek() {
+  let doc = emptyThisWeek();
+  return {
+    getThisWeek: async () => structuredClone(doc),
+    putThisWeek: async ({ also_usual, ...saved }) => { doc = structuredClone(saved); return structuredClone(doc); },
+    clearThisWeek: async () => { doc = emptyThisWeek(); return null; },
+  };
+}
 
 // A failed call: `code` is the server's error code ("too_large", "rate_limited", ...), `status` the HTTP status.
 async function failure(res) {
@@ -66,6 +79,13 @@ export function createApi(token, fetchFn = fetch) {
       return res.json();
     },
     putUsual: (doc) => json("PUT", USUAL_PATH, doc),
+    getThisWeek: () => json("GET", THIS_WEEK_PATH),
+    putThisWeek: (doc) => json("PUT", THIS_WEEK_PATH, doc),
+    async clearThisWeek() {
+      const res = await call("DELETE", THIS_WEEK_PATH);
+      if (!res.ok) throw await failure(res);
+      return null;
+    },
     get: (path) => json("GET", path),
     post: (path, body) => json("POST", path, body),
   };
@@ -88,6 +108,7 @@ export function createFixtureApi(name, fetchFn = fetch) {
     me: async () => ({ user: "fixture", guild: "fixture", view: "usual", exp: null }),
     getUsual: () => read(`fixtures/${name}.json`),
     putUsual: async (doc) => doc,
+    ...fixtureThisWeek(),
     get: (path) => read(`fixtures/${path.replace(/^\/+/, "")}.json`),
     post: refuse,
   };
@@ -196,6 +217,7 @@ function teamsFixtureApi(read, { file, usualFile, name }) {
     me: async () => { await load(); return { user: user(), guild: "fixture", view: "lfg", exp: null }; },
     getUsual: async () => { await load(); return structuredClone(await week); },
     putUsual: async (doc) => doc,
+    ...fixtureThisWeek(),
     get: async (path) => {
       if (path !== "/api/teams") throw new Error(`no fixture for ${path}`);
       return structuredClone(await load());
@@ -266,6 +288,7 @@ function teamDraftFixtureApi(read, { user: viewer, usualFile }) {
       }
       return doc;
     },
+    ...fixtureThisWeek(),
     get: async (path) => {
       if (path !== "/api/team-draft") throw new Error(`no fixture for ${path}`);
       return structuredClone(await load());
