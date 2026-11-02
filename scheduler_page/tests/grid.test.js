@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { layoutWindow, formatCell, formatTime, hourLabel, windowColumns } from "../js/grid.js";
+import { layoutWindow, formatCell, formatTime, hourLabel, rowClass, windowColumns } from "../js/grid.js";
 import { CELLS } from "../js/week.js";
 
 const start = new Date("2026-10-21T04:00:00Z");
@@ -57,4 +57,8 @@ test("windowColumns is the window by local date, keyed by window cell, padded to
   assert.deepEqual(cols.flatMap((c) => c.cells.map((x) => x.key)), Array.from({ length: CELLS }, (_, j) => j));
   assert.equal(cols[0].cells[0].label, "Mon 2 Nov, 10:00 AM");
   assert.equal(cols[0].date, "2026-11-02");
+});
+
+test("rowClass opens each hour, closes it with its half-hour, and shades every other hour", () => {
+  assert.deepEqual([0, 1, 2, 3, 4].map(rowClass), ["hr", "half", "hr alt", "half alt", "hr"]);
 });

@@ -1,7 +1,7 @@
 :root {
   color-scheme: light dark;
   --bg: #f3f8f4; --surface: #ffffff; --fg: #173b2a; --muted: #4f6e5b;
-  --accent: #2f8a4f; --accent-fg: #ffffff; --chip: #e1eee5; --empty: #e9f0eb;
+  --accent: #2f8a4f; --accent-fg: #ffffff; --chip: #e1eee5; --empty: #e9f0eb; --empty-alt: #dde7e0;
   --h1: #cfe8d6; --h2: #a3d6b1; --h3: #70bf88; --h4: #44a465; --h5: #2f8a4f; --h6: #1c6838;
   --line: #d5e3d9; --warn: #b5651d; --warnbg: #fbf0e1;
   --font: "Karla", system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -9,7 +9,7 @@
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #0f1c15; --surface: #16271d; --fg: #e3f1e7; --muted: #9bb8a5;
-    --accent: #4cb872; --accent-fg: #0b1a11; --chip: #213a2b; --empty: #1d3125;
+    --accent: #4cb872; --accent-fg: #0b1a11; --chip: #213a2b; --empty: #1d3125; --empty-alt: #243b2d;
     --h1: #234a31; --h2: #2c6340; --h3: #3a7f52; --h4: #4a9d65; --h5: #5fbb7c; --h6: #86d9a0;
     --line: #2a4434; --warn: #e3a066; --warnbg: #2e2416;
   }
@@ -33,7 +33,13 @@ button { font: inherit; }
 select { font: inherit; max-width: 100%; padding: 6px 10px; border: 2px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--fg); }
 
 .grid { display: flex; gap: 2px; background: var(--surface); border-radius: 12px; padding: 12px; touch-action: pan-y; user-select: none; -webkit-user-select: none; font-variant-numeric: tabular-nums; }
-.col { display: flex; flex-direction: column; gap: 2px; flex: 1 1 0; min-width: 0; }
+.col { display: flex; flex-direction: column; flex: 1 1 0; min-width: 0; }
+/* Rows come in hours: a wide space before each hour ("hr") and its half-hour ("half") close under it, the same in
+   the hour column and every day column so the blocks line up with their labels. --below is the space under a cell,
+   which a run's box fills in. */
+.grid .col > .hr { margin-top: 5px; --below: 1px; }
+.grid .col > .half { margin-top: 1px; --below: 5px; }
+
 .col.hours { flex: 0 0 52px; touch-action: pan-y; }
 .touchhint { display: none; }
 .dayname, .hours::before { content: ""; height: 22px; font: 700 11px/22px var(--font); text-align: center; color: var(--muted); }
@@ -99,11 +105,14 @@ textarea { font: inherit; width: 100%; border: 2px solid var(--line); border-rad
 .heat { touch-action: auto; padding: 8px; }
 .hcell { height: 13px; padding: 0; border: 0; border-radius: 2px; background: var(--empty); }
 button.hcell { cursor: pointer; }
+/* Every other hour's empty cells a shade darker, so a row can be followed across the days. After both cells' own
+   backgrounds and before the shades (.s1..), which win; a painted cell (.cell.on) wins too. */
+:where(.cell, .hcell).alt { background: var(--empty-alt); }
 /* A grid with numbers in its cells (team draft: "3–2"): dark text on the light shades, light on the dark ones */
 .counted .hcell { font: 700 10px/13px var(--font); color: var(--fg); text-align: center; white-space: nowrap; }
 .counted .hcell.s4, .counted .hcell.s5, .counted .hcell.s6 { color: var(--accent-fg); }
 .hcell:focus-visible { outline-offset: 0; z-index: 1; }
-.s0 { background: var(--empty); } .s1 { background: var(--h1); } .s2 { background: var(--h2); } .s3 { background: var(--h3); }
+.s0 { background: var(--empty); } .alt.s0 { background: var(--empty-alt); } .s1 { background: var(--h1); } .s2 { background: var(--h2); } .s3 { background: var(--h3); }
 .s4 { background: var(--h4); } .s5 { background: var(--h5); } .s6 { background: var(--h6); }
 .legend span { padding: 0 3px; }
 
@@ -166,7 +175,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 .side .toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .side .toggle.off { background: transparent; border-style: dashed; border-color: var(--line); color: var(--muted); text-decoration: line-through; }
 .togglehint { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 13px; }
-/* A run's box: sides on every cell, a top on its first and a bottom on its last, and the 2px gap between its
+/* A run's box: sides on every cell, a top on its first and a bottom on its last, and the space between its
    cells filled in so the box reads as one piece. Booked is an outline, so it shows on top of a box. */
 .counted .hcell { position: relative; }
 .hcell.run { --box: var(--fg); border-radius: 0; box-shadow: inset 2px 0 0 var(--box), inset -2px 0 0 var(--box); }
@@ -174,7 +183,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 .hcell.run.rlast { border-radius: 0 0 5px 5px; box-shadow: inset 2px 0 0 var(--box), inset -2px 0 0 var(--box), inset 0 -2px 0 var(--box); }
 .hcell.run.rfirst.rlast { border-radius: 5px; box-shadow: inset 0 0 0 2px var(--box); }
 .hcell.run:not(.rlast)::after {
-  content: ""; position: absolute; left: 0; right: 0; bottom: -2px; height: 2px;
+  content: ""; position: absolute; left: 0; right: 0; bottom: calc(-1 * var(--below)); height: var(--below);
   background: inherit; box-shadow: inset 2px 0 0 var(--box), inset -2px 0 0 var(--box);
 }
 .hcell.booked { outline: 3px solid var(--warn); outline-offset: -3px; z-index: 1; }

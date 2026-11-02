@@ -146,8 +146,8 @@ export function paintGrid({ columns, gridLabel, cells: initial, onChange }) {
   const nodes = new Map();
   const { tabs, grid, setDay } = gridFrame(columns, {
     class: "grid", role: "grid", "aria-label": gridLabel, "aria-multiselectable": "true",
-  }, ({ key, label }) => {
-    const b = el("button", { type: "button", class: "cell", "data-i": String(key), role: "gridcell", tabindex: "-1", "aria-label": label });
+  }, ({ key, label }, row) => {
+    const b = el("button", { type: "button", class: `cell ${row}`, "data-i": String(key), role: "gridcell", tabindex: "-1", "aria-label": label });
     nodes.set(key, b);
     return b;
   });
