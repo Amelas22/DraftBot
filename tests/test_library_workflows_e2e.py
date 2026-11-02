@@ -176,6 +176,7 @@ async def library(test_db, monkeypatch):
     async def _fetch(cube_id):
         return CUBE_CARDS if cube_id == CUBE else None
     monkeypatch.setattr(inventory, "fetch_cube", _fetch)
+    monkeypatch.setattr(cog_mod, "fetch_cube_fresh", _fetch)   # /library deposit
     # The name-translation table is left REAL and starts empty, which is both
     # the honest starting state and how a library learns: an empty table
     # renames nothing, and the substitution arc below fills it by depositing.

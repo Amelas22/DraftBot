@@ -38,6 +38,7 @@ from helpers.money_gate import (
     mtgo_job_footer, mtgo_trade_prompt,
     spawn_followup,
 )
+from helpers.cube_list import fetch_cube_fresh
 from helpers.permissions import has_bot_manager_role
 from library_views.callers import ContextCaller
 from services import library_loan_actions as loan_actions
@@ -311,7 +312,9 @@ class LibraryCommands(commands.Cog):
             await ctx.followup.send(_NO_LIBRARY, ephemeral=True)
             return
 
-        seen = await cube_as_the_library_sees_it(cube)
+        # Fresh, not cached: a deposit usually follows an edit to the cube, and
+        # the shelf covers the list from before it.
+        seen = await cube_as_the_library_sees_it(cube, fetch_cube_fresh)
         cards = seen.cards if seen else None
         untradeable = seen.not_on_mtgo if seen else []
         if cards is None:

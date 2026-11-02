@@ -14,7 +14,8 @@ on MTGO" when the card is on MTGO perfectly well under another printing.
 
 Lists are cached for the process and re-checked in the background with their
 ETag once 12 hours old, because a cube changes about once a fortnight and never
-mid-run; only a cube never read before waits on the network.
+mid-run; only a cube never read before waits on the network. The exception is
+fetch_cube_fresh, for a read that follows an edit (a deposit).
 
 The plain list also leaves basics out -- they live on the cube's own `basics`
 board -- which is the right default for a bot that already holds plenty.
@@ -184,6 +185,21 @@ async def refresh_now(cube: str) -> "tuple[Optional[list[dict[str, Any]]], bool]
         return (None, False)
     changed = await _store(key, _cache.get(key), got)
     return (got[1], changed)
+
+
+async def fetch_cube_fresh(cube: str) -> "Optional[list[dict[str, Any]]]":
+    """fetch_cube for a read that must see the cube as it is NOW.
+
+    A deposit is usually made because the cube was just edited, so the cached
+    list is the one most likely to be stale there -- and against a stale list the
+    shelf looks complete and the depositor is told there is nothing to give.
+    Falls back to the cached list only when CubeCobra cannot be read, so an
+    outage costs freshness rather than the command."""
+    cards, _ = await refresh_now(cube)
+    if cards is not None:
+        return cards
+    entry = _cache.get(cube.strip())
+    return entry.cards if entry is not None else None
 
 
 async def wait_for_refreshes() -> None:

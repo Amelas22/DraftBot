@@ -386,3 +386,30 @@ async def test_depositing_is_not_gated_by_the_invite_list(test_db, monkeypatch):
     assert "not on the list" not in said and "invite" not in said, said
     assert "CubeCobra" in said, \
         "it got as far as reading the cube, which is past every gate"
+
+
+@pytest.mark.asyncio
+async def test_deposit_reads_the_cube_as_it_is_now_not_as_cached(test_db, monkeypatch):
+    """A deposit usually follows an edit to the cube. Read through the process
+    cache, it compared the shelf against the list from before the edit -- which
+    the shelf already covered -- and told the depositor there was nothing to give."""
+    import cogs.library_commands as mod
+    import helpers.cube_list as cl
+    from conftest import a_library
+
+    await a_library("lib-fresh", guild=99, kind="curated")
+    monkeypatch.setattr(mod, "defer_if_usable", AsyncMock(return_value=True))
+    answers = iter(["Bolt\n", "Bolt\nIsland\n"])
+
+    async def cubecobra(cube, etag):
+        return ("new", cl.parse_cube_list(next(answers)), None)
+    monkeypatch.setattr(cl, "_get", cubecobra)
+    monkeypatch.setattr(cl, "_libraries_offering", AsyncMock(return_value=[]))
+    await cl.fetch_cube("somecube")              # cached before the edit
+
+    compared = AsyncMock(return_value=[])
+    monkeypatch.setattr(mod, "cards_to_deposit", compared)
+    cog = LibraryCommands(bot=SimpleNamespace())
+    await cog.deposit.callback(cog, _ctx(), "somecube")
+
+    assert {c["name"] for c in compared.await_args.args[0]} == {"Bolt", "Island"}

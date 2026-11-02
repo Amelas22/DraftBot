@@ -154,3 +154,31 @@ async def test_refresh_now_reports_a_change_even_if_publishing_fails(cobra, monk
     await cl.fetch_cube("c")
     cards, changed = await cl.refresh_now("c")
     assert changed and {c["name"] for c in cards} == {"Bolt", "Island"}
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_read_sees_an_edit_the_cache_has_not(cobra, monkeypatch):
+    """/library deposit is what somebody runs right after editing their cube, so
+    the cached list it used to read was the one most likely to be out of date:
+    the shelf covered the OLD list, and the depositor was told there was nothing
+    to hand over."""
+    monkeypatch.setattr(cl, "_libraries_offering", _offering({}))
+    cobra((200, "Bolt\n", "e1"), (200, "Bolt\nIsland\n", "e2"))
+    await cl.fetch_cube("c")
+    assert {c["name"] for c in await cl.fetch_cube_fresh("c")} == {"Bolt", "Island"}
+    assert {c["name"] for c in await cl.fetch_cube("c")} == {"Bolt", "Island"}, \
+        "and the cache keeps what it read"
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_read_falls_back_to_the_cache_when_cubecobra_is_down(cobra):
+    cobra((200, "Bolt\n", "e1"), (503, "", None))
+    await cl.fetch_cube("c")
+    assert await cl.fetch_cube_fresh("c") == [{"name": "Bolt", "qty": 1}]
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_read_of_an_unreadable_cube_is_none(cobra):
+    fake = cobra((404, "", None))
+    assert await cl.fetch_cube_fresh("nope") is None
+    assert fake.requests == [None], "one request, not a second try through the cache"
