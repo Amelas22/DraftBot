@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createApi, createFixtureApi, apiFromHash, checkDoc, LinkExpired, NeedsUpdate, NotEnabled, NEEDS_UPDATE } from "../js/api.js";
+import { decodeCells, encodeDayCells, localDateOf } from "../js/week.js";
 
 const TOKEN = "abcdefghijklmnopqrstuv"; // 22 chars, like a real link token
 const reply = (status, body) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
@@ -343,4 +344,24 @@ test("every fixture api keeps an in-memory this-week doc", async () => {
     assert.equal(await api.clearThisWeek(), null);
     assert.deepEqual(await api.getThisWeek(), empty);
   }
+});
+
+test("the team-draft fixture's overrides fall inside its now-based window", async () => {
+  const api = createFixtureApi("team-draft", diskFetch());
+  const state = await api.get("/api/team-draft");
+  const moss = state.sides.flatMap((s) => s.people).find((p) => p.name === "Moss");
+  const start = Date.parse(state.window.start_utc);
+  const dates = new Set([0, 1, 2, 3, 4, 5, 6, 7].map((n) => localDateOf(new Date(start + n * 86400000), "America/New_York")));
+  assert.equal(moss.overrides.length, 1);
+  assert.ok(dates.has(moss.overrides[0].date));
+});
+
+test("the team-draft fixture stores only the days that differ from the usual week", async () => {
+  const api = createFixtureApi("team-draft", diskFetch());
+  const usual = await api.getUsual();
+  const monday = decodeCells(usual.cells);
+  const same = encodeDayCells([...monday].filter((c) => c < 48));
+  await api.putThisWeek({ zone: usual.zone, also_usual: false, days: [{ date: "2026-10-26", cells: same }, { date: "2026-10-27", cells: encodeDayCells([1]) }] });
+  const ben = (await api.get("/api/team-draft")).sides.flatMap((s) => s.people).find((p) => p.user === "900000000000000002");
+  assert.deepEqual(ben.overrides.map((o) => o.date), ["2026-10-27"]);
 });

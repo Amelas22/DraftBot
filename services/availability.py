@@ -1,7 +1,8 @@
 """Week bitmaps, the usual-week -> window conversion, and usual-week storage.
 
 Python twin of scheduler_page/js/week.js; both reproduce
-scheduler_page/fixtures/conversion.json exactly.
+scheduler_page/fixtures/conversion.json and scheduler_page/fixtures/override.json
+exactly.
 """
 
 import base64
@@ -411,7 +412,7 @@ async def replace_day_overrides(
                 cells.difference_update(range(base, base + DAY_CELLS))
                 cells.update(base + c for c in d.cells)
             usual = UsualWeek(days[0].zone, frozenset(cells))
-            session.add(
+            await session.merge(
                 PlayerAvailability(
                     user_id=user_id,
                     zone=usual.zone,

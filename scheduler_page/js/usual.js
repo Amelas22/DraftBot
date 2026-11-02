@@ -49,6 +49,7 @@ const SAVE_MESSAGES = {
   too_large: "That week is too big to save.",
   rate_limited: "Too many saves just now. Wait a minute and press Save again.",
   not_enabled: NOT_ENABLED,
+  bad_input: "That week couldn't be saved. Reload the page and try again.",
 };
 export const saveFailedMessage = (e) => (e && Object.hasOwn(SAVE_MESSAGES, e.code) ? SAVE_MESSAGES[e.code] : SAVE_FAILED);
 

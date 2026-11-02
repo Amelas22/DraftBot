@@ -1,6 +1,6 @@
 // The page's only door to the bot: a JSON API on the same origin, authorised by the link token. No DOM;
 // fetch is injectable for tests.
-import { CELL_MS, DAY_CELLS, decodeDayCells, encodeCells, isoSeconds, weekdayOfDate } from "./week.js";
+import { CELL_MS, DAY_CELLS, decodeCells, decodeDayCells, encodeCells, isoSeconds, localDateOf, weekdayOfDate } from "./week.js";
 
 export class LinkExpired extends Error {
   constructor(message = "link expired") { super(message); this.name = "LinkExpired"; }
@@ -255,7 +255,11 @@ function teamDraftFixtureApi(read, { user: viewer, usualFile }) {
     if (!state) {
       state = await read("fixtures/team-draft.json");
       if (viewer) state.me.user = viewer;
-      state.window.start_utc = isoSeconds(new Date(Math.floor(Date.now() / CELL_MS) * CELL_MS));
+      const start = new Date(Math.floor(Date.now() / CELL_MS) * CELL_MS);
+      state.window.start_utc = isoSeconds(start);
+      // Overrides are dated for the real week, so move them to tomorrow, inside the now-based window.
+      const tomorrow = new Date(start.getTime() + 24 * 3600000);
+      for (const side of state.sides) for (const p of side.people) for (const o of p.overrides) o.date = localDateOf(tomorrow, o.zone);
       week = usualFile ? await read(usualFile) : null;
     }
     return state;
@@ -307,7 +311,15 @@ function teamDraftFixtureApi(read, { user: viewer, usualFile }) {
       if (doc.also_usual && week === null && doc.days.length) {
         await putUsual({ format: "draftbot.scheduler.usual_week", version: 1, zone: doc.zone, cells: encodeCells(daysAsWeek(doc.days)), saved_at: isoSeconds(new Date()) });
       }
-      setOverrides(doc.days.map((d) => ({ date: d.date, zone: doc.zone, cells: d.cells })));
+      // Also as the server does: a day equal to the usual week is not stored.
+      const usual = week ? decodeCells(week.cells) : new Set();
+      const differs = (d) => {
+        const base = weekdayOfDate(d.date) * DAY_CELLS;
+        const mine = decodeDayCells(d.cells);
+        return mine.size !== [...usual].filter((c) => c >= base && c < base + DAY_CELLS).length
+          || [...mine].some((h) => !usual.has(base + h));
+      };
+      setOverrides(doc.days.filter(differs).map((d) => ({ date: d.date, zone: doc.zone, cells: d.cells })));
       return thisWeek.putThisWeek(doc);
     },
     clearThisWeek: async () => { await load(); setOverrides([]); return thisWeek.clearThisWeek(); },
