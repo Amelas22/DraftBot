@@ -167,7 +167,7 @@ test("clicking a half-hour writes who is free; hovering shows counts and leaving
     const when = names.split(": ")[0];
     const nobody = "Rook's team — nobody · Ash's team — nobody";
     assert.equal(names, `${when}: ${nobody} (Ben, Rook, Wren, Ash, Pike, Fern, Moss not free)`);
-    for (const fn of grid.listeners.pointerover) fn({ target: { closest: () => cell(101) } });
+    for (const fn of grid.listeners.pointerover) fn({ type: "pointerover", pointerType: "mouse", target: { closest: () => cell(101) } });
     assert.match(readoutOf(root).textContent, /\d–\d free$/);
     for (const fn of grid.listeners.pointerleave) fn({ pointerType: "mouse" });
     assert.equal(readoutOf(root).textContent, names);
@@ -175,11 +175,66 @@ test("clicking a half-hour writes who is free; hovering shows counts and leaving
     root.find((n) => n.attrs["aria-pressed"] && n.children.includes("Ben")).click();
     assert.equal(readoutOf(root).textContent, `${when}: ${nobody} (Rook, Wren, Ash, Pike, Fern, Moss not free)`);
     // With the pointer on a cell, a toggle leaves its counts alone.
-    for (const fn of grid.listeners.pointerover) fn({ target: { closest: () => cell(101) } });
+    for (const fn of grid.listeners.pointerover) fn({ type: "pointerover", pointerType: "mouse", target: { closest: () => cell(101) } });
     const counts = readoutOf(root).textContent;
     root.find((n) => n.attrs["aria-pressed"] && n.children.includes("Rook")).click();
     assert.equal(readoutOf(root).textContent, counts);
   } finally {
     view.dispose();
+  }
+});
+
+const chip = (root, name) => root.find((n) => n.attrs["aria-pressed"] && n.children.includes(name));
+const over = (grid, cell, extra) => { for (const fn of grid.listeners.pointerover) fn({ type: "pointerover", target: { closest: () => cell }, ...extra }); };
+
+test("after a tap the names follow a toggle even though touch fires pointerover", async () => {
+  const { root, view } = await mount(fakeApi([], () => doc));
+  try {
+    const grid = root.find((n) => n.attrs.role === "grid");
+    const cell = root.find((n) => n.attrs["data-j"] === "100");
+    over(grid, cell, { pointerType: "touch" });
+    cell.click();
+    assert.match(readoutOf(root).textContent, /Ben, Rook/);
+    chip(root, "Ben").click();
+    assert.doesNotMatch(readoutOf(root).textContent, /Ben/);
+  } finally {
+    view.dispose();
+  }
+});
+
+test("keyboard focus on a cell shows its counts and does not hold the names back from a toggle", async () => {
+  const { root, view } = await mount(fakeApi([], () => doc));
+  try {
+    const grid = root.find((n) => n.attrs.role === "grid");
+    root.find((n) => n.attrs["data-j"] === "100").click();
+    const cell = root.find((n) => n.attrs["data-j"] === "101");
+    for (const fn of grid.listeners.focusin) fn({ type: "focusin", target: { closest: () => cell } });
+    assert.match(readoutOf(root).textContent, /\d–\d free$/);
+    chip(root, "Ben").click();
+    // Focus is not a hover: the clicked half-hour's names come back.
+    assert.match(readoutOf(root).textContent, /Rook's team — nobody/);
+    assert.doesNotMatch(readoutOf(root).textContent, /Ben/);
+  } finally {
+    view.dispose();
+  }
+});
+
+test("a window slide while hovering does not freeze the readout", async () => {
+  let onVisible;
+  document.addEventListener = (type, fn) => { if (type === "visibilitychange") onVisible = fn; };
+  document.visibilityState = "visible";
+  let current = doc;
+  const { root, view } = await mount(fakeApi([], () => current));
+  try {
+    const grid = root.find((n) => n.attrs.role === "grid");
+    over(grid, root.find((n) => n.attrs["data-j"] === "101"), { pointerType: "mouse" });
+    current = { ...doc, window: { ...doc.window, start_utc: new Date(Date.parse(doc.window.start_utc) + 1800000).toISOString() } };
+    onVisible();
+    await tick();
+    assert.match(readoutOf(root).textContent, /^Hover or tap/);
+  } finally {
+    view.dispose();
+    document.addEventListener = () => {};
+    document.visibilityState = "hidden";
   }
 });

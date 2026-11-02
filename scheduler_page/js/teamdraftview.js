@@ -72,7 +72,7 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, fi
   let selected = null;
   // The cell last clicked, whose names the readout shows when the pointer is not on the grid.
   let clicked = null;
-  // The cell the pointer or focus is on, so a redraw leaves its counts alone.
+  // The cell a mouse is over, so a redraw leaves its counts alone; touch and keyboard focus never hold it.
   let hovered = null;
   // User ids the viewer has switched off; kept across refreshes.
   let off = new Set();
@@ -128,11 +128,12 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, fi
     onPick: (j) => {
       selected = open() && bookable(j, state, now(), startUtc) ? j : null;
       clicked = j;
+      hovered = null;
       setReadout(whoLabel(j));
       renderActions();
       heat.update();
     },
-    onHover: (j) => { hovered = j; setReadout(j === null ? restingReadout() : label(j)); },
+    onHover: (j, byMouse) => { hovered = byMouse ? j : null; setReadout(j === null ? restingReadout() : label(j)); },
   });
   let heat = makeHeat();
 
@@ -234,10 +235,10 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, fi
       const start = new Date(state.window.start_utc);
       if (start.getTime() !== startUtc.getTime()) {
         // The window slid forward: keep the picked moment, not its cell index.
-        const hadClicked = clicked !== null;
         selected = shiftSelection(selected, startUtc, start);
         clicked = shiftSelection(clicked, startUtc, start);
-        if (hadClicked && clicked === null && hovered === null) setReadout(HOVER_HINT);
+        hovered = null;
+        if (clicked === null) setReadout(HOVER_HINT);
         startUtc = start;
         heat = makeHeat();
       }
