@@ -14,6 +14,22 @@ export const sideCounts = (freeSides, j) => freeSides.map((side) => side.reduce(
 // A cell's counts as the page shows them, side by side: "3–2".
 export const countText = (counts) => counts.join("–");
 
+// Who is free in cell j, per side in roster order: [{ label, free, notFree }], from freeBySide's sets and the same
+// (already filtered) state they were made from.
+export const whoIsFree = (state, freeSides, j) => state.sides.map((side, s) => {
+  const free = [];
+  const notFree = [];
+  side.people.forEach((p, i) => (freeSides[s][i].has(j) ? free : notFree).push(p.name));
+  return { label: side.label, free, notFree };
+});
+
+// "Team A — Ann, Bo · Team B — nobody (Fay, Gus not free)": each side's free names, then everyone not free.
+export function whoText(groups) {
+  const sides = groups.map((g) => `${g.label} — ${g.free.join(", ") || "nobody"}`).join(" · ");
+  const notFree = groups.flatMap((g) => g.notFree);
+  return notFree.length ? `${sides} (${notFree.join(", ")} not free)` : sides;
+}
+
 // The matchup as the viewer has it switched on: the same state with the people in `off` (user ids) left out of
 // every side, so the heatmap, counts and runs cover only who is still shown.
 export const withoutPeople = (state, off) => ({

@@ -153,3 +153,27 @@ test("Edit this week with the box ticked also keeps the week as the usual week",
   assert.equal(after, before + 1);
   assert.ok(byText(root, "Edit my usual week"));
 });
+
+// The readout text; the view sets it as a plain string.
+const readoutOf = (root) => root.find((n) => n.attrs.class === "readout" || n.className === "readout");
+
+test("clicking a half-hour writes who is free; hovering shows counts and leaving the grid brings the names back", async () => {
+  const { root, view } = await mount(fakeApi([], () => doc));
+  try {
+    const grid = root.find((n) => n.attrs.role === "grid");
+    const cell = (j) => root.find((n) => n.attrs["data-j"] === String(j));
+    cell(100).click();
+    const names = readoutOf(root).textContent;
+    assert.match(names, /^.+: Rook's team — .+ · Ash's team — .+/);
+    for (const fn of grid.listeners.pointerover) fn({ target: { closest: () => cell(101) } });
+    assert.match(readoutOf(root).textContent, /\d–\d free$/);
+    for (const fn of grid.listeners.pointerleave) fn({ pointerType: "mouse" });
+    assert.equal(readoutOf(root).textContent, names);
+    // Switching a player off recomputes the clicked names.
+    root.find((n) => n.attrs["aria-pressed"] && n.children.includes("Ben")).click();
+    assert.notEqual(readoutOf(root).textContent, names);
+    assert.ok(!readoutOf(root).textContent.includes("Ben"));
+  } finally {
+    view.dispose();
+  }
+});

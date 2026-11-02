@@ -13,7 +13,7 @@ import { expiredMessage } from "./messages.js";
 import { actionErrorText, createSync, hasAvailability, shadeLevel } from "./teams.js";
 import {
   FORMAT, bookable, bookingLine, countText, freeBySide, freeRuns, refusalText, shiftSelection, sideCounts, toggleSide,
-  togglePerson, withoutPeople,
+  togglePerson, whoIsFree, whoText, withoutPeople,
 } from "./teamdraft.js";
 
 const TEAM_DRAFT_PATHS = { get: "/api/team-draft", actions: "/api/team-draft/actions" };
@@ -70,6 +70,8 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, fi
   let freeSides = [];
   let runs = [];
   let selected = null;
+  // The cell last clicked, whose names the readout shows when the pointer is not on the grid.
+  let clicked = null;
   // User ids the viewer has switched off; kept across refreshes.
   let off = new Set();
 
@@ -106,6 +108,8 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, fi
     if (j === bookedCell()) notes.push("booked");
     return `${formatCell(startUtc, zone, j)}: ${notes.join(", ")}`;
   };
+  const whoLabel = (j) => `${formatCell(startUtc, zone, j)}: ${whoText(whoIsFree(shown(), freeSides, j))}`;
+  const restingReadout = () => (clicked === null ? HOVER_HINT : whoLabel(clicked));
   const cellClass = (j) => {
     const booked = bookedCell();
     const classes = [`s${shadeLevel(freeCount(j), Math.max(1, total()))}`];
@@ -119,11 +123,12 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, fi
     startUtc, zone, cellClass, cellLabel: label, cellText: (j) => (runs[j]?.first ? countText(sideCounts(freeSides, j)) : ""),
     onPick: (j) => {
       selected = open() && bookable(j, state, now(), startUtc) ? j : null;
-      readout.textContent = label(j);
+      clicked = j;
+      readout.textContent = whoLabel(j);
       renderActions();
       heat.update();
     },
-    onHover: (j) => { readout.textContent = j === null ? HOVER_HINT : label(j); },
+    onHover: (j) => { readout.textContent = j === null ? restingReadout() : label(j); },
   });
   let heat = makeHeat();
 
@@ -179,6 +184,7 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, fi
     renderSides();
     renderLegend();
     renderActions();
+    if (clicked !== null) readout.textContent = whoLabel(clicked);
     heat.update();
   }
 
@@ -224,9 +230,10 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, fi
       const start = new Date(state.window.start_utc);
       if (start.getTime() !== startUtc.getTime()) {
         // The window slid forward: keep the picked moment, not its cell index.
-        const had = selected !== null;
+        const hadClicked = clicked !== null;
         selected = shiftSelection(selected, startUtc, start);
-        if (had && selected === null) readout.textContent = HOVER_HINT;
+        clicked = shiftSelection(clicked, startUtc, start);
+        if (hadClicked && clicked === null) readout.textContent = HOVER_HINT;
         startUtc = start;
         heat = makeHeat();
       }
