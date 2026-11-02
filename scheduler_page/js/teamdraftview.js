@@ -9,7 +9,7 @@ import { appBar } from "./appbar.js";
 import { editWeekLabel, weekEditing } from "./usual.js";
 import { el } from "./dom.js";
 import { expiredMessage } from "./messages.js";
-import { actionErrorText, createSync, shadeLevel } from "./teams.js";
+import { actionErrorText, createSync, hasAvailability, shadeLevel } from "./teams.js";
 import {
   FORMAT, bookable, bookingLine, countText, freeBySide, freeRuns, refusalText, shiftSelection, sideCounts, toggleSide,
   togglePerson, withoutPeople,
@@ -141,7 +141,7 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, fi
           const b = chip(p.name, on);
           b.addEventListener("click", () => toggle(togglePerson(off, p.user)));
           const li = el("li", {}, b);
-          if (!p.cells || !p.zone) li.append(el("span", { class: "noweek", text: ` (${NO_WEEK})` }));
+          if (!hasAvailability(p)) li.append(el("span", { class: "noweek", text: ` (${NO_WEEK})` }));
           return li;
         })));
     }));

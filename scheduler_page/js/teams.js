@@ -1,6 +1,6 @@
 // Find a team, the decisions: how well the viewer fits each team, what the join button may do, and what a
 // refusal says. No DOM; teamsview.js draws it.
-import { CELL_MINUTES, CELL_MS, decodeCells, windowCells } from "./week.js";
+import { CELL_MINUTES, CELL_MS, decodeCells, decodeDayCells, effectiveWindowCells, windowCells } from "./week.js";
 import { LinkExpired, NeedsUpdate, NEEDS_UPDATE } from "./api.js";
 import { expiredMessage } from "./messages.js";
 import { andList, plural } from "./words.js";
@@ -25,8 +25,16 @@ export const membersText = (team, viewer) => {
   return others.length ? `with ${andList(others)}` : "";
 };
 
-// A member without a saved week (cells null) is never free.
-export const memberFree = (m, startUtc) => (m.cells && m.zone ? windowCells(m.zone, decodeCells(m.cells), startUtc) : new Set());
+// Whether a member has anything to draw: a saved week or a this-week override.
+export const hasAvailability = (m) => Boolean((m.cells && m.zone) || m.overrides?.length);
+
+// A member with neither a saved week (cells null) nor an override is never free. A member without an overrides
+// field (find-a-team) has none.
+export function memberFree(m, startUtc) {
+  const usual = m.cells && m.zone ? { zone: m.zone, cells: decodeCells(m.cells) } : null;
+  const overrides = (m.overrides ?? []).map((o) => ({ zone: o.zone, date: o.date, cells: decodeDayCells(o.cells) }));
+  return effectiveWindowCells(usual, overrides, startUtc);
+}
 
 // people: [{ user, name, free }]; overlap = cells where every person is free.
 function groupFit(people) {

@@ -79,3 +79,16 @@ test("booking with paths posts to the actions they name", async () => {
   assert.equal(post[1], "/api/tournament-match/actions");
   assert.equal(post[2].kind, "book");
 });
+
+test("only a person with neither a usual week nor an override is marked as having no week", async () => {
+  const { root, view } = await mount(fakeApi([], () => doc));
+  const marked = [];
+  const walk = (n) => {
+    if (n.className === "noweek") marked.push(n);
+    (n.children || []).forEach(walk);
+  };
+  walk(root);
+  view.dispose();
+  // Fern has nothing; Moss has only an override.
+  assert.equal(marked.length, 1);
+});

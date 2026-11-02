@@ -251,16 +251,25 @@ def this_week_doc(days: Sequence[DayOverride]) -> dict[str, object]:
     }
 
 
-def next_week_lines(week: UsualWeek, now_utc: datetime) -> list[str]:
-    """One line per local day with free time over the next 7 days."""
+def next_week_lines(
+    week: UsualWeek | None, overrides: Sequence[DayOverride], now_utc: datetime
+) -> list[str]:
+    """One line per local day with free time over the next 7 days.
+
+    Dated overrides replace the usual week for their day; the days are in the
+    week's zone, else the first override's. No week and no override gives [].
+    """
+    zone = week.zone if week else overrides[0].zone if overrides else None
+    if zone is None:
+        return []
     now = now_utc.astimezone(timezone.utc)
     start = now.replace(
         minute=now.minute - now.minute % CELL_MINUTES, second=0, microsecond=0
     )
-    tz = ZoneInfo(week.zone)
+    tz = ZoneInfo(zone)
     by_day: dict[date, list[str]] = {}
     day_start: dict[date, int] = {}
-    for first, end in merge_blocks(window_cells(week.zone, week.cells, start)):
+    for first, end in merge_blocks(effective_window_cells(week, overrides, start)):
         begin = start + timedelta(minutes=CELL_MINUTES * first)
         finish = start + timedelta(minutes=CELL_MINUTES * end)
         day = begin.astimezone(tz).date()

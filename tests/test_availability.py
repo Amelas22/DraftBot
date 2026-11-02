@@ -121,7 +121,7 @@ def test_parse_refuses(raw: bytes) -> None:
 
 def test_empty_week_is_valid_and_has_no_lines() -> None:
     now = datetime(2026, 10, 19, 12, 0, tzinfo=timezone.utc)
-    assert next_week_lines(UsualWeek("UTC", frozenset()), now) == []
+    assert next_week_lines(UsualWeek("UTC", frozenset()), [], now) == []
 
 
 def test_next_week_lines_merge_blocks() -> None:
@@ -130,7 +130,7 @@ def test_next_week_lines_merge_blocks() -> None:
         list(range(tue + 38, tue + 42)) + [tue + 44]  # 19:00-21:00, 22:00-22:30
     )
     now = datetime(2026, 10, 19, 12, 0, tzinfo=timezone.utc)
-    lines = next_week_lines(UsualWeek("UTC", cells), now)
+    lines = next_week_lines(UsualWeek("UTC", cells), [], now)
     assert len(lines) == 1
     first = int(datetime(2026, 10, 20, 19, 0, tzinfo=timezone.utc).timestamp())
     start = int(datetime(2026, 10, 20, 21, 0, tzinfo=timezone.utc).timestamp())
@@ -141,12 +141,26 @@ def test_next_week_lines_merge_blocks() -> None:
     )
 
 
+def test_next_week_lines_uses_overrides() -> None:
+    now = datetime(2026, 10, 19, 12, 0, tzinfo=timezone.utc)
+    tue = 48
+    usual = UsualWeek("UTC", frozenset(range(tue + 38, tue + 42)))  # Tue 19:00-21:00
+    wed = DayOverride("UTC", date(2026, 10, 21), frozenset({20, 21}))  # Wed 10:00-11:00
+    tue_off = DayOverride("UTC", date(2026, 10, 20), frozenset())
+    ten = int(datetime(2026, 10, 21, 10, 0, tzinfo=timezone.utc).timestamp())
+    assert next_week_lines(usual, [wed, tue_off], now) == [
+        f"<t:{ten}:D>: <t:{ten}:t>–<t:{ten + 3600}:t>"]
+    # Without a usual week the override's own zone applies.
+    assert next_week_lines(None, [wed], now) == [f"<t:{ten}:D>: <t:{ten}:t>–<t:{ten + 3600}:t>"]
+    assert next_week_lines(None, [], now) == []
+
+
 def test_worst_case_line_fits_a_discord_field() -> None:
     # Clocks go back in New York on 2026-11-01 (25 local hours); every other
     # cell painted so each cell is its own block.
     cells = frozenset(range(0, CELLS, 2))
     now = datetime(2026, 10, 31, 4, 0, tzinfo=timezone.utc)
-    lines = next_week_lines(UsualWeek("America/New_York", cells), now)
+    lines = next_week_lines(UsualWeek("America/New_York", cells), [], now)
     assert max(len(line) for line in lines) <= 1024
 
 

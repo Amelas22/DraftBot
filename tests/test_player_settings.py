@@ -6,7 +6,7 @@ Ladder board, and only that board.
 """
 import asyncio
 import dataclasses
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock
 
@@ -715,3 +715,15 @@ async def test_an_unreadable_week_does_not_break_settings(test_db, monkeypatch):
                         AsyncMock(side_effect=ValueError("bad cells")))
     s = await load_settings("p1", "g")
     assert (s.scheduler, s.usual_week) == (True, None)
+
+
+async def test_settings_shows_lines_with_only_overrides(test_db, monkeypatch):
+    from datetime import date, timedelta
+    from services.availability import DayOverride, replace_day_overrides
+    monkeypatch.setattr(player_settings, "scheduler_enabled", lambda g: True)
+    today = datetime.now(timezone.utc).date()
+    await replace_day_overrides(
+        "p1", [DayOverride("UTC", today + timedelta(days=1), frozenset({20, 21}))],
+        False, datetime.now(timezone.utc))
+    s = await load_settings("p1", "g")
+    assert s.usual_week is not None and len(s.usual_week) == 1

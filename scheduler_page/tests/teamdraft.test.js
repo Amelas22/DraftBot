@@ -23,7 +23,8 @@ test("freeBySide gives one set per person, in order; no week is never free", () 
   assert.deepEqual(free.map((s) => s.length), base.sides.map((s) => s.people.length));
   const noWeek = base.sides.flatMap((s, i) => s.people.map((p, k) => [p, free[i][k]])).filter(([p]) => p.cells === null);
   assert.ok(noWeek.length > 0);
-  for (const [, f] of noWeek) assert.equal(f.size, 0);
+  // A person with only a this-week override is free just for that day's cells.
+  for (const [p, f] of noWeek) assert.equal(f.size, p.overrides.length ? 4 : 0);
 });
 
 test("bookable: future, inside the window, matchup open", () => {
