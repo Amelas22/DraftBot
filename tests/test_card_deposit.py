@@ -369,7 +369,7 @@ async def test_a_lost_response_with_no_trade_says_nothing_was_recorded(test_db, 
 
 # --- which side of the trade a kind reads -----------------------------------
 
-async def test_each_kind_reads_the_side_the_bot_was_on():
+async def test_each_kind_reads_the_side_the_bot_was_on(test_db):
     """One table for all four kinds, because they pair off into opposite sides
     and a second copy is a second chance to get a pair backwards. A kind read
     off the wrong side reports an empty trade, which settles as "nothing
@@ -389,7 +389,7 @@ async def test_each_kind_reads_the_side_the_bot_was_on():
     assert await _items_moved(job, "card-deposit") == [{"name": "Island", "qty": 3}]
 
 
-async def test_a_settled_trade_is_booked_from_what_ACTUALLY_crossed():
+async def test_a_settled_trade_is_booked_from_what_ACTUALLY_crossed(test_db):
     """The serve reports intent and outcome separately, and they differ.
 
     `give`/`receive` echo the order as asked; `gaveActual`/`receivedActual` are
@@ -416,7 +416,7 @@ async def test_a_settled_trade_is_booked_from_what_ACTUALLY_crossed():
         {"name": "Goben, Gene-Splice Savant", "qty": 1}]
 
 
-async def test_a_partial_trade_books_only_the_part_that_moved():
+async def test_a_partial_trade_books_only_the_part_that_moved(test_db):
     """Asked for three, two crossed.
 
     The serve requires exact quantities before it approves a trade, so it does
@@ -432,7 +432,7 @@ async def test_a_partial_trade_books_only_the_part_that_moved():
     assert await _items_moved(job, "card-deposit") == [{"name": "Swamp", "qty": 2}]
 
 
-async def test_a_done_trade_that_carried_nothing_books_nothing():
+async def test_a_done_trade_that_carried_nothing_books_nothing(test_db):
     """An empty outcome on a finished job is a fact, not a missing field: the
     trade closed without moving anything. Falling back to the ask here would
     invent a movement."""

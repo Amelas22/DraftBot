@@ -94,8 +94,20 @@ async def _twin_substitutions(
     return [e for e in entries if str(e["satisfies"]) in known]
 
 
+def _tally(items: "list[dict[str, Any]]") -> "dict[str, int]":
+    """Copies by name, summed: a list can name the same card twice."""
+    totals: "dict[str, int]" = {}
+    for i in items:
+        name = i.get("name")
+        if name:
+            totals[str(name)] = totals.get(str(name), 0) + int(i.get("qty") or 0)
+    return totals
+
+
 async def booked_names(items: "list[dict[str, Any]]",
-                       reported: "Optional[list[dict[str, Any]]]") -> "list[dict[str, Any]]":
+                       reported: "Optional[list[dict[str, Any]]]",
+                       requested: "Optional[list[dict[str, Any]]]" = None
+                       ) -> "list[dict[str, Any]]":
     """What a trade moved, under the names the library counts custody by.
 
     A twin printing is booked as the name that was asked for. The cube is counted
@@ -104,16 +116,29 @@ async def booked_names(items: "list[dict[str, Any]]",
     loan that never comes off what is available, so the copy is lent twice.
     Only as many copies as each substitution covers: an order can ask for both
     names, and a copy that crossed under the name it was asked by is not a twin.
+
+    `requested` is what this trade was to move, copy for copy and by name. A twin
+    that crossed under a name not in it is folded into the learned name even when
+    the serve reported no substitution: a return names nothing, so the serve
+    reports the card as it is called, not as it was lent. For a return the
+    settler passes what the borrower owes, so the copy lands on whichever name
+    the loan was booked under; a withdraw passes its order, so custody asked for
+    under the twin's own name keeps that name when that printing crosses.
     """
-    totals: "dict[str, int]" = {}
-    for i in items:
-        totals[i["name"]] = totals.get(i["name"], 0) + int(i["qty"])
+    totals = _tally(items)
+
+    def move(src: str, dst: str, n: int) -> None:
+        if n > 0:
+            totals[src] = totals.get(src, 0) - n
+            totals[dst] = totals.get(dst, 0) + n
+
     for e in await _twin_substitutions(reported):
         got, asked = str(e["got"]), str(e["satisfies"])
-        n = min(int(e.get("qty") or 0), totals.get(got, 0))
-        if n:
-            totals[got] -= n
-            totals[asked] = totals.get(asked, 0) + n
+        move(got, asked, min(int(e.get("qty") or 0), totals.get(got, 0)))
+    asked_for = _tally(requested or [])
+    counted = await mtgo_names_for([n for n, q in totals.items() if q])
+    for got, name in counted.items():
+        move(got, name, totals.get(got, 0) - asked_for.get(got, 0))
     return [{"name": n, "qty": q} for n, q in totals.items() if q]
 
 
