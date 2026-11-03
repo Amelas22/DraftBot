@@ -167,3 +167,36 @@ async def test_a_twin_is_not_learned_as_a_translation(test_db):
     assert await mtgo_names_for(["Makdee and Itla, Skysnarers"]) == {}
     assert await mtgo_names_for(["Spider-Woman, Stunning Savior"]) == {
         "Spider-Woman, Stunning Savior": "Makdee and Itla, Skysnarers"}
+
+
+async def test_a_return_that_names_nothing_is_booked_under_the_counted_name(test_db):
+    """A return sends no list: the serve pins what it lent and reports the card
+    by its own name, with no substitution to explain it. Loan 236 on 2026-11-03
+    went out as Makdee and Itla (the counted name), came back reported as
+    Spider-Woman, and was left open for one Makdee and Itla the borrower had
+    already handed back."""
+    from services.card_lending_service import _items_moved
+    await learn_substitutions(FIRST_COPY, job_id="912b891fd663")
+
+    moved = await _items_moved(
+        {"receive": [{"name": "Spider-Woman, Stunning Savior", "qty": 1}],
+         "receivedActual": [{"name": "Spider-Woman, Stunning Savior", "qty": 1}],
+         "substitutions": []},
+        "return")
+
+    assert moved == [{"name": "Makdee and Itla, Skysnarers", "qty": 1}]
+
+
+async def test_a_name_the_caller_asked_for_as_itself_is_booked_as_itself(test_db):
+    """Custody booked under the twin's own name is withdrawn by that name; what
+    the caller asked for by name is not folded into the counted one."""
+    from services.card_lending_service import _items_moved
+    await learn_substitutions(FIRST_COPY, job_id="912b891fd663")
+
+    moved = await _items_moved(
+        {"give": [{"name": "Spider-Woman, Stunning Savior", "qty": 1}],
+         "gaveActual": [{"name": "Spider-Woman, Stunning Savior", "qty": 1}],
+         "substitutions": []},
+        "card-withdraw")
+
+    assert moved == [{"name": "Spider-Woman, Stunning Savior", "qty": 1}]

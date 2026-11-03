@@ -1177,7 +1177,9 @@ async def _resolve_batch(job_id: str, status: str) -> None:
             await session.commit()
 
 
-async def _items_moved(job: "dict[str, Any]", kind: str) -> "list[dict[str, Any]]":
+async def _items_moved(job: "dict[str, Any]", kind: str,
+                       requested: "Optional[list[dict[str, Any]]]" = None
+                       ) -> "list[dict[str, Any]]":
     """What a finished trade actually carried, off the serve's own record.
 
     Always the side the BOT was on. A borrow and a withdrawal are what it GAVE;
@@ -1197,9 +1199,14 @@ async def _items_moved(job: "dict[str, Any]", kind: str) -> "list[dict[str, Any]
     # name reads plausibly and resolves to nothing.
     match kind:
         case "borrow" | "card-withdraw":
-            side = "gaveActual"
-        case "return" | "card-deposit":
-            side = "receivedActual"
+            side, order = "gaveActual", "give"
+        case "card-deposit":
+            side, order = "receivedActual", "receive"
+        case "return":
+            # A return names nothing (_send_collect): the serve fills the order
+            # from its own record of what it lent, so its echo is not what this
+            # side asked for. The settler passes what the borrower owes instead.
+            side, order = "receivedActual", None
         case _:
             raise ValueError(f"not a library job kind: {kind!r}")
 
@@ -1230,17 +1237,15 @@ async def _items_moved(job: "dict[str, Any]", kind: str) -> "list[dict[str, Any]
     # the two callers instead would be two places to keep in step, and the one
     # that drifted would leave cards on the shelf that nothing can ask for.
     await learn_substitutions(job.get("substitutions"), job_id=job.get("id"))
-    # Summed by name, not listed as they come. The claim for a trade is keyed
-    # by job and card name, so two entries for one name would read as the same
-    # movement and the second would be dropped as already booked -- quietly
-    # losing whichever copies came in the second entry.
-    totals: "dict[str, int]" = {}
-    for i in (job.get(side) or []):
-        name = i.get("name")
-        if name:
-            totals[name] = totals.get(name, 0) + int(i.get("qty") or 0)
-    return await booked_names([{"name": n, "qty": q} for n, q in totals.items()],
-                              job.get("substitutions"))
+    # Summed by name there, not listed as they come. The claim for a trade is
+    # keyed by job and card name, so two entries for one name would read as the
+    # same movement and the second would be dropped as already booked --
+    # quietly losing whichever copies came in the second entry.
+    if requested is None:
+        # What this side named, so a twin asked for by its own name is booked
+        # as itself. Nothing, for a return nobody passed the owed list for.
+        requested = (job.get(order) or []) if order else []
+    return await booked_names(job.get(side) or [], job.get("substitutions"), requested)
 
 
 async def _already_booked(guild_id: Any, source_id: str) -> bool:
@@ -1359,13 +1364,17 @@ async def _settle_loan(client: Any, loan: Any,
                 still_open = True      # genuinely running, or unreadable
                 continue
         if state == "done":
-            # Book what THIS trade carried, now: the borrower has those
-            # cards whatever happens to the rest of the order.
-            moved = await _items_moved(job or {}, kind)
             if not batch.library_id or batch.library_id != loan.library_id:
                 raise ValueError(f"Library stamp missing or mismatched for job {batch.job_id}")
-            await _book_claim(wallet_service.library_scope(batch.library_id),
-                              loan.borrower_id, kind, moved, batch.job_id)
+            scope = wallet_service.library_scope(batch.library_id)
+            # Book what THIS trade carried, now: the borrower has those
+            # cards whatever happens to the rest of the order. A return is
+            # booked against what the borrower owes: it named nothing, and a
+            # crossover printing comes back under whichever of its two names
+            # the serve uses, which need not be the one the loan was booked as.
+            owed = await _still_owed(scope, loan.borrower_id) if kind == "return" else None
+            moved = await _items_moved(job or {}, kind, owed)
+            await _book_claim(scope, loan.borrower_id, kind, moved, batch.job_id)
             landed.extend(moved)
         else:
             detail = (job or {}).get("detail") or detail

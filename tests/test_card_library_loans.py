@@ -220,3 +220,59 @@ async def test_a_closed_loan_frees_the_borrower_to_take_another(test_db, client)
     new_id = await svc.assign_deck(GUILD, BORROWER, DECK, source="fixture:second")
 
     assert new_id is not None and new_id != loan_id
+
+
+# A crossover card: the cube's name, and the MTGO name the library learned for
+# it and counts custody under. The serve treats the two printings as one card.
+CUBE_NAME, COUNTED = "Spider-Woman, Stunning Savior", "Makdee and Itla, Skysnarers"
+PAIRING = [{"direction": "gave", "got": COUNTED, "gotCatId": 144216, "qty": 1,
+            "satisfies": CUBE_NAME}]
+
+
+async def _owe(card_name):
+    """One copy of a card on loan to the borrower, booked under that name."""
+    from services import debt_service, wallet_service
+    await debt_service.create_card_loan(
+        guild_id=wallet_service.library_scope("lib"), lender_id=wallet_service.HOUSE_MTGO,
+        borrower_id=BORROWER, card_name=card_name, quantity=1, created_by="fixture",
+        source_id=f"mtgojob:job-0:{card_name}")
+
+
+async def _owed():
+    from services import wallet_service
+    return await svc._still_owed(wallet_service.library_scope("lib"), BORROWER)
+
+
+async def test_a_return_reported_as_the_twin_retires_a_loan_booked_as_the_counted_name(
+        test_db, client):
+    """Loan 236, 2026-11-03. The borrow asked for the counted name, the twin
+    crossed and the serve said so, so the loan was booked under the counted
+    name. The return names nothing: the serve pinned what it lent and reported
+    it as the twin, with no substitution to explain it. Booked as the twin, the
+    return left one copy of the counted name owed after every card was home."""
+    from services.card_substitution_service import learn_substitutions
+    await learn_substitutions(PAIRING, job_id="job-0")
+    await _owe(COUNTED)
+    loan_id = await _seed(state="return_pending", job_id="job-1")
+    client.jobs["job-1"] = {"state": "done", "receive": [{"name": CUBE_NAME, "qty": 1}]}
+
+    await svc.settle_in_flight()
+
+    assert (await _state(loan_id))[0] == "returned"
+    assert await _owed() == []
+
+
+async def test_a_return_retires_a_loan_booked_under_the_twins_own_name(test_db, client):
+    """The mirror: custody booked under the twin's own name, before the pairing
+    was learned, is still what this borrower owes. A return of that copy is
+    booked against what is owed, not against the name the table now counts."""
+    from services.card_substitution_service import learn_substitutions
+    await learn_substitutions(PAIRING, job_id="job-0")
+    await _owe(CUBE_NAME)
+    loan_id = await _seed(state="return_pending", job_id="job-1")
+    client.jobs["job-1"] = {"state": "done", "receive": [{"name": CUBE_NAME, "qty": 1}]}
+
+    await svc.settle_in_flight()
+
+    assert (await _state(loan_id))[0] == "returned"
+    assert await _owed() == []
