@@ -35,7 +35,7 @@ from services.card_library_inventory import library_available
 from services.library_service import library_for, library_id_for
 from services.library_access_service import may_borrow
 from services.library_trust_service import hold_for
-from helpers.money_gate import linked_username, serve_busy_reason
+from helpers.money_gate import linked_username, poll_interval_s, serve_busy_reason
 from services import wallet_service
 from models.mtgo_job import MtgoJob
 from services.mtgo_tradebot_client import (
@@ -43,11 +43,6 @@ from services.mtgo_tradebot_client import (
     too_large,
 )
 
-# How long a poll waits on its own trade by default before handing over to the
-# watchdog. Commands pass what is left of their followup window instead
-# (money_gate.followup_budget_s): an unaccepted invite alone takes over two
-# minutes to fail, and a command that stopped listening sooner told nobody.
-DEFAULT_POLL_S = 90
 RESCAN_INTERVAL_S = 10 * 60
 # How long a deck asked for after its draft stays on offer while the drafter
 # collects it. After this an uncollected request goes back on the shelf, lease
@@ -972,7 +967,7 @@ async def start_return(guild_id: Any, borrower_id: Any) -> "tuple[str, Optional[
 
 
 async def poll_until_settled(guild_id: Any, borrower_id: Any, expect: str,
-                             timeout_s: float = DEFAULT_POLL_S,
+                             timeout_s: float,
                              interval_s: float = 5,
                              job_id: Optional[str] = None) -> "tuple[str, Optional[str]]":
     """Watch one borrower's in-flight trade until it lands, or give up waiting.
@@ -1000,7 +995,8 @@ async def poll_until_settled(guild_id: Any, borrower_id: Any, expect: str,
     failure, which is what the player actually needs.
     """
     failed_state = _ROLLBACK["out_pending" if expect == "borrowed" else "return_pending"]
-    deadline = time.monotonic() + timeout_s
+    began = time.monotonic()
+    deadline = began + timeout_s
     detail = None
     while True:
         just_settled = await settle_in_flight(guild_id)
@@ -1021,7 +1017,7 @@ async def poll_until_settled(guild_id: Any, borrower_id: Any, expect: str,
                 return ("failed", detail)
         if time.monotonic() >= deadline:
             return ("running", None)
-        await asyncio.sleep(interval_s)
+        await asyncio.sleep(poll_interval_s(time.monotonic() - began, interval_s))
 
 
 async def lending_jobs_watchdog(bot: Any = None, interval_s: float = RESCAN_INTERVAL_S) -> None:

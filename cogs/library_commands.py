@@ -35,7 +35,7 @@ from config import bot_config, get_config, is_money_server, save_config
 from debt_views.helpers import card_count_label
 from helpers.money_gate import (
     custodian_name, explain_trade_failure, followup_budget_s, full_trade_list_advice,
-    mtgo_job_footer, mtgo_trade_prompt,
+    mtgo_job_footer, mtgo_trade_prompt, room_for_a_trade,
     spawn_followup,
 )
 from helpers.cube_list import fetch_cube_fresh
@@ -80,6 +80,14 @@ _CUSTODY_MESSAGES = {
                  "has moved, and `/library deposits` still shows everything the library "
                  "holds for you. Ask an admin to take a look.",
 }
+
+
+# A run of several trades can outlive the command's followup window. Starting a
+# trade that could not be reported would leave the player with an invite and no
+# word on how it ended, so the run pauses between trades instead.
+_OUT_OF_WINDOW = ("⏸️ Paused before trade {n} of {of}: Discord only lets me reply to a "
+                  "command for 15 minutes, and the next trade could outlast that. Run "
+                  "`/library {cmd}` again to carry on.")
 
 
 def _custody_said(status: str, fallback: str, detail: Optional[str] = None) -> str:
@@ -303,6 +311,7 @@ class LibraryCommands(commands.Cog):
                                 "already has (default: only what it is missing)")
     async def deposit(self, ctx: discord.ApplicationContext, cube: str,
                       copies: int = 1, full_copy: bool = False) -> None:
+        opened_at = time.monotonic()   # when this command's followup window opened
         logger.info("/library deposit {} by {} in guild {} (copies={} full_copy={})",
                     cube, ctx.author.id, ctx.guild_id, copies, full_copy)
         if not await defer_if_usable(ctx):
@@ -344,7 +353,7 @@ class LibraryCommands(commands.Cog):
             f"📦 Depositing {what}.{run}{left_out_note(untradeable)}"
             f"\n_Setting up…_", ephemeral=True)
         spawn_followup("card-library deposit",
-                       self._deposit_and_watch(ctx, chunks, cube, library.id))
+                       self._deposit_and_watch(ctx, chunks, cube, library.id, opened_at))
 
     async def _adopt_once_given(self, ctx: Any, cube: str) -> None:
         """List and free this cube here, now that its depositor has given to it.
@@ -386,7 +395,7 @@ class LibraryCommands(commands.Cog):
 
     async def _deposit_and_watch(self, ctx: Any,
                                  chunks: "list[list[dict[str, Any]]]",
-                                 cube: str, library_id: Any) -> None:
+                                 cube: str, library_id: Any, opened_at: float) -> None:
         """Walk the depositor through one trade per chunk.
 
         Detached so the interaction is not held open for the wait: Discord gives
@@ -399,7 +408,6 @@ class LibraryCommands(commands.Cog):
         failure here: the later chunks would only fail the same way, and a
         depositor watching trades fail one after another learns nothing.
         """
-        started = time.monotonic()   # every chunk's poll shares one followup window
         # The first thing this does is talk to the serve, so a stall here looks
         # exactly like a stall in the deposit itself from Discord's side: the
         # command has already said "Setting up..." and nothing further is sent.
@@ -426,6 +434,9 @@ class LibraryCommands(commands.Cog):
             of = "" if len(chunks) == 1 else f" ({n} of {len(chunks)})"
             logger.info("deposit run: chunk {} of {} -- {} cards",
                         n, len(chunks), _count(chunk))
+            if not room_for_a_trade(opened_at):
+                await stop(_OUT_OF_WINDOW.format(n=n, of=len(chunks), cmd="deposit"), n)
+                return
             status, detail = await start_deposit(ctx.guild_id, ctx.author.id, chunk)
             if status != "dispatched":
                 await stop(_custody_said(status, f"⚠️ Couldn't deposit those cards ({status}).",
@@ -440,7 +451,7 @@ class LibraryCommands(commands.Cog):
 
             outcome: "dict[str, Any]" = (
                 await poll_deposit(ctx.guild_id, detail,
-                                   timeout_s=followup_budget_s(started))
+                                   timeout_s=followup_budget_s(opened_at))
                 if detail else {})
             match outcome.get("state"):
                 case "done":
@@ -495,6 +506,7 @@ class LibraryCommands(commands.Cog):
     @library.command(name="withdraw",
                       description="Take back the cards the card library is holding for you")
     async def withdraw(self, ctx: discord.ApplicationContext) -> None:
+        opened_at = time.monotonic()   # when this command's followup window opened
         logger.info("/library withdraw by {} in guild {}", ctx.author.id, ctx.guild_id)
         if not await defer_if_usable(ctx):
             return
@@ -503,16 +515,15 @@ class LibraryCommands(commands.Cog):
             await ctx.followup.send(_NO_LIBRARY, ephemeral=True)
             return
         spawn_followup("card-library withdraw",
-                       self._withdraw_and_watch(ctx, library.id))
+                       self._withdraw_and_watch(ctx, library.id, opened_at))
 
-    async def _withdraw_and_watch(self, ctx: Any, library_id: Any) -> None:
+    async def _withdraw_and_watch(self, ctx: Any, library_id: Any, opened_at: float) -> None:
         """Walk the depositor through one trade per order.
 
         A position bigger than one MTGO trade comes back in pieces, and the
         pieces are run one at a time: opening several trades at once would put
         offers in front of somebody who has not accepted the first.
         """
-        started = time.monotonic()   # every order's poll shares one followup window
         orders = await withdrawal_orders(ctx.author.id, library_id)
         if not orders:
             await ctx.followup.send(_custody_said("nothing_held", "📭 Nothing to take back."),
@@ -533,6 +544,9 @@ class LibraryCommands(commands.Cog):
 
         for n, cards in enumerate(orders, start=1):
             of = "" if len(orders) == 1 else f" ({n} of {len(orders)})"
+            if not room_for_a_trade(opened_at):
+                await stop(_OUT_OF_WINDOW.format(n=n, of=len(orders), cmd="withdraw"))
+                return
             status, detail = await start_withdrawal(ctx.guild_id, ctx.author.id,
                                                     cards=cards)
             if status == "some_on_loan":
@@ -557,7 +571,7 @@ class LibraryCommands(commands.Cog):
 
             outcome: "dict[str, Any]" = (
                 await poll_deposit(ctx.guild_id, detail,
-                                   timeout_s=followup_budget_s(started))
+                                   timeout_s=followup_budget_s(opened_at))
                 if detail else {})
             match outcome.get("state"):
                 case "done":

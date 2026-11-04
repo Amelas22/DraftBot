@@ -281,6 +281,28 @@ async def test_the_trade_is_watched_for_the_whole_followup_window(monkeypatch):
     assert FOLLOWUP_WINDOW_S - 5 <= timeout <= FOLLOWUP_WINDOW_S
 
 
+async def test_a_later_press_polls_only_for_what_is_left_of_the_first_window(monkeypatch):
+    """The partial-deck button answers on the ORIGINAL command's interaction, so
+    a press five minutes later has five minutes less to report in. Counting from
+    the press would send the outcome after Discord stopped accepting it."""
+    import time
+    import services.library_loan_actions as mod
+    from helpers.money_gate import FOLLOWUP_WINDOW_S
+    monkeypatch.setattr(mod, "poll_until_settled", AsyncMock(return_value=("borrowed", None)))
+    monkeypatch.setattr(mod, "borrow_when_free", AsyncMock(return_value=("dispatched", False)))
+    monkeypatch.setattr(mod, "active_loan", AsyncMock(
+        return_value=SimpleNamespace(cards=DECK, pending_cards=None, state="out_pending",
+                                     id=1, job_id="J1")))
+    monkeypatch.setattr(mod, "custodian_name", AsyncMock(return_value="Team01"))
+    caller = SimpleNamespace(user_id=1234, guild_id=99, send=AsyncMock(),
+                             opened_at=time.monotonic() - 300)
+
+    await mod._borrow_when_ready(caller, 99, offering=[{"name": "Swamp", "qty": 1}])
+
+    timeout = mod.poll_until_settled.await_args.kwargs["timeout_s"]
+    assert timeout == pytest.approx(FOLLOWUP_WINDOW_S - 300, abs=2)
+
+
 async def test_the_trade_message_lists_what_is_actually_being_traded(monkeypatch):
     """A borrower who took a partial deck is sent a trade for the partial deck.
     Listing the whole deck beside it invites them to reject a trade that is

@@ -37,12 +37,7 @@ from services.mtgo_tradebot_client import (
     DEFAULT_WAIT_MINUTES, get_lending_client, max_cards_per_trade,
     too_large,
 )
-
-# How long a poll waits on its own trade by default before handing over to the
-# watchdog. The deposit and withdraw runs pass what is left of their followup
-# window instead (money_gate.followup_budget_s), so the person who ran the
-# command hears how each trade ended.
-DEFAULT_POLL_S = 90
+from helpers.money_gate import poll_interval_s
 
 # Their OWN kinds, not the wallet's 'deposit'. That one is a TIX deposit with no
 # card name, and the wallet's resumer picks up every pending row it recognises
@@ -549,19 +544,20 @@ async def _settle_one(client: Any, job_row: Any,
     settled[job_row.job_id] = {"state": state, "detail": (job or {}).get("detail")}
 
 
-async def poll_until_settled(guild_id: Any, job_id: str, timeout_s: float = DEFAULT_POLL_S,
+async def poll_until_settled(guild_id: Any, job_id: str, timeout_s: float,
                              interval_s: float = 5) -> "dict[str, Any]":
     """Watch one trade until it lands, or give up waiting.
 
-    The invite stands two minutes for a human to accept and the trade takes
-    longer still, so asking once is asking too early -- the command falls silent, having
-    just told somebody to go and accept a trade. This exists so the person who
-    ran the command gets an answer while they are still looking at Discord.
+    A human has to accept the invite, so asking once is asking too early -- the
+    job is queued and the command falls silent, having just told somebody to go
+    and accept a trade. This exists so the person who ran the command gets an
+    answer while they are still looking at Discord.
 
     Giving up is NOT failing: the job keeps its row and the watchdog settles it
     later. Returns {"state": done|failed|running, "detail": ...}.
     """
-    deadline = time.monotonic() + timeout_s
+    began = time.monotonic()
+    deadline = began + timeout_s
     while True:
         settled = await settle_deposits(guild_id)
         if job_id in settled:
@@ -577,7 +573,7 @@ async def poll_until_settled(guild_id: Any, job_id: str, timeout_s: float = DEFA
             return done
         if time.monotonic() >= deadline:
             return {"state": "running", "detail": None}
-        await asyncio.sleep(interval_s)
+        await asyncio.sleep(poll_interval_s(time.monotonic() - began, interval_s))
 
 
 async def _resolved(job_id: str) -> "Optional[dict[str, Any]]":

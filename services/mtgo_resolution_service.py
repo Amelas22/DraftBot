@@ -48,8 +48,6 @@ from preference_service import get_players_dm_notification_preferences
 _POLL_INTERVAL_S = 3.0
 _POLL_INTERVAL_MAX_S = 5.0
 _POLL_BACKOFF = 1.5
-# Keep the inline poll inside Discord's 15-minute interaction/followup window.
-_DEFAULT_POLL_TIMEOUT_S = FOLLOWUP_WINDOW_S
 
 
 # ---------------------------------------------------------------------------
@@ -605,7 +603,7 @@ async def start_deposit(guild_id: str, player_id: str, mtgo_user: str, n: int, *
 
 
 async def finish_deposit(job_id: str, guild_id: str, player_id: str, n: int, mtgo_user: str,
-                         timeout_s: float = _DEFAULT_POLL_TIMEOUT_S) -> dict[str, Any]:
+                         timeout_s: float = FOLLOWUP_WINDOW_S) -> dict[str, Any]:
     """Poll the deposit job, then credit what the VAULT says arrived (idempotent by job_id):
     credited if it rose by n, whatever the serve said; failed if the trade is proven
     closed with nothing moved; otherwise settled as not arrived, and an admin told."""
@@ -763,7 +761,7 @@ async def start_withdraw(guild_id: str, player_id: str, mtgo_user: str, n: int, 
 
 async def finish_withdraw(job_id: str, guild_id: str, player_id: str, n: int,
                           mtgo_user: str | None = None,
-                          timeout_s: float = _DEFAULT_POLL_TIMEOUT_S) -> dict[str, Any]:
+                          timeout_s: float = FOLLOWUP_WINDOW_S) -> dict[str, Any]:
     """Poll the withdraw job, then book what the VAULT says left. REFUND ONLY WHEN IT SAYS
     NOTHING LEFT: 2026-10-03, a withdraw that had left the vault came back "failed" and
     the refund paid the player twice. A drop of n is a delivery whatever the serve said;

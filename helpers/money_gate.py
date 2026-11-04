@@ -30,19 +30,37 @@ DEFAULT_WAIT_MINUTES = 10
 
 # Every custodian serve invites directly (TRADEBOT_DIRECT_INVITE=120): the invite goes
 # out with the opening DM, and one nobody accepts in this long is withdrawn. Mirrors
-# the serves' setting, so changing it there makes the prompt below wrong.
+# the serves' setting, so changing it there makes the prompt below wrong -- and a serve
+# put back on the YES handshake makes it wrong in kind, not just in number.
 INVITE_ACCEPT_SECONDS = 120
 
 # How long a command can keep answering through its interaction. Discord allows
 # followups for 15 minutes; this leaves a margin for the last send.
 FOLLOWUP_WINDOW_S = 14 * 60
 
+# A trade needs about this much window left to be offered and reported: the
+# invite's own life plus a minute for the trade itself.
+_ROOM_FOR_A_TRADE_S = INVITE_ACCEPT_SECONDS + 60
 
-def followup_budget_s(started: float) -> float:
-    """What is left of the followup window for a command that began at `started`
-    (a time.monotonic() reading). A poll bounded by this answers the player for as
-    long as Discord lets it, instead of falling silent while the trade is still live."""
-    return max(0.0, FOLLOWUP_WINDOW_S - (time.monotonic() - started))
+
+def followup_budget_s(opened_at: float) -> float:
+    """Seconds left in the followup window that opened at `opened_at` (monotonic)."""
+    return max(0.0, FOLLOWUP_WINDOW_S - (time.monotonic() - opened_at))
+
+
+def room_for_a_trade(opened_at: float) -> bool:
+    """Whether another trade can still be offered and its outcome reported."""
+    return followup_budget_s(opened_at) >= _ROOM_FOR_A_TRADE_S
+
+
+def poll_interval_s(elapsed_s: float, base_s: float) -> float:
+    """How long a trade poll sleeps between checks, `elapsed_s` into it.
+
+    Every `base_s` while the invite can still be accepted or lapse -- the moment the
+    player is watching for -- and every 15 seconds after that. Each check settles the
+    whole guild's in-flight trades, so a 14-minute poll at the fast rate costs about
+    three times the serve calls for a reply at most 15 seconds sooner."""
+    return base_s if elapsed_s < _ROOM_FOR_A_TRADE_S else max(base_s, 15.0)
 
 # Keyed by serve URL: there is more than one custodian now (the wallet's vault
 # and the card library), and a single slot would answer the first name asked for
@@ -102,15 +120,10 @@ def mtgo_trade_prompt(custodian: str) -> str:
     two commands used to describe them differently — deposit told the player to open
     the trade themselves, which is not how the serve works at all. One string so the
     instructions cannot disagree about a protocol that is identical.
-
-    The serve sends the invite straight away, with no YES round trip, so the deadline
-    is the one thing the player has to act on.
     """
-    minutes, seconds = divmod(INVITE_ACCEPT_SECONDS, 60)
-    window = (f"{minutes} minute{'' if minutes == 1 else 's'}" if not seconds
-              else f"{INVITE_ACCEPT_SECONDS} seconds")
-    return (f"`{custodian}` is sending you a trade invite in MTGO now — accept it within "
-            f"**{window}**, and I'll confirm here once it lands.")
+    return (f"`{custodian}` will send you a trade invite in MTGO — accept it within "
+            f"**{INVITE_ACCEPT_SECONDS // 60} minutes**, and I'll confirm here once it "
+            f"lands.")
 
 
 def full_trade_list_advice(exact_printing: bool = False) -> str:
@@ -140,9 +153,7 @@ def mtgo_job_footer(job_id: str) -> str:
 
     Folded in beside the prompt for the same reason the prompt itself exists: the two
     commands rendered this line identically and separately, which is exactly how the
-    instructions above it drifted apart in the first place. It carries no deadline:
-    the prompt states the real one, and the wallet also appends this to its final
-    result, where a countdown would mean nothing.
+    instructions above it drifted apart in the first place.
     """
     return f"\n_Job `{job_id}`._"
 

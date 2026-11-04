@@ -69,7 +69,7 @@ def test_the_prompt_says_the_invite_is_coming_and_when_it_lapses():
     assert "TheCustodian" in prompt
     # the serve sends the invite; telling players to open it themselves is what the
     # old deposit copy got wrong
-    assert "sending you a trade invite" in prompt
+    assert "will send you a trade invite" in prompt
     assert "2 minutes" in prompt, "the accept deadline is the one thing to act on"
 
 
@@ -92,6 +92,28 @@ def test_the_followup_budget_counts_down_from_the_command():
     assert followup_budget_s(now) == pytest.approx(FOLLOWUP_WINDOW_S, abs=1)
     assert followup_budget_s(now - 300) == pytest.approx(FOLLOWUP_WINDOW_S - 300, abs=1)
     assert followup_budget_s(now - FOLLOWUP_WINDOW_S - 60) == 0
+
+
+def test_a_run_stops_offering_trades_it_could_not_report():
+    """A later trade of a multi-trade run that starts with too little window left
+    would leave an invite and nobody to say how it ended."""
+    import time
+    from helpers.money_gate import FOLLOWUP_WINDOW_S, INVITE_ACCEPT_SECONDS, room_for_a_trade
+
+    now = time.monotonic()
+    assert room_for_a_trade(now)
+    assert not room_for_a_trade(now - (FOLLOWUP_WINDOW_S - INVITE_ACCEPT_SECONDS))
+
+
+def test_polls_slow_down_once_the_invite_cannot_lapse_any_more():
+    """Fast while the player is accepting, slower for the trade itself: each check
+    settles every in-flight trade in the guild."""
+    from helpers.money_gate import poll_interval_s
+
+    assert poll_interval_s(10, 5) == 5
+    assert poll_interval_s(600, 5) == 15
+    assert poll_interval_s(600, 0) == 15
+    assert poll_interval_s(10, 0) == 0, "tests poll with no sleep inside the window"
 
 
 # ---- /wallet pay on an empty wallet ----------------------------------------------

@@ -23,8 +23,7 @@ from typing import Any, Optional
 import aiohttp
 from loguru import logger
 
-# The serve's budget for a whole trade once queued (the invite inside it is
-# withdrawn after two minutes). Mirrors helpers.money_gate.DEFAULT_WAIT_MINUTES;
+# Mirrors helpers.money_gate.DEFAULT_WAIT_MINUTES, which says what it bounds;
 # importing that here would be a cycle (money_gate imports this).
 DEFAULT_WAIT_MINUTES = 10
 

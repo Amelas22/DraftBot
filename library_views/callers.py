@@ -10,6 +10,7 @@ it is carried as None for the flows' gate to refuse.
 Replies are always private, and are sent exactly as the commands always sent
 them: an ephemeral defer, then ephemeral followups.
 """
+import time
 from typing import Optional
 
 import discord
@@ -34,6 +35,8 @@ class ContextCaller:
         self._ctx = ctx
         self.user_id: int = ctx.author.id
         self.guild_id: Optional[int] = context_guild_id(ctx)
+        # Built as the command arrives, so this is when its followup window opened.
+        self.opened_at: float = time.monotonic()
 
     async def defer(self) -> None:
         await self._ctx.defer(ephemeral=True)
@@ -65,6 +68,8 @@ class InteractionCaller:
         self.user_id: int = not_none(interaction.user).id
         self.guild_id: Optional[int] = (
             guild_id if guild_id is not None else context_guild_id(interaction))
+        # Built as the press arrives, so this is when its followup window opened.
+        self.opened_at: float = time.monotonic()
 
     async def defer(self) -> None:
         await self._interaction.response.defer(ephemeral=True, invisible=False)

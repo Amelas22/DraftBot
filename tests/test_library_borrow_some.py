@@ -7,6 +7,7 @@ drafter as if they had never asked), the trade must carry only the named cards,
 and a small borrow that fails on the no-deck path must take back the loan it
 created, while a deck that was already waiting stays waiting.
 """
+import time
 from typing import Any, Optional
 
 import pytest
@@ -38,6 +39,7 @@ class Caller:
 
     def __init__(self, user_id: str = ALICE, guild_id: Optional[str] = GUILD):
         self._user_id, self._guild_id = user_id, guild_id
+        self.opened_at = time.monotonic()
         self.said: "list[str]" = []
 
     @property

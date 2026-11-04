@@ -10,10 +10,9 @@ that turn a pycord context or interaction into a caller live in
 The bot cannot finish an MTGO trade on its own: it offers, and the player has
 to accept in the client. So every dispatched message here says so. A player who
 is not told will run the command, see nothing happen, and the invite will be
-withdrawn two minutes later -- which looks like a broken bot rather than an
+withdrawn soon after -- which looks like a broken bot rather than an
 unaccepted trade.
 """
-import time
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Awaitable, Callable, Optional, Protocol
@@ -58,7 +57,8 @@ class LibraryCaller(Protocol):
     at the boundary.
 
     Every reply is private: `defer` acknowledges ephemerally, and `send` is an
-    ephemeral followup.
+    ephemeral followup -- so every reply is bounded by the followup window
+    that opened with the interaction, at `opened_at` (time.monotonic()).
     """
 
     @property
@@ -66,6 +66,9 @@ class LibraryCaller(Protocol):
 
     @property
     def guild_id(self) -> Optional[int]: ...
+
+    @property
+    def opened_at(self) -> float: ...
 
     async def defer(self) -> None: ...
 
@@ -679,7 +682,6 @@ async def _trade_when_ready(caller: LibraryCaller, guild_id: int,
     gives a command 15 minutes of followups, but a player staring at a
     spinner for five of them will assume it broke.
     """
-    started = time.monotonic()   # the queue wait spends the same followup window
     status, waited = await when_free(guild_id, caller.user_id)
     if status == "short_funds":
         # The figures are a nicety; answering at all is not. Rendering them
@@ -717,11 +719,12 @@ async def _trade_when_ready(caller: LibraryCaller, guild_id: int,
         f"{deck_lines(loan)}"
         f"{mtgo_job_footer(job_id) if job_id else ''}{note}")
 
-    # Wait on the job so the player gets a real answer rather than silence -- for
-    # as long as Discord lets us answer, since an unanswered invite alone takes
-    # over two minutes to fail. The watchdog covers anything that outlives this.
+    # Wait on the job so the player gets a real answer rather than silence, for as
+    # long as the caller's interaction can still be answered. The partial-deck
+    # button hands back the ORIGINAL caller, so its window is the command's, not
+    # the press's. The watchdog covers anything that outlives this.
     outcome, detail = await poll_until_settled(guild_id, caller.user_id, expect,
-                                               timeout_s=followup_budget_s(started),
+                                               timeout_s=followup_budget_s(caller.opened_at),
                                                job_id=job_id)
     await _report_outcome(caller, outcome, expect, detail,
                           small_with_deck_waiting=small_with_deck_waiting)
