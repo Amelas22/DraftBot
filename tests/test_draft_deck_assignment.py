@@ -26,6 +26,7 @@ from services.card_lending_service import assign_deck
 pytestmark = pytest.mark.asyncio
 
 GUILD, SESSION, LIBRARY = "g1", "sess-1", "lib"
+STOCK = {"Island": 1, "Lightning Bolt": 2, "Counterspell": 1}
 ALICE, BOB = "1001", "1002"  # snowflake-shaped: a preference key cannot hold "_"
 
 
@@ -75,7 +76,7 @@ async def library_on(test_db):
     """
     from conftest import a_library
     await a_library(LIBRARY, guild=GUILD, collateral=5, cubes=(CUBE,),
-                    stock={"Island": 1, "Lightning Bolt": 2, "Counterspell": 1})
+                    stock=STOCK)
     yield
 
 
@@ -996,7 +997,7 @@ async def _rental(*, reserved=True, agreed=(ALICE,)):
 
     await a_library(LIBRARY, guild=GUILD, kind="rental", collateral=5,
                     cubes=(CUBE,),
-                    stock={"Island": 1, "Lightning Bolt": 2, "Counterspell": 1})
+                    stock=STOCK)
     await set_uses_library(ALICE, GUILD, True)
     await _seed()
     if reserved:

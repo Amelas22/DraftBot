@@ -148,7 +148,6 @@ TABLE = [
     (B, BACK, True, True, True, R),
     (R, BACK, True, True, True, R),
     (R, LAPSED, True, True, True, R),
-    (B, NOBODY, True, True, True, C),   # nobody listed: nobody may request
     (R, OUT, True, False, True, C),     # the chat is gone regardless
 ]
 

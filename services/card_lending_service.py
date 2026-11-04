@@ -402,15 +402,11 @@ async def collateral_for(loan: Any, guild_id: Any) -> Optional[int]:
 
 
 async def shortfall(guild_id: Any, cards: "list[dict[str, Any]]",
-                    loan_id: Optional[int] = None, *,
-                    exclude_session_id: Optional[str] = None,
-                    ) -> "list[dict[str, Any]]":
+                    loan_id: Optional[int] = None) -> "list[dict[str, Any]]":
     """Which of these cards the library cannot fully cover, and by how much.
 
     Ledger absence means zero entitlement; only the vault is truncated.
     A collecting loan may use its own reservation, but not another loan's.
-    `exclude_session_id` asks on behalf of that draft, whose own cube hold is
-    not counted against it (see library_available).
     """
     if loan_id is not None:
         async with AsyncSessionLocal() as session:
@@ -419,8 +415,7 @@ async def shortfall(guild_id: Any, cards: "list[dict[str, Any]]",
         library_id = library.id if library else None
     else:
         library_id = await library_id_for(guild_id)
-    avail = await lendable_now(library_id, exclude_loan_id=loan_id,
-                               exclude_session_id=exclude_session_id)
+    avail = await lendable_now(library_id, exclude_loan_id=loan_id)
     return [{"name": c["name"], "want": c["qty"], "have": avail.get(c["name"], 0)}
             for c in cards
             if avail.get(c["name"], 0) < c["qty"]]
@@ -452,7 +447,6 @@ def _panel_changed(loan: Any) -> None:
 
 
 async def lendable_now(library_id: Any, *, exclude_loan_id: Optional[int] = None,
-                       exclude_session_id: Optional[str] = None,
                        ) -> "dict[str, int]":
     """What THIS library can actually hand over right now: {name: copies}.
 
@@ -477,8 +471,7 @@ async def lendable_now(library_id: Any, *, exclude_loan_id: Optional[int] = None
     if not library_id:
         return {}
     physical = await available_now()
-    entitled = await library_available(library_id, exclude_loan_id=exclude_loan_id,
-                                       exclude_session_id=exclude_session_id)
+    entitled = await library_available(library_id, exclude_loan_id=exclude_loan_id)
     # The ledger is authoritative about ENTITLEMENT, so a card it has no rows
     # for is one this library holds none of -- it was deposited to somebody
     # else, or to nobody. Absent therefore means zero here, unlike the vault,
@@ -614,18 +607,17 @@ async def expire_stale_assignments(now: Optional[datetime] = None) -> int:
         return 0
 
     at = now or datetime.now()
-    requested = [l for l in offers if l.claimed_at is not None]
-    offers = [l for l in offers if l.claimed_at is None]
-
     # Grouped so the question is asked once per draft rather than once per
     # offer, and asked outside the write session above: the rule reads the
     # draft and its results through sessions of its own.
     by_draft: "dict[str, list[Any]]" = defaultdict(list)
+    retract: "list[Any]" = []
     for loan in offers:
-        by_draft[str(loan.source).split(":", 1)[1]].append(loan)
-
-    retract: "list[Any]" = [l for l in requested
-                            if at - l.claimed_at >= REQUEST_GRACE]
+        if loan.claimed_at is not None:
+            if at - loan.claimed_at >= REQUEST_GRACE:
+                retract.append(loan)
+        else:
+            by_draft[str(loan.source).split(":", 1)[1]].append(loan)
     for session_id, loans in by_draft.items():
         still_playing = await who_can_still_use_a_deck(
             session_id, [l.borrower_id for l in loans])

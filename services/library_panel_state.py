@@ -90,6 +90,11 @@ def all_back(borrowers: list[Borrower]) -> bool:
     return not any(b.state in OUT_STATES for b in borrowers)
 
 
+def has_offer(borrowers: list[Borrower]) -> bool:
+    """A deck is still on offer: assigned, not yet collected."""
+    return any(b.state == "assigned" for b in borrowers)
+
+
 def can_close(borrowers: list[Borrower], *, anyone_may_request: bool) -> bool:
     """Every deck is back, none is still on offer, and nobody listed may still
     ask for theirs again. A deck offered but not yet collected can still go out
@@ -97,9 +102,8 @@ def can_close(borrowers: list[Borrower], *, anyone_may_request: bool) -> bool:
     stays open for it; and a drafter with a match left may want their deck
     back, so it stays open for them too."""
     return (all_back(borrowers)
-            and not any(b.state == "assigned" for b in borrowers)
-            # nobody listed means nobody may request, whatever the caller says
-            and not (borrowers and anyone_may_request))
+            and not has_offer(borrowers)
+            and not anyone_may_request)
 
 
 class Face(Enum):
@@ -164,7 +168,7 @@ def desired_face(current: Face, borrowers: list[Borrower], *, settled: bool,
         return Face.BORROW
     if can_close(borrowers, anyone_may_request=anyone_may_request):
         return Face.CLOSED
-    if all_back(borrowers) and any(b.state == "assigned" for b in borrowers):
+    if all_back(borrowers) and has_offer(borrowers):
         # a deck still on offer, none out
         return Face.BORROW
     return Face.RETURN

@@ -39,7 +39,8 @@ from helpers.mtgo_untradeable import split_untradeable
 from services.card_substitution_service import to_mtgo_names
 from models.card_loan import ACTIVE_STATES, CardLoan
 from models.draft_session import DraftSession
-from services.card_lending_service import assign_deck, shortfall
+from services.card_lending_service import assign_deck
+from services.card_library_inventory import library_available
 from services.draft_log_store import map_discord_to_draftmancer, pool_items
 from services.mtgo_tradebot_client import max_cards_per_trade, too_large
 
@@ -519,10 +520,12 @@ async def assign_on_request(session_id: Any, player_id: Any) -> RequestOutcome:
         return "empty"
     if too_large(sum(int(c["qty"]) for c in cards)):
         return "too_large"
-    # On behalf of this draft: one nobody agreed in before it fired still holds
-    # its whole cube, and that hold is these very cards, not another draft's.
-    short = await shortfall(guild_id, cards, exclude_session_id=str(session_id))
-    if len(short) == len(cards) and all(s["have"] == 0 for s in short):
+    # The ledger alone decides whether any of the pool is lendable; the vault is
+    # read once, at the collect that follows, which already handles a physically
+    # short shelf. On behalf of this draft: one nobody agreed in before it fired
+    # still holds its whole cube, and that hold is these very cards.
+    avail = await library_available(library.id, exclude_session_id=str(session_id))
+    if not any(avail.get(c["name"], 0) for c in cards):
         return "nothing"
     try:
         loan_id = await assign_deck(guild_id, player, cards,
