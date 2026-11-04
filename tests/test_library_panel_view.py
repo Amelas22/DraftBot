@@ -186,7 +186,47 @@ async def test_panel_view_has_fixed_custom_ids():
     assert persistent.timeout is None
     assert {i.custom_id for i in persistent.children} == {
         "library_panel:borrow", "library_panel:return", "library_panel:decline",
-        "library_panel:some"}
+        "library_panel:some", "library_panel:open"}
+
+
+async def test_the_ask_view_has_one_button():
+    from library_views.panel_view import LibraryPanelView, panel_view
+    ask = panel_view("ask")
+    assert ask is not None
+    [button] = ask.children
+    assert (button.custom_id, button.label) == ("library_panel:open", "Use the library")
+    assert "library_panel:open" in {i.custom_id for i in LibraryPanelView().children}
+
+
+async def test_any_drafter_may_open_the_panel(test_db, monkeypatch):
+    from library_views.panel_view import LibraryPanelView
+    await _seed()
+    opened = AsyncMock(return_value=True)
+    monkeypatch.setattr("services.library_panel.open_panel", opened)
+    interaction = _interaction(3)
+    await LibraryPanelView().open_button.callback(interaction)
+    opened.assert_awaited_once_with("s1", interaction)
+    interaction.response.send_message.assert_not_awaited()
+
+
+async def test_a_spectator_may_not_open_the_panel(test_db, monkeypatch):
+    from library_views.panel_view import LibraryPanelView
+    await _seed()
+    opened = AsyncMock(return_value=True)
+    monkeypatch.setattr("services.library_panel.open_panel", opened)
+    interaction = _interaction(4)
+    await LibraryPanelView().open_button.callback(interaction)
+    opened.assert_not_awaited()
+    assert _refused(interaction) == NO_DECK
+
+
+async def test_opening_a_closed_panel_says_so(test_db, monkeypatch):
+    from library_views.panel_view import LibraryPanelView
+    await _seed()
+    monkeypatch.setattr("services.library_panel.open_panel", AsyncMock(return_value=False))
+    interaction = _interaction(3)
+    await LibraryPanelView().open_button.callback(interaction)
+    assert _refused(interaction) == "📭 This draft's library decks are closed."
 
 
 # --- changing your mind after the draft --------------------------------------

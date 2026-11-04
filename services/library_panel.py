@@ -397,3 +397,8 @@ async def reconcile_library_panels(bot: Any) -> None:
         except Exception:
             logger.exception("library panel: reconcile failed for session_id={}",
                              session_id)
+
+
+async def open_panel(session_id: str, interaction: discord.Interaction) -> bool:
+    """Stub: Task 3 replaces it with the real opener."""
+    raise NotImplementedError
