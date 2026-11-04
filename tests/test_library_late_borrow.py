@@ -32,12 +32,13 @@ async def test_a_drafter_with_nothing_waiting_is_handed_their_deck_and_collects_
 
 
 @pytest.mark.parametrize("outcome,text", [
-    ("over", "matches in that draft are done"),
+    ("over", "every match of yours"),
     ("busy", "/library return"),
-    ("already", "already had"),
+    ("closed", "chat has closed"),
     ("not_offered", "doesn't lend"),
     ("no_log", "try again"),
     ("empty", "ask an admin"),
+    ("nothing", "none of that deck"),
 ])
 async def test_why_a_request_was_refused_is_said(monkeypatch, outcome, text):
     import services.library_loan_actions as mod

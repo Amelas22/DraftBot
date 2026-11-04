@@ -11,7 +11,7 @@ else can borrow them, the drafter's one active-loan slot stays occupied so they
 are silently passed over at the NEXT draft, and the deck stays collectable long
 after the draft it belonged to.
 """
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -43,10 +43,11 @@ async def _draft(stage="pairings", results=0, submitted=0, session_id=SESSION):
 LIBRARY = "lib"
 
 
-async def _assigned(borrower=BORROWER, source=f"draft:{SESSION}"):
+async def _assigned(borrower=BORROWER, source=f"draft:{SESSION}", claimed_at=None):
     async with AsyncSessionLocal() as s:
         loan = CardLoan(guild_id=GUILD, borrower_id=borrower, cards=DECK,
-                        library_id=LIBRARY, state="assigned", source=source)
+                        library_id=LIBRARY, state="assigned", source=source,
+                        claimed_at=claimed_at)
         s.add(loan)
         await s.commit()
         return loan.id
@@ -311,3 +312,50 @@ async def test_a_collected_deck_is_untouched_however_long_ago_the_draft_ended(
 
     assert await svc.expire_stale_assignments() == 0
     assert await _state(loan) == "borrowed"
+
+
+async def test_a_requested_offer_is_left_alone_while_its_borrower_collects(test_db):
+    """After the decision who_can_still_use says nobody, but a request made
+    then is being collected right now -- the take-what's-there prompt and the
+    serve queue take minutes."""
+    await _draft(stage="completed")
+    now = datetime.now()
+    loan = await _assigned(claimed_at=now - timedelta(minutes=14))
+
+    assert await svc.expire_stale_assignments(now=now) == 0
+    assert await _state(loan) == "assigned"
+
+
+async def test_a_requested_offer_nobody_collected_lapses_after_the_grace(test_db):
+    await _draft(stage="completed")
+    now = datetime.now()
+    loan = await _assigned(claimed_at=now - svc.REQUEST_GRACE)
+
+    assert await svc.expire_stale_assignments(now=now) == 1
+    assert await _state(loan) == "expired"
+
+
+async def test_a_requested_offer_lapses_even_inside_the_lease(test_db):
+    """A request is not a reservation: with the draft live and a match left,
+    an uncollected request still goes back on the shelf after the grace."""
+    await _draft(stage="pairings")
+    now = datetime.now()
+    loan = await _assigned(claimed_at=now - timedelta(minutes=16))
+
+    assert await svc.expire_stale_assignments(now=now) == 1
+    assert await _state(loan) == "expired"
+
+
+async def test_a_first_time_offer_keeps_todays_rule(test_db):
+    """No claimed_at: judged by who_can_still_use alone, so an offer in a live
+    draft outlives the grace."""
+    await _draft(stage="pairings")
+    now = datetime.now()
+    loan = await _assigned()
+    async with AsyncSessionLocal() as s:
+        row = await s.get(CardLoan, loan)
+        row.created_at = now - timedelta(hours=1)
+        await s.commit()
+
+    assert await svc.expire_stale_assignments(now=now) == 0
+    assert await _state(loan) == "assigned"

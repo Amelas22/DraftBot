@@ -11,6 +11,9 @@ Borrow is for every drafter, not only the ones the library set a deck aside
 for: somebody who said no before the draft fired presses it to ask for their
 deck after all (library_loan_actions.borrow). "I don't need my deck" hands an
 uncollected one back.
+
+Return is on both faces, so a deck can go back between matches and come out
+again from the same place; Borrow stays on the return face for dead rubbers.
 """
 from typing import Any, Literal, Optional
 
@@ -114,11 +117,12 @@ class LibraryPanelView(discord.ui.View):
 
 
 def panel_view(mode: str) -> Optional[LibraryPanelView]:
-    """The buttons the panel shows in `mode`: Borrow and "I don't need my
-    deck" while decks are going out, Return once they are coming back, none
-    when closed."""
-    keep = {"borrow": ("library_panel:borrow", "library_panel:decline"),
-            "return": ("library_panel:return",)}.get(mode)
+    """The buttons the panel shows in `mode`: Borrow, Return and "I don't
+    need my deck" while decks are going out, Borrow and Return once they are
+    coming back, none when closed."""
+    keep = {"borrow": ("library_panel:borrow", "library_panel:return",
+                       "library_panel:decline"),
+            "return": ("library_panel:borrow", "library_panel:return")}.get(mode)
     if keep is None:
         return None
     view = LibraryPanelView()

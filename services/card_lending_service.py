@@ -19,7 +19,7 @@ tell whether the cards ever moved.
 """
 import asyncio
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable, Optional
 
 from loguru import logger
@@ -47,6 +47,10 @@ from services.mtgo_tradebot_client import (
 # The serve's own offer stands ~10 min; this is only about answering the player.
 DEFAULT_POLL_S = 90
 RESCAN_INTERVAL_S = 10 * 60
+# How long a deck asked for after its draft stays on offer while the drafter
+# collects it. After this an uncollected request goes back on the shelf, lease
+# or no lease.
+REQUEST_GRACE = timedelta(minutes=15)
 _watchdog_running = False   # on_ready refires on reconnects; start one loop only
 
 # Where a loan goes back to when its trade fails: nothing moved, so the loan
@@ -442,7 +446,7 @@ def _panel_changed(loan: Any) -> None:
     loan_changed(loan)
 
 
-async def lendable_now(library_id: Any, *, exclude_loan_id: Optional[int] = None
+async def lendable_now(library_id: Any, *, exclude_loan_id: Optional[int] = None,
                        ) -> "dict[str, int]":
     """What THIS library can actually hand over right now: {name: copies}.
 
@@ -556,7 +560,7 @@ async def assign_deck(guild_id: Any, borrower_id: Any, cards: "list[dict[str, An
         return loan.id
 
 
-async def expire_stale_assignments() -> int:
+async def expire_stale_assignments(now: Optional[datetime] = None) -> int:
     """Retract deck offers nobody can use any more. Returns how many.
 
     An assignment is a promise to a drafter who might still collect it. It
@@ -582,6 +586,14 @@ async def expire_stale_assignments() -> int:
 
     A loan with no draft behind it is left alone: nothing here can tell whether
     a hand-made assignment is stale.
+
+    A deck asked for after the decision (claimed_at set) lives on its own
+    clock. The rule above would retract it at once -- nobody can still use a
+    deck for a draft that is decided -- yet collecting it takes minutes: the
+    take-what's-there prompt stays open 180 s and the serve queue can hold the
+    trade. So it is left alone until REQUEST_GRACE after the ask, and
+    retracted after that if still merely on offer, whatever the draft says: a
+    request is not a reservation.
     """
     from collections import defaultdict
 
@@ -594,14 +606,18 @@ async def expire_stale_assignments() -> int:
     if not offers:
         return 0
 
+    at = now or datetime.now()
     # Grouped so the question is asked once per draft rather than once per
     # offer, and asked outside the write session above: the rule reads the
     # draft and its results through sessions of its own.
     by_draft: "dict[str, list[Any]]" = defaultdict(list)
-    for loan in offers:
-        by_draft[str(loan.source).split(":", 1)[1]].append(loan)
-
     retract: "list[Any]" = []
+    for loan in offers:
+        if loan.claimed_at is not None:
+            if at - loan.claimed_at >= REQUEST_GRACE:
+                retract.append(loan)
+        else:
+            by_draft[str(loan.source).split(":", 1)[1]].append(loan)
     for session_id, loans in by_draft.items():
         still_playing = await who_can_still_use_a_deck(
             session_id, [l.borrower_id for l in loans])
@@ -614,7 +630,8 @@ async def expire_stale_assignments() -> int:
 
     if expired:
         logger.info("library: retracted {} uncollected deck offer(s) whose "
-                    "borrower has no match left to play", expired)
+                    "borrower has no match left to play, or that nobody collected",
+                    expired)
     return expired
 
 

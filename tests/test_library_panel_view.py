@@ -174,10 +174,11 @@ async def test_panel_view_has_fixed_custom_ids():
     borrow = panel_view("borrow")
     assert borrow is not None
     assert [i.custom_id for i in borrow.children] == [
-        "library_panel:borrow", "library_panel:decline"]
+        "library_panel:borrow", "library_panel:return", "library_panel:decline"]
     ret = panel_view("return")
     assert ret is not None
-    assert [i.custom_id for i in ret.children] == ["library_panel:return"]
+    assert [i.custom_id for i in ret.children] == [
+        "library_panel:borrow", "library_panel:return"]
     assert panel_view("closed") is None
     persistent = LibraryPanelView()
     assert persistent.timeout is None

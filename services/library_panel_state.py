@@ -90,11 +90,20 @@ def all_back(borrowers: list[Borrower]) -> bool:
     return not any(b.state in OUT_STATES for b in borrowers)
 
 
-def can_close(borrowers: list[Borrower]) -> bool:
-    """Every deck is back and none is still on offer. A deck offered but not yet
-    collected can still go out after the decision, until the watchdog retracts
-    the offer, so the panel stays open for it."""
-    return all_back(borrowers) and not any(b.state == "assigned" for b in borrowers)
+def has_offer(borrowers: list[Borrower]) -> bool:
+    """A deck is still on offer: assigned, not yet collected."""
+    return any(b.state == "assigned" for b in borrowers)
+
+
+def can_close(borrowers: list[Borrower], *, anyone_may_request: bool) -> bool:
+    """Every deck is back, none is still on offer, and nobody listed may still
+    ask for theirs again. A deck offered but not yet collected can still go out
+    after the decision, until the watchdog retracts the offer, so the panel
+    stays open for it; and a drafter with a match left may want their deck
+    back, so it stays open for them too."""
+    return (all_back(borrowers)
+            and not has_offer(borrowers)
+            and not anyone_may_request)
 
 
 class Face(Enum):
@@ -123,21 +132,24 @@ class Face(Enum):
 
 
 def desired_face(current: Face, borrowers: list[Borrower], *, settled: bool,
-                 chat_open: bool) -> Face:
+                 chat_open: bool, anyone_may_request: bool) -> Face:
     """The face the panel should wear now.
 
     `current` is the face it wears; `settled` is whether the draft is decided
     (a side clinched, or it was abandoned); `chat_open` is whether its draft
-    chat still exists.
+    chat still exists; `anyone_may_request` is whether any drafter it lists may
+    still ask for their deck (library_reminders.may_still_request).
 
     - No panel yet: a borrow panel once the chat is open and someone is
       involved, while the draft is undecided. A panel is never first posted on
       a decided draft.
     - Borrow, undecided: stays borrow.
-    - Borrow, decided: closes when every deck is back and none is on offer;
-      stays borrow while a deck is on offer and none is out; otherwise asks for
-      returns.
-    - Return: closes when every deck is back and none is on offer.
+    - Borrow, decided: closes when every deck is back, none is on offer and
+      nobody listed may still request; stays borrow while a deck is on offer
+      and none is out; otherwise asks for returns. A decided draft stays open,
+      wearing Return with Borrow, while someone it lists may still request, so
+      a dead rubber can be played.
+    - Return: closes under the same condition.
     - Closed is final.
     - A posted panel whose chat is gone closes: there is nowhere to show it.
     """
@@ -150,12 +162,14 @@ def desired_face(current: Face, borrowers: list[Borrower], *, settled: bool,
     if not chat_open:
         return Face.CLOSED
     if current is Face.RETURN:
-        return Face.CLOSED if can_close(borrowers) else Face.RETURN
+        return Face.CLOSED if can_close(
+            borrowers, anyone_may_request=anyone_may_request) else Face.RETURN
     if not settled:
         return Face.BORROW
-    if can_close(borrowers):
+    if can_close(borrowers, anyone_may_request=anyone_may_request):
         return Face.CLOSED
-    if all_back(borrowers):  # a deck still on offer, none out
+    if all_back(borrowers) and has_offer(borrowers):
+        # a deck still on offer, none out
         return Face.BORROW
     return Face.RETURN
 
@@ -172,19 +186,25 @@ def borrow_embed(borrowers: list[Borrower], *, closed: bool = False) -> discord.
         footer = "This draft's library decks are closed."
     else:
         footer = ("Press **Borrow my deck** and the library will trade you "
-                  "your pool on MTGO.")
+                  "your pool on MTGO. **Return my deck** hands it back between "
+                  "matches; you can borrow it again while you have a match to play.")
     return discord.Embed(title=TITLE, description="\n".join(lines) + f"\n\n{footer}")
 
 
 def return_embed(borrowers: list[Borrower], result: Optional[str], *,
-                 closed: bool = False) -> discord.Embed:
+                 closed: bool = False,
+                 anyone_may_request: bool = False) -> discord.Embed:
     """The panel once the draft is decided: who still holds a deck, who has
     sent theirs back. A deck nobody collected was never lent, so is not listed.
-    `closed` is its final face, once every deck is back."""
+    `closed` is its final face, once every deck is back.
+    `anyone_may_request` adds the invitation to borrow again for a dead rubber."""
     lead = f"{result}\n\n" if result else ""
     ask = ("All decks are back. Thanks!" if closed
            else "If you borrowed a deck, please send it back. "
                 "Other drafters are waiting on those cards.")
+    if anyone_may_request and not closed:
+        ask += ("\n\nStill have a match to play? **Borrow my deck** takes your "
+                "deck out again while this chat is open.")
     embed = discord.Embed(title=TITLE, description=lead + ask)
     out = [f"**{b.name}**: {deck_summary(b.cards)}"
            for b in borrowers if b.state in OUT_STATES]
