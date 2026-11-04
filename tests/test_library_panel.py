@@ -747,3 +747,40 @@ async def test_the_panel_closes_once_the_chat_is_closing(
     await sync_panel(bot, "s1")
 
     assert (await _row()).library_panel_mode == "closed"
+
+
+@pytest.mark.asyncio
+async def test_a_lost_return_panel_held_open_for_a_dead_rubber_is_posted_again(
+        test_db, reserved, monkeypatch):  # noqa: F811
+    """Every deck is back, but "1" may still ask for theirs: losing the panel
+    must not take the Borrow button with it until the chat closes."""
+    async def state(session_id):
+        return _draft_state(True, done_at={"3": datetime(2026, 10, 1)},
+                            closes_at=datetime.now() + timedelta(hours=2))
+    monkeypatch.setattr(library_panel, "draft_state", state)
+    _wins(monkeypatch, 5, 3)
+    await _in_mode("return", [("1", "returned")])
+    bot, channel, _, _ = _bot_with_old_panel(fetch_error=_gone())
+
+    await sync_panel(bot, "s1")
+
+    channel.send.assert_awaited_once()
+    view = channel.send.await_args.kwargs["view"]
+    assert {i.custom_id for i in view.children} == {
+        "library_panel:borrow", "library_panel:return"}
+
+
+@pytest.mark.asyncio
+async def test_a_held_open_panel_closes_once_the_last_requester_reports(
+        test_db, reserved, monkeypatch):  # noqa: F811
+    async def state(session_id):
+        return _draft_state(True, done_at={p: datetime(2026, 10, 1) for p in ("1", "3")},
+                            closes_at=datetime.now() + timedelta(hours=2))
+    monkeypatch.setattr(library_panel, "draft_state", state)
+    _wins(monkeypatch, 5, 3)
+    await _in_mode("return", [("1", "returned")])
+    bot, _, _, _ = _bot_with_old_panel()
+
+    await sync_panel(bot, "s1")
+
+    assert (await _row()).library_panel_mode == "closed"

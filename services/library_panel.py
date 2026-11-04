@@ -272,9 +272,11 @@ async def _converge(bot: Any, session_id: str, *, move_down: bool) -> None:
         return
     if face is current:
         if live is None:
-            # A return panel lost while decks are out is posted again. A lost
-            # borrow panel is left be: a second one is worse than none.
-            if face is Face.RETURN and not all_back(borrowers):
+            # A return panel lost while decks are out is posted again, and so
+            # is one held open for a dead rubber, or its Borrow button is gone
+            # until the chat closes. A lost borrow panel is left be: a second
+            # one is worse than none.
+            if face is Face.RETURN and (not all_back(borrowers) or anyone_may_request):
                 await _post(bot, draft, channel, borrowers, face,
                             anyone_may_request=anyone_may_request)
                 logger.info("Reposted the missing library return panel for "
