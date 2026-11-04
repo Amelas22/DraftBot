@@ -9,16 +9,35 @@ from typing import Any, Literal
 
 import discord
 
-from helpers.utils import ui_button
+from helpers.utils import not_none, ui_button
+from library_views.callers import InteractionCaller
+from services.card_lending_service import active_loan
+from services.library_loan_actions import LOAN_MESSAGES, borrow, return_deck
 
 Action = Literal["borrow", "return"]
 
-NO_DECK = "📭 You have no deck to {verb} right now."
-
 
 async def _press(interaction: discord.Interaction, action: Action) -> None:
-    await interaction.response.send_message(
-        NO_DECK.format(verb=action), ephemeral=True)
+    """A DM carries no server, so the flow runs for the server the presser's
+    loan belongs to, wherever the press happened."""
+    # Nothing is deferred before a refusal: it is the interaction's one
+    # response, and otherwise the flow defers and answers it itself.
+    loan = await active_loan(str(not_none(interaction.user).id))
+    guild_id = None
+    if loan is not None:
+        try:
+            guild_id = int(loan.guild_id)
+        except (TypeError, ValueError):
+            pass
+    if guild_id is None:
+        refusal = LOAN_MESSAGES["not_borrowed" if action == "return" else "no_loan"]
+        await interaction.response.send_message(refusal, ephemeral=True)
+        return
+    caller = InteractionCaller(interaction, guild_id=guild_id)
+    if action == "borrow":
+        await borrow(caller)
+    else:
+        await return_deck(caller)
 
 
 class LibraryDmView(discord.ui.View):
