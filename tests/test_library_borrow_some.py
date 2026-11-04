@@ -434,7 +434,7 @@ async def test_the_reminder_sweep_counts_what_was_borrowed(library, monkeypatch)
     loan, _ = await _collected(library, THREE)
     sent: list = []
 
-    async def record(_loan, message, _what):
+    async def record(_loan, message, _what, view=None):
         sent.append(message)
         return True
 

@@ -600,7 +600,7 @@ def _recording_dm(monkeypatch, delivers=True):
 
     told = []
 
-    async def _record(bot, user_id, message, label=None):
+    async def _record(bot, user_id, message, view=None, label=None):
         told.append((str(user_id), message))
         return delivers
 
