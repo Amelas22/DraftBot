@@ -28,7 +28,7 @@ def _loan(state="borrowed", last_reminded_at=None, source="draft:s1"):
 
 
 async def _a_loan(state="borrowed", *, last_reminded_at=None, ready_dm_at=None,
-                  borrower="p1", session="s1"):
+                  borrower="p1", session="s1", claimed_at=None):
     """One real CardLoan row. Returns its id."""
     from database.db_session import AsyncSessionLocal
     from models.card_loan import CardLoan
@@ -37,7 +37,7 @@ async def _a_loan(state="borrowed", *, last_reminded_at=None, ready_dm_at=None,
         loan = CardLoan(guild_id="g", library_id="lib", borrower_id=borrower,
                         cards=[{"name": "Swamp", "qty": 4}], state=state,
                         source=f"draft:{session}", ready_dm_at=ready_dm_at,
-                        last_reminded_at=last_reminded_at)
+                        last_reminded_at=last_reminded_at, claimed_at=claimed_at)
         s.add(loan)
         await s.commit()
         return loan.id
@@ -664,3 +664,46 @@ def test_the_offer_window_does_not_end_a_request():
                            NOW + timedelta(days=6), False)
     assert mod.who_can_still_use(state, ["p1"], NOW) == set()
     assert mod.may_still_request(state, "p1", NOW) is None
+
+
+@pytest.mark.asyncio
+async def test_a_deck_claimed_late_is_not_chased_on_the_decision(test_db, dm):
+    """Borrowed for a dead rubber after a side clinched: they are playing it."""
+    await seed_session("s1", stype="random", stage="completed",
+                       matches=[("p1", "p2", None, None)],
+                       deletion_time=NOW + timedelta(hours=2))
+    await _a_loan(claimed_at=NOW - timedelta(minutes=5))
+
+    assert await mod.send_due_reminders(now=NOW) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_deck_claimed_late_is_chased_once_its_chat_is_closing(test_db, dm):
+    await seed_session("s1", stype="random", stage="completed",
+                       matches=[("p1", "p2", None, None)],
+                       deletion_time=NOW + timedelta(minutes=20))
+    await _a_loan(claimed_at=NOW - timedelta(hours=1))
+
+    assert await mod.send_due_reminders(now=NOW) == 1
+    assert dm.sent[0][1].startswith("Your draft is decided")
+
+
+@pytest.mark.asyncio
+async def test_a_deck_claimed_late_is_chased_an_hour_after_their_last_report(test_db, dm):
+    await seed_session("s1", stype="random", stage="completed",
+                       matches=[("p1", "p2", "p1", NOW - timedelta(minutes=61))],
+                       deletion_time=NOW + timedelta(hours=2))
+    await _a_loan(claimed_at=NOW - timedelta(hours=2))
+
+    assert await mod.send_due_reminders(now=NOW) == 1
+    assert not dm.sent[0][1].startswith("Your draft is decided")
+
+
+@pytest.mark.asyncio
+async def test_a_first_time_loan_is_still_chased_on_the_decision(test_db, dm):
+    await seed_session("s1", stype="random", stage="completed",
+                       matches=[("p1", "p2", None, None)],
+                       deletion_time=NOW + timedelta(hours=2))
+    await _a_loan()
+
+    assert await mod.send_due_reminders(now=NOW) == 1

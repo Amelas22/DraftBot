@@ -305,9 +305,13 @@ async def send_due_reminders(now: Optional[datetime] = None) -> int:
         # otherwise ask again at each tick until the clock caught up.
         played_since_ask = (played is not None and loan.last_reminded_at is not None
                             and loan.last_reminded_at < played <= at)
-        if reminder_due(loan, done_playing=mine is not None, draft_settled=state.settled,
+        # A deck asked for after the draft was settled is being used for a dead
+        # rubber. Settlement is why it was asked for, not a reason to want it
+        # back; the chat closing is.
+        decided = state.chat_closing(at) if loan.claimed_at is not None else state.settled
+        if reminder_due(loan, done_playing=mine is not None, draft_settled=decided,
                         finished_at=mine, played_since_ask=played_since_ask, now=at):
-            due.append((loan, state.settled))
+            due.append((loan, decided))
 
     asked = 0
     for loan, decided in due:
