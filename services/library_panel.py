@@ -16,21 +16,25 @@ through sync_panel too, under the same lock.
 import asyncio
 import json
 import weakref
+from datetime import datetime
 from typing import Any, Literal, Optional
 
 import discord
 from loguru import logger
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 
 from database.db_session import AsyncSessionLocal
 from helpers.team_names import labels_for
 from helpers.utils import as_messageable, not_none
 from library_views.panel_view import LibraryPanelView, panel_view
 from models.draft_session import DraftSession
-from services.library_panel_state import (Borrower, Face, all_back, borrow_embed,
-                                          borrowers_of, desired_face,
+from services import library_service
+from services.library_panel_state import (Borrower, Face, all_back, ask_embed,
+                                          borrow_embed, borrowers_of, desired_face,
                                           has_library_involvement, return_embed)
-from services.library_reminders import draft_state, may_still_request, session_of
+from services.library_reminders import (DraftState, draft_state, may_still_request,
+                                        session_of)
+from services.library_reservation import FINISHED_STAGES
 
 
 async def result_line(draft: Any) -> Optional[str]:
@@ -56,6 +60,8 @@ async def _render(draft: Any, borrowers: list[Borrower], face: Face, *,
                   ) -> tuple[discord.Embed, Optional[LibraryPanelView]]:
     """The embed and buttons for `face`. `copy` is the face of the copy being
     drawn on, which only matters for CLOSED: a borrow panel closes as one."""
+    if face is Face.ASK:
+        return ask_embed(), panel_view(face.value)
     if face is Face.BORROW or (face is Face.CLOSED and copy is Face.BORROW):
         embed = borrow_embed(borrowers, closed=face is Face.CLOSED)
     else:
@@ -201,6 +207,43 @@ async def _try_sticky(bot: Any, draft: Any, message: Any,
 # --- Converging ----------------------------------------------------------------
 
 
+async def _library_offers(draft: Any) -> bool:
+    """Whether this server's rental library offers the draft's cube: the pair
+    the reservation asks, so a draft nobody opted into can still be asked."""
+    library = await library_service.rental_library_for(draft.guild_id)
+    if library is None:
+        return False
+    return await library_service.offers(library.id, draft.cube)
+
+
+def _anyone_may_request(state: DraftState, draft: Any,
+                        borrowers: list[Borrower]) -> bool:
+    """Whether anyone the panel lists may still ask for their deck; with nobody
+    listed, anyone in the sign-ups, so an ask or empty borrow panel stays up
+    for a dead rubber."""
+    candidates = ([b.user_id for b in borrowers] if borrowers
+                  else [str(uid) for uid in (draft.sign_ups or {})])
+    return any(may_still_request(state, uid) is None for uid in candidates)
+
+
+async def _plan(draft: Any, current: Face, state: DraftState, *, chat_open: bool,
+                offered: Optional[bool],
+                ) -> tuple[list[Borrower], bool, Face]:
+    """What a sync and a press both decide from: who the panel lists, whether
+    anyone may still request, and the face it should wear. `offered` is whether
+    the library offers the cube, None when not yet known: then the library is
+    asked only where it can matter, for a panel not yet posted that lists
+    nobody."""
+    borrowers = await borrowers_of(draft)
+    anyone_may_request = _anyone_may_request(state, draft, borrowers)
+    face = desired_face(
+        current, borrowers, settled=state.settled, chat_open=chat_open,
+        anyone_may_request=anyone_may_request,
+        offered=current is Face.NONE and not borrowers and (
+            offered if offered is not None else await _library_offers(draft)))
+    return borrowers, anyone_may_request, face
+
+
 async def _post(bot: Any, draft: Any, channel: Any, borrowers: list[Borrower],
                 face: Face, *, anyone_may_request: bool,
                 replacing: Optional[Any] = None) -> None:
@@ -247,19 +290,24 @@ async def _converge(bot: Any, session_id: str, *, move_down: bool) -> None:
         if move_down and chat:
             await _drop_sticky(chat, session_id)
         return
-    if current is Face.NONE and (chat is None or not await has_library_involvement(draft)):
+    # Whether the library offers the cube. A draft that never involved the
+    # library is worth reading only if it does, so that is asked first; for any
+    # other draft it is left to the plan, which asks only if it needs to.
+    offered: Optional[bool] = None
+    if current is Face.NONE:
         # The common case on the victory path: no chat yet, or no library.
-        return
+        if chat is None:
+            return
+        if not await has_library_involvement(draft):
+            if not await _library_offers(draft):
+                return
+            offered = True
     state = await draft_state(session_id)
     if current is Face.NONE and state.settled:
         return  # a panel is never first posted on a decided draft
-    borrowers = await borrowers_of(draft)
-    anyone_may_request = any(
-        may_still_request(state, b.user_id) is None for b in borrowers)
     channel = await _chat_channel(bot, chat) if chat else None
-    face = desired_face(current, borrowers, settled=state.settled,
-                        chat_open=channel is not None,
-                        anyone_may_request=anyone_may_request)
+    borrowers, anyone_may_request, face = await _plan(
+        draft, current, state, chat_open=channel is not None, offered=offered)
     if channel is None or chat is None:
         if face is Face.CLOSED:
             await _write(session_id, library_panel_mode=Face.CLOSED.mode)
@@ -272,15 +320,21 @@ async def _converge(bot: Any, session_id: str, *, move_down: bool) -> None:
         return
     if face is current:
         if live is None:
-            # A return panel lost while decks are out is posted again, and so
-            # is one held open for a dead rubber, or its Borrow button is gone
-            # until the chat closes. A lost borrow panel is left be: a second
-            # one is worse than none.
-            if face is Face.RETURN and (not all_back(borrowers) or anyone_may_request):
+            # A lost copy that is the drafters' only way in (an ask panel, or a
+            # borrow panel that lists nobody) or that somebody still owes a
+            # return to (or may borrow from again, for a dead rubber) is posted
+            # again. A lost borrow panel with somebody listed is left be: a
+            # second one is worse than none.
+            needs_repost = (
+                face is Face.ASK
+                or (face is Face.BORROW and not borrowers)
+                or (face is Face.RETURN
+                    and (not all_back(borrowers) or anyone_may_request)))
+            if needs_repost:
                 await _post(bot, draft, channel, borrowers, face,
                             anyone_may_request=anyone_may_request)
-                logger.info("Reposted the missing library return panel for "
-                            "session_id={}", session_id)
+                logger.info("Reposted the missing library {} panel for "
+                            "session_id={}", face.value, session_id)
             return
         sticky = (await _sticky_state(chat, session_id, str(live.id))
                   if face is Face.RETURN else None)
@@ -295,10 +349,26 @@ async def _converge(bot: Any, session_id: str, *, move_down: bool) -> None:
             # Its record was lost: a failed make-sticky, an unpin, a stale one.
             await _try_sticky(bot, draft, live, view)
         return
-    if face is Face.BORROW:  # from none
+    if current is Face.NONE:  # borrow or ask
         await _post(bot, draft, channel, borrowers, face,
                     anyone_may_request=anyone_may_request)
-        logger.info("Posted library panel for session_id={}", session_id)
+        logger.info("Posted library {} panel for session_id={}", face.value, session_id)
+        return
+    if current is Face.ASK and face is Face.BORROW:  # someone is listed: in place
+        if live is None:  # the ask copy is lost: post the borrow panel afresh
+            await _post(bot, draft, channel, borrowers, face,
+                        anyone_may_request=anyone_may_request)
+        else:
+            await _show(live, *await _render(
+                draft, borrowers, face, copy=face, anyone_may_request=anyone_may_request))
+            await _write(session_id, library_panel_mode=Face.BORROW.mode)
+        logger.info("Library panel for session_id={} now offers decks", session_id)
+        return
+    if current is Face.ASK:  # closed: an ask copy is taken down, not redrawn
+        if live is not None:
+            await _delete(live)
+        await _write(session_id, library_panel_mode=Face.CLOSED.mode)
+        logger.info("Took down the library ask panel for session_id={}", session_id)
         return
     if face is Face.RETURN:  # from borrow: below the victory post
         await _post(bot, draft, channel, borrowers, face, replacing=live,
@@ -385,15 +455,54 @@ async def reconcile_library_panels(bot: Any) -> None:
     Catches what a missed trigger left behind: a decided draft still showing
     its borrow panel (a restart, or a failed victory post, between the decision
     and the switch), a return panel whose message is gone, a panel whose chat
-    no longer exists. Closed and never-posted panels are not read at all.
+    no longer exists. Also posts the ask copy a nudge missed, or that predates
+    it: a draft with a chat, not finished and not past its deletion time, that
+    has no panel yet is read too. Closed panels and finished drafts are not.
     """
+    now = datetime.now()  # deletion_time is stored naive, in local time
+    open_draft = and_(
+        DraftSession.library_panel_mode.is_(None),
+        DraftSession.draft_chat_channel.isnot(None),
+        or_(DraftSession.deletion_time.is_(None), DraftSession.deletion_time > now),
+        or_(DraftSession.session_stage.is_(None),
+            DraftSession.session_stage.notin_(FINISHED_STAGES)))
     async with AsyncSessionLocal() as s:
-        session_ids = (await s.execute(select(DraftSession.session_id).where(
+        session_ids = (await s.execute(select(DraftSession.session_id).where(or_(
             DraftSession.library_panel_mode.in_(
-                (Face.BORROW.mode, Face.RETURN.mode))))).scalars().all()
+                (Face.BORROW.mode, Face.RETURN.mode, Face.ASK.mode)),
+            open_draft)))).scalars().all()
     for session_id in session_ids:
         try:
             await sync_panel(bot, session_id)
         except Exception:
             logger.exception("library panel: reconcile failed for session_id={}",
                              session_id)
+
+
+async def open_panel(session_id: str, interaction: discord.Interaction) -> bool:
+    """A press of Use the library: redraw the pressed copy as the borrow panel
+    and point the draft at it. Pressed again on an open panel, it just redraws.
+
+    False, with nothing drawn, when the panel is closed or would close now, so
+    the press can say so; the next sync takes it down.
+    """
+    async with _lock_for(session_id):
+        draft = await DraftSession.get_by_session_id(session_id)
+        if draft is None:
+            return False
+        current = Face.of(draft.library_panel_mode)
+        if current is Face.CLOSED:
+            return False
+        state = await draft_state(session_id)
+        borrowers, anyone_may_request, face = await _plan(
+            draft, current, state, chat_open=True, offered=False)
+        if face in (Face.CLOSED, Face.NONE):
+            return False
+        embed, view = await _render(draft, borrowers, Face.BORROW, copy=Face.BORROW,
+                                    anyone_may_request=anyone_may_request)
+        await interaction.response.edit_message(embed=embed, view=view)
+        message_id = str(not_none(interaction.message).id)
+        await _write(session_id, library_panel_mode=Face.BORROW.mode,
+                     library_panel_message_id=message_id)
+        _shown[message_id] = _digest(embed, view)
+        return True

@@ -35,14 +35,14 @@ OTHER_DRAFT = (" Your library deck is from another draft — use `/library borro
                "or `/library return`.")
 
 
-Action = Literal["borrow", "return", "decline"]
+Action = Literal["borrow", "return", "decline", "open"]
 
 
 async def may_use_panel(session_id: str, user_id: str,
                         action: Action) -> Optional[str]:
     """Why this user may not use this draft's panel, or None to run the command.
 
-    The command runs for a loan from this draft. For borrow it also runs for
+    The command runs for a loan from this draft. For borrow and open it also runs for
     anybody in the draft with no loan yet -- the reserved, and a drafter who
     changed their mind -- so the borrow flow decides whether they can have a
     deck and says why not in its own words.
@@ -52,8 +52,10 @@ async def may_use_panel(session_id: str, user_id: str,
         if session_of(loan) == session_id:
             return None
         return NO_DECK + OTHER_DRAFT
-    if action == "borrow" and (await _drafted_in(session_id, user_id) or any(
-            b.user_id == str(user_id) for b in await panel_borrowers(session_id))):
+    if action in ("borrow", "open") and (
+            await _drafted_in(session_id, user_id)
+            or any(b.user_id == str(user_id)
+                   for b in await panel_borrowers(session_id))):
         return None
     return NO_DECK
 
@@ -86,6 +88,13 @@ async def _press(interaction: discord.Interaction, action: Action,
     if some:
         # The form is the press's one response, so nothing was deferred.
         await interaction.response.send_modal(SomeCardsModal(session_id))
+        return
+    if action == "open":
+        # Imported here: the panel module imports this one.
+        from services.library_panel import open_panel
+        if not await open_panel(session_id, interaction):
+            await interaction.response.send_message(
+                "📭 This draft's library decks are closed.", ephemeral=True)
         return
     caller = InteractionCaller(interaction)
     if action == "borrow":
@@ -127,16 +136,24 @@ class LibraryPanelView(discord.ui.View):
                              interaction: discord.Interaction) -> None:
         await _press(interaction, "decline")
 
+    @ui_button(label="Use the library", style=discord.ButtonStyle.secondary,
+               custom_id="library_panel:open")
+    async def open_button(self, button: "discord.ui.Button[Any]",
+                          interaction: discord.Interaction) -> None:
+        await _press(interaction, "open")
+
 
 def panel_view(mode: str) -> Optional[LibraryPanelView]:
     """The buttons the panel shows in `mode`: Borrow, Borrow only some cards,
     Return and "I don't need my deck" while decks are going out; the same
     without the decline once they are coming back, so a dead rubber can take
-    a few cards out again; none when closed."""
+    a few cards out again; one "Use the library" button on the ask face;
+    none when closed."""
     keep = {"borrow": ("library_panel:borrow", "library_panel:some",
                        "library_panel:return", "library_panel:decline"),
             "return": ("library_panel:borrow", "library_panel:some",
-                       "library_panel:return")}.get(mode)
+                       "library_panel:return"),
+            "ask": ("library_panel:open",)}.get(mode)
     if keep is None:
         return None
     return keep_only(LibraryPanelView(), keep)
