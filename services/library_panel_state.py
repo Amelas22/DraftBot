@@ -137,6 +137,7 @@ class Face(Enum):
     closes, i.e. by the face it had before; after that it is never drawn again.
     """
     NONE = "none"
+    ASK = "ask"
     BORROW = "borrow"
     RETURN = "return"
     CLOSED = "closed"
@@ -153,17 +154,23 @@ class Face(Enum):
 
 
 def desired_face(current: Face, borrowers: list[Borrower], *, settled: bool,
-                 chat_open: bool, anyone_may_request: bool) -> Face:
+                 chat_open: bool, anyone_may_request: bool,
+                 offered: bool = False) -> Face:
     """The face the panel should wear now.
 
     `current` is the face it wears; `settled` is whether the draft is decided
     (a side clinched, or it was abandoned); `chat_open` is whether its draft
     chat still exists; `anyone_may_request` is whether any drafter it lists may
-    still ask for their deck (library_reminders.may_still_request).
+    still ask for their deck (library_reminders.may_still_request); `offered`
+    is whether the library offers this draft's cube to people who have not
+    opted in.
 
     - No panel yet: a borrow panel once the chat is open and someone is
-      involved, while the draft is undecided. A panel is never first posted on
-      a decided draft.
+      involved, while the draft is undecided; failing that, an ask panel when
+      the library offers the cube. A panel is never first posted on a decided
+      draft.
+    - Ask: becomes borrow once someone is listed; closes when the chat is gone,
+      or the draft is decided and nobody may request.
     - Borrow, undecided: stays borrow.
     - Borrow, decided: closes when every deck is back, none is on offer and
       nobody listed may still request; stays borrow while a deck is on offer
@@ -179,9 +186,17 @@ def desired_face(current: Face, borrowers: list[Borrower], *, settled: bool,
     if current is Face.NONE:
         if chat_open and borrowers and not settled:
             return Face.BORROW
+        if chat_open and offered and not settled:
+            return Face.ASK
         return Face.NONE
     if not chat_open:
         return Face.CLOSED
+    if current is Face.ASK:
+        if borrowers:
+            return Face.BORROW
+        return Face.CLOSED if settled and not anyone_may_request else Face.ASK
+    if current is Face.BORROW and not borrowers:
+        return Face.BORROW if not settled or anyone_may_request else Face.CLOSED
     if current is Face.RETURN:
         return Face.CLOSED if can_close(
             borrowers, anyone_may_request=anyone_may_request) else Face.RETURN
@@ -195,8 +210,15 @@ def desired_face(current: Face, borrowers: list[Borrower], *, settled: bool,
     return Face.RETURN
 
 
+def ask_embed() -> discord.Embed:
+    return discord.Embed(
+        title=TITLE,
+        description=("Nobody here asked for a library deck. Changed your mind? "
+                     "Press **Use the library** to see this draft's borrowing options."))
+
+
 def borrow_embed(borrowers: list[Borrower], *, closed: bool = False) -> discord.Embed:
-    lines = []
+    lines = [] if borrowers else ["Nobody has a library deck yet."]
     for b in borrowers:
         if closed and b.state in (None, "assigned", "expired"):
             text = "not collected, back on the shelf"

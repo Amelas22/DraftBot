@@ -7,8 +7,8 @@ from database.db_session import AsyncSessionLocal
 from models.card_loan import CardLoan
 from models.draft_session import DraftSession
 from services import library_panel_state
-from services.library_panel_state import (Borrower, Face, borrow_embed, desired_face,
-                                          return_embed)
+from services.library_panel_state import (TITLE, Borrower, Face, ask_embed, borrow_embed,
+                                          desired_face, return_embed)
 
 
 def _text(embed):
@@ -88,6 +88,7 @@ def test_faces_round_trip_the_stored_mode():
     for face in Face:
         assert Face.of(face.mode) is face
     assert Face.NONE.mode is None and Face.CLOSED.mode == "closed"
+    assert Face.of("ask") is Face.ASK and Face.ASK.mode == "ask"
 
 
 def _who(*states):
@@ -103,61 +104,79 @@ BACK = _who("returned")          # every deck back
 BACK_AND_OFFER = _who("returned", "assigned")
 LAPSED = _who("expired")
 
-N, B, R, C = Face.NONE, Face.BORROW, Face.RETURN, Face.CLOSED
+N, B, R, C, A = Face.NONE, Face.BORROW, Face.RETURN, Face.CLOSED, Face.ASK
 
-# (current, borrowers, settled, chat open) -> desired
+# (current, borrowers, settled, chat open, offered, anyone may request) -> desired
 TABLE = [
     # No panel yet: posted only while undecided, with a chat and someone in it.
-    (N, NOBODY, False, True, False, N),
-    (N, RESERVED, False, True, False, B),
-    (N, OUT, False, True, False, B),
-    (N, OUT, False, False, False, N),
-    (N, OUT, True, True, False, N),
-    (N, BACK, True, True, False, N),
+    (N, NOBODY, False, True, False, False, N),
+    (N, RESERVED, False, True, False, False, B),
+    (N, OUT, False, True, False, False, B),
+    (N, OUT, False, False, False, False, N),
+    (N, OUT, True, True, False, False, N),
+    (N, BACK, True, True, False, False, N),
     # Borrow, undecided: stays, whatever the loans say.
-    (B, RESERVED, False, True, False, B),
-    (B, OUT, False, True, False, B),
-    (B, BACK, False, True, False, B),
-    (B, LAPSED, False, True, False, B),
+    (B, RESERVED, False, True, False, False, B),
+    (B, OUT, False, True, False, False, B),
+    (B, BACK, False, True, False, False, B),
+    (B, LAPSED, False, True, False, False, B),
     # Borrow, decided.
-    (B, OUT, True, True, False, R),
-    (B, OUT_AND_OFFER, True, True, False, R),
-    (B, ON_OFFER, True, True, False, B),
-    (B, BACK_AND_OFFER, True, True, False, B),
-    (B, BACK, True, True, False, C),
-    (B, LAPSED, True, True, False, C),
-    (B, RESERVED, True, True, False, C),
-    (B, NOBODY, True, True, False, C),
+    (B, OUT, True, True, False, False, R),
+    (B, OUT_AND_OFFER, True, True, False, False, R),
+    (B, ON_OFFER, True, True, False, False, B),
+    (B, BACK_AND_OFFER, True, True, False, False, B),
+    (B, BACK, True, True, False, False, C),
+    (B, LAPSED, True, True, False, False, C),
+    (B, RESERVED, True, True, False, False, C),
+    (B, NOBODY, True, True, False, False, C),
     # Return: open while a deck is out or on offer.
-    (R, OUT, True, True, False, R),
-    (R, OUT_AND_OFFER, True, True, False, R),
-    (R, BACK_AND_OFFER, True, True, False, R),
-    (R, ON_OFFER, True, True, False, R),
-    (R, BACK, True, True, False, C),
-    (R, LAPSED, True, True, False, C),
+    (R, OUT, True, True, False, False, R),
+    (R, OUT_AND_OFFER, True, True, False, False, R),
+    (R, BACK_AND_OFFER, True, True, False, False, R),
+    (R, ON_OFFER, True, True, False, False, R),
+    (R, BACK, True, True, False, False, C),
+    (R, LAPSED, True, True, False, False, C),
     # The chat is gone: a posted panel closes.
-    (B, OUT, False, False, False, C),
-    (B, OUT, True, False, False, C),
-    (R, OUT, True, False, False, C),
+    (B, OUT, False, False, False, False, C),
+    (B, OUT, True, False, False, False, C),
+    (R, OUT, True, False, False, False, C),
     # Closed is final.
-    (C, OUT, True, True, False, C),
-    (C, ON_OFFER, False, True, False, C),
-    (C, NOBODY, False, False, False, C),
+    (C, OUT, True, True, False, False, C),
+    (C, ON_OFFER, False, True, False, False, C),
+    (C, NOBODY, False, False, False, False, C),
     # Decided, every deck back, but somebody listed still has a match: stays
     # open with Borrow, so a dead rubber can be played.
-    (B, BACK, True, True, True, R),
-    (R, BACK, True, True, True, R),
-    (R, LAPSED, True, True, True, R),
-    (R, OUT, True, False, True, C),     # the chat is gone regardless
+    (B, BACK, True, True, False, True, R),
+    (R, BACK, True, True, False, True, R),
+    (R, LAPSED, True, True, False, True, R),
+    (R, OUT, True, False, False, True, C),     # the chat is gone regardless
+    # No panel yet, nobody listed: ask when the library offers the cube.
+    (N, NOBODY, False, True, True, False, A),
+    (N, NOBODY, False, True, False, False, N),
+    (N, RESERVED, False, True, True, False, B),      # listed beats ask
+    (N, NOBODY, True, True, True, True, N),          # never first posted on a decided draft
+    (N, NOBODY, False, False, True, False, N),
+    # Ask: becomes borrow when someone is listed, closes when nobody may request.
+    (A, NOBODY, False, True, True, False, A),
+    (A, NOBODY, False, True, False, False, A),       # offered only matters before posting
+    (A, RESERVED, False, True, True, False, B),
+    (A, OUT, False, True, True, False, B),
+    (A, NOBODY, True, True, True, True, A),
+    (A, NOBODY, True, True, True, False, C),
+    (A, NOBODY, False, False, True, False, C),
+    # Borrow with nobody listed: stays borrow, never return, never ask.
+    (B, NOBODY, False, True, False, False, B),
+    (B, NOBODY, True, True, False, True, B),
 ]
 
 
-@pytest.mark.parametrize("current,borrowers,settled,chat_open,anyone_may_request,want",
-                         TABLE)
-def test_desired_face(current, borrowers, settled, chat_open,
+@pytest.mark.parametrize(
+    "current,borrowers,settled,chat_open,offered,anyone_may_request,want", TABLE)
+def test_desired_face(current, borrowers, settled, chat_open, offered,
                       anyone_may_request, want):
     assert desired_face(current, borrowers, settled=settled, chat_open=chat_open,
-                        anyone_may_request=anyone_may_request) is want
+                        anyone_may_request=anyone_may_request,
+                        offered=offered) is want
 
 
 def test_return_embed_invites_a_dead_rubber_to_borrow_again():
@@ -179,3 +198,16 @@ async def test_a_promised_loan_is_described_by_the_cards_on_offer(state):
     offer = [{"name": "Swamp", "qty": 1}]
     loan = CardLoan(state=state, cards=pool, pending_cards=offer)
     assert await library_panel_state._cards_described(loan) == offer
+
+
+def test_ask_embed_invites_a_change_of_mind():
+    embed = ask_embed()
+    assert embed.title == TITLE
+    assert embed.description == ("Nobody here asked for a library deck. Changed your mind? "
+                                 "Press **Use the library** to see this draft's borrowing options.")
+
+
+def test_borrow_embed_with_nobody_listed_says_so():
+    embed = borrow_embed([])
+    assert _text(embed).splitlines()[1] == "Nobody has a library deck yet."
+    assert "Press **Borrow my deck**" in _text(embed)
