@@ -3,6 +3,7 @@ it moves to the bottom of the draft chat, and sync_panel does the move under
 the same per-draft lock as every other change, so the draft's pointer always
 names the one live copy. Once every deck is back it closes and stops moving."""
 import asyncio
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -18,6 +19,11 @@ from database.message_management import (
 from models.card_loan import CardLoan
 from models.draft_session import DraftSession
 from services import library_panel, library_panel_state
+from services.library_reminders import DraftState
+
+
+def _draft_state(settled, done_at=None, closes_at=None):
+    return DraftState(done_at or {}, settled, None, {}, closes_at, False)
 
 
 @pytest.fixture(autouse=True)
@@ -38,7 +44,8 @@ def decided(monkeypatch):
         return 5, 3
 
     async def state(session_id):
-        return SimpleNamespace(settled=True)
+        return _draft_state(True, done_at={p: datetime(2026, 10, 1)
+                                    for p in ("1", "2", "3")})
     monkeypatch.setattr(library_panel_state, "library_users", users)
     monkeypatch.setattr(library_panel, "draft_state", state)
     monkeypatch.setattr(utils, "calculate_team_wins", wins)
@@ -278,7 +285,7 @@ async def test_a_sync_redraws_a_return_panel_with_decks_out(test_db, decided):  
 @pytest.mark.asyncio
 async def test_a_sync_redraws_a_borrow_panel(test_db, decided, monkeypatch):  # noqa: F811
     async def state(session_id):
-        return SimpleNamespace(settled=False)
+        return _draft_state(False)
     monkeypatch.setattr(library_panel, "draft_state", state)
     await _seed("out_pending", mode="borrow")
     bot, _, messages = _bot(900)

@@ -30,7 +30,7 @@ from models.draft_session import DraftSession
 from services.library_panel_state import (Borrower, Face, all_back, borrow_embed,
                                           borrowers_of, desired_face,
                                           has_library_involvement, return_embed)
-from services.library_reminders import draft_state, session_of
+from services.library_reminders import draft_state, may_still_request, session_of
 
 
 async def result_line(draft: Any) -> Optional[str]:
@@ -52,14 +52,16 @@ async def result_line(draft: Any) -> Optional[str]:
 
 
 async def _render(draft: Any, borrowers: list[Borrower], face: Face, *,
-                  copy: Face) -> tuple[discord.Embed, Optional[LibraryPanelView]]:
+                  copy: Face, anyone_may_request: bool,
+                  ) -> tuple[discord.Embed, Optional[LibraryPanelView]]:
     """The embed and buttons for `face`. `copy` is the face of the copy being
     drawn on, which only matters for CLOSED: a borrow panel closes as one."""
     if face is Face.BORROW or (face is Face.CLOSED and copy is Face.BORROW):
         embed = borrow_embed(borrowers, closed=face is Face.CLOSED)
     else:
         embed = return_embed(borrowers, await result_line(draft),
-                             closed=face is Face.CLOSED)
+                             closed=face is Face.CLOSED,
+                             anyone_may_request=anyone_may_request)
     return embed, panel_view(face.value)
 
 
@@ -200,7 +202,8 @@ async def _try_sticky(bot: Any, draft: Any, message: Any,
 
 
 async def _post(bot: Any, draft: Any, channel: Any, borrowers: list[Borrower],
-                face: Face, *, replacing: Optional[Any] = None) -> None:
+                face: Face, *, anyone_may_request: bool,
+                replacing: Optional[Any] = None) -> None:
     """Post a copy wearing `face` at the bottom of the chat and point the draft
     at it; a return copy is made sticky.
 
@@ -213,7 +216,8 @@ async def _post(bot: Any, draft: Any, channel: Any, borrowers: list[Borrower],
     if replacing is not None:
         await _drop_sticky(str(draft.draft_chat_channel), draft.session_id)
         await _delete(replacing)
-    embed, view = await _render(draft, borrowers, face, copy=face)
+    embed, view = await _render(draft, borrowers, face, copy=face,
+                                 anyone_may_request=anyone_may_request)
     sent = await as_messageable(channel).send(embed=embed, view=not_none(view))
     try:
         await _write(draft.session_id, library_panel_mode=face.mode,
@@ -246,13 +250,16 @@ async def _converge(bot: Any, session_id: str, *, move_down: bool) -> None:
     if current is Face.NONE and (chat is None or not await has_library_involvement(draft)):
         # The common case on the victory path: no chat yet, or no library.
         return
-    settled = (await draft_state(session_id)).settled
-    if current is Face.NONE and settled:
+    state = await draft_state(session_id)
+    if current is Face.NONE and state.settled:
         return  # a panel is never first posted on a decided draft
     borrowers = await borrowers_of(draft)
+    anyone_may_request = any(
+        may_still_request(state, b.user_id) is None for b in borrowers)
     channel = await _chat_channel(bot, chat) if chat else None
-    face = desired_face(current, borrowers, settled=settled,
-                        chat_open=channel is not None)
+    face = desired_face(current, borrowers, settled=state.settled,
+                        chat_open=channel is not None,
+                        anyone_may_request=anyone_may_request)
     if channel is None or chat is None:
         if face is Face.CLOSED:
             await _write(session_id, library_panel_mode=Face.CLOSED.mode)
@@ -268,32 +275,38 @@ async def _converge(bot: Any, session_id: str, *, move_down: bool) -> None:
             # A return panel lost while decks are out is posted again. A lost
             # borrow panel is left be: a second one is worse than none.
             if face is Face.RETURN and not all_back(borrowers):
-                await _post(bot, draft, channel, borrowers, face)
+                await _post(bot, draft, channel, borrowers, face,
+                            anyone_may_request=anyone_may_request)
                 logger.info("Reposted the missing library return panel for "
                             "session_id={}", session_id)
             return
         sticky = (await _sticky_state(chat, session_id, str(live.id))
                   if face is Face.RETURN else None)
         if sticky == "ours" and move_down:
-            await _post(bot, draft, channel, borrowers, face, replacing=live)
+            await _post(bot, draft, channel, borrowers, face, replacing=live,
+                        anyone_may_request=anyone_may_request)
             return
-        embed, view = await _render(draft, borrowers, face, copy=face)
+        embed, view = await _render(
+            draft, borrowers, face, copy=face, anyone_may_request=anyone_may_request)
         await _show(live, embed, view)
         if sticky == "none":
             # Its record was lost: a failed make-sticky, an unpin, a stale one.
             await _try_sticky(bot, draft, live, view)
         return
     if face is Face.BORROW:  # from none
-        await _post(bot, draft, channel, borrowers, face)
+        await _post(bot, draft, channel, borrowers, face,
+                    anyone_may_request=anyone_may_request)
         logger.info("Posted library panel for session_id={}", session_id)
         return
     if face is Face.RETURN:  # from borrow: below the victory post
-        await _post(bot, draft, channel, borrowers, face, replacing=live)
+        await _post(bot, draft, channel, borrowers, face, replacing=live,
+                    anyone_may_request=anyone_may_request)
         logger.info("Library panel for session_id={} now asks for returns", session_id)
         return
     # Closed, from borrow or return: in place, with no button, and still.
     if live is not None:
-        await _show(live, *await _render(draft, borrowers, face, copy=current))
+        await _show(live, *await _render(
+            draft, borrowers, face, copy=current, anyone_may_request=anyone_may_request))
         await _unpin(live)
     await _write(session_id, library_panel_mode=Face.CLOSED.mode)
     await _drop_sticky(chat, session_id)

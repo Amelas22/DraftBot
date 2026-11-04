@@ -108,45 +108,64 @@ N, B, R, C = Face.NONE, Face.BORROW, Face.RETURN, Face.CLOSED
 # (current, borrowers, settled, chat open) -> desired
 TABLE = [
     # No panel yet: posted only while undecided, with a chat and someone in it.
-    (N, NOBODY, False, True, N),
-    (N, RESERVED, False, True, B),
-    (N, OUT, False, True, B),
-    (N, OUT, False, False, N),
-    (N, OUT, True, True, N),
-    (N, BACK, True, True, N),
+    (N, NOBODY, False, True, False, N),
+    (N, RESERVED, False, True, False, B),
+    (N, OUT, False, True, False, B),
+    (N, OUT, False, False, False, N),
+    (N, OUT, True, True, False, N),
+    (N, BACK, True, True, False, N),
     # Borrow, undecided: stays, whatever the loans say.
-    (B, RESERVED, False, True, B),
-    (B, OUT, False, True, B),
-    (B, BACK, False, True, B),
-    (B, LAPSED, False, True, B),
+    (B, RESERVED, False, True, False, B),
+    (B, OUT, False, True, False, B),
+    (B, BACK, False, True, False, B),
+    (B, LAPSED, False, True, False, B),
     # Borrow, decided.
-    (B, OUT, True, True, R),
-    (B, OUT_AND_OFFER, True, True, R),
-    (B, ON_OFFER, True, True, B),
-    (B, BACK_AND_OFFER, True, True, B),
-    (B, BACK, True, True, C),
-    (B, LAPSED, True, True, C),
-    (B, RESERVED, True, True, C),
-    (B, NOBODY, True, True, C),
+    (B, OUT, True, True, False, R),
+    (B, OUT_AND_OFFER, True, True, False, R),
+    (B, ON_OFFER, True, True, False, B),
+    (B, BACK_AND_OFFER, True, True, False, B),
+    (B, BACK, True, True, False, C),
+    (B, LAPSED, True, True, False, C),
+    (B, RESERVED, True, True, False, C),
+    (B, NOBODY, True, True, False, C),
     # Return: open while a deck is out or on offer.
-    (R, OUT, True, True, R),
-    (R, OUT_AND_OFFER, True, True, R),
-    (R, BACK_AND_OFFER, True, True, R),
-    (R, ON_OFFER, True, True, R),
-    (R, BACK, True, True, C),
-    (R, LAPSED, True, True, C),
+    (R, OUT, True, True, False, R),
+    (R, OUT_AND_OFFER, True, True, False, R),
+    (R, BACK_AND_OFFER, True, True, False, R),
+    (R, ON_OFFER, True, True, False, R),
+    (R, BACK, True, True, False, C),
+    (R, LAPSED, True, True, False, C),
     # The chat is gone: a posted panel closes.
-    (B, OUT, False, False, C),
-    (B, OUT, True, False, C),
-    (R, OUT, True, False, C),
+    (B, OUT, False, False, False, C),
+    (B, OUT, True, False, False, C),
+    (R, OUT, True, False, False, C),
     # Closed is final.
-    (C, OUT, True, True, C),
-    (C, ON_OFFER, False, True, C),
-    (C, NOBODY, False, False, C),
+    (C, OUT, True, True, False, C),
+    (C, ON_OFFER, False, True, False, C),
+    (C, NOBODY, False, False, False, C),
+    # Decided, every deck back, but somebody listed still has a match: stays
+    # open with Borrow, so a dead rubber can be played.
+    (B, BACK, True, True, True, R),
+    (R, BACK, True, True, True, R),
+    (R, LAPSED, True, True, True, R),
+    (B, NOBODY, True, True, True, C),   # nobody listed: nobody may request
+    (R, OUT, True, False, True, C),     # the chat is gone regardless
 ]
 
 
-@pytest.mark.parametrize("current,borrowers,settled,chat_open,want", TABLE)
-def test_desired_face(current, borrowers, settled, chat_open, want):
-    assert desired_face(current, borrowers, settled=settled,
-                        chat_open=chat_open) is want
+@pytest.mark.parametrize("current,borrowers,settled,chat_open,anyone_may_request,want",
+                         TABLE)
+def test_desired_face(current, borrowers, settled, chat_open,
+                      anyone_may_request, want):
+    assert desired_face(current, borrowers, settled=settled, chat_open=chat_open,
+                        anyone_may_request=anyone_may_request) is want
+
+
+def test_return_embed_invites_a_dead_rubber_to_borrow_again():
+    embed = return_embed(_who("returned"), None, anyone_may_request=True)
+    assert "**Borrow my deck** takes your deck out again" in embed.description
+
+
+def test_return_embed_says_nothing_about_borrowing_when_nobody_may():
+    embed = return_embed(_who("returned"), None, anyone_may_request=False)
+    assert "Borrow my deck" not in embed.description
