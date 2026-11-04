@@ -279,3 +279,80 @@ async def test_no_board_means_nothing_to_refresh(test_db):  # noqa: F811
     with patch.object(lfg_cog, "get_config", return_value={}):
         await lfg_cog.refresh_lfg_board(bot, "1")
     bot.fetch_channel.assert_not_awaited()
+
+
+# ---- Find a team closes with registration ------------------------------------------
+
+
+async def _tournament(status="registration"):
+    from models.tournament import Tournament
+    async with db_session() as session:
+        session.add(Tournament(guild_id="1", name="Cup", total_rounds=3, format="swiss", status=status))
+
+
+async def _team_status():
+    from models.team_finder import LfgTeam
+    async with db_session() as session:
+        return [t.status for t in (await session.execute(select(LfgTeam))).scalars()]
+
+
+@pytest.mark.asyncio
+async def test_while_registration_is_open_nothing_closes(test_db):  # noqa: F811
+    await _tournament()
+    await _open_team()
+    await _make_sticky(view_type="lfg_board")
+    board = _discord_message(900, _channel())
+    bot = _refresh_bot(board)
+
+    with _board_channel():
+        assert await lfg_cog.close_unless_registering(bot, "1") is False
+
+    board.delete.assert_not_awaited()
+    assert len(await _sticky_rows()) == 1
+    assert await _team_status() == ["open"]
+
+
+@pytest.mark.asyncio
+async def test_once_the_tournament_starts_the_board_and_its_teams_are_gone(test_db):  # noqa: F811
+    """The board is deleted, not left behind unpinned: a Find a team button with
+    nothing to find is what this change exists to stop. The teams close silently."""
+    await _tournament(status="active")
+    await _open_team()
+    await _make_sticky(view_type="lfg_board")
+    board = _discord_message(900, _channel())
+    bot = _refresh_bot(board)
+
+    with _board_channel():
+        assert await lfg_cog.close_unless_registering(bot, "1") is True
+
+    board.delete.assert_awaited_once()
+    assert await _sticky_rows() == []
+    assert await _team_status() == ["closed"]
+
+
+@pytest.mark.asyncio
+async def test_a_board_already_deleted_by_hand_still_stops_being_sticky(test_db):  # noqa: F811
+    await _make_sticky(view_type="lfg_board")
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.fetch_message = AsyncMock(side_effect=discord.NotFound(MagicMock(status=404), "gone"))
+    bot = MagicMock()
+    bot.get_channel = MagicMock(return_value=channel)
+
+    with _board_channel():
+        assert await lfg_cog.close_unless_registering(bot, "1") is True
+
+    assert await _sticky_rows() == []
+
+
+@pytest.mark.asyncio
+async def test_a_board_that_could_not_be_deleted_is_tried_again(test_db):  # noqa: F811
+    """The sticky record is what finds the board, so it outlives a failed delete."""
+    await _make_sticky(view_type="lfg_board")
+    board = _discord_message(900, _channel())
+    board.delete = AsyncMock(side_effect=discord.Forbidden(MagicMock(status=403), "no"))
+    bot = _refresh_bot(board)
+
+    with _board_channel(), pytest.raises(discord.Forbidden):
+        await lfg_cog.close_unless_registering(bot, "1")
+
+    assert len(await _sticky_rows()) == 1

@@ -10,6 +10,9 @@ export const NOTE_MAX = 200;
 export const MULTI_TEAM_WARNING = "Being on more than one team needs a mod's permission. DM a mod first.";
 export const NETWORK_FAILED = "Couldn't reach DraftBot. Check your connection and try again.";
 const SERVER_FAILED = "DraftBot couldn't do that just now. Try again in a minute.";
+// Find a team is open only while a tournament takes registrations; a link can outlive that.
+export const REGISTRATION_CLOSED = "Find a team is closed: it opens again when the next tournament opens registration.";
+export const isRegistrationClosed = (e) => e?.code === "registration_closed";
 
 export const halfHourFloor = (date) => new Date(Math.floor(date.getTime() / CELL_MS) * CELL_MS);
 // The grid's first cell: prev while the clock is still in the same half-hour, else the new one, so a page left
@@ -160,6 +163,7 @@ const REFUSALS = {
   bad_input: "Something about that request wasn't valid. Reload and try again.",
   not_captain: "Only the captain can do that.",
   too_many_teams: "You already captain two teams. Close one to open another.",
+  registration_closed: REGISTRATION_CLOSED,
 };
 export const refusalText = (code) => (Object.hasOwn(REFUSALS, code) ? REFUSALS[code] : SERVER_FAILED);
 

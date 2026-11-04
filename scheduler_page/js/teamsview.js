@@ -11,7 +11,7 @@ import { expiredMessage } from "./messages.js";
 import { plural, pluralWord } from "./words.js";
 import {
   CLOSE_CONFIRM, FORMAT, MULTI_TEAM_WARNING, NOTE_MAX, actionErrorText, cellText, createSync, declinedText, isFull,
-  joinNote, joinState, leaveConfirm, membersText, modeAfterSelect, myTeams, noteDrafts, noteError, onOtherTeam, rankTeams, refusalText, requestHeading,
+  REGISTRATION_CLOSED, isRegistrationClosed, joinNote, joinState, leaveConfirm, membersText, modeAfterSelect, myTeams, noteDrafts, noteError, onOtherTeam, rankTeams, refusalText, requestHeading,
   requestsFor, shadeLevel, slotsText, teamName, windowStart,
 } from "./teams.js";
 
@@ -407,6 +407,7 @@ async function showList(root, api, usualDoc, now, cleanups, notice, firstStatus,
       render();
     } catch (e) {
       if (e instanceof LinkExpired) notice(expiredMessage());
+      else if (isRegistrationClosed(e)) notice(REGISTRATION_CLOSED);
       else console.warn("teams refresh failed", e);
     }
   }

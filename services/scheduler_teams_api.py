@@ -12,7 +12,7 @@ from models.team_finder import LfgAction
 from services import team_finder
 from services.availability import naive_utc
 from services.scheduler_http import DISPLAY_NAME, NOTIFY, NOW, error, identity, read_body, view_refused
-from services.team_finder import ActionResult, teams_state
+from services.team_finder import ActionResult, registration_open, teams_state
 
 MAX_ACTION_BYTES = 4096
 VIEW = "lfg"
@@ -68,6 +68,11 @@ def _parse(body: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     raise _BadInput
 
 
+# A link outlives the registration it was handed out for, so every call asks
+# whether Find a team is still open: only while the tournament takes registrations.
+CLOSED = "registration_closed"
+
+
 async def _state(guild_id: str, user_id: str) -> dict[str, object]:
     async with db_session() as session:
         return await teams_state(session, guild_id, user_id)
@@ -78,6 +83,9 @@ async def get_teams(request: web.Request) -> web.Response:
     if (refused := view_refused(request, VIEW)) is not None:
         return refused
     who = identity(request)
+    async with db_session() as session:
+        if not await registration_open(session, who.guild_id):
+            return error(403, CLOSED)
     return web.json_response(await _state(who.guild_id, who.user_id))
 
 
@@ -114,6 +122,9 @@ async def post_action(request: web.Request) -> web.Response:
 
     async with team_finder.WRITE_LOCK:
         async with db_session() as session:
+            # Checked under the lock /tournament start closes the teams under.
+            if not await registration_open(session, who.guild_id):
+                return error(403, CLOSED)
             seen = await session.get(LfgAction, action_id)
             if seen is not None:
                 if seen.user_id != who.user_id:

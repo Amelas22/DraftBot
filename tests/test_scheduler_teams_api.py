@@ -12,13 +12,22 @@ from database.db_session import db_session
 from models.team_finder import LfgRequest, LfgTeam
 from services.scheduler_links import issue_link
 from services.scheduler_web import build_app
+from services.tournament_service import create_tournament
 
 NOW = datetime(2026, 10, 22, 12, 0, 0, tzinfo=timezone.utc)
 GUILD = "222"
 
 
+async def _open_registration():
+    """Find a team is open only while a tournament takes registrations."""
+    async with db_session() as session:
+        for guild in (GUILD, "other"):
+            await create_tournament(session, guild, "Cup", 3)
+
+
 @pytest_asyncio.fixture
 async def client(test_db):
+    await _open_registration()
     sent = []
     seen_rows = []
 
@@ -116,6 +125,7 @@ async def test_notify_raising_does_not_fail_action(test_db):
     async def boom(notice, guild_id):
         raise RuntimeError("x")
 
+    await _open_registration()
     app = build_app(now=lambda: NOW, notify=boom, enabled=lambda g: True)
     async with TestClient(TestServer(app)) as c:
         team = await _open(c, "333")
@@ -277,3 +287,23 @@ async def test_captain_actions_from_another_guilds_link_are_refused(client):
     state = await (await client.get("/api/teams", headers=await _auth("111"))).json()
     assert state["teams"][0]["status"] == "open"
     assert [r["user"] for r in state["me"]["incoming"][team]] == ["200"]
+
+
+@pytest.mark.asyncio
+async def test_once_registration_closes_the_page_refuses_reads_and_actions(client):
+    """A link lasts 7 days and can outlive the registration it was handed out for."""
+    from models.tournament import Tournament
+    team = await _open(client, "111")
+    async with db_session() as session:
+        for t in (await session.execute(select(Tournament))).scalars():
+            t.status = "active"
+
+    headers = await _auth("444")
+    resp = await client.get("/api/teams", headers=headers)
+    assert resp.status == 403
+    assert await resp.json() == {"error": "registration_closed"}
+    resp = await _act(client, headers, kind="request_join", team_id=team, note="")
+    assert resp.status == 403
+    assert await resp.json() == {"error": "registration_closed"}
+    async with db_session() as session:
+        assert (await session.execute(select(func.count()).select_from(LfgRequest))).scalar() == 0
