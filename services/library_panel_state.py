@@ -218,7 +218,8 @@ def ask_embed() -> discord.Embed:
 
 
 def borrow_embed(borrowers: list[Borrower], *, closed: bool = False) -> discord.Embed:
-    lines = [] if borrowers else ["Nobody has a library deck yet."]
+    # A closed copy that never listed anyone reads just its closed footer.
+    lines = [] if borrowers or closed else ["Nobody has a library deck yet."]
     for b in borrowers:
         if closed and b.state in (None, "assigned", "expired"):
             text = "not collected, back on the shelf"
@@ -231,7 +232,8 @@ def borrow_embed(borrowers: list[Borrower], *, closed: bool = False) -> discord.
         footer = ("Press **Borrow my deck** and the library will trade you "
                   "your pool on MTGO. **Return my deck** hands it back between "
                   "matches; you can borrow it again while you have a match to play.")
-    return discord.Embed(title=TITLE, description="\n".join(lines) + f"\n\n{footer}")
+    return discord.Embed(title=TITLE, description="\n\n".join(
+        part for part in ("\n".join(lines), footer) if part))
 
 
 def return_embed(borrowers: list[Borrower], result: Optional[str], *,

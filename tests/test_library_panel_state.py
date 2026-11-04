@@ -30,6 +30,12 @@ def test_borrow_embed_says_returning_between_matches_is_fine():
     assert "borrow it again while you have a match to play" in text
 
 
+
+def test_borrow_embed_closed_with_nobody_listed_says_only_that_it_is_closed():
+    text = borrow_embed([], closed=True).description
+    assert "Nobody has a library deck yet." not in text
+    assert "This draft's library decks are closed." in text
+
 def test_borrow_embed_lists_each_borrower_by_state():
     embed = borrow_embed([
         Borrower("1", "Ravenwood", "borrowed", []),
