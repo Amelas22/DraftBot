@@ -52,6 +52,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from database.models_base import Base
+# The player preferences table is declared in preference_service, not under
+# models/, so it only joins Base.metadata once that module is imported. Import
+# it here so every test database has the table, whichever test runs first.
+import preference_service  # noqa: F401
 from database.db_session import AsyncSessionLocal
 from models.debt_ledger import DebtLedger
 from models.draft_session import DraftSession
