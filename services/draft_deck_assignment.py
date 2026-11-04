@@ -39,7 +39,7 @@ from helpers.mtgo_untradeable import split_untradeable
 from services.card_substitution_service import to_mtgo_names
 from models.card_loan import ACTIVE_STATES, CardLoan
 from models.draft_session import DraftSession
-from services.card_lending_service import assign_deck
+from services.card_lending_service import assign_deck, shortfall
 from services.draft_log_store import map_discord_to_draftmancer, pool_items
 from services.mtgo_tradebot_client import max_cards_per_trade, too_large
 
@@ -459,7 +459,7 @@ async def latest_draft_of(guild_id: Any, player_id: Any) -> Optional[str]:
 
 RequestOutcome = Literal[
     "assigned", "not_drafter", "not_offered", "closed", "over", "busy",
-    "not_allowed", "no_log", "unseatable", "empty", "too_large", "failed"]
+    "not_allowed", "no_log", "unseatable", "empty", "too_large", "nothing", "failed"]
 
 
 async def assign_on_request(session_id: Any, player_id: Any) -> RequestOutcome:
@@ -482,7 +482,9 @@ async def assign_on_request(session_id: Any, player_id: Any) -> RequestOutcome:
 
     Returns "assigned", or why not: "not_drafter", "not_offered", "closed",
     "over", "busy", "not_allowed", "no_log", "unseatable", "empty",
-    "too_large" or "failed".
+    "too_large", "nothing" or "failed". "nothing" -- none of the pool is on
+    the shelf -- is said now, not as a shortfall listing every card, and
+    mints no row to pin their one loan slot. A partial shelf still mints.
     """
     player = str(player_id)
     meta = await _session_meta(session_id)
@@ -496,12 +498,9 @@ async def assign_on_request(session_id: Any, player_id: Any) -> RequestOutcome:
     library = await library_for(guild_id)
     if cube is None or library is None or not await offers(library.id, cube):
         return "not_offered"
-    # may_still_request answers in plain str; narrow to the two outcomes it names.
     refused = may_still_request(await draft_state(session_id), player)
-    if refused == "closed":
-        return "closed"
-    if refused == "over":
-        return "over"
+    if refused is not None:
+        return refused
     if await _holding_a_deck([player]):
         return "busy"
     if player not in await may_borrow_many(library.id, [player]):
@@ -520,6 +519,9 @@ async def assign_on_request(session_id: Any, player_id: Any) -> RequestOutcome:
         return "empty"
     if too_large(sum(int(c["qty"]) for c in cards)):
         return "too_large"
+    short = await shortfall(guild_id, cards)
+    if len(short) == len(cards) and all(s["have"] == 0 for s in short):
+        return "nothing"
     try:
         loan_id = await assign_deck(guild_id, player, cards,
                                     source=loan_source(session_id),

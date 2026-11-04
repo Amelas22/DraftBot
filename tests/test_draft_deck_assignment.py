@@ -74,7 +74,8 @@ async def library_on(test_db):
     through the bot, and anything they can reach is a number they can lower.
     """
     from conftest import a_library
-    await a_library(LIBRARY, guild=GUILD, collateral=5, cubes=(CUBE,))
+    await a_library(LIBRARY, guild=GUILD, collateral=5, cubes=(CUBE,),
+                    stock={"Island": 1, "Lightning Bolt": 2, "Counterspell": 1})
     yield
 
 
@@ -994,7 +995,8 @@ async def _rental(*, reserved=True, agreed=(ALICE,)):
     from preference_service import set_uses_library
 
     await a_library(LIBRARY, guild=GUILD, kind="rental", collateral=5,
-                    cubes=(CUBE,))
+                    cubes=(CUBE,),
+                    stock={"Island": 1, "Lightning Bolt": 2, "Counterspell": 1})
     await set_uses_library(ALICE, GUILD, True)
     await _seed()
     if reserved:
@@ -1190,3 +1192,33 @@ async def test_a_deck_from_this_draft_landing_first_counts_as_handed_over(
     monkeypatch.setattr(svc, "assign_deck", lands_first)
 
     assert await svc.assign_on_request(SESSION, BOB) == "assigned"
+
+
+async def test_a_request_with_nothing_on_the_shelf_mints_no_row(test_db, library_on):
+    """Someone else has the whole pool out: say so now, rather than offer a
+    deck that lists every card as missing and pins their loan slot."""
+    await _seed()
+    await _reported(SESSION, [(ALICE, "x", False), (BOB, "y", False)])
+    await _open_chat()
+    await assign_deck(GUILD, "9", [{"name": "Island", "qty": 1}],
+                      source="fixture:9", library_id=LIBRARY)
+    await svc.assign_drafted_decks(SESSION)   # offers hold the ledger copies
+    await _returned(BOB)
+    # Bob's pool is one Island; "9" has an offer on the library's only copy.
+
+    assert await svc.assign_on_request(SESSION, BOB) == "nothing"
+    async with AsyncSessionLocal() as s:
+        rows = (await s.scalars(select(CardLoan).where(CardLoan.borrower_id == BOB))).all()
+    assert [r.state for r in rows] == ["returned"]
+
+
+async def test_a_request_with_part_of_the_pool_on_the_shelf_is_handed_out(
+        test_db, library_on):
+    """A partial shelf still mints: the borrow flow offers what is there."""
+    await _seed()
+    await _reported(SESSION, [(ALICE, "x", False), (BOB, "y", False)])
+    await _open_chat()
+    await assign_deck(GUILD, "9", [{"name": "Lightning Bolt", "qty": 2}],
+                      source="fixture:9", library_id=LIBRARY)
+
+    assert await svc.assign_on_request(SESSION, ALICE) == "assigned"

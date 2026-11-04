@@ -22,7 +22,7 @@ The decisions live here as plain functions over a loan so the interesting cases
 draft or a Discord client.
 """
 from datetime import datetime, timedelta
-from typing import Any, NamedTuple, Optional
+from typing import Any, Literal, NamedTuple, Optional
 
 from loguru import logger
 
@@ -404,7 +404,8 @@ def who_can_still_use(state: DraftState, player_ids: Any,
 
 
 def may_still_request(state: DraftState, player_id: Any,
-                      now: Optional[datetime] = None) -> Optional[str]:
+                      now: Optional[datetime] = None,
+                      ) -> Optional[Literal["closed", "over"]]:
     """Why this drafter may not ask for their deck again, or None if they may.
 
     The request rule, beside who_can_still_use, the reservation rule. That one

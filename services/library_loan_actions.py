@@ -95,6 +95,8 @@ REQUEST_MESSAGES: "dict[RequestOutcome, str]" = {
     "unseatable": _CANNOT_COLLECT,
     "empty": _CANNOT_COLLECT,
     "too_large": _CANNOT_COLLECT,
+    "nothing": "📭 None of that deck is on the shelf right now — try again once the "
+               "other decks are back.",
     "failed": _CANNOT_COLLECT,
 }
 
