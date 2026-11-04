@@ -340,6 +340,48 @@ async def test_a_clinched_draft_is_settled_even_at_the_pairings_stage(test_db):
     assert (await mod.draft_state("s1")).settled is True
 
 
+@pytest.mark.asyncio
+async def test_a_chat_closing_within_the_half_hour_counts_as_closing(test_db):
+    await seed_session("s1", stype="random", stage="pairings",
+                       deletion_time=NOW + timedelta(minutes=29))
+    assert (await mod.draft_state("s1")).chat_closing(NOW) is True
+
+
+@pytest.mark.asyncio
+async def test_a_chat_closing_in_an_hour_is_open(test_db):
+    await seed_session("s1", stype="random", stage="pairings",
+                       deletion_time=NOW + timedelta(hours=1))
+    assert (await mod.draft_state("s1")).chat_closing(NOW) is False
+
+
+@pytest.mark.asyncio
+async def test_a_chat_past_its_time_counts_as_closing(test_db):
+    """A tournament draft is extended by the sweep only after its time has
+    passed; in that gap it reads as closing, and the next press works."""
+    await seed_session("s1", stype="random", stage="pairings",
+                       deletion_time=NOW - timedelta(minutes=5))
+    assert (await mod.draft_state("s1")).chat_closing(NOW) is True
+
+
+@pytest.mark.asyncio
+async def test_a_chat_with_no_closing_time_is_open(test_db):
+    await seed_session("s1", stype="random", stage="pairings")
+    state = await mod.draft_state("s1")
+    assert state.chat_closes_at is None and state.chat_closing(NOW) is False
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_draft_is_closing_whatever_its_time(test_db):
+    await seed_session("s1", stype="random", stage="abandoned",
+                       deletion_time=NOW + timedelta(days=6))
+    state = await mod.draft_state("s1")
+    assert state.abandoned is True and state.chat_closing(NOW) is True
+
+
+def test_a_missing_draft_is_not_closing():
+    assert mod.DraftState({}, False, None, {}, None, False).chat_closing(NOW) is False
+
+
 # ---- the watchdog pass ------------------------------------------------------
 
 @pytest.mark.asyncio

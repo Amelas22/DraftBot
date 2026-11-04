@@ -48,6 +48,10 @@ REPEAT_AFTER = timedelta(hours=1)
 # or results: teams form before the Draftmancer draft even runs.
 OFFER_WINDOW = timedelta(hours=1)
 
+# Requests stop, and a requested deck is asked back, this long before the
+# draft's rooms are deleted (DraftState.chat_closes_at).
+CHAT_CLOSING = timedelta(minutes=30)
+
 # The one state with anything to give back. An 'assigned' loan is an offer
 # nobody collected, which expire_stale_assignments retracts on its own, and the
 # in-flight states mean a trade is already moving.
@@ -341,6 +345,25 @@ class DraftState(NamedTuple):
     # Every player -> when their latest reported match was, finished or not and
     # in any format. What a dead rubber after an ask is measured against.
     played_at: "dict[str, datetime]"
+    # DraftSession.deletion_time: when the cleanup sweep deletes the draft's
+    # rooms. None when unknown. See chat_closing.
+    chat_closes_at: Optional[datetime]
+    # session_stage == "abandoned": the draft collapsed, so its chat is as good
+    # as closed whatever deletion_time says.
+    abandoned: bool
+
+    def chat_closing(self, now: Optional[datetime] = None) -> bool:
+        """Is the draft's chat within CHAT_CLOSING of being deleted, or gone?
+
+        A time already past counts as closing: the sweep only extends a
+        tournament draft after its time has passed, and in that gap it must
+        not read as open.
+        """
+        if self.abandoned:
+            return True
+        if self.chat_closes_at is None:
+            return False
+        return self.chat_closes_at - CHAT_CLOSING <= (now or datetime.now())
 
     def offer_window_closed(self, now: Optional[datetime] = None) -> bool:
         """Has OFFER_WINDOW passed since this draft ended?
@@ -424,7 +447,7 @@ async def draft_state(session_id: Any) -> DraftState:
         row = await session.scalar(
             select(DraftSession).where(DraftSession.session_id == str(session_id)))
         if row is None:
-            return DraftState({}, False, None, {})
+            return DraftState({}, False, None, {}, None, False)
         results = (await session.execute(
             select(MatchResult.player1_id, MatchResult.player2_id,
                    MatchResult.result_submitted_at)
@@ -444,7 +467,9 @@ async def draft_state(session_id: Any) -> DraftState:
                 outstanding.add(pid)
             elif pid not in last_played or submitted_at > last_played[pid]:
                 last_played[pid] = submitted_at
+    chat_closes_at = row.deletion_time
+    abandoned = row.session_stage == "abandoned"
     if row.session_type not in FULLY_PAIRED_TYPES:
-        return DraftState({}, settled, ended_at, last_played)
+        return DraftState({}, settled, ended_at, last_played, chat_closes_at, abandoned)
     done_at = {pid: t for pid, t in last_played.items() if pid not in outstanding}
-    return DraftState(done_at, settled, ended_at, last_played)
+    return DraftState(done_at, settled, ended_at, last_played, chat_closes_at, abandoned)
