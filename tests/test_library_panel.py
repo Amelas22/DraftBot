@@ -933,7 +933,10 @@ async def test_opening_edits_the_ask_copy_into_the_borrow_panel(test_db, monkeyp
     assert "Nobody has a library deck yet." in kwargs["embed"].description
     assert [i.custom_id for i in kwargs["view"].children] == [
         "library_panel:borrow", "library_panel:some", "library_panel:return", "library_panel:decline"]
-    assert (await _row()).library_panel_mode == "borrow"
+    row = await _row()
+    assert row.library_panel_mode == "borrow"
+    assert row.library_panel_message_id == "777"
+    assert "777" in library_panel._shown
 
 
 @pytest.mark.asyncio
