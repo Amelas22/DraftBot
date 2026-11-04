@@ -94,6 +94,17 @@ def undecided(monkeypatch):
     monkeypatch.setattr(library_panel, "draft_state", state)
 
 
+def _nobody(monkeypatch):
+    async def none(draft, library_id=None):
+        return set()
+    monkeypatch.setattr(library_panel_state, "library_users", none)
+
+
+@pytest.fixture
+def offered(monkeypatch):
+    monkeypatch.setattr(library_panel, "_library_offers", AsyncMock(return_value=True))
+
+
 # --- Posting it when the chat opens -------------------------------------------
 
 
@@ -784,3 +795,148 @@ async def test_a_held_open_panel_closes_once_the_last_requester_reports(
     await sync_panel(bot, "s1")
 
     assert (await _row()).library_panel_mode == "closed"
+
+
+# --- The ask face, for a draft of an offered cube nobody opted into ------------
+
+
+@pytest.mark.asyncio
+async def test_an_offered_cube_nobody_opted_into_gets_the_ask_copy(test_db, monkeypatch, undecided, offered):  # noqa: F811
+    _nobody(monkeypatch)
+    await _seed({"1": "Ravenwood"}, reserved_at=None)
+    bot, channel, sent = _bot()
+    await sync_panel(bot, "s1")
+    channel.send.assert_awaited_once()
+    embed, view = channel.send.await_args.kwargs["embed"], channel.send.await_args.kwargs["view"]
+    assert "Press **Use the library**" in embed.description
+    assert [i.custom_id for i in view.children] == ["library_panel:open"]
+    assert (await _row()).library_panel_mode == "ask"
+    assert (await _row()).library_panel_message_id == str(sent.id)
+    sent.pin.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_cube_the_library_does_not_offer_gets_nothing(test_db, monkeypatch, undecided):  # noqa: F811
+    _nobody(monkeypatch)
+    monkeypatch.setattr(library_panel, "_library_offers", AsyncMock(return_value=False))
+    monkeypatch.setattr(library_panel, "borrowers_of", AsyncMock(side_effect=AssertionError("read the borrowers")))
+    await _seed({"1": "Ravenwood"}, reserved_at=None)
+    bot, channel, _ = _bot()
+    await sync_panel(bot, "s1")
+    channel.send.assert_not_awaited()
+    assert (await _row()).library_panel_mode is None
+
+
+@pytest.mark.asyncio
+async def test_a_listed_drafter_turns_the_ask_copy_into_the_borrow_panel(test_db, reserved, undecided, offered):  # noqa: F811
+    await _in_mode("ask", [])
+    bot, channel, sent, old = _bot_with_old_panel()
+    await sync_panel(bot, "s1")
+    old.edit.assert_awaited_once()
+    assert "Borrow my deck" in old.edit.await_args.kwargs["embed"].description
+    channel.send.assert_not_awaited()
+    assert (await _row()).library_panel_mode == "borrow"
+
+
+@pytest.mark.asyncio
+async def test_a_lost_ask_copy_is_posted_again(test_db, monkeypatch, undecided, offered):  # noqa: F811
+    _nobody(monkeypatch)
+    await _in_mode("ask", [], panel_id="123")   # 123 is not in the chat
+    bot, channel, sent, _ = _bot_with_old_panel()
+    await sync_panel(bot, "s1")
+    channel.send.assert_awaited_once()
+    assert (await _row()).library_panel_message_id == str(sent.id)
+
+
+@pytest.mark.asyncio
+async def test_a_decided_draft_nobody_may_request_closes_the_ask_copy_by_deleting_it(
+        test_db, monkeypatch, settled, offered):  # noqa: F811
+    _nobody(monkeypatch)
+    await _in_mode("ask", [], sign_ups={"1": "Ravenwood", "2": "Bo", "3": "Tomasz88"})
+    bot, channel, sent, old = _bot_with_old_panel()
+    await sync_panel(bot, "s1")
+    old.delete.assert_awaited_once()
+    old.edit.assert_not_awaited()
+    channel.send.assert_not_awaited()
+    assert (await _row()).library_panel_mode == "closed"
+
+
+@pytest.mark.asyncio
+async def test_a_decided_draft_with_a_dead_rubber_keeps_the_ask_copy(test_db, monkeypatch, offered):  # noqa: F811
+    """Nobody is listed, so who may request is judged over the sign-ups: "1" has a match left."""
+    _nobody(monkeypatch)
+    async def state(session_id):
+        return _draft_state(True, done_at={"3": datetime(2026, 10, 1)},
+                            closes_at=datetime.now() + timedelta(hours=2))
+    monkeypatch.setattr(library_panel, "draft_state", state)
+    await _in_mode("ask", [])
+    bot, channel, sent, old = _bot_with_old_panel()
+    await sync_panel(bot, "s1")
+    old.delete.assert_not_awaited()
+    assert (await _row()).library_panel_mode == "ask"
+
+
+@pytest.mark.asyncio
+async def test_an_empty_borrow_panel_stays_borrow_for_a_dead_rubber(test_db, monkeypatch, offered):  # noqa: F811
+    _nobody(monkeypatch)
+    async def state(session_id):
+        return _draft_state(True, done_at={"3": datetime(2026, 10, 1)},
+                            closes_at=datetime.now() + timedelta(hours=2))
+    monkeypatch.setattr(library_panel, "draft_state", state)
+    _wins(monkeypatch, 5, 3)
+    await _in_mode("borrow", [])
+    bot, channel, sent, old = _bot_with_old_panel()
+    await sync_panel(bot, "s1")
+    channel.send.assert_not_awaited()
+    assert (await _row()).library_panel_mode == "borrow"
+    assert "Nobody has a library deck yet." in old.edit.await_args.kwargs["embed"].description
+
+
+@pytest.mark.asyncio
+async def test_opening_edits_the_ask_copy_into_the_borrow_panel(test_db, monkeypatch, undecided, offered):  # noqa: F811
+    _nobody(monkeypatch)
+    await _in_mode("ask", [])
+    interaction = MagicMock()
+    interaction.response.edit_message = AsyncMock()
+    interaction.message = _message(777)
+    assert await library_panel.open_panel("s1", interaction) is True
+    kwargs = interaction.response.edit_message.await_args.kwargs
+    assert "Nobody has a library deck yet." in kwargs["embed"].description
+    assert [i.custom_id for i in kwargs["view"].children] == [
+        "library_panel:borrow", "library_panel:some", "library_panel:return", "library_panel:decline"]
+    assert (await _row()).library_panel_mode == "borrow"
+
+
+@pytest.mark.asyncio
+async def test_opening_an_already_open_panel_just_redraws_it(test_db, reserved, undecided, offered):  # noqa: F811
+    await _in_mode("borrow", [])
+    interaction = MagicMock()
+    interaction.response.edit_message = AsyncMock()
+    interaction.message = _message(777)
+    assert await library_panel.open_panel("s1", interaction) is True
+    interaction.response.edit_message.assert_awaited_once()
+    assert (await _row()).library_panel_mode == "borrow"
+
+
+@pytest.mark.asyncio
+async def test_opening_once_nobody_may_request_is_refused(test_db, monkeypatch, settled, offered):  # noqa: F811
+    _nobody(monkeypatch)
+    await _in_mode("ask", [], sign_ups={"1": "Ravenwood", "2": "Bo", "3": "Tomasz88"})
+    interaction = MagicMock()
+    interaction.response.edit_message = AsyncMock()
+    interaction.message = _message(777)
+    assert await library_panel.open_panel("s1", interaction) is False
+    interaction.response.edit_message.assert_not_awaited()
+    assert (await _row()).library_panel_mode == "ask"   # the next sync closes it
+
+
+@pytest.mark.asyncio
+async def test_the_library_offers_check_reads_the_binding_and_the_cube(test_db, monkeypatch):  # noqa: F811
+    from services import library_service
+    monkeypatch.setattr(library_service, "rental_library_for", AsyncMock(return_value=SimpleNamespace(id="lib")))
+    offers = AsyncMock(return_value=True)
+    monkeypatch.setattr(library_service, "offers", offers)
+    assert await library_panel._library_offers(SimpleNamespace(guild_id="g", cube="LSVCube")) is True
+    offers.assert_awaited_once_with("lib", "LSVCube")
+    monkeypatch.setattr(library_service, "rental_library_for", AsyncMock(return_value=None))
+    assert await library_panel._library_offers(SimpleNamespace(guild_id="g", cube="LSVCube")) is False
