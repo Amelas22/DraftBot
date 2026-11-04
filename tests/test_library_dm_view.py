@@ -81,39 +81,21 @@ async def test_the_loans_server_wins_over_where_the_press_happened(monkeypatch, 
     assert flows.return_deck.await_args.args[0].guild_id == 5
 
 
-async def test_a_press_with_nothing_out_says_so(monkeypatch, flows):
+@pytest.mark.parametrize("action, loan, message_key", [
+    ("return", None, "not_borrowed"),
+    ("borrow", None, "no_loan"),
+    ("return", _loan(guild_id="lotus"), "not_borrowed"),
+], ids=["nothing-out", "nothing-waiting", "unparseable-guild"])
+async def test_a_press_without_a_usable_loan_is_refused(
+        monkeypatch, flows, action, loan, message_key):
     import library_views.dm_view as view
     from services.library_loan_actions import LOAN_MESSAGES
-    monkeypatch.setattr(view, "active_loan", AsyncMock(return_value=None))
+    monkeypatch.setattr(view, "active_loan", AsyncMock(return_value=loan))
     interaction = _interaction()
 
-    await view._press(interaction, "return")
+    await view._press(interaction, action)
 
     interaction.response.send_message.assert_awaited_once_with(
-        LOAN_MESSAGES["not_borrowed"], ephemeral=True)
-    flows.return_deck.assert_not_awaited()
-
-
-async def test_a_borrow_press_with_nothing_waiting_says_so(monkeypatch, flows):
-    import library_views.dm_view as view
-    from services.library_loan_actions import LOAN_MESSAGES
-    monkeypatch.setattr(view, "active_loan", AsyncMock(return_value=None))
-    interaction = _interaction()
-
-    await view._press(interaction, "borrow")
-
-    interaction.response.send_message.assert_awaited_once_with(
-        LOAN_MESSAGES["no_loan"], ephemeral=True)
-
-
-async def test_a_loan_from_no_real_server_is_refused_not_crashed(monkeypatch, flows):
-    import library_views.dm_view as view
-    from services.library_loan_actions import LOAN_MESSAGES
-    monkeypatch.setattr(view, "active_loan", AsyncMock(return_value=_loan(guild_id="lotus")))
-    interaction = _interaction()
-
-    await view._press(interaction, "return")
-
-    interaction.response.send_message.assert_awaited_once_with(
-        LOAN_MESSAGES["not_borrowed"], ephemeral=True)
+        LOAN_MESSAGES[message_key], ephemeral=True)
+    flows.borrow.assert_not_awaited()
     flows.return_deck.assert_not_awaited()
