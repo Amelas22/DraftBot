@@ -851,6 +851,33 @@ async def test_a_lost_ask_copy_is_posted_again(test_db, monkeypatch, undecided, 
 
 
 @pytest.mark.asyncio
+async def test_a_lost_ask_copy_that_should_be_borrow_gets_a_fresh_borrow_copy(
+        test_db, reserved, undecided, offered):  # noqa: F811
+    await _in_mode("ask", [], panel_id="123")   # 123 is not in the chat
+    bot, channel, sent, _ = _bot_with_old_panel()
+    await sync_panel(bot, "s1")
+    channel.send.assert_awaited_once()
+    assert [i.custom_id for i in channel.send.await_args.kwargs["view"].children] == [
+        "library_panel:borrow", "library_panel:some", "library_panel:return", "library_panel:decline"]
+    row = await _row()
+    assert row.library_panel_mode == "borrow"
+    assert row.library_panel_message_id == str(sent.id)
+
+
+@pytest.mark.asyncio
+async def test_a_lost_empty_borrow_copy_is_posted_again(test_db, monkeypatch, undecided, offered):  # noqa: F811
+    """An opened ask copy with nobody on it yet is the drafters' only way in."""
+    _nobody(monkeypatch)
+    await _in_mode("borrow", [], panel_id="123")   # 123 is not in the chat
+    bot, channel, sent, _ = _bot_with_old_panel()
+    await sync_panel(bot, "s1")
+    channel.send.assert_awaited_once()
+    row = await _row()
+    assert row.library_panel_mode == "borrow"
+    assert row.library_panel_message_id == str(sent.id)
+
+
+@pytest.mark.asyncio
 async def test_a_decided_draft_nobody_may_request_closes_the_ask_copy_by_deleting_it(
         test_db, monkeypatch, settled, offered):  # noqa: F811
     _nobody(monkeypatch)

@@ -309,9 +309,10 @@ async def _converge(bot: Any, session_id: str, *, move_down: bool) -> None:
             # A return panel lost while decks are out is posted again, and so
             # is one held open for a dead rubber, or its Borrow button is gone
             # until the chat closes; so is a lost ask panel, the drafters' only
-            # way in. A lost borrow panel is left be: a second one is worse
-            # than none.
-            if face is Face.ASK or (
+            # way in, and a lost borrow panel that lists nobody (an opened ask
+            # copy nobody is on yet), for the same reason. A lost borrow panel
+            # with somebody listed is left be: a second one is worse than none.
+            if face is Face.ASK or (face is Face.BORROW and not borrowers) or (
                     face is Face.RETURN and (not all_back(borrowers) or anyone_may_request)):
                 await _post(bot, draft, channel, borrowers, face,
                             anyone_may_request=anyone_may_request)
@@ -337,10 +338,13 @@ async def _converge(bot: Any, session_id: str, *, move_down: bool) -> None:
         logger.info("Posted library {} panel for session_id={}", face.value, session_id)
         return
     if current is Face.ASK and face is Face.BORROW:  # someone is listed: in place
-        if live is not None:
+        if live is None:  # the ask copy is lost: post the borrow panel afresh
+            await _post(bot, draft, channel, borrowers, face,
+                        anyone_may_request=anyone_may_request)
+        else:
             await _show(live, *await _render(
                 draft, borrowers, face, copy=face, anyone_may_request=anyone_may_request))
-        await _write(session_id, library_panel_mode=Face.BORROW.mode)
+            await _write(session_id, library_panel_mode=Face.BORROW.mode)
         logger.info("Library panel for session_id={} now offers decks", session_id)
         return
     if current is Face.ASK:  # closed: an ask copy is taken down, not redrawn
