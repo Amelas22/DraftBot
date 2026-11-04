@@ -621,9 +621,11 @@ async def test_reconcile_finds_a_chat_missing_from_the_cache(test_db, reserved, 
 @pytest.mark.asyncio
 async def test_one_failing_draft_does_not_stop_the_scan(test_db, monkeypatch):  # noqa: F811
     async with AsyncSessionLocal() as s:
-        for sid, mode in (("a", "borrow"), ("b", "return"), ("c", "closed"), ("d", None)):
+        for sid, mode, stage in (("a", "borrow", None), ("b", "return", None),
+                                 ("c", "closed", None), ("d", None, None),
+                                 ("e", None, "completed")):
             s.add(DraftSession(session_id=sid, guild_id="g", draft_chat_channel="555",
-                               library_panel_mode=mode))
+                               library_panel_mode=mode, session_stage=stage))
         await s.commit()
     seen = []
 
@@ -633,7 +635,7 @@ async def test_one_failing_draft_does_not_stop_the_scan(test_db, monkeypatch):  
             raise RuntimeError("discord down")
     monkeypatch.setattr(library_panel, "sync_panel", sync)
     await library_panel.reconcile_library_panels(MagicMock())
-    assert sorted(seen) == ["a", "b"]
+    assert sorted(seen) == ["a", "b", "d"]
 
 
 @pytest.mark.asyncio
@@ -940,3 +942,52 @@ async def test_the_library_offers_check_reads_the_binding_and_the_cube(test_db, 
     offers.assert_awaited_once_with("lib", "LSVCube")
     monkeypatch.setattr(library_service, "rental_library_for", AsyncMock(return_value=None))
     assert await library_panel._library_offers(SimpleNamespace(guild_id="g", cube="LSVCube")) is False
+
+
+@pytest.mark.asyncio
+async def test_reconcile_posts_the_ask_copy_for_a_running_draft_with_no_panel(
+        test_db, monkeypatch, undecided, offered):
+    _nobody(monkeypatch)
+    await _seed({"1": "Ravenwood"}, reserved_at=None)
+    await library_panel._write("s1", session_stage="pairings",
+                               deletion_time=datetime.now() + timedelta(days=6))
+    bot, channel, sent = _bot()
+    await library_panel.reconcile_library_panels(bot)
+    channel.send.assert_awaited_once()
+    assert (await _row()).library_panel_mode == "ask"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage,deletion", [(None, None), ("pairings", None), (None, "future")])
+async def test_reconcile_reads_open_drafts_with_blank_stage_or_deletion_time(
+        test_db, monkeypatch, undecided, offered, stage, deletion):
+    _nobody(monkeypatch)
+    await _seed({"1": "Ravenwood"}, reserved_at=None)
+    await library_panel._write("s1", session_stage=stage,
+                               deletion_time=None if deletion is None else datetime.now() + timedelta(days=6))
+    bot, channel, _ = _bot()
+    await library_panel.reconcile_library_panels(bot)
+    channel.send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage,deletion", [("completed", "future"), ("abandoned", "future"), ("pairings", "past")])
+async def test_reconcile_skips_finished_drafts_and_deleted_chats(
+        test_db, monkeypatch, undecided, offered, stage, deletion):
+    _nobody(monkeypatch)
+    await _seed({"1": "Ravenwood"}, reserved_at=None)
+    await library_panel._write("s1", session_stage=stage,
+                               deletion_time=datetime.now() + timedelta(days=6 if deletion == "future" else -1))
+    bot, channel, _ = _bot()
+    await library_panel.reconcile_library_panels(bot)
+    channel.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_turns_an_ask_copy_into_the_borrow_panel_when_someone_opts_in(
+        test_db, reserved, undecided, offered):
+    await _in_mode("ask", [])
+    bot, channel, sent, old = _bot_with_old_panel()
+    await library_panel.reconcile_library_panels(bot)
+    old.edit.assert_awaited_once()
+    assert (await _row()).library_panel_mode == "borrow"

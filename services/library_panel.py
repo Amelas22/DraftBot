@@ -16,11 +16,12 @@ through sync_panel too, under the same lock.
 import asyncio
 import json
 import weakref
+from datetime import datetime
 from typing import Any, Literal, Optional
 
 import discord
 from loguru import logger
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 
 from database.db_session import AsyncSessionLocal
 from helpers.team_names import labels_for
@@ -433,12 +434,22 @@ async def reconcile_library_panels(bot: Any) -> None:
     Catches what a missed trigger left behind: a decided draft still showing
     its borrow panel (a restart, or a failed victory post, between the decision
     and the switch), a return panel whose message is gone, a panel whose chat
-    no longer exists. Closed and never-posted panels are not read at all.
+    no longer exists. Also posts the ask copy a nudge missed, or that predates
+    it: a draft with a chat, not finished and not past its deletion time, that
+    has no panel yet is read too. Closed panels and finished drafts are not.
     """
+    now = datetime.now()  # deletion_time is stored naive, in local time
+    open_draft = and_(
+        DraftSession.library_panel_mode.is_(None),
+        DraftSession.draft_chat_channel.isnot(None),
+        or_(DraftSession.deletion_time.is_(None), DraftSession.deletion_time > now),
+        or_(DraftSession.session_stage.is_(None),
+            DraftSession.session_stage.notin_(("completed", "abandoned"))))
     async with AsyncSessionLocal() as s:
-        session_ids = (await s.execute(select(DraftSession.session_id).where(
+        session_ids = (await s.execute(select(DraftSession.session_id).where(or_(
             DraftSession.library_panel_mode.in_(
-                (Face.BORROW.mode, Face.RETURN.mode))))).scalars().all()
+                (Face.BORROW.mode, Face.RETURN.mode, Face.ASK.mode)),
+            open_draft)))).scalars().all()
     for session_id in session_ids:
         try:
             await sync_panel(bot, session_id)
