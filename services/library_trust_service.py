@@ -23,8 +23,13 @@ from typing import Any, Optional
 from loguru import logger
 
 from services.library_access_service import members
-from services.library_service import price_range_of
+from services.library_service import price_range_of, small_price_range_of
 from services.library_tournament_exemption import is_exempt
+
+# A loan of this many named cards or fewer is priced by the library's small-loan
+# figures; a bigger one is a deck. The same number caps what a drafter may
+# name when borrowing specific cards.
+SMALL_LOAN_MAX: int = 3
 
 
 async def is_trusted(library_id: Any, player_id: Any) -> bool:
@@ -32,7 +37,8 @@ async def is_trusted(library_id: Any, player_id: Any) -> bool:
     return str(player_id) in await members(library_id)
 
 
-async def hold_for(library: Any, player_id: Any) -> Optional[int]:
+async def hold_for(library: Any, player_id: Any,
+                   cards: Optional[int] = None) -> Optional[int]:
     """What THIS borrower puts up for THIS library, or None if it cannot lend.
 
     None rather than 0 for a missing library, the same distinction price_of
@@ -47,14 +53,22 @@ async def hold_for(library: Any, player_id: Any) -> Optional[int]:
     that rule is about there being no per-CUBE figure for anyone to argue over.
     Both numbers here are still the library's own policy, set from the same shell
     tool, and a borrower cannot move themselves between them.
+
+    `cards` is how many named cards the loan is for, None meaning a deck. A loan
+    of SMALL_LOAN_MAX or fewer is priced by the small-loan pair instead of the
+    deck pair; the exemption and the member split apply to whichever is chosen.
     """
-    prices = price_range_of(library)
+    small = cards is not None and 1 <= cards <= SMALL_LOAN_MAX
+    prices = small_price_range_of(library) if small else price_range_of(library)
     if prices is None:
         return None
     least, most = prices
     # Before is_trusted, so an exempt player is never logged as a non-member; and
-    # only where there is a hold to waive.
-    if most and await is_exempt(library.id, player_id):
+    # only where there is a hold to waive. Either figure, not `most`: the shell
+    # tool refuses a pair whose member figure is the higher, but the columns
+    # can still hold one, and reading `most` alone would then skip the check
+    # and charge an exempt member the larger figure.
+    if max(least, most) and await is_exempt(library.id, player_id):
         return 0   # a running tournament lends its players the deck on the house
     if least == most or await is_trusted(library.id, player_id):
         return least

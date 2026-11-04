@@ -52,6 +52,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from database.models_base import Base
+# The player preferences table is declared in preference_service, not under
+# models/, so it only joins Base.metadata once that module is imported. Import
+# it here so every test database has the table, whichever test runs first.
+import preference_service  # noqa: F401
 from database.db_session import AsyncSessionLocal
 from models.debt_ledger import DebtLedger
 from models.draft_session import DraftSession
@@ -805,7 +809,8 @@ def forget_the_custodian():
 
 async def a_library(library_id="lib", *, guild="g1", kind="communal",
                     collateral=0, collateral_untrusted=None, cubes=(),
-                    stock=None, min_drafts=None):
+                    stock=None, min_drafts=None, small=None,
+                    small_untrusted=None):
     """Seed a library, bind a server to it, list its cubes, and stock its shelf.
 
     Almost every library test needs the same rows, and writing them out each
@@ -817,6 +822,9 @@ async def a_library(library_id="lib", *, guild="g1", kind="communal",
 
     `min_drafts` lets non-members with that many drafts borrow; None leaves the
     member list alone in charge.
+
+    `small` / `small_untrusted` are the holds for a loan of a few named cards
+    (members / everyone else); None charges the deck figures.
 
     `stock` is {card name: copies}, booked the way a settled deposit books
     them. A dispatch checks the shelf before it opens a trade, so a library
@@ -833,6 +841,8 @@ async def a_library(library_id="lib", *, guild="g1", kind="communal",
         s.add(Library(id=library_id, name=library_id, kind=kind,
                       collateral_tix=collateral,
                       collateral_tix_untrusted=collateral_untrusted,
+                      small_loan_tix=small,
+                      small_loan_tix_untrusted=small_untrusted,
                       min_drafts_to_borrow=min_drafts,
                       created_by="test"))
         if guild is not None:

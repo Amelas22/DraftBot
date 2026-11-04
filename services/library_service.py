@@ -112,6 +112,23 @@ def price_range_of(library: "Optional[Library]") -> "Optional[tuple[int, int]]":
     return (trusted, trusted if untrusted is None else int(untrusted))
 
 
+def small_price_range_of(library: "Optional[Library]") -> "Optional[tuple[int, int]]":
+    """(member, non-member) hold for a loan of a few named cards, or None.
+
+    Each figure falls back on its deck counterpart on its own, so a library
+    that sets only the member figure still asks a stranger the deck non-member
+    hold rather than nothing. None exactly when price_range_of is None: no
+    library is a refusal whatever the loan's size.
+    """
+    deck = price_range_of(library)
+    if deck is None:
+        return None
+    member = getattr(library, "small_loan_tix", None)
+    non_member = getattr(library, "small_loan_tix_untrusted", None)
+    return (deck[0] if member is None else int(member),
+            deck[1] if non_member is None else int(non_member))
+
+
 async def offers(library_id: Any, cube_id: Any) -> bool:
     """Has this library been set up to lend for this cube?
 

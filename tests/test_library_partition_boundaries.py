@@ -152,7 +152,7 @@ async def test_borrow_and_return_claims_stay_on_original_library(shelves):
     await lending.settle_in_flight()
     async with AsyncSessionLocal() as s:
         assert (await s.get(CardLoan, loan_id)).state == "returned"
-    assert await lending._still_owed("library:a", "player") == []
+    assert await lending.owed_cards("library:a", "player") == []
 
 
 @pytest.mark.parametrize("kind", ["card-deposit", "borrow"])

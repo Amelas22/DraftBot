@@ -78,6 +78,19 @@ class Library(Base):
     # borrower cannot move themselves along it.
     collateral_tix_untrusted = Column(Integer, nullable=True)
 
+    # The same two figures for a loan of at most services/library_trust_service
+    # .SMALL_LOAN_MAX named cards, rather than a deck: what a member and
+    # everybody else put up against a handful of cards, which is worth far less
+    # than the deck the figures above are sized for.
+    #
+    # NULL means no separate small-loan figure, and each falls back on its deck
+    # counterpart independently: an unset member figure charges
+    # `collateral_tix`, an unset non-member figure charges the deck non-member
+    # figure. Independently on purpose -- setting only the member figure to 0
+    # must not make small loans free for strangers.
+    small_loan_tix = Column(Integer, nullable=True)
+    small_loan_tix_untrusted = Column(Integer, nullable=True)
+
     # Drafts in this library's servers that let somebody borrow without being
     # on its member list (services/library_access_service).
     #

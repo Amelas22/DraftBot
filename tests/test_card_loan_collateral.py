@@ -181,3 +181,94 @@ async def test_a_returned_hold_is_drawn_against_what_they_owe(test_db, rig, monk
 
     assert ("set", BORROWER, 0) in moves, "the hold came back"
     assert seen == [(GUILD, BORROWER)], "and the debt system was told about it"
+
+
+# --- the hold follows the size of what is sent ------------------------------
+# A library with a deck hold of 200/400 and a small-loan hold of 0/50: a trade
+# of a few named cards is charged the small figure, the whole deck the big one.
+SMALL_GUILD, SMALL_LIB, CUBE40 = "g2", "slib", "cube40"
+BIG_DECK = [{"name": f"Card {i}", "qty": 1} for i in range(40)]
+
+
+@pytest.fixture
+def small_rig(monkeypatch):
+    client = FakeLendingServe({c["name"]: 99 for c in BIG_DECK},
+                              job={"state": "done"})
+    monkeypatch.setattr(svc, "get_lending_client", lambda: client)
+
+    async def handle(_):
+        return HANDLE
+    monkeypatch.setattr(svc, "_mtgo_handle", handle)
+    monkeypatch.setattr(svc, "is_money_server", lambda gid: True)
+    return client
+
+
+async def _small_loan_for_a_stranger():
+    """A non-member with 500 tix and an assigned 40-card loan."""
+    from conftest import a_library
+    from database.db_session import db_session
+    from services import wallet_service
+    await a_library(SMALL_LIB, guild=SMALL_GUILD, kind="rental", collateral=200,
+                    collateral_untrusted=400, small=0, small_untrusted=50,
+                    cubes=(CUBE40,), stock={c["name"]: 99 for c in BIG_DECK})
+    async with AsyncSessionLocal() as s:
+        loan = CardLoan(guild_id=SMALL_GUILD, library_id=SMALL_LIB,
+                        borrower_id=BORROWER, cards=BIG_DECK, state="assigned",
+                        source="fixture")
+        s.add(loan)
+        await s.commit()
+        loan_id = loan.id
+    async with db_session() as session:
+        await wallet_service.transfer_in(session, SMALL_GUILD, "system:test",
+                                         BORROWER, 500, "fund")
+    return loan_id
+
+
+async def _held(guild=SMALL_GUILD):
+    from database.db_session import db_session
+    from services import wallet_service
+    async with db_session() as session:
+        return await wallet_service.balance_in(
+            session, guild, svc.collateral_holder(guild))
+
+
+async def test_a_three_card_offering_takes_the_small_hold(test_db, small_rig):
+    await _small_loan_for_a_stranger()
+
+    status, _ = await svc.start_borrow(SMALL_GUILD, BORROWER, BIG_DECK[:3])
+
+    assert status == "dispatched"
+    assert await _held() == 50
+
+
+async def test_a_take_what_is_there_of_three_cards_takes_the_small_hold(
+        test_db, small_rig, monkeypatch):
+    loan_id = await _small_loan_for_a_stranger()
+
+    # The shelf can cover only three of the deck's cards right now.
+    async def three(library_id, exclude_loan_id=None):
+        return {c["name"]: 99 for c in BIG_DECK[:3]}
+    monkeypatch.setattr(svc, "lendable_now", three)
+
+    trimmed = await svc.trim_to_available(SMALL_GUILD, loan_id)
+    status, _ = await svc.start_borrow(SMALL_GUILD, BORROWER, trimmed)
+
+    assert sum(c["qty"] for c in trimmed) == 3
+    assert status == "dispatched"
+    assert await _held() == 50
+
+
+async def test_short_funds_on_a_small_offering_quotes_the_small_hold(
+        test_db, small_rig):
+    await _small_loan_for_a_stranger()
+
+    figures = await svc.hold_shortfall(SMALL_GUILD, BORROWER,
+                                       offering=BIG_DECK[:2])
+
+    assert figures["hold"] == 50
+
+
+async def test_the_deck_ready_quote_stays_the_deck_hold(test_db, small_rig):
+    loan_id = await _small_loan_for_a_stranger()
+
+    assert await svc.collateral_for(await _loan(loan_id), SMALL_GUILD) == 400

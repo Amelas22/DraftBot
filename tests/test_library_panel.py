@@ -731,7 +731,7 @@ async def test_a_decided_draft_with_a_dead_rubber_keeps_a_return_panel(
     assert "Borrow my deck" in embed.description
     view = channel.send.await_args.kwargs["view"]
     assert {i.custom_id for i in view.children} == {
-        "library_panel:borrow", "library_panel:return"}
+        "library_panel:borrow", "library_panel:some", "library_panel:return"}
 
 
 @pytest.mark.asyncio
@@ -767,7 +767,7 @@ async def test_a_lost_return_panel_held_open_for_a_dead_rubber_is_posted_again(
     channel.send.assert_awaited_once()
     view = channel.send.await_args.kwargs["view"]
     assert {i.custom_id for i in view.children} == {
-        "library_panel:borrow", "library_panel:return"}
+        "library_panel:borrow", "library_panel:some", "library_panel:return"}
 
 
 @pytest.mark.asyncio
