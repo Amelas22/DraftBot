@@ -90,3 +90,9 @@ async def test_a_button_runs_the_same_gate_as_the_command():
     interaction.followup.send.assert_awaited_once_with(said, view=MISSING, ephemeral=True)
     ctx.defer.assert_awaited_once_with(ephemeral=True)
     ctx.followup.send.assert_awaited_once_with(said, view=MISSING, ephemeral=True)
+
+
+async def test_an_interaction_caller_can_be_told_its_server():
+    from library_views.callers import InteractionCaller
+    interaction = _interaction()
+    assert InteractionCaller(interaction, guild_id=42).guild_id == 42
