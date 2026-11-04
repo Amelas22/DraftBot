@@ -155,7 +155,7 @@ class Face(Enum):
 
 def desired_face(current: Face, borrowers: list[Borrower], *, settled: bool,
                  chat_open: bool, anyone_may_request: bool,
-                 offered: bool = False) -> Face:
+                 offered: bool) -> Face:
     """The face the panel should wear now.
 
     `current` is the face it wears; `settled` is whether the draft is decided
@@ -191,12 +191,12 @@ def desired_face(current: Face, borrowers: list[Borrower], *, settled: bool,
         return Face.NONE
     if not chat_open:
         return Face.CLOSED
-    if current is Face.ASK:
-        if borrowers:
-            return Face.BORROW
-        return Face.CLOSED if settled and not anyone_may_request else Face.ASK
-    if current is Face.BORROW and not borrowers:
-        return Face.BORROW if not settled or anyone_may_request else Face.CLOSED
+    if current is Face.ASK and borrowers:
+        return Face.BORROW
+    if current is Face.ASK or (current is Face.BORROW and not borrowers):
+        # Nobody listed: it keeps its face until the draft is decided and
+        # nobody may request.
+        return Face.CLOSED if settled and not anyone_may_request else current
     if current is Face.RETURN:
         return Face.CLOSED if can_close(
             borrowers, anyone_may_request=anyone_may_request) else Face.RETURN
@@ -218,7 +218,6 @@ def ask_embed() -> discord.Embed:
 
 
 def borrow_embed(borrowers: list[Borrower], *, closed: bool = False) -> discord.Embed:
-    # A closed copy that never listed anyone reads just its closed footer.
     lines = [] if borrowers or closed else ["Nobody has a library deck yet."]
     for b in borrowers:
         if closed and b.state in (None, "assigned", "expired"):
@@ -233,7 +232,7 @@ def borrow_embed(borrowers: list[Borrower], *, closed: bool = False) -> discord.
                   "your pool on MTGO. **Return my deck** hands it back between "
                   "matches; you can borrow it again while you have a match to play.")
     return discord.Embed(title=TITLE, description="\n\n".join(
-        part for part in ("\n".join(lines), footer) if part))
+        filter(None, ("\n".join(lines), footer))))
 
 
 def return_embed(borrowers: list[Borrower], result: Optional[str], *,

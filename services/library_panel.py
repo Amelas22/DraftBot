@@ -34,6 +34,7 @@ from services.library_panel_state import (Borrower, Face, all_back, ask_embed,
                                           has_library_involvement, return_embed)
 from services.library_reminders import (DraftState, draft_state, may_still_request,
                                         session_of)
+from services.library_reservation import FINISHED_STAGES
 
 
 async def result_line(draft: Any) -> Optional[str]:
@@ -225,6 +226,24 @@ def _anyone_may_request(state: DraftState, draft: Any,
     return any(may_still_request(state, uid) is None for uid in candidates)
 
 
+async def _plan(draft: Any, current: Face, state: DraftState, *, chat_open: bool,
+                offered: Optional[bool],
+                ) -> tuple[list[Borrower], bool, Face]:
+    """What a sync and a press both decide from: who the panel lists, whether
+    anyone may still request, and the face it should wear. `offered` is whether
+    the library offers the cube, None when not yet known: then the library is
+    asked only where it can matter, for a panel not yet posted that lists
+    nobody."""
+    borrowers = await borrowers_of(draft)
+    anyone_may_request = _anyone_may_request(state, draft, borrowers)
+    face = desired_face(
+        current, borrowers, settled=state.settled, chat_open=chat_open,
+        anyone_may_request=anyone_may_request,
+        offered=current is Face.NONE and not borrowers and (
+            offered if offered is not None else await _library_offers(draft)))
+    return borrowers, anyone_may_request, face
+
+
 async def _post(bot: Any, draft: Any, channel: Any, borrowers: list[Borrower],
                 face: Face, *, anyone_may_request: bool,
                 replacing: Optional[Any] = None) -> None:
@@ -271,29 +290,24 @@ async def _converge(bot: Any, session_id: str, *, move_down: bool) -> None:
         if move_down and chat:
             await _drop_sticky(chat, session_id)
         return
-    # Whether the library offers the cube; asked only for a panel not yet
-    # posted, and only once.
+    # Whether the library offers the cube. A draft that never involved the
+    # library is worth reading only if it does, so that is asked first; for any
+    # other draft it is left to the plan, which asks only if it needs to.
     offered: Optional[bool] = None
     if current is Face.NONE:
         # The common case on the victory path: no chat yet, or no library.
         if chat is None:
             return
         if not await has_library_involvement(draft):
-            offered = await _library_offers(draft)
-            if not offered:
+            if not await _library_offers(draft):
                 return
+            offered = True
     state = await draft_state(session_id)
     if current is Face.NONE and state.settled:
         return  # a panel is never first posted on a decided draft
-    borrowers = await borrowers_of(draft)
-    if current is Face.NONE and offered is None and not borrowers:
-        offered = await _library_offers(draft)
-    anyone_may_request = _anyone_may_request(state, draft, borrowers)
     channel = await _chat_channel(bot, chat) if chat else None
-    face = desired_face(current, borrowers, settled=state.settled,
-                        chat_open=channel is not None,
-                        anyone_may_request=anyone_may_request,
-                        offered=bool(offered))
+    borrowers, anyone_may_request, face = await _plan(
+        draft, current, state, chat_open=channel is not None, offered=offered)
     if channel is None or chat is None:
         if face is Face.CLOSED:
             await _write(session_id, library_panel_mode=Face.CLOSED.mode)
@@ -306,14 +320,17 @@ async def _converge(bot: Any, session_id: str, *, move_down: bool) -> None:
         return
     if face is current:
         if live is None:
-            # A return panel lost while decks are out is posted again, and so
-            # is one held open for a dead rubber, or its Borrow button is gone
-            # until the chat closes; so is a lost ask panel, the drafters' only
-            # way in, and a lost borrow panel that lists nobody (an opened ask
-            # copy nobody is on yet), for the same reason. A lost borrow panel
-            # with somebody listed is left be: a second one is worse than none.
-            if face is Face.ASK or (face is Face.BORROW and not borrowers) or (
-                    face is Face.RETURN and (not all_back(borrowers) or anyone_may_request)):
+            # A lost copy that is the drafters' only way in (an ask panel, or a
+            # borrow panel that lists nobody) or that somebody still owes a
+            # return to (or may borrow from again, for a dead rubber) is posted
+            # again. A lost borrow panel with somebody listed is left be: a
+            # second one is worse than none.
+            needs_repost = (
+                face is Face.ASK
+                or (face is Face.BORROW and not borrowers)
+                or (face is Face.RETURN
+                    and (not all_back(borrowers) or anyone_may_request)))
+            if needs_repost:
                 await _post(bot, draft, channel, borrowers, face,
                             anyone_may_request=anyone_may_request)
                 logger.info("Reposted the missing library {} panel for "
@@ -448,7 +465,7 @@ async def reconcile_library_panels(bot: Any) -> None:
         DraftSession.draft_chat_channel.isnot(None),
         or_(DraftSession.deletion_time.is_(None), DraftSession.deletion_time > now),
         or_(DraftSession.session_stage.is_(None),
-            DraftSession.session_stage.notin_(("completed", "abandoned"))))
+            DraftSession.session_stage.notin_(FINISHED_STAGES)))
     async with AsyncSessionLocal() as s:
         session_ids = (await s.execute(select(DraftSession.session_id).where(or_(
             DraftSession.library_panel_mode.in_(
@@ -477,10 +494,8 @@ async def open_panel(session_id: str, interaction: discord.Interaction) -> bool:
         if current is Face.CLOSED:
             return False
         state = await draft_state(session_id)
-        borrowers = await borrowers_of(draft)
-        anyone_may_request = _anyone_may_request(state, draft, borrowers)
-        face = desired_face(current, borrowers, settled=state.settled, chat_open=True,
-                            anyone_may_request=anyone_may_request)
+        borrowers, anyone_may_request, face = await _plan(
+            draft, current, state, chat_open=True, offered=False)
         if face in (Face.CLOSED, Face.NONE):
             return False
         embed, view = await _render(draft, borrowers, Face.BORROW, copy=Face.BORROW,
