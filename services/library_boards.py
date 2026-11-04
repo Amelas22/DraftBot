@@ -2,8 +2,8 @@
 line says.
 
 Only a staked board has a Change Entry / Settings panel, so where a rental
-library backs the server every other board -- premade, random, swiss, winston
--- gets a button of its own for the library row. Other servers' boards must
+library backs the server every other board -- premade, random, swiss -- gets
+a button of its own for the library row. Other servers' boards must
 not: a button that only ever says "no library here" is clutter on every league
 draft.
 

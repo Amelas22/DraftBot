@@ -9,7 +9,6 @@ from helpers.team_names import BLUE, RED
 
 from sessions import RandomSession, PremadeSession, SwissSession, BaseSession
 from sessions.staked_session import StakedSession
-from sessions.winston_session import WinstonSession
 
 # Shared, dependency-light selection building blocks live in cube_views so the
 # Update Cube flow (views.py) can reuse the exact same controls without a
@@ -168,7 +167,6 @@ def create_session_instance(session_type: str, session_details: SessionDetails) 
         "premade": PremadeSession,
         "swiss": SwissSession,
         'random': RandomSession,
-        "winston": WinstonSession
     }.get(session_type, BaseSession)
 
     return session_class(session_details)

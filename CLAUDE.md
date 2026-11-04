@@ -131,7 +131,7 @@ Claude can drive the test Discord server itself — run slash commands, click bo
 ## Key Features
 
 ### Draft Management
-- **Session Types**: Random teams, premade teams, Winston draft
+- **Session Types**: Random teams, premade teams, staked, Swiss
 - **Signup System**: Player registration with limits and validation
 - **Team Formation**: Automatic random team assignment or manual selection
 - **Ready Checks**: Ensure all players are present before starting

@@ -17,7 +17,7 @@ import pytest
 from views import PersistentView, TEAM_A_STYLE, TEAM_B_STYLE
 
 
-SESSION_TYPES = ("premade", "random", "staked", "winston", "swiss", "test", "schedule")
+SESSION_TYPES = ("premade", "random", "staked", "swiss", "test", "schedule")
 
 
 def _buttons(session_type="premade", **names):
