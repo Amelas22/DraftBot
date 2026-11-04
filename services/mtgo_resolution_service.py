@@ -34,7 +34,7 @@ from database.retry import with_db_retry
 from models.mtgo_job import MtgoJob
 from models.wallet_tx import TIX, WalletTx
 from models.debt_ledger import DebtLedger
-from helpers.money_gate import serve_busy_reason, spawn_followup
+from helpers.money_gate import FOLLOWUP_WINDOW_S, serve_busy_reason, spawn_followup
 from services.mtgo_tradebot_client import ORDER_TIMEOUT_S, get_client, max_cards_per_trade
 from services import wallet_service
 from services import vault_check
@@ -49,7 +49,7 @@ _POLL_INTERVAL_S = 3.0
 _POLL_INTERVAL_MAX_S = 5.0
 _POLL_BACKOFF = 1.5
 # Keep the inline poll inside Discord's 15-minute interaction/followup window.
-_DEFAULT_POLL_TIMEOUT_S = 14 * 60
+_DEFAULT_POLL_TIMEOUT_S = FOLLOWUP_WINDOW_S
 
 
 # ---------------------------------------------------------------------------

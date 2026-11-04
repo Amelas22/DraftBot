@@ -9,10 +9,11 @@ that turn a pycord context or interaction into a caller live in
 
 The bot cannot finish an MTGO trade on its own: it offers, and the player has
 to accept in the client. So every dispatched message here says so. A player who
-is not told will run the command, see nothing happen, and the job will sit for
-its ten-minute wait and fail -- which looks like a broken bot rather than an
+is not told will run the command, see nothing happen, and the invite will be
+withdrawn two minutes later -- which looks like a broken bot rather than an
 unaccepted trade.
 """
+import time
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Awaitable, Callable, Optional, Protocol
@@ -21,7 +22,7 @@ import discord
 from loguru import logger
 
 from helpers.money_gate import (
-    custodian_name, explain_trade_failure, full_trade_list_advice,
+    custodian_name, explain_trade_failure, followup_budget_s, full_trade_list_advice,
     mtgo_job_footer, mtgo_trade_prompt, spawn_followup,
 )
 from library_views.take_what_is_there import TakeWhatIsThereView
@@ -678,6 +679,7 @@ async def _trade_when_ready(caller: LibraryCaller, guild_id: int,
     gives a command 15 minutes of followups, but a player staring at a
     spinner for five of them will assume it broke.
     """
+    started = time.monotonic()   # the queue wait spends the same followup window
     status, waited = await when_free(guild_id, caller.user_id)
     if status == "short_funds":
         # The figures are a nicety; answering at all is not. Rendering them
@@ -715,9 +717,11 @@ async def _trade_when_ready(caller: LibraryCaller, guild_id: int,
         f"{deck_lines(loan)}"
         f"{mtgo_job_footer(job_id) if job_id else ''}{note}")
 
-    # Wait on the job so the player gets a real answer rather than silence.
-    # The watchdog covers anything that outlives this poll.
+    # Wait on the job so the player gets a real answer rather than silence -- for
+    # as long as Discord lets us answer, since an unanswered invite alone takes
+    # over two minutes to fail. The watchdog covers anything that outlives this.
     outcome, detail = await poll_until_settled(guild_id, caller.user_id, expect,
+                                               timeout_s=followup_budget_s(started),
                                                job_id=job_id)
     await _report_outcome(caller, outcome, expect, detail,
                           small_with_deck_waiting=small_with_deck_waiting)

@@ -4,8 +4,8 @@ Two things had gone wrong in the copy. `/wallet pay` on an empty wallet reported
 "Insufficient funds: 123456789012345678 needs 5, has 0" — the player's own Discord id
 read back at them, and no hint that depositing is the fix. And `/wallet deposit` told
 them to open an MTGO trade themselves, which is not how the serve works: the custodian
-messages the player, they reply YES, and it opens the trade. Withdraw described the
-same protocol differently again.
+sends the invite, and the player accepts it. Withdraw described the same protocol
+differently again.
 """
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -60,14 +60,38 @@ async def test_both_trade_commands_give_the_same_instructions():
     assert shared in withdraw_msg, "withdraw should render the shared instructions"
 
 
-def test_the_prompt_says_to_reply_yes_and_wait():
+def test_the_prompt_says_the_invite_is_coming_and_when_it_lapses():
+    """The serves invite directly. Telling players to reply YES had them waiting
+    for a message to answer while the invite's two minutes ran out."""
     prompt = mtgo_trade_prompt("TheCustodian")
 
-    assert "YES" in prompt, "replying YES is the step players miss"
+    assert "YES" not in prompt, "nothing waits for a YES any more"
     assert "TheCustodian" in prompt
-    # the serve opens the trade; telling players to open it themselves is what the
+    # the serve sends the invite; telling players to open it themselves is what the
     # old deposit copy got wrong
-    assert "will open" in prompt
+    assert "sending you a trade invite" in prompt
+    assert "2 minutes" in prompt, "the accept deadline is the one thing to act on"
+
+
+def test_the_job_footer_carries_no_deadline():
+    """The wallet appends the footer to its final result too, where "you have
+    ~10 min" read as a countdown for a trade that had already finished."""
+    from helpers.money_gate import mtgo_job_footer
+
+    assert "min" not in mtgo_job_footer("J1")
+    assert "J1" in mtgo_job_footer("J1")
+
+
+def test_the_followup_budget_counts_down_from_the_command():
+    """Polls run for what is left of Discord's followup window, so a command
+    that already spent time in the queue polls for correspondingly less."""
+    import time
+    from helpers.money_gate import FOLLOWUP_WINDOW_S, followup_budget_s
+
+    now = time.monotonic()
+    assert followup_budget_s(now) == pytest.approx(FOLLOWUP_WINDOW_S, abs=1)
+    assert followup_budget_s(now - 300) == pytest.approx(FOLLOWUP_WINDOW_S - 300, abs=1)
+    assert followup_budget_s(now - FOLLOWUP_WINDOW_S - 60) == 0
 
 
 # ---- /wallet pay on an empty wallet ----------------------------------------------

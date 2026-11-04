@@ -19,8 +19,8 @@ two commands here only adapt their context and hand it over.
 
 The bot cannot finish an MTGO trade on its own: it offers, and the player has
 to accept in the client. So every dispatched message here says so. A player who
-is not told will run the command, see nothing happen, and the job will sit for
-its ten-minute wait and fail -- which looks like a broken bot rather than an
+is not told will run the command, see nothing happen, and the invite will be
+withdrawn two minutes later -- which looks like a broken bot rather than an
 unaccepted trade.
 """
 import time
@@ -34,7 +34,7 @@ from loguru import logger
 from config import bot_config, get_config, is_money_server, save_config
 from debt_views.helpers import card_count_label
 from helpers.money_gate import (
-    custodian_name, explain_trade_failure, full_trade_list_advice,
+    custodian_name, explain_trade_failure, followup_budget_s, full_trade_list_advice,
     mtgo_job_footer, mtgo_trade_prompt,
     spawn_followup,
 )
@@ -399,6 +399,7 @@ class LibraryCommands(commands.Cog):
         failure here: the later chunks would only fail the same way, and a
         depositor watching trades fail one after another learns nothing.
         """
+        started = time.monotonic()   # every chunk's poll shares one followup window
         # The first thing this does is talk to the serve, so a stall here looks
         # exactly like a stall in the deposit itself from Discord's side: the
         # command has already said "Setting up..." and nothing further is sent.
@@ -438,7 +439,9 @@ class LibraryCommands(commands.Cog):
                 ephemeral=True)
 
             outcome: "dict[str, Any]" = (
-                await poll_deposit(ctx.guild_id, detail) if detail else {})
+                await poll_deposit(ctx.guild_id, detail,
+                                   timeout_s=followup_budget_s(started))
+                if detail else {})
             match outcome.get("state"):
                 case "done":
                     if n == 1:
@@ -509,6 +512,7 @@ class LibraryCommands(commands.Cog):
         pieces are run one at a time: opening several trades at once would put
         offers in front of somebody who has not accepted the first.
         """
+        started = time.monotonic()   # every order's poll shares one followup window
         orders = await withdrawal_orders(ctx.author.id, library_id)
         if not orders:
             await ctx.followup.send(_custody_said("nothing_held", "📭 Nothing to take back."),
@@ -552,7 +556,9 @@ class LibraryCommands(commands.Cog):
                 ephemeral=True)
 
             outcome: "dict[str, Any]" = (
-                await poll_deposit(ctx.guild_id, detail) if detail else {})
+                await poll_deposit(ctx.guild_id, detail,
+                                   timeout_s=followup_budget_s(started))
+                if detail else {})
             match outcome.get("state"):
                 case "done":
                     continue

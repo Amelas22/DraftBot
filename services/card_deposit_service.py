@@ -38,9 +38,10 @@ from services.mtgo_tradebot_client import (
     too_large,
 )
 
-# How long a command waits on its own trade before handing over to the
-# watchdog. The serve's offer stands ~10 min; this is only about answering the
-# person who ran the command.
+# How long a poll waits on its own trade by default before handing over to the
+# watchdog. The deposit and withdraw runs pass what is left of their followup
+# window instead (money_gate.followup_budget_s), so the person who ran the
+# command hears how each trade ended.
 DEFAULT_POLL_S = 90
 
 # Their OWN kinds, not the wallet's 'deposit'. That one is a TIX deposit with no
@@ -552,8 +553,8 @@ async def poll_until_settled(guild_id: Any, job_id: str, timeout_s: float = DEFA
                              interval_s: float = 5) -> "dict[str, Any]":
     """Watch one trade until it lands, or give up waiting.
 
-    The offer stands about ten minutes for a human to accept, so asking once is
-    asking too early -- the job is queued and the command falls silent, having
+    The invite stands two minutes for a human to accept and the trade takes
+    longer still, so asking once is asking too early -- the command falls silent, having
     just told somebody to go and accept a trade. This exists so the person who
     ran the command gets an answer while they are still looking at Discord.
 

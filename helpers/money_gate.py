@@ -16,6 +16,7 @@ gives that task the never-crash-silently wrapper (and keeps a strong reference s
 it can't be garbage-collected mid-poll).
 """
 import asyncio
+import time
 
 from loguru import logger
 
@@ -23,9 +24,25 @@ from config import is_money_server
 from models.mtgo_account import MtgoAccount
 from services.mtgo_tradebot_client import get_client
 
-# Serve-side readiness wait (minutes) before the job fails. Bounds how long a player
-# has to accept the in-client trade.
+# Serve-side budget (minutes) for the whole trade once it is queued. It is not the time
+# a player has to accept: the invite itself is withdrawn after INVITE_ACCEPT_SECONDS.
 DEFAULT_WAIT_MINUTES = 10
+
+# Every custodian serve invites directly (TRADEBOT_DIRECT_INVITE=120): the invite goes
+# out with the opening DM, and one nobody accepts in this long is withdrawn. Mirrors
+# the serves' setting, so changing it there makes the prompt below wrong.
+INVITE_ACCEPT_SECONDS = 120
+
+# How long a command can keep answering through its interaction. Discord allows
+# followups for 15 minutes; this leaves a margin for the last send.
+FOLLOWUP_WINDOW_S = 14 * 60
+
+
+def followup_budget_s(started: float) -> float:
+    """What is left of the followup window for a command that began at `started`
+    (a time.monotonic() reading). A poll bounded by this answers the player for as
+    long as Discord lets it, instead of falling silent while the trade is still live."""
+    return max(0.0, FOLLOWUP_WINDOW_S - (time.monotonic() - started))
 
 # Keyed by serve URL: there is more than one custodian now (the wallet's vault
 # and the card library), and a single slot would answer the first name asked for
@@ -85,9 +102,15 @@ def mtgo_trade_prompt(custodian: str) -> str:
     two commands used to describe them differently — deposit told the player to open
     the trade themselves, which is not how the serve works at all. One string so the
     instructions cannot disagree about a protocol that is identical.
+
+    The serve sends the invite straight away, with no YES round trip, so the deadline
+    is the one thing the player has to act on.
     """
-    return (f"`{custodian}` will message you in MTGO — reply **YES** and it will open "
-            f"the trade. Accept it and I'll confirm here once it lands.")
+    minutes, seconds = divmod(INVITE_ACCEPT_SECONDS, 60)
+    window = (f"{minutes} minute{'' if minutes == 1 else 's'}" if not seconds
+              else f"{INVITE_ACCEPT_SECONDS} seconds")
+    return (f"`{custodian}` is sending you a trade invite in MTGO now — accept it within "
+            f"**{window}**, and I'll confirm here once it lands.")
 
 
 def full_trade_list_advice(exact_printing: bool = False) -> str:
@@ -113,13 +136,15 @@ def full_trade_list_advice(exact_printing: bool = False) -> str:
 
 
 def mtgo_job_footer(job_id: str) -> str:
-    """The job reference and how long the player has to accept.
+    """The job reference, for anyone chasing a trade afterwards.
 
     Folded in beside the prompt for the same reason the prompt itself exists: the two
     commands rendered this line identically and separately, which is exactly how the
-    instructions above it drifted apart in the first place.
+    instructions above it drifted apart in the first place. It carries no deadline:
+    the prompt states the real one, and the wallet also appends this to its final
+    result, where a countdown would mean nothing.
     """
-    return f"\n_Job `{job_id}` — you have ~{DEFAULT_WAIT_MINUTES} min._"
+    return f"\n_Job `{job_id}`._"
 
 
 def gate_read(ctx) -> str | None:

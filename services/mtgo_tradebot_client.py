@@ -23,9 +23,9 @@ from typing import Any, Optional
 import aiohttp
 from loguru import logger
 
-# How long a trade offer stands before the serve gives up. Mirrors
-# helpers.money_gate.DEFAULT_WAIT_MINUTES, which renders the same figure to
-# players; importing that here would be a cycle (money_gate imports this).
+# The serve's budget for a whole trade once queued (the invite inside it is
+# withdrawn after two minutes). Mirrors helpers.money_gate.DEFAULT_WAIT_MINUTES;
+# importing that here would be a cycle (money_gate imports this).
 DEFAULT_WAIT_MINUTES = 10
 
 # On MTGO, event tickets are the currency. Depositing/withdrawing tix is just trading this "card".

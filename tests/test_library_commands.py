@@ -249,12 +249,11 @@ async def test_a_short_wallet_is_told_the_hold_and_the_gap(monkeypatch):
 
 
 async def test_both_library_commands_give_the_shared_trade_instructions(monkeypatch):
-    """The serve's protocol is one protocol: it messages the player, they reply
-    YES, and it opens the trade. /borrow and /return drive the same serve as
-    /wallet deposit and withdraw, so they must not describe it differently --
-    telling a player to "accept the trade" leaves them waiting at a message
-    that needs an answer first. Asserted on what is SENT, so a command that
-    imports the shared prompt and forgets to render it still fails.
+    """The serve's protocol is one protocol: it sends the player an invite, and
+    they accept it within its window. /borrow and /return drive the same serve as
+    /wallet deposit and withdraw, so they must not describe it differently.
+    Asserted on what is SENT, so a command that imports the shared prompt and
+    forgets to render it still fails.
     """
     from helpers.money_gate import mtgo_trade_prompt
     shared = mtgo_trade_prompt("Team01")
@@ -265,6 +264,21 @@ async def test_both_library_commands_give_the_shared_trade_instructions(monkeypa
 
     assert shared in borrowed, "/borrow must render the shared instructions"
     assert shared in returned, "/return must render the shared instructions"
+
+
+async def test_the_trade_is_watched_for_the_whole_followup_window(monkeypatch):
+    """An unaccepted invite takes over two minutes to fail, and one in nine
+    library trades that did complete took longer than the old 90-second poll --
+    each of those players was told "I'll confirm here once it lands" and then
+    heard nothing. The poll now runs for what is left of the followup window."""
+    import services.library_loan_actions as mod
+    from helpers.money_gate import FOLLOWUP_WINDOW_S
+    loan = SimpleNamespace(cards=DECK, state="assigned", id=1, job_id="J1")
+
+    await _run(monkeypatch, "borrow", "dispatched", loan=loan)
+
+    timeout = mod.poll_until_settled.await_args.kwargs["timeout_s"]
+    assert FOLLOWUP_WINDOW_S - 5 <= timeout <= FOLLOWUP_WINDOW_S
 
 
 async def test_the_trade_message_lists_what_is_actually_being_traded(monkeypatch):

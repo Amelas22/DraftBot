@@ -43,8 +43,10 @@ from services.mtgo_tradebot_client import (
     too_large,
 )
 
-# How long a command waits on its own trade before handing over to the watchdog.
-# The serve's own offer stands ~10 min; this is only about answering the player.
+# How long a poll waits on its own trade by default before handing over to the
+# watchdog. Commands pass what is left of their followup window instead
+# (money_gate.followup_budget_s): an unaccepted invite alone takes over two
+# minutes to fail, and a command that stopped listening sooner told nobody.
 DEFAULT_POLL_S = 90
 RESCAN_INTERVAL_S = 10 * 60
 # How long a deck asked for after its draft stays on offer while the drafter
