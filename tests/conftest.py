@@ -896,7 +896,8 @@ def stub_library(monkeypatch, module, *, collateral=0, library_id="lib",
         monkeypatch.setattr(module, "library_behind", _behind)
 
     if stock is not None and hasattr(module, "lendable_now"):
-        async def _lendable(_library_id, *, exclude_loan_id=None):
+        async def _lendable(_library_id, *, exclude_loan_id=None,
+                            exclude_session_id=None):
             return dict(stock)
 
         monkeypatch.setattr(module, "lendable_now", _lendable)

@@ -519,7 +519,9 @@ async def assign_on_request(session_id: Any, player_id: Any) -> RequestOutcome:
         return "empty"
     if too_large(sum(int(c["qty"]) for c in cards)):
         return "too_large"
-    short = await shortfall(guild_id, cards)
+    # On behalf of this draft: one nobody agreed in before it fired still holds
+    # its whole cube, and that hold is these very cards, not another draft's.
+    short = await shortfall(guild_id, cards, exclude_session_id=str(session_id))
     if len(short) == len(cards) and all(s["have"] == 0 for s in short):
         return "nothing"
     try:

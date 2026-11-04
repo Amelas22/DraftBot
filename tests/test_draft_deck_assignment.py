@@ -1222,3 +1222,35 @@ async def test_a_request_with_part_of_the_pool_on_the_shelf_is_handed_out(
                       source="fixture:9", library_id=LIBRARY)
 
     assert await svc.assign_on_request(SESSION, ALICE) == "assigned"
+
+
+async def test_a_change_of_mind_in_a_draft_holding_its_own_cube_is_handed_out(
+        test_db, library_on, monkeypatch):
+    """Nobody agreed before the draft fired, so it has no loans and still holds
+    its whole cube. That hold is this draft's own copy: a drafter asking for
+    their deck is not refused because their own draft is holding it."""
+    from services import card_library_inventory
+
+    async def the_cube(cube):
+        return [{"name": "Island", "qty": 1}, {"name": "Lightning Bolt", "qty": 2},
+                {"name": "Counterspell", "qty": 1}]
+    monkeypatch.setattr(card_library_inventory, "fetch_cube", the_cube)
+    await _seed()
+    await _reported(SESSION, [(ALICE, "x", False), (BOB, "y", False)])
+    await _open_chat()
+    await _stamp_draft(teams_start_time=datetime.now() - timedelta(minutes=40))
+
+    assert await svc.assign_on_request(SESSION, BOB) == "assigned"
+
+
+async def test_a_card_short_but_not_gone_still_mints(test_db, library_on):
+    """Every card in Alice's pool is short, but one of her two Bolts is still
+    on the shelf: short is not gone, so her deck is minted."""
+    await _seed()
+    await _reported(SESSION, [(ALICE, "x", False), (BOB, "y", False)])
+    await _open_chat()
+    await assign_deck(GUILD, "9", [{"name": "Lightning Bolt", "qty": 1},
+                                   {"name": "Counterspell", "qty": 1}],
+                      source="fixture:9", library_id=LIBRARY)
+
+    assert await svc.assign_on_request(SESSION, ALICE) == "assigned"

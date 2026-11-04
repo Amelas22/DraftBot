@@ -402,11 +402,15 @@ async def collateral_for(loan: Any, guild_id: Any) -> Optional[int]:
 
 
 async def shortfall(guild_id: Any, cards: "list[dict[str, Any]]",
-                    loan_id: Optional[int] = None) -> "list[dict[str, Any]]":
+                    loan_id: Optional[int] = None, *,
+                    exclude_session_id: Optional[str] = None,
+                    ) -> "list[dict[str, Any]]":
     """Which of these cards the library cannot fully cover, and by how much.
 
     Ledger absence means zero entitlement; only the vault is truncated.
     A collecting loan may use its own reservation, but not another loan's.
+    `exclude_session_id` asks on behalf of that draft, whose own cube hold is
+    not counted against it (see library_available).
     """
     if loan_id is not None:
         async with AsyncSessionLocal() as session:
@@ -415,7 +419,8 @@ async def shortfall(guild_id: Any, cards: "list[dict[str, Any]]",
         library_id = library.id if library else None
     else:
         library_id = await library_id_for(guild_id)
-    avail = await lendable_now(library_id, exclude_loan_id=loan_id)
+    avail = await lendable_now(library_id, exclude_loan_id=loan_id,
+                               exclude_session_id=exclude_session_id)
     return [{"name": c["name"], "want": c["qty"], "have": avail.get(c["name"], 0)}
             for c in cards
             if avail.get(c["name"], 0) < c["qty"]]
@@ -446,7 +451,8 @@ def _panel_changed(loan: Any) -> None:
     loan_changed(loan)
 
 
-async def lendable_now(library_id: Any, *, exclude_loan_id: Optional[int] = None
+async def lendable_now(library_id: Any, *, exclude_loan_id: Optional[int] = None,
+                       exclude_session_id: Optional[str] = None,
                        ) -> "dict[str, int]":
     """What THIS library can actually hand over right now: {name: copies}.
 
@@ -471,7 +477,8 @@ async def lendable_now(library_id: Any, *, exclude_loan_id: Optional[int] = None
     if not library_id:
         return {}
     physical = await available_now()
-    entitled = await library_available(library_id, exclude_loan_id=exclude_loan_id)
+    entitled = await library_available(library_id, exclude_loan_id=exclude_loan_id,
+                                       exclude_session_id=exclude_session_id)
     # The ledger is authoritative about ENTITLEMENT, so a card it has no rows
     # for is one this library holds none of -- it was deposited to somebody
     # else, or to nobody. Absent therefore means zero here, unlike the vault,
