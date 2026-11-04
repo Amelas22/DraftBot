@@ -14,6 +14,7 @@ from services.league_roles import (
     league_participant_role,
     RoleSyncPlan,
     apply_role_sync,
+    closest_role_name,
     format_role_sync,
     live_member_ids,
     plan_role_sync,
@@ -434,3 +435,46 @@ def test_missing_role_warns_once_per_guild():
     warned = [str(m) for m in messages if "League Participant" in str(m)]
     assert len(warned) == 2
     assert any("g1" in m for m in warned) and any("g2" in m for m in warned)
+
+
+def test_a_missing_role_suggests_the_nearest_name_the_guild_has():
+    guild = _guild(["@everyone", "league participants", "Active", "Moderator"], {})
+    assert closest_role_name(guild, "League Participant") == "league participants"
+    assert closest_role_name(_guild(["🏆 League Participant"], {}), "League Participant")         == "🏆 League Participant"
+    assert closest_role_name(_guild(["@everyone", "Moderator"], {}), "League Participant") is None
+
+
+def test_the_missing_role_warning_in_the_log_names_the_likely_role():
+    guild = _guild(["League participant", "Active"], {})
+    messages = []
+    sink = logger.add(messages.append, level="WARNING")
+    try:
+        assert league_participant_role(guild) is None
+    finally:
+        logger.remove(sink)
+    assert any("did you mean 'League participant'?" in str(m) for m in messages)
+
+
+@pytest.mark.asyncio
+async def test_sync_roles_reply_says_a_league_role_is_missing_and_what_was_meant(test_db):
+    async with db_session() as session:
+        await _season(session)
+    guild, lp, *_ = _sync_guild({10: ["active"]}, with_lp=False)
+    near = MagicMock(); near.name = "League Participants"
+    guild.roles.append(near)
+
+    plan = await plan_role_sync(guild)
+    reply = format_role_sync(plan, False).splitlines()
+
+    assert reply[1] == ("⚠️ No role named **League Participant** in this server, so nobody is "
+                        "given it. Did you mean **League Participants**? Rename it to match, "
+                        "or create the role.")
+    assert len(plan.missing_roles) == 1   # Active exists, so only one warning
+
+
+@pytest.mark.asyncio
+async def test_sync_roles_reply_has_no_warning_when_both_roles_exist(test_db):
+    guild, *_ = _sync_guild({})
+    plan = await plan_role_sync(guild)
+    assert plan.missing_roles == []
+    assert "⚠️" not in format_role_sync(plan, False)

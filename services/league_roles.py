@@ -8,6 +8,7 @@ is only ever granted here, never removed.
 Discord-facing like tournament_roles: every function takes the guild it
 reconciles, and the database is only opened for the one lookup that needs it.
 """
+import difflib
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
@@ -59,8 +60,25 @@ def _find_role(guild: discord.Guild, name: str) -> discord.Role | None:
             logger.debug(message)
         else:
             _warned_missing.add(key)
-            logger.warning(message)
+            guess = closest_role_name(guild, name)
+            logger.warning(message + (f" (did you mean '{guess}'?)" if guess else ""))
     return role
+
+
+def closest_role_name(guild: discord.Guild, name: str) -> str | None:
+    """The guild role whose name most nearly matches ``name``: the likely intended
+    role when ``name`` itself is missing, renamed by a case, spacing or plural slip."""
+    by_key = {r.name.casefold().strip(): r.name for r in guild.roles}
+    match = difflib.get_close_matches(name.casefold().strip(), list(by_key), n=1, cutoff=0.6)
+    return by_key[match[0]] if match else None
+
+
+def missing_role_text(guild: discord.Guild, name: str) -> str:
+    """The operator's warning for a league role the guild lacks, so nobody gets it."""
+    guess = closest_role_name(guild, name)
+    fix = (f"Did you mean **{discord.utils.escape_markdown(guess)}**? Rename it to match, "
+           "or create the role." if guess else "Create the role to have it given.")
+    return f"⚠️ No role named **{name}** in this server, so nobody is given it. {fix}"
 
 
 def league_participant_name(guild_id: str | int) -> str:
@@ -141,6 +159,7 @@ class RoleSyncPlan:
     ok: bool = True  # False once an applied change was refused by Discord
     unfixed: list[str] = field(default_factory=list)  # still roleless after an apply
     unfixed_why: dict[str, str] = field(default_factory=dict)  # team name -> reason
+    missing_roles: list[str] = field(default_factory=list)  # warnings for league roles the guild lacks
 
 
 async def active_tournament_id(guild_id: str | int, *, registering: bool = False) -> int | None:
@@ -176,6 +195,9 @@ async def plan_role_sync(guild: discord.Guild) -> RoleSyncPlan:
     league = league_participant_role(guild)
     active = active_role(guild)
     wanted = [r for r in (league, active) if r is not None]
+    missing_roles = [missing_role_text(guild, name) for name, role in (
+        (league_participant_name(guild.id), league), (active_role_name(guild.id), active))
+        if role is None]
     grant: list[str] = []
     for user_id in sorted(live):
         member = guild.get_member(int(user_id))
@@ -185,7 +207,7 @@ async def plan_role_sync(guild: discord.Guild) -> RoleSyncPlan:
     strip: list[str] = []
     if league is not None:
         strip = [str(m.id) for m in league.members if str(m.id) not in live]
-    return RoleSyncPlan(missing, grant, strip)
+    return RoleSyncPlan(missing, grant, strip, missing_roles=missing_roles)
 
 
 def _unfixed_reason(guild: discord.Guild, team_name: str) -> str:
@@ -233,6 +255,7 @@ def format_role_sync(plan: RoleSyncPlan, applied: bool) -> str:
     """The operator's reply: counts, then up to 20 of each, within one message."""
     lines = [] if applied else [
         "Dry run — nothing changed. Run again with apply:True to make these changes."]
+    lines += plan.missing_roles
     titles = (
         ("Team roles created", "Given League Participant / Active", "League Participant removed")
         if applied and plan.ok else
