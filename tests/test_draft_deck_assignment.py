@@ -10,10 +10,12 @@ POSITIONALLY, and map_discord_to_draftmancer refuses to guess when the counts
 disagree. Getting that wrong here does not mis-post a message: it hands someone
 another player's 45 cards and charges them collateral for the privilege.
 """
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import select
 
 from database.db_session import AsyncSessionLocal
 from models.card_loan import CardLoan
@@ -1048,17 +1050,90 @@ async def test_a_declined_deck_is_not_handed_back_by_the_reconciler(
     assert (await _loans())[BOB].state == "expired"
 
 
-async def test_a_deck_already_returned_is_not_handed_out_twice(test_db, library_on):
+async def _returned(player):
     from sqlalchemy import update
-
-    await _seed()
-    await svc.assign_drafted_decks(SESSION)
     async with AsyncSessionLocal() as s:
-        await s.execute(update(CardLoan).where(CardLoan.borrower_id == BOB)
+        await s.execute(update(CardLoan).where(CardLoan.borrower_id == player)
                         .values(state="returned"))
         await s.commit()
 
-    assert await svc.assign_on_request(SESSION, BOB) == "already"
+
+async def _open_chat():
+    await _stamp_draft(deletion_time=datetime.now() + timedelta(hours=2))
+
+
+async def test_a_returned_deck_can_be_asked_for_again(test_db, library_on):
+    await _seed()
+    await _reported(SESSION, [(ALICE, "x", False), (BOB, "y", False)])
+    await _open_chat()
+    await svc.assign_drafted_decks(SESSION)
+    await _returned(BOB)
+
+    assert await svc.assign_on_request(SESSION, BOB) == "assigned"
+    async with AsyncSessionLocal() as s:
+        rows = (await s.scalars(select(CardLoan).where(CardLoan.borrower_id == BOB)
+                                .order_by(CardLoan.id))).all()
+    assert [r.state for r in rows] == ["returned", "assigned"], "a new row, history kept"
+    assert rows[1].claimed_at is not None
+
+
+async def test_a_returned_deck_can_be_asked_for_a_third_time(test_db, library_on):
+    await _seed()
+    await _reported(SESSION, [(ALICE, "x", False), (BOB, "y", False)])
+    await _open_chat()
+    await svc.assign_drafted_decks(SESSION)
+    await _returned(BOB)
+    assert await svc.assign_on_request(SESSION, BOB) == "assigned"
+    await _returned(BOB)
+
+    assert await svc.assign_on_request(SESSION, BOB) == "assigned"
+
+
+async def test_a_request_after_the_decision_is_handed_out_for_a_dead_rubber(
+        test_db, library_on):
+    await _seed()
+    await _reported(SESSION, [(ALICE, "x", True), (BOB, "y", False)])
+    await _stamp_draft(session_stage="completed",
+                       deletion_time=datetime.now() + timedelta(hours=2))
+
+    assert await svc.assign_on_request(SESSION, BOB) == "assigned"
+
+
+async def test_a_request_once_every_match_is_reported_is_over(test_db, library_on):
+    await _seed()
+    await _reported(SESSION, [(ALICE, "x", False), (BOB, "y", True)])
+    await _open_chat()
+
+    assert await svc.assign_on_request(SESSION, BOB) == "over"
+    assert BOB not in await _loans()
+
+
+async def test_a_request_as_the_chat_is_closing_is_closed(test_db, library_on):
+    await _seed()
+    await _reported(SESSION, [(ALICE, "x", False), (BOB, "y", False)])
+    await _stamp_draft(deletion_time=datetime.now() + timedelta(minutes=20))
+
+    assert await svc.assign_on_request(SESSION, BOB) == "closed"
+    assert BOB not in await _loans()
+
+
+async def test_a_request_in_an_abandoned_draft_is_closed(test_db, library_on):
+    await _seed()
+    await _stamp_draft(session_stage="abandoned",
+                       deletion_time=datetime.now() + timedelta(days=6))
+
+    assert await svc.assign_on_request(SESSION, BOB) == "closed"
+
+
+async def test_a_request_while_holding_another_drafts_deck_is_busy(
+        test_db, library_on):
+    await _seed()
+    await _reported(SESSION, [(ALICE, "x", False), (BOB, "y", False)])
+    await _open_chat()
+    await assign_deck(GUILD, BOB, [{"name": "Swamp", "qty": 1}],
+                      source="draft:other", library_id=LIBRARY)
+
+    assert await svc.assign_on_request(SESSION, BOB) == "busy"
 
 
 @pytest.mark.parametrize("who,why", [("9999", "not_drafter")])
@@ -1067,14 +1142,6 @@ async def test_somebody_who_was_not_in_the_draft_gets_nothing(test_db, library_o
 
     assert await svc.assign_on_request(SESSION, who) == why
     assert await _loans() == {}
-
-
-async def test_a_drafter_with_no_match_left_is_told_it_is_over(test_db, library_on):
-    await _seed()
-    await _reported(SESSION, [(ALICE, "x", False), (BOB, "y", True)])
-
-    assert await svc.assign_on_request(SESSION, BOB) == "over"
-    assert BOB not in await _loans()
 
 
 async def test_the_librarys_gate_still_applies(test_db, monkeypatch):

@@ -31,7 +31,8 @@ from services.library_service import library_for, offers
 from services.library_access_service import may_borrow_many
 from models.library import RENTAL
 from services.library_reservation import users_if_reserved
-from services.library_reminders import draft_state, who_can_still_use
+from services.library_reminders import (
+    draft_state, may_still_request, who_can_still_use)
 from database.db_session import AsyncSessionLocal
 from helpers.mtgo_names import mtgo_name
 from helpers.mtgo_untradeable import split_untradeable
@@ -435,18 +436,6 @@ async def assign_drafted_decks(session_id: Any) -> int:
     return assigned
 
 
-async def _taken_from(session_id: Any) -> "set[str]":
-    """Who this draft has given a deck that still counts: anything but an offer
-    that lapsed or was turned down. Those two are the only way to have had a
-    deck from it and still be owed one."""
-    async with AsyncSessionLocal() as session:
-        rows = await session.scalars(
-            select(CardLoan.borrower_id).where(
-                CardLoan.source == loan_source(session_id),
-                CardLoan.state != "expired"))
-        return {str(r) for r in rows.all()}
-
-
 async def latest_draft_of(guild_id: Any, player_id: Any) -> Optional[str]:
     """The newest draft in this server that the player drafted in, or None.
 
@@ -469,18 +458,20 @@ async def latest_draft_of(guild_id: Any, player_id: Any) -> Optional[str]:
 
 
 RequestOutcome = Literal[
-    "assigned", "not_drafter", "not_offered", "already", "over", "busy",
+    "assigned", "not_drafter", "not_offered", "closed", "over", "busy",
     "not_allowed", "no_log", "unseatable", "empty", "too_large", "failed"]
 
 
 async def assign_on_request(session_id: Any, player_id: Any) -> RequestOutcome:
     """Hand ONE drafter their pool because they asked for it after the draft.
 
-    For somebody who changed their mind: they said no before the draft fired,
-    never answered, or turned the offer down and want it after all. Every other
-    rule assign_drafted_decks applies still does -- the library offers this
-    cube, the drafter has a match left, holds no other deck, may borrow here,
-    and the seating can be trusted. What is skipped is only the rental
+    Anyone who holds no deck now may ask: they never agreed, declined, let the
+    offer lapse, or collected the deck and returned it. The horizon is the
+    chat closing and their own unreported match, not the decision or the
+    offer window (see library_reminders.may_still_request, which owns that
+    rule). Every other rule assign_drafted_decks applies still does -- the
+    library offers this cube, the drafter holds no other deck, may borrow
+    here, and the seating can be trusted. What is skipped is only the rental
     library's "agreed before it fired": asking now IS agreeing.
 
     The loan is dated from now (CardLoan.claimed_at), not from the draft: a
@@ -489,7 +480,7 @@ async def assign_on_request(session_id: Any, player_id: Any) -> RequestOutcome:
     offers to leave behind. No "deck waiting" DM, now or from the watchdog's
     retry sweep: the caller is collecting it, and was told so.
 
-    Returns "assigned", or why not: "not_drafter", "not_offered", "already",
+    Returns "assigned", or why not: "not_drafter", "not_offered", "closed",
     "over", "busy", "not_allowed", "no_log", "unseatable", "empty",
     "too_large" or "failed".
     """
@@ -505,9 +496,11 @@ async def assign_on_request(session_id: Any, player_id: Any) -> RequestOutcome:
     library = await library_for(guild_id)
     if cube is None or library is None or not await offers(library.id, cube):
         return "not_offered"
-    if player in await _taken_from(session_id):
-        return "already"
-    if player not in who_can_still_use(await draft_state(session_id), [player]):
+    # may_still_request answers in plain str; narrow to the two outcomes it names.
+    refused = may_still_request(await draft_state(session_id), player)
+    if refused == "closed":
+        return "closed"
+    if refused == "over":
         return "over"
     if await _holding_a_deck([player]):
         return "busy"

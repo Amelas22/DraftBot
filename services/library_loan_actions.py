@@ -85,9 +85,10 @@ SETUP_MESSAGES = {
 _CANNOT_COLLECT = "⚠️ The library can't put your deck together for that draft — ask an admin."
 REQUEST_MESSAGES: "dict[RequestOutcome, str]" = {
     "not_offered": "📭 The library doesn't lend that draft's cube.",
-    "already": "📭 You've already had your deck from that draft.",
-    "over": "📭 Your matches in that draft are done, so the library can't lend you "
-            "its deck any more.",
+    "closed": "📭 That draft's chat has closed, so its library decks can't be "
+              "borrowed any more.",
+    "over": "📭 Every match of yours in that draft is reported, so the library can't "
+            "lend you its deck any more.",
     "busy": "📦 You're still holding a library deck from another draft — hand it back "
             "with `/library return` first.",
     "no_log": "⏳ That draft's picks aren't in yet — try again in a minute.",
