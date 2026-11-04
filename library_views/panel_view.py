@@ -42,7 +42,7 @@ async def may_use_panel(session_id: str, user_id: str,
                         action: Action) -> Optional[str]:
     """Why this user may not use this draft's panel, or None to run the command.
 
-    The command runs for a loan from this draft. For borrow it also runs for
+    The command runs for a loan from this draft. For borrow and open it also runs for
     anybody in the draft with no loan yet -- the reserved, and a drafter who
     changed their mind -- so the borrow flow decides whether they can have a
     deck and says why not in its own words.
@@ -52,8 +52,10 @@ async def may_use_panel(session_id: str, user_id: str,
         if session_of(loan) == session_id:
             return None
         return NO_DECK + OTHER_DRAFT
-    if action in ("borrow", "open") and (await _drafted_in(session_id, user_id) or any(
-            b.user_id == str(user_id) for b in await panel_borrowers(session_id))):
+    if action in ("borrow", "open") and (
+            await _drafted_in(session_id, user_id)
+            or any(b.user_id == str(user_id)
+                   for b in await panel_borrowers(session_id))):
         return None
     return NO_DECK
 
@@ -134,7 +136,7 @@ class LibraryPanelView(discord.ui.View):
                              interaction: discord.Interaction) -> None:
         await _press(interaction, "decline")
 
-    @ui_button(label="Use the library", style=discord.ButtonStyle.primary,
+    @ui_button(label="Use the library", style=discord.ButtonStyle.secondary,
                custom_id="library_panel:open")
     async def open_button(self, button: "discord.ui.Button[Any]",
                           interaction: discord.Interaction) -> None:

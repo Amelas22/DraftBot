@@ -3,6 +3,7 @@ borrow and return the slash commands run."""
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import discord
 import pytest
 from discord.utils import MISSING
 
@@ -195,6 +196,7 @@ async def test_the_ask_view_has_one_button():
     assert ask is not None
     [button] = ask.children
     assert (button.custom_id, button.label) == ("library_panel:open", "Use the library")
+    assert button.style == discord.ButtonStyle.secondary
     assert "library_panel:open" in {i.custom_id for i in LibraryPanelView().children}
 
 
