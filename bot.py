@@ -140,6 +140,8 @@ async def main():
         bot.add_view(PublicSettleDebtsView())
         from library_views.panel_view import LibraryPanelView
         bot.add_view(LibraryPanelView())
+        from library_views.dm_view import LibraryDmView
+        bot.add_view(LibraryDmView())
         from cogs.tournament_commands import re_register_tournament_views
         await re_register_tournament_views(bot)
         from cogs.tournament_commands import sweep_brackets

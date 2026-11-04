@@ -403,7 +403,7 @@ def _dms(monkeypatch, delivers=True):
 
     sent = []
 
-    async def _record(bot, user_id, message, label=None):
+    async def _record(bot, user_id, message, view=None, label=None):
         sent.append((str(user_id), message))
         return delivers
 

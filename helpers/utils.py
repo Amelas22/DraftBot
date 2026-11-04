@@ -173,6 +173,22 @@ class PrefilledSelect(discord.ui.Select[Any]):
         return payload
 
 
+_ViewT = TypeVar("_ViewT", bound=discord.ui.View)
+
+
+def keep_only(view: _ViewT, custom_ids: Iterable[str]) -> _ViewT:
+    """Trim `view` to the children whose custom_id is in `custom_ids`.
+
+    A persistent view declares every button once, so a single `add_view`
+    covers them all; each message then shows only the subset for its face.
+    """
+    keep = set(custom_ids)
+    for item in list(view.children):
+        if getattr(item, "custom_id", None) not in keep:
+            view.remove_item(item)
+    return view
+
+
 def ui_button(
     *,
     label: "str | None" = None,

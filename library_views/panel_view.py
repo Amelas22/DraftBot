@@ -21,7 +21,7 @@ import discord
 from sqlalchemy import select
 
 from database.db_session import AsyncSessionLocal
-from helpers.utils import not_none, ui_button
+from helpers.utils import keep_only, not_none, ui_button
 from library_views.callers import InteractionCaller
 from library_views.some_cards import SomeCardsModal
 from models.draft_session import DraftSession
@@ -139,8 +139,4 @@ def panel_view(mode: str) -> Optional[LibraryPanelView]:
                        "library_panel:return")}.get(mode)
     if keep is None:
         return None
-    view = LibraryPanelView()
-    for item in list(view.children):
-        if getattr(item, "custom_id", None) not in keep:
-            view.remove_item(item)
-    return view
+    return keep_only(LibraryPanelView(), keep)

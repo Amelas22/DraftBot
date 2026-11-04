@@ -56,11 +56,15 @@ class InteractionCaller:
     when it does -- so the press would show nothing while the flow works.
     """
 
-    def __init__(self, interaction: discord.Interaction) -> None:
+    def __init__(self, interaction: discord.Interaction, *,
+                 guild_id: Optional[int] = None) -> None:
+        """A press in a DM names no server; the caller that knows which server
+        the loan is from says so with `guild_id`."""
         self._interaction = interaction
         # Every component interaction carries the member or user who pressed it.
         self.user_id: int = not_none(interaction.user).id
-        self.guild_id: Optional[int] = context_guild_id(interaction)
+        self.guild_id: Optional[int] = (
+            guild_id if guild_id is not None else context_guild_id(interaction))
 
     async def defer(self) -> None:
         await self._interaction.response.defer(ephemeral=True, invisible=False)

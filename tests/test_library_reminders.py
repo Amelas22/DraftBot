@@ -61,8 +61,8 @@ class _Recorder:
         self.sent = []
         self.delivers = delivers
 
-    async def __call__(self, bot, user_id, message, label=None):
-        self.sent.append((str(user_id), message))
+    async def __call__(self, bot, user_id, message, view=None, label=None):
+        self.sent.append((str(user_id), message, view))
         return self.delivers
 
 
@@ -209,7 +209,8 @@ def test_a_loan_belonging_to_no_draft_is_never_asked_for():
 
 def test_the_ready_dm_says_how_to_collect():
     """The board says nothing now, so this DM carries the whole signal."""
-    assert "/library borrow" in deck_ready_message([{"name": "Swamp", "qty": 4}], 0)
+    msg = deck_ready_message([{"name": "Swamp", "qty": 4}], 0)
+    assert "**Borrow my deck** below" in msg and "/library borrow" in msg
 
 
 def test_the_ready_dm_names_the_hold_when_there_is_one():
@@ -233,7 +234,8 @@ def test_the_ready_dm_does_not_invent_a_hold_when_there_is_none():
 
 
 def test_the_return_dm_says_how_to_return():
-    assert "/library return" in return_message(_loan())
+    msg = return_message(_loan())
+    assert "**Return my deck** below" in msg and "/library return" in msg
 
 
 def test_the_return_dm_does_not_quote_a_deposit_figure():
@@ -397,7 +399,7 @@ async def test_a_finished_player_is_asked_once_not_once_per_tick(test_db, dm):
     second = await mod.send_due_reminders(now=due + timedelta(minutes=10))
 
     assert first == 1 and second == 0, dm.sent
-    assert [uid for uid, _ in dm.sent] == ["p1"]
+    assert [sent[0] for sent in dm.sent] == ["p1"]
 
 
 @pytest.mark.asyncio
@@ -552,13 +554,13 @@ async def test_a_deck_returned_mid_scan_is_not_chased(test_db, dm):
     second = await _a_loan(borrower="p2")
     original = dm.__call__
 
-    async def _return_the_other(bot, user_id, message, label=None):
+    async def _return_the_other(bot, user_id, message, view=None, label=None):
         if str(user_id) == "p1":
             async with AsyncSessionLocal() as s:
                 row = await s.get(CardLoan, second)
                 row.state = "returned"
                 await s.commit()
-        return await original(bot, user_id, message, label)
+        return await original(bot, user_id, message, view, label)
 
     import notification_service
     notification_service.send_dm = _return_the_other
@@ -566,7 +568,7 @@ async def test_a_deck_returned_mid_scan_is_not_chased(test_db, dm):
     asked = await mod.send_due_reminders(now=NOW)
 
     assert asked == 1, f"the returned deck was chased anyway: {dm.sent}"
-    assert [uid for uid, _ in dm.sent] == ["p1"]
+    assert [sent[0] for sent in dm.sent] == ["p1"]
     assert (await _stamps(second))[1] is None
     assert first != second
 
@@ -707,3 +709,34 @@ async def test_a_first_time_loan_is_still_chased_on_the_decision(test_db, dm):
     await _a_loan()
 
     assert await mod.send_due_reminders(now=NOW) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_reminder_carries_a_return_button(test_db, dm):
+    await seed_session("s1", stype="swiss", stage="completed",
+                       matches=[("p1", "p2", "p1", NOW)])
+    await _a_loan()
+
+    assert await mod.send_due_reminders(now=NOW) == 1
+    view = dm.sent[0][2]
+    assert [i.custom_id for i in view.children] == ["library_dm:return"]
+
+
+@pytest.mark.asyncio
+async def test_the_ready_dm_carries_a_borrow_button(test_db, dm):
+    loan_id = await _a_loan(state="assigned")
+
+    assert await mod.announce_one(loan_id, at=NOW) is True
+    view = dm.sent[0][2]
+    assert [i.custom_id for i in view.children] == ["library_dm:borrow"]
+
+
+@pytest.mark.asyncio
+async def test_an_undelivered_dm_with_a_button_is_still_not_recorded(test_db, monkeypatch):
+    import bot_registry, notification_service
+    monkeypatch.setattr(bot_registry, "get_bot", lambda: object())
+    monkeypatch.setattr(notification_service, "send_dm", _Recorder(delivers=False))
+    loan_id = await _a_loan(state="assigned")
+
+    assert await mod.announce_one(loan_id, at=NOW) is False
+    assert (await _stamps(loan_id))[0] is None

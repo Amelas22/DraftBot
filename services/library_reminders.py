@@ -150,7 +150,8 @@ def deck_ready_message(cards: Any, collateral: int) -> str:
     unlike in return_message: they have not paid yet.
     """
     msg = (f"📚 Your drafted deck is ready to borrow — **{deck_summary(cards)}**.\n"
-           "Run `/library borrow` to have it traded to you.")
+           "Press **Borrow my deck** below, or run `/library borrow` in the "
+           "server, to have it traded to you.")
     if collateral:
         msg += (f"\nThis library asks for a **{collateral} tix** hold, "
                 "refunded when you return the deck.")
@@ -175,12 +176,12 @@ def return_message(loan: Any, decided: bool = False,
     lead = "Your draft is decided. " if decided else ""
     summary = deck_summary(cards if cards else loan.cards)
     return (f"{lead}📦 Please return your borrowed deck — **{summary}**.\n"
-            "Run `/library return` and the library will collect it, and the "
-            "hold comes back with it.\n"
+            "Press **Return my deck** below, or run `/library return` in the "
+            "server, and the library will collect it; the hold comes back with it.\n"
             "Other drafters are waiting on those cards.")
 
 
-async def _dm(loan: Any, message: str, what: str) -> bool:
+async def _dm(loan: Any, message: str, what: str, view: Any = None) -> bool:
     """Send one library DM. True only if it actually went.
 
     send_dm RETURNS False for a blocked inbox, an HTTP error or an unparseable
@@ -195,7 +196,8 @@ async def _dm(loan: Any, message: str, what: str) -> bool:
     if bot is None:      # no bot (tests, migrations, CLI): nobody to tell
         return False
     return bool(await notification_service.send_dm(
-        bot, loan.borrower_id, message, label=f"{what} for {loan.borrower_id}"))
+        bot, loan.borrower_id, message, view=view,
+        label=f"{what} for {loan.borrower_id}"))
 
 
 async def _stamp(loan_id: Any, field: str, at: datetime) -> None:
@@ -265,7 +267,10 @@ async def announce_one(loan_id: Any, at: Optional[datetime] = None) -> bool:
             "library reminders: could not read the terms behind loan {}; "
             "announcing without naming a hold", loan_id)
 
-    if not await _dm(loan, deck_ready_message(loan.cards, collateral), "deck ready"):
+    from library_views.dm_view import dm_view
+
+    if not await _dm(loan, deck_ready_message(loan.cards, collateral), "deck ready",
+                     view=dm_view("borrow")):
         return False
     await _stamp(loan_id, "ready_dm_at", at or datetime.now())
     return True
@@ -320,6 +325,7 @@ async def send_due_reminders(now: Optional[datetime] = None) -> int:
                         finished_at=mine, played_since_ask=played_since_ask, now=at):
             due.append((loan, decided))
 
+    from library_views.dm_view import dm_view
     from services.card_lending_service import held_cards
 
     asked = 0
@@ -332,7 +338,7 @@ async def send_due_reminders(now: Optional[datetime] = None) -> int:
             continue
         held = await held_cards(loan)
         if await _dm(loan, return_message(loan, decided, cards=held),
-                     "return reminder"):
+                     "return reminder", view=dm_view("return")):
             await _stamp(loan.id, "last_reminded_at", at)
             asked += 1
     if asked:
