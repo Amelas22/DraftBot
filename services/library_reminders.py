@@ -403,6 +403,29 @@ def who_can_still_use(state: DraftState, player_ids: Any,
     return {str(p) for p in player_ids if str(p) not in state.done_at}
 
 
+def may_still_request(state: DraftState, player_id: Any,
+                      now: Optional[datetime] = None) -> Optional[str]:
+    """Why this drafter may not ask for their deck again, or None if they may.
+
+    The request rule, beside who_can_still_use, the reservation rule. That one
+    decides when an offer is handed out and taken back; this one decides when a
+    drafter, after the draft, may ask for the deck again. They differ on purpose:
+    a request ignores settlement (a clinched side still plays its dead rubbers)
+    and the offer window (a draft that ran long is still being played). Only the
+    chat bounds it, so a request is refused once the chat is closing.
+
+    "closed" -- the draft chat is closing (DraftState.chat_closing); outranks
+    "over", since there is nothing left to ask in.
+    "over" -- this drafter has reported every match, so they are done with a deck.
+    For a progressively-paired format done_at is empty, so only the chat gates.
+    """
+    if state.chat_closing(now):
+        return "closed"
+    if str(player_id) in state.done_at:
+        return "over"
+    return None
+
+
 async def who_can_still_use_a_deck(session_id: Any, player_ids: Any,
                                    now: Optional[datetime] = None) -> "set[str]":
     """who_can_still_use, reading the draft first."""

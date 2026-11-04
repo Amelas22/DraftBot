@@ -622,3 +622,45 @@ async def test_an_undelivered_announcement_is_retried_next_tick(test_db, dm):
     dm.delivers = True
     assert await mod.announce_ready_decks(now=NOW) == 1, "the retry never came"
     assert (await _stamps(loan_id))[0] == NOW
+
+
+# -- who may ask for a deck again ---------------------------------------------
+
+
+def _state(done_at=None, settled=False, closes_at=None, abandoned=False):
+    return mod.DraftState(done_at or {}, settled, None, {}, closes_at, abandoned)
+
+
+def test_a_player_with_a_match_left_may_request_after_the_decision():
+    """Settlement ends the reservation, not the request: dead rubbers get played."""
+    state = _state(done_at={"p2": NOW}, settled=True, closes_at=NOW + timedelta(hours=2))
+    assert mod.may_still_request(state, "p1", NOW) is None
+
+
+def test_a_player_with_every_match_reported_is_over():
+    state = _state(done_at={"p1": NOW}, closes_at=NOW + timedelta(hours=2))
+    assert mod.may_still_request(state, "p1", NOW) == "over"
+
+
+def test_a_chat_about_to_close_refuses_everyone():
+    state = _state(closes_at=NOW + timedelta(minutes=10))
+    assert mod.may_still_request(state, "p1", NOW) == "closed"
+
+
+def test_closing_outranks_over():
+    state = _state(done_at={"p1": NOW}, closes_at=NOW)
+    assert mod.may_still_request(state, "p1", NOW) == "closed"
+
+
+def test_a_swiss_draft_gates_only_on_the_chat():
+    """done_at is empty for a progressively-paired format; the chat is the horizon."""
+    state = _state(settled=True, closes_at=NOW + timedelta(hours=1))
+    assert mod.may_still_request(state, "p1", NOW) is None
+
+
+def test_the_offer_window_does_not_end_a_request():
+    """who_can_still_use says nobody an hour after the end; a request does not care."""
+    state = mod.DraftState({}, False, NOW - timedelta(hours=3), {},
+                           NOW + timedelta(days=6), False)
+    assert mod.who_can_still_use(state, ["p1"], NOW) == set()
+    assert mod.may_still_request(state, "p1", NOW) is None
