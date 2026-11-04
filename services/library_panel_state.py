@@ -172,7 +172,8 @@ def borrow_embed(borrowers: list[Borrower], *, closed: bool = False) -> discord.
         footer = "This draft's library decks are closed."
     else:
         footer = ("Press **Borrow my deck** and the library will trade you "
-                  "your pool on MTGO.")
+                  "your pool on MTGO. **Return my deck** hands it back between "
+                  "matches; you can borrow it again while you have a match to play.")
     return discord.Embed(title=TITLE, description="\n".join(lines) + f"\n\n{footer}")
 
 

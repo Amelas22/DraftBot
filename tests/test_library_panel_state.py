@@ -24,6 +24,12 @@ def _field(embed, name):
     return next((f.value for f in embed.fields if f.name == name), "")
 
 
+def test_borrow_embed_says_returning_between_matches_is_fine():
+    text = library_panel_state.borrow_embed(_who("borrowed")).description
+    assert "**Return my deck** hands it back between matches" in text
+    assert "borrow it again while you have a match to play" in text
+
+
 def test_borrow_embed_lists_each_borrower_by_state():
     embed = borrow_embed([
         Borrower("1", "Ravenwood", "borrowed", []),
