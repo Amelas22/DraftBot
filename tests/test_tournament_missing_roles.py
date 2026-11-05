@@ -172,7 +172,7 @@ async def test_start_refuses_a_team_whose_role_name_is_taken(test_db):
     cog = TournamentCog(MagicMock())
     cog._post_schedule = AsyncMock()
     ctx = _ctx()
-    ctx.guild.roles = [SimpleNamespace(id=1, name="Team Mod")]
+    ctx.guild.roles = [SimpleNamespace(id=1, name="Team Mod", managed=False)]
 
     with patch("cogs.tournament_commands.tournament_enabled", return_value=True), \
          patch("helpers.permissions.get_config", return_value={}), \
@@ -213,7 +213,7 @@ async def test_sync_roles_apply_names_a_team_it_could_not_fix(test_db):
     t_id = await _registering(["Mod"])
     guild = MagicMock()
     guild.id = GUILD_ID
-    guild.roles = [SimpleNamespace(id=1, name="Team Mod")]
+    guild.roles = [SimpleNamespace(id=1, name="Team Mod", managed=False)]
     guild.get_role = MagicMock(return_value=None)
     guild.members = []
     with patch("helpers.permissions.get_config", return_value={}), \

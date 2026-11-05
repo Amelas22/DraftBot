@@ -9,6 +9,7 @@ Discord-facing like tournament_roles: every function takes the guild it
 reconciles, and the database is only opened for the one lookup that needs it.
 """
 import difflib
+import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
@@ -60,25 +61,48 @@ def _find_role(guild: discord.Guild, name: str) -> discord.Role | None:
             logger.debug(message)
         else:
             _warned_missing.add(key)
-            guess = closest_role_name(guild, name)
+            guess = closest_role_name(guild, name, exclude=_other_league_roles(guild.id, name))
             logger.warning(message + (f" (did you mean '{guess}'?)" if guess else ""))
     return role
 
 
-def closest_role_name(guild: discord.Guild, name: str) -> str | None:
+def _role_key(name: str) -> str:
+    """A role name with the slips operators make folded out: case, spacing, emoji
+    and punctuation, and a plural s."""
+    key = re.sub(r"[^a-z0-9]", "", name.casefold())
+    return key[:-1] if key.endswith("s") and len(key) > 1 else key
+
+
+def closest_role_name(guild: discord.Guild, name: str, *,
+                      exclude: Iterable[str] = ()) -> str | None:
     """The guild role whose name most nearly matches ``name``: the likely intended
-    role when ``name`` itself is missing, renamed by a case, spacing or plural slip."""
-    by_key = {r.name.casefold().strip(): r.name for r in guild.roles}
-    match = difflib.get_close_matches(name.casefold().strip(), list(by_key), n=1, cutoff=0.6)
+    role when ``name`` itself is missing, renamed by a case, spacing, plural or
+    one-letter slip. Never @everyone, a managed role or a name in ``exclude`` (the
+    other configured league role): the warning tells the operator to rename the
+    role to match, so it must not point at one that does a different job, the way
+    "Inactive" nearly spells "Active"."""
+    skip = set(exclude) | {name, "@everyone"}
+    by_key = {_role_key(r.name): r.name for r in guild.roles
+              if r.name not in skip and not r.managed}
+    wanted = _role_key(name)
+    if wanted in by_key:
+        return by_key[wanted]
+    match = difflib.get_close_matches(wanted, list(by_key), n=1, cutoff=0.9)
     return by_key[match[0]] if match else None
+
+
+def _other_league_roles(guild_id: str | int, name: str) -> set[str]:
+    """The configured league role names other than ``name``."""
+    return {league_participant_name(guild_id), active_role_name(guild_id)} - {name}
 
 
 def missing_role_text(guild: discord.Guild, name: str) -> str:
     """The operator's warning for a league role the guild lacks, so nobody gets it."""
-    guess = closest_role_name(guild, name)
+    guess = closest_role_name(guild, name, exclude=_other_league_roles(guild.id, name))
     fix = (f"Did you mean **{discord.utils.escape_markdown(guess)}**? Rename it to match, "
            "or create the role." if guess else "Create the role to have it given.")
-    return f"⚠️ No role named **{name}** in this server, so nobody is given it. {fix}"
+    return (f"⚠️ No role named **{discord.utils.escape_markdown(name)}** in this server, "
+            f"so nobody is given it. {fix}")
 
 
 def league_participant_name(guild_id: str | int) -> str:
@@ -150,6 +174,9 @@ async def release_league_role(guild: discord.Guild, user_ids: Iterable[str]) -> 
     return ok
 
 
+GRANTING_BOTH = "League Participant / Active"
+
+
 @dataclass
 class RoleSyncPlan:
     """What /tournament sync_roles would change. Team names and user ids."""
@@ -160,6 +187,7 @@ class RoleSyncPlan:
     unfixed: list[str] = field(default_factory=list)  # still roleless after an apply
     unfixed_why: dict[str, str] = field(default_factory=dict)  # team name -> reason
     missing_roles: list[str] = field(default_factory=list)  # warnings for league roles the guild lacks
+    granting: str = GRANTING_BOTH  # the roles the grant list is given, as the reply names them
 
 
 async def active_tournament_id(guild_id: str | int, *, registering: bool = False) -> int | None:
@@ -207,7 +235,8 @@ async def plan_role_sync(guild: discord.Guild) -> RoleSyncPlan:
     strip: list[str] = []
     if league is not None:
         strip = [str(m.id) for m in league.members if str(m.id) not in live]
-    return RoleSyncPlan(missing, grant, strip, missing_roles=missing_roles)
+    return RoleSyncPlan(missing, grant, strip, missing_roles=missing_roles,
+                        granting=" / ".join(r.name for r in wanted) or GRANTING_BOTH)
 
 
 def _unfixed_reason(guild: discord.Guild, team_name: str) -> str:
@@ -257,11 +286,11 @@ def format_role_sync(plan: RoleSyncPlan, applied: bool) -> str:
         "Dry run — nothing changed. Run again with apply:True to make these changes."]
     lines += plan.missing_roles
     titles = (
-        ("Team roles created", "Given League Participant / Active", "League Participant removed")
+        ("Team roles created", f"Given {plan.granting}", "League Participant removed")
         if applied and plan.ok else
-        ("Team roles", "League Participant / Active", "League Participant removal")
+        ("Team roles", plan.granting, "League Participant removal")
         if applied else
-        ("Teams without a role", "Members to give League Participant / Active",
+        ("Teams without a role", f"Members to give {plan.granting}",
          "Members to take League Participant from"))
     lines.append(_listing(titles[0], [f"**{n}**" for n in plan.teams_missing_role]))
     lines.append(_listing(titles[1], [f"<@{u}>" for u in plan.grant]))

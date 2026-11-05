@@ -94,8 +94,8 @@ async def test_a_pending_team_is_live(test_db):
         assert await live_member_ids(session, GUILD) == {"10"}
 
 
-def _role(name):
-    role = SimpleNamespace(name=name)
+def _role(name, managed=False):
+    role = SimpleNamespace(name=name, managed=managed)
     return role
 
 
@@ -460,7 +460,7 @@ async def test_sync_roles_reply_says_a_league_role_is_missing_and_what_was_meant
     async with db_session() as session:
         await _season(session)
     guild, lp, *_ = _sync_guild({10: ["active"]}, with_lp=False)
-    near = MagicMock(); near.name = "League Participants"
+    near = MagicMock(); near.name = "League Participants"; near.managed = False
     guild.roles.append(near)
 
     plan = await plan_role_sync(guild)
@@ -478,3 +478,30 @@ async def test_sync_roles_reply_has_no_warning_when_both_roles_exist(test_db):
     plan = await plan_role_sync(guild)
     assert plan.missing_roles == []
     assert "⚠️" not in format_role_sync(plan, False)
+
+
+def test_the_suggestion_never_points_at_a_role_that_does_a_different_job():
+    # "Inactive" nearly spells "Active" but is the opposite role.
+    assert closest_role_name(_guild(["@everyone", "Inactive", "League Participant"], {}), "Active") is None
+    # A one-letter typo is still found.
+    assert closest_role_name(_guild(["Leauge Participant"], {}), "League Participant") == "Leauge Participant"
+    # Never @everyone or a managed (bot or booster) role.
+    guild = _guild(["@everyone"], {})
+    guild.roles.append(_role("Actives", managed=True))
+    assert closest_role_name(guild, "Active") is None
+    # Never the other configured league role: renaming it would break that role.
+    guild = _guild(["League Participant"], {})
+    assert closest_role_name(guild, "League Participants") == "League Participant"
+    assert closest_role_name(guild, "League Participants", exclude={"League Participant"}) is None
+
+
+@pytest.mark.asyncio
+async def test_sync_roles_reply_offers_only_the_roles_the_guild_has(test_db):
+    async with db_session() as session:
+        await _season(session)
+    guild, *_ = _sync_guild({10: []}, with_lp=False)
+    plan = await plan_role_sync(guild)
+    reply = format_role_sync(plan, False)
+    assert plan.granting == "Active"
+    assert "**Members to give Active** (1)" in reply
+    assert "League Participant / Active" not in reply
