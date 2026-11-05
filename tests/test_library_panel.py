@@ -744,7 +744,8 @@ async def test_a_decided_draft_with_a_dead_rubber_keeps_a_return_panel(
     assert "Borrow my deck" in embed.description
     view = channel.send.await_args.kwargs["view"]
     assert {i.custom_id for i in view.children} == {
-        "library_panel:borrow", "library_panel:some", "library_panel:return"}
+        "library_panel:borrow", "library_panel:some", "library_panel:return",
+        "library_panel:sub"}
 
 
 @pytest.mark.asyncio
@@ -780,7 +781,8 @@ async def test_a_lost_return_panel_held_open_for_a_dead_rubber_is_posted_again(
     channel.send.assert_awaited_once()
     view = channel.send.await_args.kwargs["view"]
     assert {i.custom_id for i in view.children} == {
-        "library_panel:borrow", "library_panel:some", "library_panel:return"}
+        "library_panel:borrow", "library_panel:some", "library_panel:return",
+        "library_panel:sub"}
 
 
 @pytest.mark.asyncio
@@ -858,7 +860,8 @@ async def test_a_lost_ask_copy_that_should_be_borrow_gets_a_fresh_borrow_copy(
     await sync_panel(bot, "s1")
     channel.send.assert_awaited_once()
     assert [i.custom_id for i in channel.send.await_args.kwargs["view"].children] == [
-        "library_panel:borrow", "library_panel:some", "library_panel:return", "library_panel:decline"]
+        "library_panel:borrow", "library_panel:some", "library_panel:return", "library_panel:decline",
+        "library_panel:sub"]
     row = await _row()
     assert row.library_panel_mode == "borrow"
     assert row.library_panel_message_id == str(sent.id)
@@ -932,7 +935,8 @@ async def test_opening_edits_the_ask_copy_into_the_borrow_panel(test_db, monkeyp
     kwargs = interaction.response.edit_message.await_args.kwargs
     assert "Nobody has a library deck yet." in kwargs["embed"].description
     assert [i.custom_id for i in kwargs["view"].children] == [
-        "library_panel:borrow", "library_panel:some", "library_panel:return", "library_panel:decline"]
+        "library_panel:borrow", "library_panel:some", "library_panel:return", "library_panel:decline",
+        "library_panel:sub"]
     row = await _row()
     assert row.library_panel_mode == "borrow"
     assert row.library_panel_message_id == "777"

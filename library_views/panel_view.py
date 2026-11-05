@@ -21,6 +21,7 @@ import discord
 from sqlalchemy import select
 
 from database.db_session import AsyncSessionLocal
+from helpers.permissions import is_bot_manager_interaction
 from helpers.utils import keep_only, not_none, ui_button
 from library_views.callers import InteractionCaller
 from library_views.some_cards import SomeCardsModal
@@ -35,7 +36,7 @@ OTHER_DRAFT = (" Your library deck is from another draft — use `/library borro
                "or `/library return`.")
 
 
-Action = Literal["borrow", "return", "decline", "open"]
+Action = Literal["borrow", "return", "decline", "open", "sub"]
 
 
 async def may_use_panel(session_id: str, user_id: str,
@@ -46,7 +47,12 @@ async def may_use_panel(session_id: str, user_id: str,
     anybody in the draft with no loan yet -- the reserved, and a drafter who
     changed their mind -- so the borrow flow decides whether they can have a
     deck and says why not in its own words.
+
+    Sub is for anybody seated on a team in the draft, whatever they hold:
+    Confirm's own checks say what stands in the way.
     """
+    if action == "sub":
+        return None if await _seated_in(session_id, user_id) else NO_DECK
     loan = await active_loan(user_id)
     if loan is not None:
         if session_of(loan) == session_id:
@@ -63,6 +69,12 @@ async def may_use_panel(session_id: str, user_id: str,
 async def _drafted_in(session_id: str, user_id: str) -> bool:
     draft = await DraftSession.get_by_session_id(session_id)
     return draft is not None and str(user_id) in {str(p) for p in (draft.sign_ups or {})}
+
+
+async def _seated_in(session_id: str, user_id: str) -> bool:
+    draft = await DraftSession.get_by_session_id(session_id)
+    return draft is not None and str(user_id) in {
+        str(p) for p in [*(draft.team_a or []), *(draft.team_b or [])]}
 
 
 async def _session_for_channel(channel_id: Any) -> Optional[str]:
@@ -82,6 +94,10 @@ async def _press(interaction: discord.Interaction, action: Action,
         await interaction.response.send_message(NO_DECK, ephemeral=True)
         return
     refused = await may_use_panel(session_id, user_id, action)
+    is_manager = False
+    if action == "sub" and refused is not None \
+            and await is_bot_manager_interaction(interaction):
+        refused, is_manager = None, True
     if refused is not None:
         await interaction.response.send_message(refused, ephemeral=True)
         return
@@ -95,6 +111,14 @@ async def _press(interaction: discord.Interaction, action: Action,
         if not await open_panel(session_id, interaction):
             await interaction.response.send_message(
                 "📭 This draft's library decks are closed.", ephemeral=True)
+        return
+    if action == "sub":
+        # Imported here: the picker imports the panel module, which imports this one.
+        from library_views.sub_picker import SubPickerView
+        await interaction.response.send_message(
+            "Who can't play, and who is subbing?",
+            view=await SubPickerView.build(session_id, user_id, is_manager),
+            ephemeral=True)
         return
     caller = InteractionCaller(interaction)
     if action == "borrow":
@@ -142,17 +166,24 @@ class LibraryPanelView(discord.ui.View):
                           interaction: discord.Interaction) -> None:
         await _press(interaction, "open")
 
+    @ui_button(label="Sub for a player", style=discord.ButtonStyle.secondary,
+               custom_id="library_panel:sub")
+    async def sub_button(self, button: "discord.ui.Button[Any]",
+                         interaction: discord.Interaction) -> None:
+        await _press(interaction, "sub")
+
 
 def panel_view(mode: str) -> Optional[LibraryPanelView]:
     """The buttons the panel shows in `mode`: Borrow, Borrow only some cards,
     Return and "I don't need my deck" while decks are going out; the same
     without the decline once they are coming back, so a dead rubber can take
-    a few cards out again; one "Use the library" button on the ask face;
-    none when closed."""
+    a few cards out again; Sub for a player last on both; one "Use the
+    library" button on the ask face; none when closed."""
     keep = {"borrow": ("library_panel:borrow", "library_panel:some",
-                       "library_panel:return", "library_panel:decline"),
+                       "library_panel:return", "library_panel:decline",
+                       "library_panel:sub"),
             "return": ("library_panel:borrow", "library_panel:some",
-                       "library_panel:return"),
+                       "library_panel:return", "library_panel:sub"),
             "ask": ("library_panel:open",)}.get(mode)
     if keep is None:
         return None
