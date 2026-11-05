@@ -1666,6 +1666,12 @@ class PersistentView(discord.ui.View):
                     if bet_embed:
                         embeds.append(bet_embed)
 
+                    if session.tournament_match_id is not None:
+                        # First thing in the room: which match this is, and the
+                        # thread it was arranged in. The room's name says neither.
+                        from match_control_view import post_room_header
+                        await post_room_header(draft_chat_channel, session.tournament_match_id)
+
                     sign_up_tags = ' '.join(f"<@{user_id}>" for user_id in session.sign_ups.keys())
                     auto_text = " (Auto-created)" if interaction is None else ""
                     logger.debug("Sending pairing announcement")
@@ -1710,6 +1716,12 @@ class PersistentView(discord.ui.View):
 
                 from services.library_panel import nudge
                 await nudge(bot, session.session_id)
+
+                if session.tournament_match_id is not None:
+                    # After the commit that stamped rooms_created_at, which is
+                    # what lets the control message point at the room.
+                    from match_control_view import announce_rooms_open
+                    await announce_rooms_open(bot, session.tournament_match_id)
 
                 if interaction:
                     await interaction.followup.send("Pairings posted.", ephemeral=True)

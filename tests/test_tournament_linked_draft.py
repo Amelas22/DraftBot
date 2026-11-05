@@ -680,7 +680,7 @@ async def test_sync_updates_a_score_that_grew_after_the_clinch(test_db):
 
     with patch("services.tournament_service.db_session", lambda: _committing(test_db)):
         await record_linked_result(match_id, 5, 2)      # clinch
-        match, _done = await sync_linked_result(match_id, 7, 2)  # final
+        match, _done, _new = await sync_linked_result(match_id, 7, 2)  # final
 
     assert match is not None, "a changed score must be written"
     assert (match.team_a_wins, match.team_b_wins) == (7, 2)
@@ -707,7 +707,7 @@ async def test_sync_records_a_match_that_has_no_result_yet(test_db):
     match_id, _ = await _one_match(test_db)
 
     with patch("services.tournament_service.db_session", lambda: _committing(test_db)):
-        match, _done = await sync_linked_result(match_id, 5, 0)
+        match, _done, _new = await sync_linked_result(match_id, 5, 0)
 
     assert match is not None
     assert (match.team_a_wins, match.team_b_wins) == (5, 0)
@@ -737,3 +737,20 @@ async def test_sync_refuses_to_restate_a_finished_tournament(test_db):
     async with test_db() as session:
         match = await session.get(TournamentMatch, match_id)
         assert (match.team_a_wins, match.team_b_wins) == (5, 2)
+
+
+@pytest.mark.asyncio
+async def test_sync_says_when_a_match_first_becomes_decided(test_db):
+    """The clinch write is the one the thread gets a fresh result post for.
+
+    Every later report that moves the score is a correction of a decided
+    match: the control message and pairing line follow it, a new post would
+    only repeat them.
+    """
+    match_id, _ = await _one_match(test_db)
+
+    with patch("services.tournament_service.db_session", lambda: _committing(test_db)):
+        _m, _done, newly_decided = await sync_linked_result(match_id, 5, 2)
+        assert newly_decided is True
+        _m, _done, newly_decided = await sync_linked_result(match_id, 7, 2)
+        assert newly_decided is False

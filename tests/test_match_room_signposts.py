@@ -163,3 +163,37 @@ async def test_result_post_tolerates_a_vanished_thread():
     with patch.object(match_control_view, "match_facts", AsyncMock(return_value=facts)), \
          patch.object(match_control_view, "db_session", _fake_db_session()):
         await match_control_view.post_result_to_thread(bot, 143)  # no raise
+
+
+# --- the victory chokepoint posts the result into the thread exactly once ----
+
+@pytest.mark.asyncio
+async def test_victory_sync_posts_to_the_thread_on_the_clinch():
+    import utils
+
+    bot = MagicMock()
+    with patch("services.tournament_service.sync_linked_result",
+               AsyncMock(return_value=(MagicMock(), False, True))), \
+         patch("services.tournament_formatter.update_standings_message_for_match", AsyncMock()), \
+         patch("cogs.tournament_commands.after_bracket_result", AsyncMock()), \
+         patch("match_control_view.safe_refresh_match_views", AsyncMock()), \
+         patch("match_control_view.post_result_to_thread", AsyncMock()) as post:
+        await utils._sync_linked_tournament_match(bot, 143, 5, 3, "draft-1")
+
+    post.assert_awaited_once_with(bot, 143)
+
+
+@pytest.mark.asyncio
+async def test_victory_sync_does_not_repost_a_corrected_score():
+    import utils
+
+    bot = MagicMock()
+    with patch("services.tournament_service.sync_linked_result",
+               AsyncMock(return_value=(MagicMock(), False, False))), \
+         patch("services.tournament_formatter.update_standings_message_for_match", AsyncMock()), \
+         patch("cogs.tournament_commands.after_bracket_result", AsyncMock()), \
+         patch("match_control_view.safe_refresh_match_views", AsyncMock()), \
+         patch("match_control_view.post_result_to_thread", AsyncMock()) as post:
+        await utils._sync_linked_tournament_match(bot, 143, 7, 3, "draft-1")
+
+    post.assert_not_awaited()
