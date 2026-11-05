@@ -268,6 +268,22 @@ async def test_a_bot_manager_outside_the_draft_gets_the_picker(test_db, monkeypa
     built.assert_awaited_once_with("s1", "9", True)
 
 
+async def test_a_manager_on_a_draft_with_no_teams_is_told_so(test_db, monkeypatch):
+    from library_views.panel_view import LibraryPanelView
+    async with AsyncSessionLocal() as s:
+        s.add(DraftSession(session_id="s1", guild_id="g", sign_ups={"3": "Ali"},
+                           team_a=[], team_b=[], draft_chat_channel="555"))
+        await s.commit()
+    monkeypatch.setattr("library_views.panel_view.is_bot_manager_interaction",
+                        AsyncMock(return_value=True))
+    built = AsyncMock(return_value=MagicMock())
+    monkeypatch.setattr("library_views.sub_picker.SubPickerView.build", built)
+    interaction = _interaction(9)
+    await LibraryPanelView().sub_button.callback(interaction)
+    built.assert_not_awaited()
+    assert _refused(interaction) == "📭 Nobody is seated on a team in this draft yet."
+
+
 async def test_the_sub_button_is_for_seated_players_only(test_db, reserved):
     from library_views.panel_view import may_use_panel
     await _seed(loans=[("4", "draft:other")])

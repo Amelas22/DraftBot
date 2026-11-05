@@ -35,6 +35,7 @@ NO_DECK = "📭 You have no deck from this draft."
 OTHER_DRAFT = (" Your library deck is from another draft — use `/library borrow` "
                "or `/library return`.")
 
+NOBODY_SEATED = "📭 Nobody is seated on a team in this draft yet."
 
 Action = Literal["borrow", "return", "decline", "open", "sub"]
 
@@ -77,6 +78,11 @@ async def _seated_in(session_id: str, user_id: str) -> bool:
         str(p) for p in [*(draft.team_a or []), *(draft.team_b or [])]}
 
 
+async def _anybody_seated(session_id: str) -> bool:
+    draft = await DraftSession.get_by_session_id(session_id)
+    return draft is not None and bool(draft.team_a or draft.team_b)
+
+
 async def _session_for_channel(channel_id: Any) -> Optional[str]:
     async with AsyncSessionLocal() as s:
         return await s.scalar(
@@ -113,6 +119,11 @@ async def _press(interaction: discord.Interaction, action: Action,
                 "📭 This draft's library decks are closed.", ephemeral=True)
         return
     if action == "sub":
+        if is_manager and not await _anybody_seated(session_id):
+            # The picker would have nobody to sub for, and Discord refuses an
+            # empty select.
+            await interaction.response.send_message(NOBODY_SEATED, ephemeral=True)
+            return
         # Imported here: the picker imports the panel module, which imports this one.
         from library_views.sub_picker import SubPickerView
         await interaction.response.send_message(

@@ -6,9 +6,11 @@ follows from the pick); who is subbing is any member of the server. Discord
 modals cannot hold a user select, so this is an ephemeral message with
 components, and Confirm does the work.
 
-Confirm runs the checks, the chat access for a sub from outside the draft,
-and the offer under the draft's panel lock, then syncs the panel once the
-lock is released (services.library_sub's lock contract).
+Confirm runs the checks, the offer and then, for a sub from outside the
+draft, the chat access under the draft's panel lock, and syncs the panel once
+the lock is released (services.library_sub's lock contract). The grant comes
+after the offer because its announcement says the deck has been offered: a
+refused offer grants nothing and announces nothing.
 """
 from typing import Any, Optional
 
@@ -18,7 +20,7 @@ from sqlalchemy import select
 
 from database.db_session import AsyncSessionLocal
 from helpers.display_names import get_display_name
-from helpers.substitutes import grant_sub_access, resolve_sub_grant
+from helpers.substitutes import GrantDecision, grant_sub_access, resolve_sub_grant
 from helpers.utils import PrefilledSelect, not_none, ui_button
 from models.draft_session import DraftSession
 from services.library_panel import _lock_for, nudge
@@ -26,6 +28,7 @@ from services.library_sub import (
     chat_line, check_sub, confirm_reply, offer_to_sub, sub_context)
 
 NO_GRANT = " ⚠️ Could not grant chat access — add them with /add_sub."
+WENT_WRONG = "📭 Something went wrong — try again."
 
 
 def _ids(team: Any) -> "list[str]":
@@ -98,9 +101,14 @@ class SubPickerView(discord.ui.View):
             await interaction.response.send_message("Pick both first.", ephemeral=True)
             return
         self.stop()
-        await interaction.response.defer(ephemeral=True)
+        # A component defer updates the picker's own message, so the picker
+        # is this press's @original and the replies are followups.
+        await interaction.response.defer()
         try:
             await self._confirmed(interaction, *picks)
+        except Exception:
+            logger.exception("library sub: Confirm failed in {}", self.session_id)
+            await interaction.followup.send(WENT_WRONG, ephemeral=True)
         finally:
             await self._take_picker_away(interaction)
 
@@ -114,6 +122,7 @@ class SubPickerView(discord.ui.View):
         presser_name = (get_display_name(presser, interaction.guild)
                         if isinstance(presser, discord.Member) else presser.display_name)
         granted: Optional[bool] = None
+        decision: Optional[GrantDecision] = None
         async with _lock_for(self.session_id):
             ctx = await sub_context(self.session_id, absent_id, str(member.id),
                                     member.display_name)
@@ -124,14 +133,16 @@ class SubPickerView(discord.ui.View):
                     team_choice=ctx.team_key)
                 if decision is None:
                     refused = f"📭 {err}"
-                else:
-                    grant = await grant_sub_access(
-                        interaction.guild, self.draft, member, decision,
-                        added_by=presser_name, note=chat_line(ctx))
-                    granted = bool(grant.granted)
             if refused is None:
                 result = await offer_to_sub(ctx)
                 refused = result if isinstance(result, str) else None
+            if refused is None and decision is not None:
+                # Only now is the announcement's "has been offered" true. A
+                # grant that fails leaves the offer standing.
+                grant = await grant_sub_access(
+                    interaction.guild, self.draft, member, decision,
+                    added_by=presser_name, note=chat_line(ctx))
+                granted = bool(grant.granted)
         # Outside the lock: the sync takes it.
         await nudge(interaction.client, self.session_id)
         if refused is not None:
@@ -144,15 +155,14 @@ class SubPickerView(discord.ui.View):
             await not_none(interaction.channel).send(chat_line(ctx))
 
     async def _take_picker_away(self, interaction: discord.Interaction) -> None:
-        """Clear the picker. A miss only leaves dead components behind, so it
-        is logged, never raised over the offer."""
-        message = interaction.message
-        if message is None:
-            return
+        """Clear the picker, which is this press's @original. A miss only
+        leaves dead components behind, so it is logged, never raised over the
+        offer."""
         try:
-            await interaction.followup.edit_message(message.id, view=None)
+            await interaction.edit_original_response(view=None)
         except discord.HTTPException:
-            logger.warning("library sub: could not clear the picker on {}", message.id)
+            logger.warning("library sub: could not clear the picker in {}",
+                           self.session_id)
 
     @ui_button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, button: "discord.ui.Button[Any]",

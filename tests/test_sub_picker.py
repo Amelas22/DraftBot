@@ -55,7 +55,7 @@ def _interaction(user_id=3):
     interaction.response.send_message = AsyncMock()
     interaction.response.edit_message = AsyncMock()
     interaction.followup.send = AsyncMock()
-    interaction.followup.edit_message = AsyncMock()
+    interaction.edit_original_response = AsyncMock()
     interaction.channel.send = AsyncMock()
     return interaction
 
@@ -114,8 +114,8 @@ async def test_confirm_runs_checks_offer_and_reply_for_an_insider(stubs):
     assert interaction.followup.send.await_args.args[0].startswith(
         "✅ **Bo**'s deck is offered to **Ali**.")
     assert interaction.followup.send.await_args.kwargs["ephemeral"] is True
-    interaction.response.defer.assert_awaited_once_with(ephemeral=True)
-    interaction.followup.edit_message.assert_awaited_once_with(777, view=None)
+    interaction.response.defer.assert_awaited_once_with()
+    interaction.edit_original_response.assert_awaited_once_with(view=None)
     assert view.is_finished()
 
 
@@ -137,6 +137,46 @@ async def test_confirm_grants_access_for_an_outside_sub(stubs):
     interaction.channel.send.assert_not_awaited()
     assert interaction.followup.send.await_args.args[0].startswith(
         "✅ **Bo**'s deck is offered to **Sal**.")
+
+
+async def test_the_offer_is_made_before_the_grant_announces_it(stubs):
+    from library_views.sub_picker import SubPickerView
+    order = []
+    stubs.offer.side_effect = lambda ctx: order.append("offer") or 42
+
+    async def grant(*args, **kwargs):
+        order.append("grant")
+        return SimpleNamespace(granted=["#draft-chat"], failed=[], announced=True)
+    stubs.grant.side_effect = grant
+    view = await SubPickerView.build("s1", "3", False)
+    with _picked("5", _member(7, "Sal")):
+        await view.confirm.callback(_interaction())
+    assert order == ["offer", "grant"]
+
+
+async def test_a_refused_offer_grants_and_announces_nothing(stubs):
+    from library_views.sub_picker import SubPickerView
+    stubs.offer.return_value = REFUSAL
+    view = await SubPickerView.build("s1", "3", False)
+    interaction = _interaction()
+    with _picked("5", _member(7, "Sal")):
+        await view.confirm.callback(interaction)
+    stubs.grant.assert_not_awaited()
+    interaction.channel.send.assert_not_awaited()
+    assert interaction.followup.send.await_args.args[0] == REFUSAL
+
+
+async def test_a_failure_inside_confirm_is_answered(stubs):
+    from library_views.sub_picker import SubPickerView
+    stubs.check.side_effect = RuntimeError("boom")
+    view = await SubPickerView.build("s1", "3", False)
+    interaction = _interaction()
+    with _picked("5", _member(3, "Ali")):
+        await view.confirm.callback(interaction)
+    interaction.followup.send.assert_awaited_once_with(
+        "📭 Something went wrong — try again.", ephemeral=True)
+    stubs.offer.assert_not_awaited()
+    interaction.edit_original_response.assert_awaited_once_with(view=None)
 
 
 async def test_a_failed_grant_still_offers_and_says_to_add_them(stubs):
