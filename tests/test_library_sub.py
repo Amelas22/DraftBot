@@ -5,6 +5,8 @@ already holds what: the absent player, the sub, or another sub. The caller
 holds the draft's panel lock around check_sub and offer_to_sub; offer_to_sub
 re-runs the two pool checks so two Confirms for one pool cannot both land.
 """
+from unittest.mock import patch
+
 import pytest
 from sqlalchemy import update
 
@@ -149,3 +151,27 @@ async def test_an_outside_sub_is_named_from_the_member(test_db, library_on):
     assert (ctx.sub_in_draft, ctx.sub_name, ctx.team_key) == (False, "Sal", "A")
     assert chat_line(ctx) == "**Sal** is subbing for **Bob** and has been offered **Bob**'s deck."
     assert confirm_reply(ctx) == "✅ **Bob**'s deck is offered to **Sal**. They collect it with **Borrow my deck** here or the **Borrow** button in their DM; the offer lasts 15 minutes."
+
+
+async def test_a_player_whose_own_pool_is_with_a_sub_may_still_sub(test_db, library_on):
+    await _ready()
+    held = await assign_deck(GUILD, CY, [{"name": "Lightning Bolt", "qty": 1}],
+                             source=f"draft:{SESSION}", library_id=LIBRARY,
+                             on_behalf_of=ALICE)
+    await _set_state(held, "borrowed")
+    ctx = await _ctx()
+    assert await check_sub(ctx) is None
+    loan_id = await offer_to_sub(ctx)
+    assert isinstance(loan_id, int)
+    async with AsyncSessionLocal() as s:
+        loan = await s.get(CardLoan, loan_id)
+    assert loan is not None
+    assert (loan.borrower_id, loan.on_behalf_of, loan.state) == (ALICE, BOB, "assigned")
+
+
+async def test_an_unexpected_failure_says_the_deck_cannot_be_put_together(
+        test_db, library_on):
+    await _ready()
+    with patch("services.library_sub.assign_deck", side_effect=RuntimeError("boom")):
+        assert await offer_to_sub(await _ctx()) == (
+            "⚠️ The library can't put **Bob**'s deck together — ask an admin.")

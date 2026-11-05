@@ -23,7 +23,7 @@ from sqlalchemy.exc import IntegrityError
 from database.db_session import AsyncSessionLocal
 from models.draft_session import DraftSession
 from services.card_lending_service import (
-    REQUEST_GRACE, PoolOutWithSub, active_loan, assign_deck, decline_offer,
+    REQUEST_GRACE, active_loan, assign_deck, decline_offer,
     sub_loan_for)
 from services.card_library_inventory import library_available
 from services.draft_deck_assignment import (
@@ -213,8 +213,10 @@ async def offer_to_sub(ctx: SubContext) -> "int | str":
             on_behalf_of=ctx.absent_id)
     except IntegrityError:
         return _sub_busy_text(ctx)
-    except PoolOutWithSub:
-        return await _with_another_sub_text(ctx) or _absent_holds_text(ctx)
+    except Exception:
+        logger.exception("library sub: could not offer {}'s pool from {} to {}",
+                         ctx.absent_id, ctx.session_id, ctx.sub_id)
+        return _cannot_build_text(ctx)
     logger.info("library sub: {} offered {}'s pool from {} (loan {})",
                 ctx.sub_id, ctx.absent_id, ctx.session_id, loan_id)
     return loan_id

@@ -1278,6 +1278,19 @@ async def test_assign_deck_refuses_the_absent_players_own_offer_while_a_sub_hold
                           source=f"draft:{SESSION}", library_id=LIBRARY)
 
 
+async def test_a_player_whose_pool_is_with_a_sub_may_take_a_sub_offer(
+        test_db, library_on):
+    """The guard refuses only an offer of the borrower's own pool."""
+    await _seed()
+    await assign_deck(GUILD, "1003", [{"name": "Lightning Bolt", "qty": 1}],
+                      source=f"draft:{SESSION}", library_id=LIBRARY, on_behalf_of=ALICE)
+    loan_id = await assign_deck(GUILD, ALICE, [{"name": "Island", "qty": 1}],
+                                source=f"draft:{SESSION}", library_id=LIBRARY,
+                                on_behalf_of=BOB)
+    found = await sub_loan_for(f"draft:{SESSION}", BOB)
+    assert found is not None and found.id == loan_id and found.borrower_id == ALICE
+
+
 async def test_a_returned_sub_loan_no_longer_blocks_the_absent_player(test_db, library_on):
     await _seed()
     loan_id = await assign_deck(GUILD, ALICE, [{"name": "Island", "qty": 1}],

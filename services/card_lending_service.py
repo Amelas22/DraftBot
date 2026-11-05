@@ -589,9 +589,12 @@ async def assign_deck(guild_id: Any, borrower_id: Any, cards: "list[dict[str, An
     handed out with its draft leaves it unset.
 
     `on_behalf_of` names the drafter whose pool a sub is borrowing. While such a
-    loan is active, that drafter's own offer for the same draft is refused.
+    loan is active, that drafter's own offer for the same draft is refused
+    (PoolOutWithSub). Only an offer of the borrower's OWN pool is refused: a
+    drafter whose pool is with a sub holds no deck, so they may sub for
+    somebody else.
     """
-    if source and source.startswith("draft:") \
+    if on_behalf_of is None and source and source.startswith("draft:") \
             and await sub_loan_for(source, borrower_id) is not None:
         raise PoolOutWithSub(f"{borrower_id}'s pool is out with a sub")
     if library_id is None:
