@@ -62,3 +62,43 @@ test("windowColumns is the window by local date, keyed by window cell, padded to
 test("rowClass opens each hour, closes it with its half-hour, and shades every other hour", () => {
   assert.deepEqual([0, 1, 2, 3, 4].map(rowClass), ["hr", "half", "hr alt", "half alt", "hr"]);
 });
+
+// Each column's cells' kinds, run-length: [["wk0", 48], ...] reads "48 cells of this week".
+const kindRuns = (col) => col.cells.reduce((runs, c) => {
+  const last = runs.at(-1);
+  if (last && last[0] === c.kind) last[1]++; else runs.push([c.kind, 1]);
+  return runs;
+}, []);
+
+test("the league's Sunday is due until midnight Pacific, 3 AM Eastern on Monday", () => {
+  const cols = windowColumns(new Date("2026-11-05T15:00:00Z"), "America/New_York"); // Thursday 10 AM
+  assert.deepEqual(cols.map((c) => [c.label, c.kind]), [
+    ["Thu 5", "wk0"], ["Fri 6", "wk0"], ["Sat 7", "wk0"], ["Sun 8", "due"],
+    ["Mon 9", "wk1"], ["Tue 10", "wk1"], ["Wed 11", "wk1"], ["Thu 12", "wk1"],
+  ]);
+  const sunday = cols.find((c) => c.label === "Sun 8");
+  const monday = cols.find((c) => c.label === "Mon 9");
+  // Midnight to 3 AM Eastern on Sunday is still Saturday in Pacific; Monday's first three hours are still Sunday.
+  assert.deepEqual(kindRuns(sunday), [["wk0", 6], ["due", 42]]);
+  assert.deepEqual(kindRuns(monday), [["due", 6], ["wk1", 42]]);
+  const cutoffs = cols.flatMap((c) => c.cells.filter((x) => x.cutoff).map((x) => x.label));
+  assert.deepEqual(cutoffs, ["Mon 9 Nov, 2:30 AM"]);
+});
+
+test("in London the deadline falls on the matching hours: until 8 AM Monday is still the league's Sunday", () => {
+  const cols = windowColumns(new Date("2026-11-05T15:00:00Z"), "Europe/London");
+  const sunday = cols.find((c) => c.label === "Sun 8");
+  const monday = cols.find((c) => c.label === "Mon 9");
+  assert.deepEqual(kindRuns(sunday), [["wk0", 16], ["due", 32]]);
+  assert.deepEqual(kindRuns(monday), [["due", 16], ["wk1", 32]]);
+  assert.equal(sunday.kind, "due");
+  assert.equal(monday.kind, "wk1");
+  const cutoffs = cols.flatMap((c) => c.cells.filter((x) => x.cutoff).map((x) => x.label));
+  assert.deepEqual(cutoffs, ["Mon 9 Nov, 7:30 AM"]);
+});
+
+test("a window opening on the league's Sunday shows that deadline and next week's too", () => {
+  const cols = windowColumns(new Date("2026-11-08T15:00:00Z"), "America/New_York"); // Sunday 10 AM
+  assert.deepEqual(cols.map((c) => c.kind), ["due", "wk1", "wk1", "wk1", "wk1", "wk1", "wk1", "due"]);
+  assert.equal(cols.flatMap((c) => c.cells.filter((x) => x.cutoff)).length, 1);
+});

@@ -285,3 +285,22 @@ test("a window slide while hovering does not freeze the readout", async () => {
     document.visibilityState = "hidden";
   }
 });
+
+test("Show times in redraws the matchup in the picked zone and remembers it", async () => {
+  const kept = new Map();
+  const storage = { getItem: (k) => kept.get(k) ?? null, setItem: (k, v) => kept.set(k, v) };
+  const zones = ["America/New_York", "Asia/Tokyo"];
+  const { root, view } = await mount(fakeApi([], () => doc), { zonePicker: { zones, storage } });
+  try {
+    const picker = root.find((n) => n.attrs.id === "shown-zone");
+    const cellLabel = () => root.find((n) => n.attrs["data-j"] === "0").attrs["aria-label"];
+    const before = cellLabel();
+    picker.value = "Asia/Tokyo";
+    for (const fn of picker.listeners.change) fn({});
+    assert.match(root.children[2].textContent, /Times in Asia\/Tokyo\./);
+    assert.notEqual(cellLabel(), before);
+    assert.deepEqual([...kept.values()], ["Asia/Tokyo"]);
+  } finally {
+    view.dispose();
+  }
+});

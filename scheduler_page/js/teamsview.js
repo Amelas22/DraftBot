@@ -4,8 +4,9 @@
 import { LinkExpired, NeedsUpdate, checkDoc } from "./api.js";
 import { decodeCells } from "./week.js";
 import { mountUsual, weekEditing } from "./usual.js";
-import { mountHeatmap, formatCell } from "./grid.js";
+import { mountHeatmap, formatCell, weekKeys } from "./grid.js";
 import { appBar } from "./appbar.js";
+import { shownZonePicker } from "./shownzone.js";
 import { el } from "./dom.js";
 import { expiredMessage } from "./messages.js";
 import { plural, pluralWord } from "./words.js";
@@ -24,7 +25,8 @@ const HOVER_HINT = "Hover or tap a half-hour to see who's free.";
 
 const hoursShort = (h) => `${h} h`;
 
-// deps: { now?: () => Date }. Returns { dispose } which stops the refresh timer.
+// deps: { now?: () => Date, zonePicker?: { zones?, storage? } } (zonePicker is shownZonePicker's deps). Returns
+// { dispose } which stops the refresh timer.
 export async function mountTeams(root, api, deps = {}) {
   const now = deps.now || (() => new Date());
   const cleanups = [];
@@ -39,7 +41,7 @@ export async function mountTeams(root, api, deps = {}) {
     if (e instanceof LinkExpired) { notice(expiredMessage()); return controller; }
     throw e;
   }
-  const list = (doc, firstStatus) => showList(root, api, doc, now, cleanups, notice, firstStatus, editWeek).catch((e) => {
+  const list = (doc, firstStatus) => showList(root, api, doc, now, cleanups, notice, firstStatus, editWeek, deps.zonePicker || {}).catch((e) => {
     if (e instanceof LinkExpired) notice(expiredMessage());
     else { console.error(e); notice(actionErrorText(e)); }
   });
@@ -50,11 +52,11 @@ export async function mountTeams(root, api, deps = {}) {
     await mountUsual(root, api, { now, intro: PAINT_FIRST, onSaved: (doc) => list(doc, "Saved.") });
     return controller;
   }
-  await showList(root, api, checkDoc(usual, USUAL_FORMAT), now, cleanups, notice, "", editWeek);
+  await showList(root, api, checkDoc(usual, USUAL_FORMAT), now, cleanups, notice, "", editWeek, deps.zonePicker || {});
   return controller;
 }
 
-async function showList(root, api, usualDoc, now, cleanups, notice, firstStatus, editWeek) {
+async function showList(root, api, usualDoc, now, cleanups, notice, firstStatus, editWeek, zoneDeps) {
   root.replaceChildren(el("p", { class: "status", text: "Loading teams…" }));
   let state;
   try {
@@ -64,9 +66,17 @@ async function showList(root, api, usualDoc, now, cleanups, notice, firstStatus,
     throw e;
   }
 
-  const zone = usualDoc.zone;
+  // The viewer's free cells come from their usual week in its own zone; times are drawn in the zone picked at the
+  // top (see shownzone.js), at first that same zone. Picking one draws the heatmap again in it, on the same day tab.
+  const picker = shownZonePicker(usualDoc.zone, (z) => {
+    zone = z;
+    heat = makeHeat(heat.openDate());
+    readout.textContent = HOVER_HINT;
+    render();
+  }, zoneDeps);
+  let zone = picker.zone;
   let startUtc = windowStart(null, now());
-  const viewerWeek = () => ({ user: state.me.user, zone, cells: decodeCells(usualDoc.cells) });
+  const viewerWeek = () => ({ user: state.me.user, zone: usualDoc.zone, cells: decodeCells(usualDoc.cells) });
   const sync = createSync();
   const drafts = noteDrafts();
   let ranked = [];
@@ -114,7 +124,7 @@ async function showList(root, api, usualDoc, now, cleanups, notice, firstStatus,
   bar.classList.add("withaction");
   const editBtn = el("button", { type: "button", class: "secondary small", text: "Edit my usual week" });
   editBtn.addEventListener("click", () => { editWeek(usualDoc); });
-  bar.append(editBtn, openBtn);
+  bar.append(editBtn, openBtn, picker.row);
   const lede = el("p", { class: "lede" });
   // Page-level news ("Saved." after a first-run save) stays visible even when there are no teams to show.
   const pageStatus = el("p", { class: "status", role: "status", "aria-live": "polite", text: firstStatus });
@@ -138,8 +148,8 @@ async function showList(root, api, usualDoc, now, cleanups, notice, firstStatus,
   };
   const freeCount = (ps, j) => ps.reduce((n, p) => n + (p.free.has(j) ? 1 : 0), 0);
   const label = (j) => cellText(formatCell(startUtc, zone, j), people(), j);
-  const makeHeat = () => mountHeatmap(heatBox, {
-    startUtc, zone,
+  const makeHeat = (openDate) => mountHeatmap(heatBox, {
+    startUtc, zone, openDate,
     cellClass: (j) => { const ps = people(); return ps.length ? `s${shadeLevel(freeCount(ps, j), ps.length)}` : ""; },
     cellLabel: label,
     onPick: (j) => { readout.textContent = label(j); },
@@ -152,7 +162,7 @@ async function showList(root, api, usualDoc, now, cleanups, notice, firstStatus,
     const swatches = [];
     for (let n = 0; n <= total; n++) swatches.push(el("i", { class: `s${shadeLevel(n, total)}` }));
     const high = total === 1 ? "you're free" : `all ${total} free`;
-    legend.replaceChildren(el("span", { text: total === 1 ? "not free" : "nobody" }), ...swatches, el("span", { text: high }));
+    legend.replaceChildren(el("span", { text: total === 1 ? "not free" : "nobody" }), ...swatches, el("span", { text: high }), ...weekKeys());
   };
 
   // A finished action (or a failed one) unlocks refreshes again; an answer the page can't read is refetched.
@@ -403,7 +413,7 @@ async function showList(root, api, usualDoc, now, cleanups, notice, firstStatus,
       if (!sync.isCurrent(ticket)) return;
       state = fresh;
       const start = windowStart(startUtc, now());
-      if (start !== startUtc) { startUtc = start; heat = makeHeat(); readout.textContent = HOVER_HINT; }
+      if (start !== startUtc) { startUtc = start; heat = makeHeat(heat.openDate()); readout.textContent = HOVER_HINT; }
       render();
     } catch (e) {
       if (e instanceof LinkExpired) notice(expiredMessage());

@@ -5,8 +5,9 @@
 // only draws and wires.
 import { LinkExpired, checkDoc } from "./api.js";
 import { CELLS, CELL_MS, addCells, isoSeconds } from "./week.js";
-import { mountHeatmap, formatCell, layoutWindow } from "./grid.js";
+import { mountHeatmap, formatCell, layoutWindow, legendKey, weekKeys } from "./grid.js";
 import { appBar } from "./appbar.js";
+import { shownZonePicker } from "./shownzone.js";
 import { mountUsual } from "./usual.js";
 import { mountThisWeek } from "./thisweek.js";
 import { el } from "./dom.js";
@@ -59,7 +60,8 @@ function statusCard({ everyoneWords, which, onEveryone, onMine }) {
       segmented("Show", [["Everyone", which === null, onEveryone], ["My availability", which !== null, onMine]])));
 }
 
-// deps: { now?: () => Date, paths?: { get, actions } } (paths default to the team-draft API; a match link passes its own). Returns { dispose } which stops the refresh timer.
+// deps: { now?: () => Date, paths?: { get, actions }, zonePicker?: { zones?, storage? } } (paths default to the team-draft
+// API; a match link passes its own; zonePicker is shownZonePicker's deps). Returns { dispose } which stops the refresh timer.
 export async function mountTeamDraft(root, api, deps = {}) {
   const now = deps.now || (() => new Date());
   const paths = deps.paths || TEAM_DRAFT_PATHS;
@@ -75,11 +77,11 @@ export async function mountTeamDraft(root, api, deps = {}) {
     if (e instanceof LinkExpired) { notice(expiredMessage()); return controller; }
     throw e;
   }
-  await showMatchup(root, api, paths, usual, now, cleanups, notice);
+  await showMatchup(root, api, paths, usual, now, cleanups, notice, deps.zonePicker || {});
   return controller;
 }
 
-async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice) {
+async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zoneDeps) {
   root.replaceChildren(el("p", { class: "status", text: "Loading…" }));
   let state;
   try {
@@ -88,8 +90,15 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice) {
     if (e instanceof LinkExpired) return notice(expiredMessage());
     throw e;
   }
-  // Times are shown in the viewer's usual-week zone, else the browser's.
-  const zone = usualDoc?.zone || Intl.DateTimeFormat().resolvedOptions().timeZone;
+  // Times are shown in the zone picked at the top (see shownzone.js), at first the viewer's usual-week zone, else the
+  // browser's. Picking one draws the heatmap again in it, on the same day tab.
+  const picker = shownZonePicker(usualDoc?.zone || Intl.DateTimeFormat().resolvedOptions().timeZone, (z) => {
+    zone = z;
+    heat = makeHeat(heat.openDate());
+    if (clicked === null) setReadout(HOVER_HINT);
+    render();
+  }, zoneDeps);
+  let zone = picker.zone;
 
   let startUtc = new Date(state.window.start_utc);
   const sync = createSync();
@@ -159,8 +168,8 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice) {
     if (j === selected) classes.push("picked");
     return classes.join(" ");
   };
-  const makeHeat = () => mountHeatmap(heatBox, {
-    startUtc, zone, cellClass, cellLabel: label, cellText: (j) => (runs[j]?.first ? countText(sideCounts(freeSides, j)) : ""),
+  const makeHeat = (openDate) => mountHeatmap(heatBox, {
+    startUtc, zone, openDate, cellClass, cellLabel: label, cellText: (j) => (runs[j]?.first ? countText(sideCounts(freeSides, j)) : ""),
     onPick: (j) => {
       selected = open() && bookable(j, state, now(), startUtc) ? j : null;
       clicked = j;
@@ -212,6 +221,7 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice) {
     if (which !== null) await leave();
     which = w;
     renderCard();
+    picker.row.classList.add("idle");
     everyoneBox.hidden = true;
     mineBox.hidden = false;
     pane.setAttribute("aria-label", "Your availability");
@@ -233,19 +243,18 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice) {
     await refresh();
     which = null;
     renderCard();
+    picker.row.classList.remove("idle");
     mineBox.hidden = true;
     mineBox.replaceChildren();
     everyoneBox.hidden = false;
     pane.setAttribute("aria-label", "Pick a time");
   };
 
-  // A key and its words, kept together when the legend wraps on a narrow screen.
-  const keyItem = (kind, text) => el("span", { class: "keyitem" }, el("i", { class: `key ${kind}` }), el("span", { text }));
   const renderLegend = () => {
     const swatches = [];
     for (let n = 0; n <= total(); n++) swatches.push(el("i", { class: `s${shadeLevel(n, Math.max(1, total()))}` }));
     legend.replaceChildren(el("span", { text: "nobody" }), ...swatches, el("span", { text: `all ${total()} free` }),
-      keyItem("run", "same people throughout"), keyItem("booked", "booked"));
+      legendKey("run", "same people throughout"), legendKey("booked", "booked"), ...weekKeys());
   };
 
   function renderActions() {
@@ -321,7 +330,7 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice) {
         hovered = null;
         if (clicked === null) setReadout(HOVER_HINT);
         startUtc = start;
-        heat = makeHeat();
+        heat = makeHeat(heat.openDate());
       }
       render();
     } catch (e) {
@@ -335,6 +344,9 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice) {
   cleanups.push(() => clearInterval(timer), () => document.removeEventListener("visibilitychange", onVisible));
 
   root.classList.add("wide");
-  root.replaceChildren(appBar("Team draft"), heading, ledeEl, bookLine, threadLink, cardBox, sidesBox, pane);
+  const bar = appBar("Team draft");
+  bar.classList.add("withaction");
+  bar.append(picker.row);
+  root.replaceChildren(bar, heading, ledeEl, bookLine, threadLink, cardBox, sidesBox, pane);
   render();
 }
