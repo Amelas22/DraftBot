@@ -4,7 +4,10 @@ No Discord objects in here — the DraftCommands cog resolves members/channels
 and applies the permission overwrites this module decides on.
 """
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
+
+import discord
+from loguru import logger
 
 from helpers.draft_rooms import SHARED_SIDE, side_by_key, side_by_prefix
 from helpers.team_names import BLUE, RED
@@ -92,3 +95,54 @@ def channel_ids_contains(channel_ids, channel_id) -> bool:
         return False
     wanted = str(channel_id)
     return any(str(cid) == wanted for cid in channel_ids)
+
+
+@dataclass
+class SubGrant:
+    granted: list[str]     # channel mentions granted
+    failed: list[str]      # channel mentions Discord refused
+    announced: bool        # the draft-chat announcement was sent
+    draft_chat_failed: bool = False   # Discord refused the draft chat itself
+
+
+async def grant_sub_access(guild: Any, draft: Any, user: Any, decision: GrantDecision,
+                           *, added_by: str, note: str = "") -> SubGrant:
+    """Give `user` the draft's shared and own-team rooms, then announce it in the draft chat."""
+    draft_chat_id = str(draft.draft_chat_channel)
+    granted: list[str] = []
+    failed: list[str] = []
+    draft_chat_failed = False
+    draft_chat: Any = None
+    for channel_id in draft.channel_ids:
+        channel = guild.get_channel(int(channel_id))
+        if not channel or not is_sub_target_channel(
+                channel.name, draft.friendly_id, decision.channel_prefix):
+            continue
+        try:
+            # Same overwrites teammates get at channel creation
+            await channel.set_permissions(
+                user, read_messages=True, manage_messages=True)
+        except discord.HTTPException:
+            logger.exception(f"add_sub: failed to set permissions on "
+                             f"channel {channel.id}")
+            failed.append(channel.mention)
+            draft_chat_failed = draft_chat_failed or str(channel.id) == draft_chat_id
+            continue
+        granted.append(channel.mention)
+        if str(channel.id) == draft_chat_id:
+            draft_chat = channel
+
+    announced = False
+    if draft_chat is not None:
+        text = (f"{user.mention} was added as a substitute for "
+                f"**{decision.team_display_name}** by {added_by}.")
+        if note:
+            text += f" {note}"
+        try:
+            await draft_chat.send(text)
+            announced = True
+        except discord.HTTPException:
+            logger.warning(
+                f"add_sub: grant succeeded but the public announcement "
+                f"failed in channel {draft_chat.id}", exc_info=True)
+    return SubGrant(granted, failed, announced, draft_chat_failed)

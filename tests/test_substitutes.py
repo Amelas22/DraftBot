@@ -5,10 +5,12 @@ import pytest
 
 from helpers.substitutes import (
     GrantDecision,
+    grant_sub_access,
     channel_ids_contains,
     is_sub_target_channel,
     resolve_sub_grant,
 )
+from test_add_sub_command import make_draft, make_sub, standard_channels
 from models.draft_session import DraftSession
 from helpers.team_names import RED
 
@@ -231,3 +233,19 @@ async def test_get_by_any_channel_id_returns_none_when_no_match():
          patch("models.draft_session.db_session", _mock_db_session([])):
         found = await DraftSession.get_by_any_channel_id(999)
     assert found is None
+
+
+@pytest.mark.asyncio
+async def test_grant_sub_access_grants_team_rooms_and_announces_with_a_note():
+    channels = standard_channels()
+    guild = SimpleNamespace(get_channel=lambda cid: channels.get(cid))
+    draft = make_draft()
+    sub = make_sub()
+    decision = GrantDecision("A", "Red-Team", "Red")
+    result = await grant_sub_access(guild, draft, sub, decision, added_by="One",
+                                    note="**Nine** is subbing for **Two**.")
+    assert result.announced is True and result.failed == []
+    assert channels[100].mention in result.granted and channels[101].mention in result.granted
+    channels[102].set_permissions.assert_not_awaited()
+    sent = channels[100].send.await_args.args[0]
+    assert sent.endswith("by One. **Nine** is subbing for **Two**.")
