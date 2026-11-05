@@ -39,7 +39,7 @@ def _said(ctx):
 
 
 async def _run(monkeypatch, command, status, loan=None, busy=None, waited=False,
-               draft=None, asks=None, handed=None):
+               draft=None, asks=None, handed=None, settled=None):
     """`draft` is the recent draft a borrower with nothing waiting asks for
     their deck from (None: they are in none), `asks` what that request answers,
     and `handed` the deck it hands over -- active_loan's answer after the ask."""
@@ -61,7 +61,7 @@ async def _run(monkeypatch, command, status, loan=None, busy=None, waited=False,
     # The shortfall path has its own tests; these cover what each status says,
     # so a library that cannot cover the deck would short-circuit all of them.
     monkeypatch.setattr(mod, "shortfall", AsyncMock(return_value=[]))
-    monkeypatch.setattr(mod, "poll_until_settled", AsyncMock(return_value=(status, None)))
+    monkeypatch.setattr(mod, "poll_until_settled", AsyncMock(return_value=(settled or status, None)))
     # The real spawn_followup returns a Task and is not awaited by the flow, so
     # capture the coroutine and drive it here -- otherwise the followup that
     # carries every message would never run.
@@ -413,3 +413,16 @@ async def test_deposit_reads_the_cube_as_it_is_now_not_as_cached(test_db, monkey
     await cog.deposit.callback(cog, _ctx(), "somecube")
 
     assert {c["name"] for c in compared.await_args.args[0]} == {"Bolt", "Island"}
+
+
+async def test_a_subs_return_is_worded_for_the_deck_they_hand_back(monkeypatch):
+    import services.library_sub as sub
+    monkeypatch.setattr(sub, "sub_return_texts", AsyncMock(return_value=(
+        "📬 Returning **Bob**'s deck. x", "✅ **Bob**'s deck is back on the shelf. y")))
+    loan = SimpleNamespace(cards=DECK, state="borrowed", id=1, on_behalf_of="2")
+    said = await _run(monkeypatch, "return_cards", "dispatched", loan=loan,
+                      settled="returned")
+    # _run joins every message; the first starts with the lead, the last is the landing.
+    assert said.startswith("📬 Returning **Bob**'s deck.")
+    assert said.rstrip().endswith("✅ **Bob**'s deck is back on the shelf. y")
+    assert "Deck returned. Thanks" not in said

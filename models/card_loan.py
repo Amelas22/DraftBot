@@ -101,6 +101,8 @@ class CardLoan(Base):
     # another queue may have reserved those cards, and dating it from its draft
     # would let it take them.
     claimed_at = Column(DateTime, nullable=True)
+    # The drafter whose pool this loan carries when it is not the borrower's own.
+    on_behalf_of = Column(String(64), nullable=True)
 
     __table_args__ = (
         Index('ix_card_loans_borrower', 'guild_id', 'borrower_id'),

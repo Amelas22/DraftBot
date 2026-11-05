@@ -29,6 +29,7 @@ def reserved(monkeypatch):
 async def _seed(loans=()):
     async with AsyncSessionLocal() as s:
         s.add(DraftSession(session_id="s1", guild_id="g", sign_ups={"3": "Ali"},
+                           team_a=["3"], team_b=["4"],
                            draft_chat_channel="555"))
         for borrower, source in loans:
             s.add(CardLoan(guild_id="g", library_id="lib", borrower_id=borrower,
@@ -177,17 +178,18 @@ async def test_panel_view_has_fixed_custom_ids():
     assert borrow is not None
     assert [i.custom_id for i in borrow.children] == [
         "library_panel:borrow", "library_panel:some", "library_panel:return",
-        "library_panel:decline"]
+        "library_panel:decline", "library_panel:sub"]
     ret = panel_view("return")
     assert ret is not None
     assert [i.custom_id for i in ret.children] == [
-        "library_panel:borrow", "library_panel:some", "library_panel:return"]
+        "library_panel:borrow", "library_panel:some", "library_panel:return",
+        "library_panel:sub"]
     assert panel_view("closed") is None
     persistent = LibraryPanelView()
     assert persistent.timeout is None
     assert {i.custom_id for i in persistent.children} == {
         "library_panel:borrow", "library_panel:return", "library_panel:decline",
-        "library_panel:some", "library_panel:open"}
+        "library_panel:some", "library_panel:open", "library_panel:sub"}
 
 
 async def test_the_ask_view_has_one_button():
@@ -229,6 +231,73 @@ async def test_opening_a_closed_panel_says_so(test_db, monkeypatch):
     interaction = _interaction(3)
     await LibraryPanelView().open_button.callback(interaction)
     assert _refused(interaction) == "📭 This draft's library decks are closed."
+
+
+async def test_a_seated_player_gets_the_sub_picker(test_db, monkeypatch):
+    from library_views.panel_view import LibraryPanelView
+    await _seed()
+    built = AsyncMock(return_value=MagicMock())
+    monkeypatch.setattr("library_views.sub_picker.SubPickerView.build", built)
+    interaction = _interaction(3)
+    await LibraryPanelView().sub_button.callback(interaction)
+    built.assert_awaited_once_with("s1", "3", False)
+    assert interaction.response.send_message.await_args.args[0] == (
+        "Who can't play, and who is subbing?")
+    assert interaction.response.send_message.await_args.kwargs["view"] is built.return_value
+    assert interaction.response.send_message.await_args.kwargs["ephemeral"] is True
+
+
+async def test_a_spectator_may_not_open_the_sub_picker(test_db, monkeypatch):
+    from library_views.panel_view import LibraryPanelView
+    await _seed()
+    monkeypatch.setattr("library_views.panel_view.is_bot_manager_interaction",
+                        AsyncMock(return_value=False))
+    interaction = _interaction(9)
+    await LibraryPanelView().sub_button.callback(interaction)
+    assert _refused(interaction) == NO_DECK
+
+
+async def test_a_bot_manager_outside_the_draft_gets_the_picker(test_db, monkeypatch):
+    from library_views.panel_view import LibraryPanelView
+    await _seed()
+    monkeypatch.setattr("library_views.panel_view.is_bot_manager_interaction",
+                        AsyncMock(return_value=True))
+    built = AsyncMock(return_value=MagicMock())
+    monkeypatch.setattr("library_views.sub_picker.SubPickerView.build", built)
+    await LibraryPanelView().sub_button.callback(_interaction(9))
+    built.assert_awaited_once_with("s1", "9", True)
+
+
+async def test_a_manager_on_a_draft_with_no_teams_is_told_so(test_db, monkeypatch):
+    from library_views.panel_view import LibraryPanelView
+    async with AsyncSessionLocal() as s:
+        s.add(DraftSession(session_id="s1", guild_id="g", sign_ups={"3": "Ali"},
+                           team_a=[], team_b=[], draft_chat_channel="555"))
+        await s.commit()
+    monkeypatch.setattr("library_views.panel_view.is_bot_manager_interaction",
+                        AsyncMock(return_value=True))
+    built = AsyncMock(return_value=MagicMock())
+    monkeypatch.setattr("library_views.sub_picker.SubPickerView.build", built)
+    interaction = _interaction(9)
+    await LibraryPanelView().sub_button.callback(interaction)
+    built.assert_not_awaited()
+    assert _refused(interaction) == "📭 Nobody is seated on a team in this draft yet."
+
+
+async def test_the_sub_button_is_for_seated_players_only(test_db, reserved):
+    from library_views.panel_view import may_use_panel
+    await _seed(loans=[("4", "draft:other")])
+    assert await may_use_panel("s1", "3", "sub") is None
+    # Seated, even with a deck from another draft: the checks speak for that.
+    assert await may_use_panel("s1", "4", "sub") is None
+    assert await may_use_panel("s1", "9", "sub") == NO_DECK
+
+
+async def test_the_sub_button_reads_sub_for_a_player():
+    from library_views.panel_view import LibraryPanelView
+    [button] = [i for i in LibraryPanelView().children
+                if i.custom_id == "library_panel:sub"]
+    assert (button.label, button.style) == ("Sub for a player", discord.ButtonStyle.secondary)
 
 
 # --- changing your mind after the draft --------------------------------------

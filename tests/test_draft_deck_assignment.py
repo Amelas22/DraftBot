@@ -21,7 +21,7 @@ from database.db_session import AsyncSessionLocal
 from models.card_loan import CardLoan
 from models.draft_session import DraftSession
 from services import draft_deck_assignment as svc
-from services.card_lending_service import assign_deck
+from services.card_lending_service import PoolOutWithSub, assign_deck, sub_loan_for
 
 pytestmark = pytest.mark.asyncio
 
@@ -1255,3 +1255,88 @@ async def test_a_card_short_but_not_gone_still_mints(test_db, library_on):
                       source="fixture:9", library_id=LIBRARY)
 
     assert await svc.assign_on_request(SESSION, ALICE) == "assigned"
+
+
+async def test_assign_deck_records_whose_pool_a_sub_carries(test_db, library_on):
+    await _seed()
+    loan_id = await assign_deck(GUILD, ALICE, [{"name": "Island", "qty": 1}],
+                                source=f"draft:{SESSION}", library_id=LIBRARY,
+                                on_behalf_of=BOB)
+    found = await sub_loan_for(f"draft:{SESSION}", BOB)
+    assert found is not None and found.id == loan_id
+    assert found.borrower_id == ALICE and found.on_behalf_of == BOB
+    assert await sub_loan_for(f"draft:{SESSION}", ALICE) is None
+
+
+async def test_assign_deck_refuses_the_absent_players_own_offer_while_a_sub_holds_it(
+        test_db, library_on):
+    await _seed()
+    await assign_deck(GUILD, ALICE, [{"name": "Island", "qty": 1}],
+                      source=f"draft:{SESSION}", library_id=LIBRARY, on_behalf_of=BOB)
+    with pytest.raises(PoolOutWithSub):
+        await assign_deck(GUILD, BOB, [{"name": "Island", "qty": 1}],
+                          source=f"draft:{SESSION}", library_id=LIBRARY)
+
+
+async def test_a_player_whose_pool_is_with_a_sub_may_take_a_sub_offer(
+        test_db, library_on):
+    """The guard refuses only an offer of the borrower's own pool."""
+    await _seed()
+    await assign_deck(GUILD, "1003", [{"name": "Lightning Bolt", "qty": 1}],
+                      source=f"draft:{SESSION}", library_id=LIBRARY, on_behalf_of=ALICE)
+    loan_id = await assign_deck(GUILD, ALICE, [{"name": "Island", "qty": 1}],
+                                source=f"draft:{SESSION}", library_id=LIBRARY,
+                                on_behalf_of=BOB)
+    found = await sub_loan_for(f"draft:{SESSION}", BOB)
+    assert found is not None and found.id == loan_id and found.borrower_id == ALICE
+
+
+async def test_a_returned_sub_loan_no_longer_blocks_the_absent_player(test_db, library_on):
+    await _seed()
+    loan_id = await assign_deck(GUILD, ALICE, [{"name": "Island", "qty": 1}],
+                                source=f"draft:{SESSION}", library_id=LIBRARY,
+                                on_behalf_of=BOB)
+    async with AsyncSessionLocal() as s:
+        loan = await s.get(CardLoan, loan_id)
+        loan.state = "returned"
+        await s.commit()
+    assert await sub_loan_for(f"draft:{SESSION}", BOB) is None
+    await assign_deck(GUILD, BOB, [{"name": "Island", "qty": 1}],
+                      source=f"draft:{SESSION}", library_id=LIBRARY)
+
+
+async def test_request_refuses_while_a_sub_holds_the_pool(test_db, library_on):
+    await _seed()
+    await _reported(SESSION, [(ALICE, "x", False), (BOB, "y", False)])
+    await _open_chat()
+    await assign_deck(GUILD, ALICE, [{"name": "Island", "qty": 1}],
+                      source=f"draft:{SESSION}", library_id=LIBRARY, on_behalf_of=BOB)
+
+    assert await svc.assign_on_request(SESSION, BOB) == "subbed"
+    assert await svc.subbed_message(SESSION, BOB) == (
+        "📭 **Alice** has your deck as your sub. It has to come back before you can borrow it again.")
+
+
+async def test_request_works_again_once_the_sub_offer_lapsed(test_db, library_on):
+    await _seed()
+    await _reported(SESSION, [(ALICE, "x", False), (BOB, "y", False)])
+    await _open_chat()
+    loan_id = await assign_deck(GUILD, ALICE, [{"name": "Island", "qty": 1}],
+                                source=f"draft:{SESSION}", library_id=LIBRARY,
+                                on_behalf_of=BOB)
+    async with AsyncSessionLocal() as s:
+        loan = await s.get(CardLoan, loan_id)
+        loan.state = "expired"
+        await s.commit()
+
+    assert await svc.assign_on_request(SESSION, BOB) == "assigned"
+
+
+async def test_a_pool_that_went_to_a_sub_meanwhile_says_subbed(test_db, library_on):
+    """The drafter's own ask is not under the panel lock: a sub's offer can
+    land between its checks and its write."""
+    from services.card_lending_service import PoolOutWithSub
+    await _seed()
+    with patch("services.draft_deck_assignment.assign_deck",
+               side_effect=PoolOutWithSub("out with a sub")):
+        assert await svc.assign_on_request(SESSION, BOB) == "subbed"

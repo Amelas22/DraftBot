@@ -141,7 +141,8 @@ def deck_summary(cards: Any) -> str:
     return card_count_label(total)
 
 
-def deck_ready_message(cards: Any, collateral: int) -> str:
+def deck_ready_message(cards: Any, collateral: int, *,
+                       holding_for: Optional[str] = None) -> str:
     """The DM that replaces what the shared board used to say.
 
     Names the hold when there is one, because what it costs is what decides
@@ -149,7 +150,10 @@ def deck_ready_message(cards: Any, collateral: int) -> str:
     version that wastes their evening. Today's price is the right figure here,
     unlike in return_message: they have not paid yet.
     """
-    msg = (f"📚 Your drafted deck is ready to borrow — **{deck_summary(cards)}**.\n"
+    lead = (f"📚 **{holding_for}**'s drafted deck is ready for you to borrow as "
+            f"their sub — **{deck_summary(cards)}**.\n" if holding_for else
+            f"📚 Your drafted deck is ready to borrow — **{deck_summary(cards)}**.\n")
+    msg = (lead +
            "Press **Borrow my deck** below, or run `/library borrow` in the "
            "server, to have it traded to you.")
     if collateral:
@@ -159,7 +163,7 @@ def deck_ready_message(cards: Any, collateral: int) -> str:
 
 
 def return_message(loan: Any, decided: bool = False,
-                   cards: Any = None) -> str:
+                   cards: Any = None, *, holding_for: Optional[str] = None) -> str:
     """The ask. Says what it is for, because a borrower who has finished a draft
     has no other reason to think about the cards again.
 
@@ -175,10 +179,26 @@ def return_message(loan: Any, decided: bool = False,
     """
     lead = "Your draft is decided. " if decided else ""
     summary = deck_summary(cards if cards else loan.cards)
-    return (f"{lead}📦 Please return your borrowed deck — **{summary}**.\n"
+    what = (f"the deck you're holding for **{holding_for}**" if holding_for
+            else "your borrowed deck")
+    return (f"{lead}📦 Please return {what} — **{summary}**.\n"
             "Press **Return my deck** below, or run `/library return` in the "
             "server, and the library will collect it; the hold comes back with it.\n"
             "Other drafters are waiting on those cards.")
+
+
+async def name_in_draft(session_id: Any, player_id: Any) -> str:
+    """The name a player goes by in this draft, else a mention of them."""
+    from sqlalchemy import select
+
+    from database.db_session import AsyncSessionLocal
+    from models.draft_session import DraftSession
+
+    async with AsyncSessionLocal() as s:
+        sign_ups = await s.scalar(select(DraftSession.sign_ups).where(
+            DraftSession.session_id == session_id))
+    name = (sign_ups or {}).get(str(player_id))
+    return str(name) if name else f"<@{player_id}>"
 
 
 async def _dm(loan: Any, message: str, what: str, view: Any = None) -> bool:
@@ -269,8 +289,11 @@ async def announce_one(loan_id: Any, at: Optional[datetime] = None) -> bool:
 
     from library_views.dm_view import dm_view
 
-    if not await _dm(loan, deck_ready_message(loan.cards, collateral), "deck ready",
-                     view=dm_view("borrow")):
+    holding_for = (await name_in_draft(session_of(loan), loan.on_behalf_of)
+                   if loan.on_behalf_of else None)
+    if not await _dm(loan, deck_ready_message(loan.cards, collateral,
+                                              holding_for=holding_for),
+                     "deck ready", view=dm_view("borrow")):
         return False
     await _stamp(loan_id, "ready_dm_at", at or datetime.now())
     return True
@@ -310,8 +333,10 @@ async def send_due_reminders(now: Optional[datetime] = None) -> int:
         if session_id not in verdicts:
             verdicts[session_id] = await draft_state(session_id)
         state = verdicts[session_id]
-        mine = state.done_at.get(str(loan.borrower_id))
-        played = state.played_at.get(str(loan.borrower_id))
+        # A sub holds someone else's deck: it is due when THEIR draft is over.
+        whose = str(loan.on_behalf_of or loan.borrower_id)
+        mine = state.done_at.get(whose)
+        played = state.played_at.get(whose)
         # Up to now only: naive local timestamps repeat an hour when the clocks
         # go back, and a result dated past every ask stamped after it would
         # otherwise ask again at each tick until the clock caught up.
@@ -337,7 +362,10 @@ async def send_due_reminders(now: Optional[datetime] = None) -> int:
         if not await _still_out(loan.id):
             continue
         held = await held_cards(loan)
-        if await _dm(loan, return_message(loan, decided, cards=held),
+        holding_for = (await name_in_draft(session_of(loan), loan.on_behalf_of)
+                       if loan.on_behalf_of else None)
+        if await _dm(loan, return_message(loan, decided, cards=held,
+                                          holding_for=holding_for),
                      "return reminder", view=dm_view("return")):
             await _stamp(loan.id, "last_reminded_at", at)
             asked += 1

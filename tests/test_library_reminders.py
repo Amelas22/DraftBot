@@ -28,7 +28,8 @@ def _loan(state="borrowed", last_reminded_at=None, source="draft:s1"):
 
 
 async def _a_loan(state="borrowed", *, last_reminded_at=None, ready_dm_at=None,
-                  borrower="p1", session="s1", claimed_at=None):
+                  borrower="p1", session="s1", claimed_at=None,
+                  on_behalf_of=None):
     """One real CardLoan row. Returns its id."""
     from database.db_session import AsyncSessionLocal
     from models.card_loan import CardLoan
@@ -37,7 +38,8 @@ async def _a_loan(state="borrowed", *, last_reminded_at=None, ready_dm_at=None,
         loan = CardLoan(guild_id="g", library_id="lib", borrower_id=borrower,
                         cards=[{"name": "Swamp", "qty": 4}], state=state,
                         source=f"draft:{session}", ready_dm_at=ready_dm_at,
-                        last_reminded_at=last_reminded_at, claimed_at=claimed_at)
+                        last_reminded_at=last_reminded_at, claimed_at=claimed_at,
+                        on_behalf_of=on_behalf_of)
         s.add(loan)
         await s.commit()
         return loan.id
@@ -740,3 +742,25 @@ async def test_an_undelivered_dm_with_a_button_is_still_not_recorded(test_db, mo
 
     assert await mod.announce_one(loan_id, at=NOW) is False
     assert (await _stamps(loan_id))[0] is None
+
+
+@pytest.mark.asyncio
+async def test_a_sub_loan_is_timed_by_the_absent_players_matches(test_db, dm):
+    await seed_session("s1", stype="random", stage="pairings",
+                       sign_ups={"p1": "Ali", "p2": "Bo", "p3": "Cy", "p4": "Di"},
+                       matches=[("p2", "p3", "p2", NOW),            # Bo's last match, reported
+                                ("p1", "p4", None, None)])          # Ali's own, unreported
+    await _a_loan(borrower="p1", claimed_at=NOW, on_behalf_of="p2")
+
+    assert await mod.send_due_reminders(now=NOW + timedelta(minutes=60)) == 1
+    assert "the deck you're holding for **Bo**" in dm.sent[0][1]
+
+
+@pytest.mark.asyncio
+async def test_the_ready_dm_for_a_sub_names_whose_deck_it_is(test_db, dm):
+    await seed_session("s1", stype="random", stage="pairings",
+                       sign_ups={"p1": "Ali", "p2": "Bo"}, matches=[("p1", "p2", None, None)])
+    loan_id = await _a_loan(state="assigned", borrower="p1", claimed_at=NOW, on_behalf_of="p2")
+
+    assert await mod.announce_one(loan_id, at=NOW) is True
+    assert dm.sent[0][1].startswith("📚 **Bo**'s drafted deck is ready for you to borrow as their sub")
