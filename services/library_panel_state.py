@@ -11,6 +11,7 @@ from typing import Any, Optional
 import discord
 from sqlalchemy import select
 
+import bot_registry
 from database.db_session import AsyncSessionLocal
 from models.card_loan import CardLoan
 from models.draft_session import DraftSession
@@ -44,6 +45,8 @@ class Borrower:
     # The loan's state, or None when the player is reserved with no loan yet.
     state: Optional[str]
     cards: Optional[list[Any]]
+    # The absent player's draft name when this is a sub holding their deck.
+    sub_for: Optional[str] = None
 
 
 def _sort_key(b: Borrower) -> tuple[str, str]:
@@ -70,6 +73,15 @@ async def _cards_described(loan: CardLoan) -> Any:
     return loan.cards
 
 
+def _guild_name(draft: Any, uid: str) -> str:
+    """A member's display name for someone outside the draft's sign-ups, or a
+    mention when the bot, guild or member cannot be found."""
+    bot = bot_registry.get_bot()
+    guild = bot.get_guild(int(draft.guild_id)) if bot and draft.guild_id else None
+    member = guild.get_member(int(uid)) if guild else None
+    return member.display_name if member else f"<@{uid}>"
+
+
 async def borrowers_of(draft: Any) -> list[Borrower]:
     """Everyone the panel lists: the reserved plus anyone with a loan from this
     draft, each with their newest loan, sorted by name."""
@@ -83,9 +95,12 @@ async def borrowers_of(draft: Any) -> list[Borrower]:
     out: list[Borrower] = []
     for uid in set(reserved) | set(newest):
         loan = newest.get(uid)
-        out.append(Borrower(uid, names.get(uid, f"<@{uid}>"),
+        behalf = loan.on_behalf_of if loan else None
+        sub_for = None if not behalf else names.get(str(behalf), f"<@{behalf}>")
+        out.append(Borrower(uid, names[uid] if uid in names else _guild_name(draft, uid),
                             loan.state if loan else None,
-                            await _cards_described(loan) if loan else None))
+                            await _cards_described(loan) if loan else None,
+                            sub_for))
     return sorted(out, key=_sort_key)
 
 
@@ -210,6 +225,21 @@ def desired_face(current: Face, borrowers: list[Borrower], *, settled: bool,
     return Face.RETURN
 
 
+def sub_line(b: Borrower) -> str:
+    """The state text for a sub's loan, which names whose deck it is."""
+    deck = f"**{b.sub_for}**'s deck"
+    return {
+        None: f"⏳ preparing {deck}",
+        "assigned": f"📦 {deck} ready for you (sub), not collected",
+        "out_pending": f"🚚 {deck} on its way (sub)",
+        "borrowed": f"✅ collected {deck} (sub)",
+        "return_pending": f"⏳ returning {deck}",
+        "dispatch_unknown": f"🚚 {deck} on its way (sub)",
+        "returned": f"☑️ returned {deck}",
+        "expired": f"⌛ offer of {deck} lapsed",
+    }.get(b.state, str(b.state))
+
+
 def ask_embed() -> discord.Embed:
     return discord.Embed(
         title=TITLE,
@@ -220,7 +250,11 @@ def ask_embed() -> discord.Embed:
 def borrow_embed(borrowers: list[Borrower], *, closed: bool = False) -> discord.Embed:
     lines = [] if borrowers or closed else ["Nobody has a library deck yet."]
     for b in borrowers:
-        if closed and b.state in (None, "assigned", "expired"):
+        if b.sub_for:
+            text = (f"⌛ offer of **{b.sub_for}**'s deck lapsed"
+                    if closed and b.state in (None, "assigned", "expired")
+                    else sub_line(b))
+        elif closed and b.state in (None, "assigned", "expired"):
             text = "not collected, back on the shelf"
         else:
             text = _STATE_TEXT.get(b.state, str(b.state))
@@ -250,9 +284,12 @@ def return_embed(borrowers: list[Borrower], result: Optional[str], *,
         ask += ("\n\nStill have a match to play? **Borrow my deck** takes your "
                 "deck out again while this chat is open.")
     embed = discord.Embed(title=TITLE, description=lead + ask)
-    out = [f"**{b.name}**: {deck_summary(b.cards)}"
+    def who(b: Borrower) -> str:
+        return f"**{b.name}** (sub for **{b.sub_for}**)" if b.sub_for else f"**{b.name}**"
+
+    out = [f"{who(b)}: {deck_summary(b.cards)}"
            for b in borrowers if b.state in OUT_STATES]
-    back = [f"**{b.name}**" for b in borrowers if b.state == "returned"]
+    back = [who(b) for b in borrowers if b.state == "returned"]
     # A field may not be empty, so a side with nobody on it is left off.
     if out:
         embed.add_field(name="Still out", value="\n".join(out), inline=False)

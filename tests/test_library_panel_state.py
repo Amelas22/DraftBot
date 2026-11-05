@@ -1,5 +1,8 @@
 """What the library panel should say and which face it should wear, without
 Discord: who it lists, its embeds, and desired_face as a table."""
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
 
 from conftest import test_db  # noqa: F401  (fixture)
@@ -88,6 +91,49 @@ async def test_borrowers_are_the_reserved_plus_loaned_newest_loan_by_name(
     assert [(b.name, b.state) for b in got] == [("Ravenwood", "borrowed"),
                                                 ("Tomasz88", None)]
     assert await library_panel_state.panel_borrowers("nope") == []
+
+
+def test_borrow_embed_names_whose_deck_a_sub_holds():
+    embed = borrow_embed([
+        Borrower("1", "Ali", "assigned", [], sub_for="Bo"),
+        Borrower("2", "Cy", "borrowed", [], sub_for="Bo"),
+        Borrower("3", "Di", "return_pending", [], sub_for="Bo"),
+        Borrower("4", "Ed", "returned", [], sub_for="Bo"),
+        Borrower("5", "Fay", "expired", [], sub_for="Bo"),
+        Borrower("6", "Gus", "out_pending", [], sub_for="Bo"),
+    ])
+    assert _line(embed, "Ali") == "**Ali**: 📦 **Bo**'s deck ready for you (sub), not collected"
+    assert _line(embed, "Cy") == "**Cy**: ✅ collected **Bo**'s deck (sub)"
+    assert _line(embed, "Di") == "**Di**: ⏳ returning **Bo**'s deck"
+    assert _line(embed, "Ed") == "**Ed**: ☑️ returned **Bo**'s deck"
+    assert _line(embed, "Fay") == "**Fay**: ⌛ offer of **Bo**'s deck lapsed"
+    assert _line(embed, "Gus") == "**Gus**: 🚚 **Bo**'s deck on its way (sub)"
+
+
+def test_return_embed_marks_a_sub_in_both_fields():
+    embed = return_embed([
+        Borrower("1", "Ali", "borrowed", [{"name": "Island", "qty": 1}], sub_for="Bo"),
+        Borrower("2", "Cy", "returned", [], sub_for="Bo"),
+    ], None)
+    assert "**Ali** (sub for **Bo**)" in _field(embed, "Still out")
+    assert "**Cy** (sub for **Bo**)" in _field(embed, "Back")
+
+
+@pytest.mark.asyncio
+async def test_an_outside_sub_is_named_from_the_guild(test_db, monkeypatch):  # noqa: F811
+    async with AsyncSessionLocal() as s:
+        s.add(DraftSession(session_id="s1", guild_id="99", sign_ups={"1": "Bo"}))
+        s.add(CardLoan(guild_id="99", library_id="lib", borrower_id="7", cards=[],
+                       state="borrowed", source="draft:s1", on_behalf_of="1"))
+        await s.commit()
+    member = SimpleNamespace(display_name="Sal")
+    guild = SimpleNamespace(get_member=lambda uid: member if uid == 7 else None)
+    monkeypatch.setattr("services.library_panel_state.library_users",
+                        AsyncMock(return_value=set()))
+    monkeypatch.setattr("bot_registry.get_bot",
+                        lambda: SimpleNamespace(get_guild=lambda gid: guild))
+    (sub,) = await library_panel_state.panel_borrowers("s1")
+    assert (sub.user_id, sub.name, sub.state, sub.sub_for) == ("7", "Sal", "borrowed", "Bo")
 
 
 def test_faces_round_trip_the_stored_mode():
