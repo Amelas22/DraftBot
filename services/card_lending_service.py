@@ -558,10 +558,27 @@ async def _mtgo_handle(discord_user_id: Any) -> Optional[str]:
     return await linked_username(discord_user_id)
 
 
+class PoolOutWithSub(ValueError):
+    """The drafter's pool is already out on loan to a sub."""
+
+
+async def sub_loan_for(source: str, absent_id: Any) -> Optional[CardLoan]:
+    """The active loan carrying `absent_id`'s pool for `source`, or None."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(CardLoan)
+            .where(CardLoan.source == source,
+                   CardLoan.on_behalf_of == str(absent_id),
+                   CardLoan.state.in_(ACTIVE_STATES))
+            .order_by(CardLoan.id.desc()))
+        return result.scalars().first()
+
+
 async def assign_deck(guild_id: Any, borrower_id: Any, cards: "list[dict[str, Any]]",
                       source: Optional[str] = None,
                       library_id: "Optional[str]" = None,
-                      claimed_at: Optional[datetime] = None) -> int:
+                      claimed_at: Optional[datetime] = None,
+                      on_behalf_of: Optional[str] = None) -> int:
     """Give a borrower a deck they may collect. Returns the new loan's id.
 
     The library is stamped on the loan at assignment, so the deck stays priced
@@ -570,7 +587,13 @@ async def assign_deck(guild_id: Any, borrower_id: Any, cards: "list[dict[str, An
 
     `claimed_at` dates a deck asked for after its draft (see CardLoan); a deck
     handed out with its draft leaves it unset.
+
+    `on_behalf_of` names the drafter whose pool a sub is borrowing. While such a
+    loan is active, that drafter's own offer for the same draft is refused.
     """
+    if source and source.startswith("draft:") \
+            and await sub_loan_for(source, borrower_id) is not None:
+        raise PoolOutWithSub(f"{borrower_id}'s pool is out with a sub")
     if library_id is None:
         found = await library_for(guild_id)
         library_id = str(found.id) if found else None
@@ -579,6 +602,7 @@ async def assign_deck(guild_id: Any, borrower_id: Any, cards: "list[dict[str, An
     async with AsyncSessionLocal() as session:
         loan = CardLoan(guild_id=str(guild_id), borrower_id=str(borrower_id),
                         library_id=library_id, claimed_at=claimed_at,
+                        on_behalf_of=str(on_behalf_of) if on_behalf_of is not None else None,
                         cards=cards, state="assigned", source=source)
         session.add(loan)
         await session.commit()
