@@ -1290,3 +1290,30 @@ async def test_a_returned_sub_loan_no_longer_blocks_the_absent_player(test_db, l
     assert await sub_loan_for(f"draft:{SESSION}", BOB) is None
     await assign_deck(GUILD, BOB, [{"name": "Island", "qty": 1}],
                       source=f"draft:{SESSION}", library_id=LIBRARY)
+
+
+async def test_request_refuses_while_a_sub_holds_the_pool(test_db, library_on):
+    await _seed()
+    await _reported(SESSION, [(ALICE, "x", False), (BOB, "y", False)])
+    await _open_chat()
+    await assign_deck(GUILD, ALICE, [{"name": "Island", "qty": 1}],
+                      source=f"draft:{SESSION}", library_id=LIBRARY, on_behalf_of=BOB)
+
+    assert await svc.assign_on_request(SESSION, BOB) == "subbed"
+    assert await svc.subbed_message(SESSION, BOB) == (
+        "📭 **Alice** has your deck as your sub. It has to come back before you can borrow it again.")
+
+
+async def test_request_works_again_once_the_sub_offer_lapsed(test_db, library_on):
+    await _seed()
+    await _reported(SESSION, [(ALICE, "x", False), (BOB, "y", False)])
+    await _open_chat()
+    loan_id = await assign_deck(GUILD, ALICE, [{"name": "Island", "qty": 1}],
+                                source=f"draft:{SESSION}", library_id=LIBRARY,
+                                on_behalf_of=BOB)
+    async with AsyncSessionLocal() as s:
+        loan = await s.get(CardLoan, loan_id)
+        loan.state = "expired"
+        await s.commit()
+
+    assert await svc.assign_on_request(SESSION, BOB) == "assigned"

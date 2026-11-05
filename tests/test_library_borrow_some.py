@@ -575,3 +575,15 @@ async def test_a_dispatch_unknown_loan_is_not_told_it_has_its_deck(library):
     await library.drain()
     assert caller.said == [actions.LOAN_MESSAGES["dispatch_unknown"]]
     assert library.sent == []
+
+
+async def test_borrow_some_refuses_while_a_sub_holds_the_pool(library):
+    await lending_svc.assign_deck(GUILD, ALICE, [{"name": "Island", "qty": 1}],
+                                  source=f"draft:{SESSION}", library_id=LIB,
+                                  on_behalf_of=BOB)
+
+    result = await actions.match_for_borrow(GUILD,
+                                            int(BOB), SESSION, ["Island"])
+
+    assert result == ("📭 **Alice** has your deck as your sub. "
+                      "It has to come back before you can borrow it again.")

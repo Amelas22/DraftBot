@@ -39,7 +39,7 @@ from helpers.mtgo_untradeable import split_untradeable
 from services.card_substitution_service import to_mtgo_names
 from models.card_loan import ACTIVE_STATES, CardLoan
 from models.draft_session import DraftSession
-from services.card_lending_service import assign_deck
+from services.card_lending_service import assign_deck, sub_loan_for
 from services.card_library_inventory import library_available
 from services.draft_log_store import map_discord_to_draftmancer, pool_items
 from services.mtgo_tradebot_client import max_cards_per_trade, too_large
@@ -460,11 +460,25 @@ async def latest_draft_of(guild_id: Any, player_id: Any) -> Optional[str]:
 
 RequestOutcome = Literal[
     "assigned", "not_drafter", "not_offered", "closed", "over", "busy",
-    "not_allowed", "no_log", "unseatable", "empty", "too_large", "nothing", "failed"]
+    "not_allowed", "subbed", "no_log", "unseatable", "empty", "too_large", "nothing",
+    "failed"]
 
 # Why a drafter's pool cannot be read: the subset of RequestOutcome that comes
 # from the log and the seating rather than from the library's rules.
 PoolRefusal = Literal["not_drafter", "no_log", "unseatable"]
+
+
+async def subbed_message(session_id: Any, player_id: Any) -> str:
+    """Why a drafter cannot borrow their own pool: a sub is holding it."""
+    loan = await sub_loan_for(loan_source(session_id), player_id)
+    sub = "somebody"
+    if loan is not None:
+        meta = await _session_meta(session_id)
+        names: "dict[str, Any]" = meta[1] if meta is not None else {}
+        sub = str(next((n for k, n in names.items() if str(k) == str(loan.borrower_id)),
+                       f"<@{loan.borrower_id}>"))
+    return (f"📭 **{sub}** has your deck as your sub. "
+            "It has to come back before you can borrow it again.")
 
 
 async def _pool_of(session_id: Any, key: Any, sign_ups: "dict[str, Any]"
@@ -553,6 +567,8 @@ async def assign_on_request(session_id: Any, player_id: Any) -> RequestOutcome:
         return refused
     if await _holding_a_deck([player]):
         return "busy"
+    if await sub_loan_for(loan_source(session_id), player) is not None:
+        return "subbed"
     if player not in await may_borrow_many(library.id, [player]):
         return "not_allowed"
 

@@ -36,11 +36,12 @@ from services.card_lending_service import (
     poll_until_settled,
     return_when_free,
     shortfall,
+    sub_loan_for,
 )
 from services.card_name_match import NameMatch, match_names
 from services.draft_deck_assignment import (
     RequestOutcome, assign_on_request, latest_draft_of, loan_source,
-    pool_for_request,
+    pool_for_request, subbed_message,
 )
 from services.library_access_service import may_borrow, why_not
 from services.library_service import library_id_for
@@ -302,17 +303,20 @@ async def _ask_for_deck(caller: LibraryCaller, guild_id: int,
     outcome = await assign_on_request(session_id, caller.user_id)
     if outcome in ("assigned", "not_drafter"):
         return True
-    await _say_request_refused(caller, guild_id, outcome)
+    await _say_request_refused(caller, guild_id, outcome, session_id)
     return False
 
 
 async def _say_request_refused(caller: LibraryCaller, guild_id: int,
-                               outcome: RequestOutcome) -> None:
+                               outcome: RequestOutcome,
+                               session_id: Optional[str] = None) -> None:
     """Why assign_on_request handed nothing over. "not_allowed" is answered by
     why_not, which can say what the library's rule is."""
     if outcome == "not_allowed":
         library_id = await library_id_for(guild_id)
         await caller.send(await why_not(library_id, caller.user_id))
+    elif outcome == "subbed" and session_id is not None:
+        await caller.send(await subbed_message(session_id, caller.user_id))
     else:
         await caller.send(REQUEST_MESSAGES.get(outcome, _CANNOT_COLLECT))
 
@@ -432,6 +436,8 @@ async def match_for_borrow(guild_id: int, user_id: int, session_id: str,
         pool = list(loan.cards or [])
         library_id = getattr(loan, "library_id", None) or await library_id_for(guild_id)
     else:
+        if await sub_loan_for(loan_source(session_id), user_id) is not None:
+            return await subbed_message(session_id, user_id)
         read = await pool_for_request(session_id, user_id)
         if isinstance(read, str):
             return REQUEST_MESSAGES.get(read, _CANNOT_COLLECT)
@@ -533,7 +539,7 @@ async def borrow_some(caller: LibraryCaller, session_id: str,
     if asked:
         outcome = await assign_on_request(session_id, caller.user_id)
         if outcome != "assigned":
-            await _say_request_refused(caller, guild_id, outcome)
+            await _say_request_refused(caller, guild_id, outcome, session_id)
             return
         loan = await active_loan(caller.user_id)
     if loan is not None:
