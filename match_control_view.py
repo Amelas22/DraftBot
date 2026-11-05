@@ -23,6 +23,9 @@ from helpers.match_control import (
     render_match_control,
     match_tag,
     render_pairing_line,
+    room_header_text,
+    room_topic,
+    rooms_open_text,
 )
 from helpers.matchup import (
     MATCH_SCHEDULING_NOT_ENABLED,
@@ -155,6 +158,18 @@ def lobby_link(draft: DraftSession | None) -> str | None:
             f"{draft.draft_channel_id}/{draft.message_id}")
 
 
+def room_id(draft: DraftSession | None) -> str | None:
+    """The linked draft's shared chat room, once its rooms exist, or None.
+
+    Gated on rooms_created_at rather than the chat id alone: the id is
+    committed while the FIRST of the rooms is being made, so on its own it
+    would point players at a room the pairings have not reached yet.
+    """
+    if draft is None or not draft.rooms_created_at or not draft.draft_chat_channel:
+        return None
+    return str(draft.draft_chat_channel)
+
+
 def block_for_facts(
     facts: tuple[TournamentMatch, str, str, str, DraftSession | None],
 ) -> str | None:
@@ -202,6 +217,7 @@ def control_body_and_view(
         result=(match.team_a_wins, match.team_b_wins),
         role_mentions=role_mentions,
         booking=Booking(match.booked_start_utc, match.booked_by_name),
+        room_id=room_id(draft),
     )
     return body, (MatchControlView(match.id) if state == SCHEDULING else None)
 
@@ -435,6 +451,22 @@ async def _refresh_pairing_message(
         logger.error(f"Failed to refresh pairing message for match {match.id}: {e}")
 
 
+async def _match_thread(
+    bot: discord.Client, match_id: int, thread_id: str
+) -> discord.Thread | None:
+    """A match's room, or None (logged) when Discord can't produce it."""
+    channel = bot.get_channel(int(thread_id))
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(int(thread_id))
+        except discord.HTTPException:
+            logger.warning(f"Match {match_id} thread {thread_id} unreachable")
+            return None
+    # The stored id always names a thread opened by create_match_room; the
+    # wider return type here covers channel ids in general.
+    return cast(discord.Thread, channel)
+
+
 async def _refresh_match_views_with_facts(
     bot: discord.Client,
     match_id: int,
@@ -451,18 +483,9 @@ async def _refresh_match_views_with_facts(
     body, view = control_body_and_view(match, a_name, b_name, name, draft)
 
     if match.control_message_id and match.thread_id:
-        thread_id, control_id = int(match.thread_id), int(match.control_message_id)
-        channel = bot.get_channel(thread_id)
-        if channel is None:
-            try:
-                channel = await bot.fetch_channel(thread_id)
-            except discord.HTTPException:
-                logger.warning(f"Match {match_id} thread {thread_id} unreachable; not refreshed")
-                channel = None
-        if channel is not None:
-            # The stored id always names a thread opened by create_match_room; the
-            # wider return type here covers channel ids in general.
-            thread = cast(discord.Thread, channel)
+        control_id = int(match.control_message_id)
+        thread = await _match_thread(bot, match_id, match.thread_id)
+        if thread is not None:
             try:
                 message = await thread.fetch_message(control_id)
                 await message.edit(content=body, view=view)
@@ -607,3 +630,75 @@ async def announce_match_booking(bot: discord.Client, match_id: int, change: Boo
         logger.exception(f"Match {match_id}: booking announcement failed")
     # After the send: another booking may have committed during it.
     await safe_refresh_match_views(bot, match_id)
+
+
+async def post_room_header(channel: discord.abc.Messageable, match_id: int) -> None:
+    """Head a tournament draft's shared room with the match it is for.
+
+    Posted and pinned first thing in the room, and set as the channel topic,
+    because the room's own name is a random draft id. Failures are logged and
+    swallowed: this runs inside room creation, which must not fail over a
+    signpost.
+    """
+    async with db_session() as session:
+        facts = await match_facts(session, match_id)
+    if facts is None:
+        return
+    match, a_name, b_name, name, _draft = facts
+    label = match_tag(match.id, name)
+    try:
+        posted = await channel.send(room_header_text(label, a_name, b_name, match.thread_id))
+        await safe_pin(posted)
+        if isinstance(channel, discord.TextChannel):
+            await channel.edit(topic=room_topic(label, a_name, b_name))
+    except discord.HTTPException as e:
+        logger.warning(f"Could not head the draft room for match {match_id}: {e}")
+
+
+async def announce_rooms_open(bot: discord.Client, match_id: int) -> None:
+    """Tell the match thread its draft rooms are open, and re-render the
+    control message so it points at the room instead of the lobby.
+
+    Nothing is posted until the draft's rooms exist: an early call (a draft
+    that died before its rooms) would otherwise announce a room that isn't
+    there.
+    """
+    async with db_session() as session:
+        facts = await match_facts(session, match_id)
+    if facts is None:
+        return
+    match, _a, _b, _name, draft = facts
+    room = room_id(draft)
+    if room is None:
+        return
+    if match.thread_id:
+        thread = await _match_thread(bot, match_id, match.thread_id)
+        if thread is not None:
+            try:
+                await thread.send(rooms_open_text(room))
+            except discord.HTTPException as e:
+                logger.warning(f"Could not announce rooms in match {match_id}'s thread: {e}")
+    await _refresh_match_views_with_facts(bot, match_id, facts)
+
+
+async def post_result_to_thread(bot: discord.Client, match_id: int) -> None:
+    """Drop a match's recorded result into its thread as a fresh message.
+
+    The control message is edited in place when a result lands, and an edit
+    neither bumps the thread in the sidebar nor notifies anyone in it. A new
+    message does both, and it survives the draft rooms being cleaned up.
+    """
+    async with db_session() as session:
+        facts = await match_facts(session, match_id)
+    if facts is None:
+        return
+    match, a_name, b_name, _name, _draft = facts
+    if match.team_a_wins is None or not match.thread_id:
+        return
+    thread = await _match_thread(bot, match_id, match.thread_id)
+    if thread is None:
+        return
+    try:
+        await thread.send(recorded_result_line(a_name, b_name, match.team_a_wins, match.team_b_wins))
+    except discord.HTTPException as e:
+        logger.warning(f"Could not post match {match_id}'s result to its thread: {e}")
