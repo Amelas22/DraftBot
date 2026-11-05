@@ -31,7 +31,8 @@ from services.draft_deck_assignment import (
 from services.library_access_service import may_borrow_many, why_not
 from services.library_loan_actions import REQUEST_MESSAGES
 from services.library_panel_state import OUT_STATES
-from services.library_reminders import draft_state, may_still_request
+from services.library_reminders import (
+    draft_state, may_still_request, name_in_draft, session_of)
 from services.library_service import library_for, offers
 
 
@@ -234,3 +235,29 @@ def confirm_reply(ctx: SubContext) -> str:
     return (f"✅ **{ctx.absent_name}**'s deck is offered to **{ctx.sub_name}**. They "
             "collect it with **Borrow my deck** here or the **Borrow** button in "
             f"their DM; the offer lasts {minutes} minutes.")
+
+
+async def sub_return_texts(loan: Any) -> Optional["tuple[str, str]"]:
+    """(what the sub is told when they press Return, what they are told once
+    the deck has landed) for a pool lent on someone's behalf; None for a
+    deck that is the borrower's own."""
+    absent_id = getattr(loan, "on_behalf_of", None)
+    session_id = session_of(loan)
+    if absent_id is None or session_id is None:
+        return None
+    name = await name_in_draft(session_id, absent_id)
+    pressed = (f"📬 Returning **{name}**'s deck. That's the end of your turn as "
+               f"{name}'s sub: it goes back on the shelf for {name}.")
+    landed = (f"✅ **{name}**'s deck is back on the shelf. "
+              f"You're no longer subbing for {name}.")
+    async with AsyncSessionLocal() as session:
+        sign_ups = await session.scalar(select(DraftSession.sign_ups).where(
+            DraftSession.session_id == session_id))
+    borrower = str(loan.borrower_id)
+    if borrower in {str(k) for k in (sign_ups or {})} and may_still_request(
+            await draft_state(session_id), borrower) is None:
+        pressed += (" Want your own pool back? Press **Borrow my deck** once the "
+                    "return lands.")
+        landed += (" Your own pool is still yours to borrow back: press "
+                   "**Borrow my deck** in the draft chat.")
+    return pressed, landed

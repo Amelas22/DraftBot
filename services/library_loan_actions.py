@@ -638,8 +638,12 @@ async def return_deck(caller: LibraryCaller) -> None:
     if guild_id is None:
         return
     await _warn_if_busy(caller)
+    # Imported here: library_sub imports this module.
+    from services.library_sub import sub_return_texts
+    texts = await sub_return_texts(await active_loan(caller.user_id))
     spawn_followup("card-library return", _trade_when_ready(
-        caller, guild_id, return_when_free, "return", "returned"))
+        caller, guild_id, return_when_free, "return", "returned",
+        lead=texts[0] if texts else None, done=texts[1] if texts else None))
 
 
 async def _warn_if_busy(caller: LibraryCaller) -> None:
@@ -669,7 +673,9 @@ async def _trade_when_ready(caller: LibraryCaller, guild_id: int,
                             when_free: "Callable[[int, int], Awaitable[tuple[str, bool]]]",
                             verb: str, expect: str, note: str = "",
                             offering: "Optional[list[dict[str, Any]]]" = None,
-                            small_with_deck_waiting: Optional[bool] = None
+                            small_with_deck_waiting: Optional[bool] = None,
+                            *, lead: Optional[str] = None,
+                            done: Optional[str] = None
                             ) -> None:
     """Wait for the library's turn, dispatch, then see the trade through.
 
@@ -711,10 +717,11 @@ async def _trade_when_ready(caller: LibraryCaller, guild_id: int,
 
     loan = await active_loan(caller.user_id)
     who = await custodian_name(get_lending_client())
-    lead = "✅ **Your turn.** " if waited else ""
+    turn = "✅ **Your turn.** " if waited else ""
     job_id = getattr(loan, "job_id", None)
     await caller.send(
-        f"{lead}🤝 **Your deck is ready to {verb}.** {mtgo_trade_prompt(who)}\n"
+        (f"{lead}\n" if lead else "") +
+        f"{turn}🤝 **Your deck is ready to {verb}.** {mtgo_trade_prompt(who)}\n"
         # Only when the bot is TAKING cards. Collecting a deck gives cards
         # to the player, who offers nothing and needs no advice about how.
         f"{full_trade_list_advice(exact_printing=True) if expect == 'returned' else ''}\n\n"
@@ -726,12 +733,14 @@ async def _trade_when_ready(caller: LibraryCaller, guild_id: int,
     outcome, detail = await poll_until_settled(guild_id, caller.user_id, expect,
                                                job_id=job_id)
     await _report_outcome(caller, outcome, expect, detail,
-                          small_with_deck_waiting=small_with_deck_waiting)
+                          small_with_deck_waiting=small_with_deck_waiting,
+                          done=done)
 
 
 async def _report_outcome(caller: LibraryCaller, outcome: str, expected: str,
                           detail: Optional[str] = None,
-                          small_with_deck_waiting: Optional[bool] = None) -> None:
+                          small_with_deck_waiting: Optional[bool] = None,
+                          done: Optional[str] = None) -> None:
     """Say what happened, and for a failure, what to do about it.
 
     A failed borrow and a failed return need opposite advice: the first
@@ -745,7 +754,7 @@ async def _report_outcome(caller: LibraryCaller, outcome: str, expected: str,
             "_Move it into your **trade binder** before `/library return`, or the bot "
             "can't take it back._")
     elif outcome == "returned":
-        await caller.send("✅ Deck returned. Thanks!")
+        await caller.send(done or "✅ Deck returned. Thanks!")
     elif outcome == "failed":
         why = explain_trade_failure(detail or "the trade didn't complete")
         if small_with_deck_waiting is not None:

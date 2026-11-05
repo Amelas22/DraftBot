@@ -12,9 +12,10 @@ from sqlalchemy import update
 
 from database.db_session import AsyncSessionLocal
 from models.card_loan import CardLoan
-from services.card_lending_service import assign_deck, sub_loan_for
+from services.card_lending_service import active_loan, assign_deck, sub_loan_for
 from services.library_sub import (
-    chat_line, check_sub, confirm_reply, offer_to_sub, sub_context)
+    chat_line, check_sub, confirm_reply, offer_to_sub, sub_context,
+    sub_return_texts)
 from test_draft_deck_assignment import (  # noqa: F401 -- library_on is a fixture
     ALICE, BOB, GUILD, LIBRARY, SESSION, _loans, _log, _open_chat, _reported,
     _seed, _stamp_draft, library_on)
@@ -175,3 +176,29 @@ async def test_an_unexpected_failure_says_the_deck_cannot_be_put_together(
     with patch("services.library_sub.assign_deck", side_effect=RuntimeError("boom")):
         assert await offer_to_sub(await _ctx()) == (
             "⚠️ The library can't put **Bob**'s deck together — ask an admin.")
+
+
+async def test_return_texts_for_a_drafter_sub_with_a_match_left(test_db, library_on):
+    await _ready()
+    await offer_to_sub(await _ctx())
+    loan = await active_loan(ALICE)
+    pressed, landed = await sub_return_texts(loan)
+    assert pressed == ("📬 Returning **Bob**'s deck. That's the end of your turn as Bob's sub: it goes back on the shelf for Bob. "
+                       "Want your own pool back? Press **Borrow my deck** once the return lands.")
+    assert landed == ("✅ **Bob**'s deck is back on the shelf. You're no longer subbing for Bob. "
+                      "Your own pool is still yours to borrow back: press **Borrow my deck** in the draft chat.")
+
+
+async def test_return_landed_for_an_outside_sub_offers_no_reborrow(test_db, library_on):
+    await _ready()
+    await offer_to_sub(await _ctx(sub="7000", name="Sal"))
+    loan = await active_loan("7000")
+    pressed, landed = await sub_return_texts(loan)
+    assert pressed == "📬 Returning **Bob**'s deck. That's the end of your turn as Bob's sub: it goes back on the shelf for Bob."
+    assert landed == "✅ **Bob**'s deck is back on the shelf. You're no longer subbing for Bob."
+
+
+async def test_own_loan_has_no_sub_return_texts(test_db, library_on):
+    await _ready()
+    await assign_deck(GUILD, ALICE, [{"name": "Lightning Bolt", "qty": 1}], source=f"draft:{SESSION}", library_id=LIBRARY)
+    assert await sub_return_texts(await active_loan(ALICE)) is None
