@@ -68,6 +68,7 @@ async def test_room_header_is_posted_pinned_and_set_as_topic():
     posted = MagicMock()
     channel.send = AsyncMock(return_value=posted)
     channel.edit = AsyncMock()
+    channel.pins = AsyncMock(return_value=[])
     facts = (_match(thread_id="900"), "Alpha", "Bravo", "Week 3", _draft())
 
     with patch.object(match_control_view, "match_facts", AsyncMock(return_value=facts)), \
@@ -82,10 +83,32 @@ async def test_room_header_is_posted_pinned_and_set_as_topic():
 
 
 @pytest.mark.asyncio
+async def test_room_header_is_not_posted_twice_when_room_creation_resumes():
+    """A run that died after the header leaves it pinned; the retry that
+    finishes the rooms must not pin a second one."""
+    import match_control_view
+
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.send = AsyncMock()
+    channel.edit = AsyncMock()
+    already = MagicMock()
+    already.content = "**#143 · Week 3 — Alpha vs Bravo**\nScheduling thread: <#900>\nResults record to the tournament automatically."
+    channel.pins = AsyncMock(return_value=[already])
+    facts = (_match(thread_id="900"), "Alpha", "Bravo", "Week 3", _draft())
+
+    with patch.object(match_control_view, "match_facts", AsyncMock(return_value=facts)), \
+         patch.object(match_control_view, "db_session", _fake_db_session()):
+        await match_control_view.post_room_header(channel, 143)
+
+    channel.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_room_header_failure_never_escapes_into_room_creation():
     import match_control_view
 
     channel = MagicMock(spec=discord.TextChannel)
+    channel.pins = AsyncMock(side_effect=discord.HTTPException(MagicMock(status=403), "nope"))
     channel.send = AsyncMock(side_effect=discord.HTTPException(MagicMock(status=403), "nope"))
     facts = (_match(), "Alpha", "Bravo", "Week 3", _draft())
 

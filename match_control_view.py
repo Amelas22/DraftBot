@@ -454,7 +454,7 @@ async def _refresh_pairing_message(
 async def _match_thread(
     bot: discord.Client, match_id: int, thread_id: str
 ) -> discord.Thread | None:
-    """A match's room, or None (logged) when Discord can't produce it."""
+    """A match's thread, or None (logged) when Discord can't produce it."""
     channel = bot.get_channel(int(thread_id))
     if channel is None:
         try:
@@ -639,6 +639,9 @@ async def post_room_header(channel: discord.abc.Messageable, match_id: int) -> N
     because the room's own name is a random draft id. Failures are logged and
     swallowed: this runs inside room creation, which must not fail over a
     signpost.
+
+    Room creation resumes after a crash with the shared chat already made, so
+    a header already pinned is left alone rather than pinned a second time.
     """
     async with db_session() as session:
         facts = await match_facts(session, match_id)
@@ -646,8 +649,12 @@ async def post_room_header(channel: discord.abc.Messageable, match_id: int) -> N
         return
     match, a_name, b_name, name, _draft = facts
     label = match_tag(match.id, name)
+    text = room_header_text(label, a_name, b_name, match.thread_id)
     try:
-        posted = await channel.send(room_header_text(label, a_name, b_name, match.thread_id))
+        if isinstance(channel, discord.TextChannel):
+            if any(m.content == text for m in await channel.pins()):
+                return
+        posted = await channel.send(text)
         await safe_pin(posted)
         if isinstance(channel, discord.TextChannel):
             await channel.edit(topic=room_topic(label, a_name, b_name))

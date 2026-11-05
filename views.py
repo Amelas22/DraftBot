@@ -1709,6 +1709,18 @@ class PersistentView(discord.ui.View):
                     logger.info("Database commit complete for session_id={}", session_id)
 
                 # Post-commit
+                if session.tournament_match_id is not None:
+                    # First thing after the commit that stamped rooms_created_at
+                    # (what lets the control message point at the room), and
+                    # guarded: the marker is set, so this run cannot be retried,
+                    # and a signpost must neither be skipped by a later step
+                    # failing nor turn a finished room creation into an error.
+                    from match_control_view import announce_rooms_open
+                    try:
+                        await announce_rooms_open(bot, session.tournament_match_id)
+                    except Exception:
+                        logger.exception("Could not announce the rooms for session_id={}", session_id)
+
                 logger.debug("Running post_pairings tasks")
                 await post_pairings(bot, guild, session.session_id)
                 from livedrafts import create_live_draft_summary
@@ -1716,12 +1728,6 @@ class PersistentView(discord.ui.View):
 
                 from services.library_panel import nudge
                 await nudge(bot, session.session_id)
-
-                if session.tournament_match_id is not None:
-                    # After the commit that stamped rooms_created_at, which is
-                    # what lets the control message point at the room.
-                    from match_control_view import announce_rooms_open
-                    await announce_rooms_open(bot, session.tournament_match_id)
 
                 if interaction:
                     await interaction.followup.send("Pairings posted.", ephemeral=True)

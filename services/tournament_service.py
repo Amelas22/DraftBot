@@ -1233,11 +1233,12 @@ async def sync_linked_result(tournament_match_id, team_a_wins, team_b_wins):
     past its clinch ends up holding the true score, without re-posting the
     standings for the reports that changed nothing.
 
-    Returns (match, completed_now, newly_decided) when it wrote, or None when
+    Returns (match, completed_now, winner_changed) when it wrote, or None when
     the score already matched; completed_now is True only for the write that
-    completed the tournament, newly_decided only for the write that first gave
-    the match a winner -- the clinch, as opposed to the later reports that
-    correct a decided score.
+    completed the tournament, winner_changed only for a write that gave the
+    match a winner it did not have -- the clinch, or a correction that hands
+    it to the other team -- as opposed to the reports that move a decided
+    score without changing who won.
     """
     async with db_session() as session:
         match = await session.get(TournamentMatch, tournament_match_id)
@@ -1245,8 +1246,8 @@ async def sync_linked_result(tournament_match_id, team_a_wins, team_b_wins):
             raise ValueError("Match not found.")
         if (match.team_a_wins, match.team_b_wins) == (team_a_wins, team_b_wins):
             return None
-        newly_decided = (_stored_winner(match) is None
-                         and _decided_winner(match, team_a_wins, team_b_wins) is not None)
+        new_winner = _decided_winner(match, team_a_wins, team_b_wins)
+        winner_changed = new_winner is not None and _stored_winner(match) != new_winner
         # set_result guards a finished tournament for playoff rounds only. That
         # was enough while this ran once, at the clinch: a swiss match could not
         # be reached after the event closed. It can now, on any late-landing
@@ -1267,7 +1268,7 @@ async def sync_linked_result(tournament_match_id, team_a_wins, team_b_wins):
                 return None
         written, completed_now = await record_result(
             session, tournament_match_id, team_a_wins, team_b_wins)
-        return written, completed_now, newly_decided
+        return written, completed_now, winner_changed
 
 
 def _playable_bracket_stmt(tournament_id, *columns):

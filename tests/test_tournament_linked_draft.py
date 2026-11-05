@@ -750,7 +750,22 @@ async def test_sync_says_when_a_match_first_becomes_decided(test_db):
     match_id, _ = await _one_match(test_db)
 
     with patch("services.tournament_service.db_session", lambda: _committing(test_db)):
-        _m, _done, newly_decided = await sync_linked_result(match_id, 5, 2)
-        assert newly_decided is True
-        _m, _done, newly_decided = await sync_linked_result(match_id, 7, 2)
-        assert newly_decided is False
+        _m, _done, winner_changed = await sync_linked_result(match_id, 5, 2)
+        assert winner_changed is True
+        _m, _done, winner_changed = await sync_linked_result(match_id, 7, 2)
+        assert winner_changed is False
+
+
+@pytest.mark.asyncio
+async def test_sync_says_when_a_decided_winner_flips(test_db):
+    """A correction that hands the match to the other team is news too: the
+    thread's last fresh post would otherwise keep naming the first winner."""
+    match_id, _ = await _one_match(test_db)
+
+    with patch("services.tournament_service.db_session", lambda: _committing(test_db)):
+        _m, _done, newsworthy = await sync_linked_result(match_id, 5, 4)
+        assert newsworthy is True
+        _m, _done, newsworthy = await sync_linked_result(match_id, 4, 5)
+        assert newsworthy is True
+        _m, _done, newsworthy = await sync_linked_result(match_id, 4, 6)
+        assert newsworthy is False
