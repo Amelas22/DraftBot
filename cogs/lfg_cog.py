@@ -69,10 +69,10 @@ async def lfg_reply(guild_id: str, user_id: str,
     """The ephemeral reply shared by /lfg and the board button."""
     if not scheduler_enabled(guild_id):
         return NOT_ENABLED, None
-    async with db_session() as session:
-        if not await registration_open(session, guild_id):
-            return REGISTRATION_CLOSED, None
     try:
+        async with db_session() as session:
+            if not await registration_open(session, guild_id):
+                return REGISTRATION_CLOSED, None
         url = await issue_link(user_id, guild_id, "lfg", now)
     except Exception:
         logger.exception("lfg: couldn't issue a link for {}", user_id)

@@ -61,6 +61,8 @@ async function showList(root, api, usualDoc, now, cleanups, notice, firstStatus,
     state = checkDoc(await api.get(TEAMS_PATH), FORMAT);
   } catch (e) {
     if (e instanceof LinkExpired) return notice(expiredMessage());
+    // A link lasts 7 days; a registration may not. The first load meets the refusal as often as a refresh does.
+    if (isRegistrationClosed(e)) return notice(REGISTRATION_CLOSED);
     throw e;
   }
 

@@ -120,7 +120,7 @@ test("action errors: expired, refusal over HTTP, network, server", () => {
   assert.notEqual(actionErrorText(Object.assign(new Error("x"), { code: "http_500", status: 500 })), NETWORK_FAILED);
 });
 
-test("a closed registration says when Find a team opens again, on load and on an action", () => {
+test("a closed registration says when Find a team opens again, on an action", () => {
   // The server sends it as a 403 for reads and actions alike.
   const closed = Object.assign(new Error("x"), { code: "registration_closed", status: 403 });
   assert.ok(isRegistrationClosed(closed));
