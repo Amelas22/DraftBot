@@ -70,6 +70,8 @@ def stubs(monkeypatch):
     monkeypatch.setattr("library_views.sub_picker.offer_to_sub", s.offer)
     monkeypatch.setattr("library_views.sub_picker.nudge", s.nudge)
     monkeypatch.setattr("library_views.sub_picker.grant_sub_access", s.grant)
+    s.announce = AsyncMock()
+    monkeypatch.setattr("library_views.sub_picker._say_it_is_ready", s.announce)
     return s
 
 
@@ -287,3 +289,50 @@ async def test_cancel_subs_nobody(stubs):
         content="👌 Nobody subbed.", view=None)
     stubs.check.assert_not_awaited()
     assert view.is_finished()
+
+
+async def test_a_made_offer_tells_the_sub_at_once(stubs):
+    from library_views.sub_picker import SubPickerView
+    view = await SubPickerView.build("s1", "3", False)
+    with _picked("5", _member(7, "Sal")):
+        await view.confirm.callback(_interaction())
+    stubs.announce.assert_awaited_once_with(42, "7")
+
+
+async def test_the_deck_waiting_dm_goes_out_after_the_lock(stubs):
+    from library_views.sub_picker import SubPickerView
+    from services.library_panel import _lock_for
+    seen = []
+
+    async def announce(loan_id, sub_id):
+        seen.append(_lock_for("s1").locked())
+    stubs.announce.side_effect = announce
+    view = await SubPickerView.build("s1", "3", False)
+    with _picked("5", _member(3, "Ali")):
+        await view.confirm.callback(_interaction())
+    assert seen == [False]
+
+
+async def test_a_refused_offer_tells_the_sub_nothing(stubs):
+    from library_views.sub_picker import SubPickerView
+    stubs.offer.return_value = REFUSAL
+    view = await SubPickerView.build("s1", "3", False)
+    with _picked("5", _member(7, "Sal")):
+        await view.confirm.callback(_interaction())
+    stubs.announce.assert_not_awaited()
+
+
+async def test_a_grant_that_missed_the_draft_chat_still_posts_the_line(stubs):
+    from helpers.substitutes import SubGrant
+    from library_views.sub_picker import SubPickerView
+    stubs.grant.return_value = SubGrant(granted=["<#101>"], failed=["<#100>"],
+                                        announced=False)
+    view = await SubPickerView.build("s1", "3", False)
+    interaction = _interaction()
+    with _picked("5", _member(7, "Sal")):
+        await view.confirm.callback(interaction)
+    interaction.channel.send.assert_awaited_once_with(
+        "**Sal** is subbing for **Bo** and has been offered **Bo**'s deck.")
+    reply = interaction.followup.send.await_args.args[0]
+    assert reply.startswith("✅ **Bo**'s deck is offered to **Sal**.")
+    assert "/add_sub" not in reply

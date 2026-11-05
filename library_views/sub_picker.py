@@ -7,8 +7,9 @@ modals cannot hold a user select, so this is an ephemeral message with
 components, and Confirm does the work.
 
 Confirm runs the checks, the offer and then, for a sub from outside the
-draft, the chat access under the draft's panel lock, and syncs the panel once
-the lock is released (services.library_sub's lock contract). The grant comes
+draft, the chat access under the draft's panel lock. Once the lock is
+released it syncs the panel and DMs the sub that the deck is waiting
+(services.library_sub's lock contract). The grant comes
 after the offer because its announcement says the deck has been offered: a
 refused offer grants nothing and announces nothing.
 """
@@ -23,6 +24,7 @@ from helpers.display_names import get_display_name
 from helpers.substitutes import GrantDecision, grant_sub_access, resolve_sub_grant
 from helpers.utils import PrefilledSelect, not_none, ui_button
 from models.draft_session import DraftSession
+from services.draft_deck_assignment import _say_it_is_ready
 from services.library_panel import _lock_for, nudge
 from services.library_sub import (
     chat_line, check_sub, confirm_reply, offer_to_sub, sub_context)
@@ -121,7 +123,9 @@ class SubPickerView(discord.ui.View):
         presser = not_none(interaction.user)
         presser_name = (get_display_name(presser, interaction.guild)
                         if isinstance(presser, discord.Member) else presser.display_name)
-        granted: Optional[bool] = None
+        granted: Optional[bool] = None    # None: no grant was needed
+        announced = False                 # the grant's announcement carried the line
+        loan_id: Optional[int] = None
         decision: Optional[GrantDecision] = None
         async with _lock_for(self.session_id):
             ctx = await sub_context(self.session_id, absent_id, str(member.id),
@@ -135,23 +139,30 @@ class SubPickerView(discord.ui.View):
                     refused = f"📭 {err}"
             if refused is None:
                 result = await offer_to_sub(ctx)
-                refused = result if isinstance(result, str) else None
+                if isinstance(result, str):
+                    refused = result
+                else:
+                    loan_id = result
             if refused is None and decision is not None:
                 # Only now is the announcement's "has been offered" true. A
                 # grant that fails leaves the offer standing.
                 grant = await grant_sub_access(
                     interaction.guild, self.draft, member, decision,
                     added_by=presser_name, note=chat_line(ctx))
-                granted = bool(grant.granted)
+                granted, announced = bool(grant.granted), grant.announced
         # Outside the lock: the sync takes it.
         await nudge(interaction.client, self.session_id)
         if refused is not None:
             await interaction.followup.send(refused, ephemeral=True)
             return
+        if loan_id is not None:
+            # Now, not at the watchdog's next tick: the offer lasts 15 minutes.
+            await _say_it_is_ready(loan_id, ctx.sub_id)
         await interaction.followup.send(
             confirm_reply(ctx) + (NO_GRANT if granted is False else ""), ephemeral=True)
-        if granted is None:
-            # An insider got no grant announcement to carry the line.
+        if not announced:
+            # An insider got no grant announcement, or the grant's own did not
+            # reach the draft chat: the line is posted here instead.
             await not_none(interaction.channel).send(chat_line(ctx))
 
     async def _take_picker_away(self, interaction: discord.Interaction) -> None:

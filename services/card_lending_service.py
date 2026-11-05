@@ -718,6 +718,23 @@ async def _retract(session: Any, loans: "list[Any]") -> int:
     return expired
 
 
+async def retract_offer(loan_id: int) -> bool:
+    """Retract one uncollected offer, by id. True if it was still merely on
+    offer and is now expired; False if it had been collected, or had finished,
+    since it was read.
+
+    Needs no dispatch lock, unlike decline_offer: the guarded UPDATE in
+    _retract settles a race with a collect in the database, and a caller
+    holding another lock (a draft's panel lock) must not queue behind a serve
+    call for the answer.
+    """
+    async with AsyncSessionLocal() as session:
+        loan = await session.get(CardLoan, loan_id)
+        if loan is None:
+            return False
+        return await _retract(session, [loan]) > 0
+
+
 async def decline_offer(borrower_id: Any, session_id: Any) -> bool:
     """The drafter does not want the deck this draft offered them. True if it
     was handed back.

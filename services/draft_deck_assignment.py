@@ -39,7 +39,7 @@ from helpers.mtgo_untradeable import split_untradeable
 from services.card_substitution_service import to_mtgo_names
 from models.card_loan import ACTIVE_STATES, CardLoan
 from models.draft_session import DraftSession
-from services.card_lending_service import assign_deck, sub_loan_for
+from services.card_lending_service import PoolOutWithSub, assign_deck, sub_loan_for
 from services.card_library_inventory import library_available
 from services.draft_log_store import map_discord_to_draftmancer, pool_items
 from services.mtgo_tradebot_client import max_cards_per_trade, too_large
@@ -599,6 +599,9 @@ async def assign_on_request(session_id: Any, player_id: Any) -> RequestOutcome:
             held = await session.scalar(select(CardLoan.source).where(
                 CardLoan.borrower_id == player, CardLoan.state.in_(ACTIVE_STATES)))
         return "assigned" if held == loan_source(session_id) else "busy"
+    except PoolOutWithSub:
+        # A teammate's sub offer landed between the check above and this write.
+        return "subbed"
     except Exception:
         logger.opt(exception=True).error(
             "deck assignment: could not assign {}'s pool from {} on request",

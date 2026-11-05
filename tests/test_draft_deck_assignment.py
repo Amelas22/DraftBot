@@ -1330,3 +1330,13 @@ async def test_request_works_again_once_the_sub_offer_lapsed(test_db, library_on
         await s.commit()
 
     assert await svc.assign_on_request(SESSION, BOB) == "assigned"
+
+
+async def test_a_pool_that_went_to_a_sub_meanwhile_says_subbed(test_db, library_on):
+    """The drafter's own ask is not under the panel lock: a sub's offer can
+    land between its checks and its write."""
+    from services.card_lending_service import PoolOutWithSub
+    await _seed()
+    with patch("services.draft_deck_assignment.assign_deck",
+               side_effect=PoolOutWithSub("out with a sub")):
+        assert await svc.assign_on_request(SESSION, BOB) == "subbed"

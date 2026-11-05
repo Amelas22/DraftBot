@@ -1,7 +1,10 @@
-"""Pure decision logic for granting a substitute access to draft channels.
+"""The rules for granting a substitute access to a draft's channels, and the
+grant that applies them.
 
-No Discord objects in here — the DraftCommands cog resolves members/channels
-and applies the permission overwrites this module decides on.
+resolve_sub_grant decides which rooms a sub may see and which side they join;
+grant_sub_access applies that decision as permission overwrites and announces
+it in the draft chat. Both /add_sub and the library panel's Sub for a player
+go through them.
 """
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple

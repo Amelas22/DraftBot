@@ -23,8 +23,7 @@ from sqlalchemy.exc import IntegrityError
 from database.db_session import AsyncSessionLocal
 from models.draft_session import DraftSession
 from services.card_lending_service import (
-    REQUEST_GRACE, active_loan, assign_deck, decline_offer,
-    sub_loan_for)
+    REQUEST_GRACE, active_loan, assign_deck, retract_offer, sub_loan_for)
 from services.card_library_inventory import library_available
 from services.draft_deck_assignment import (
     _cube_of, _pool_of, _session_meta, loan_source, too_large)
@@ -80,10 +79,26 @@ def _absent_holds_text(ctx: SubContext) -> str:
             "It has to come back before a sub can take it.")
 
 
-def _sub_busy_text(ctx: SubContext) -> str:
+def _sub_holds_text(ctx: SubContext, held: Any) -> str:
+    """Refusal for a sub who already holds `held`, an active loan."""
+    if held.state == "assigned" and held.source == loan_source(ctx.session_id):
+        return (f"📭 **{ctx.sub_name}** has their own deck waiting. Press "
+                "**I don't need my deck** first, then **Sub for a player** "
+                "again; the pool stays theirs to ask for later.")
+    if held.state == "assigned":
+        # An offer cannot be returned, only declined -- on its own draft's panel.
+        return (f"📭 **{ctx.sub_name}** has a deck offer waiting from another "
+                "draft. Press **I don't need my deck** on that draft's library "
+                "panel first, then **Sub for a player** again.")
     return (f"📭 **{ctx.sub_name}** still has a deck out. Press **Return my deck** "
             "first, then **Sub for a player** again. Their own pool stays theirs "
             "to borrow back later.")
+
+
+async def _sub_busy_text(ctx: SubContext) -> Optional[str]:
+    """Refusal if the sub holds any active loan."""
+    held = await active_loan(ctx.sub_id)
+    return None if held is None else _sub_holds_text(ctx, held)
 
 
 def _cannot_build_text(ctx: SubContext) -> str:
@@ -145,13 +160,9 @@ async def check_sub(ctx: SubContext) -> Optional[str]:
     if refused is not None:
         return refused
 
-    held = await active_loan(ctx.sub_id)
-    if held is not None:
-        if held.state == "assigned" and held.source == loan_source(ctx.session_id):
-            return (f"📭 **{ctx.sub_name}** has their own deck waiting. Press "
-                    "**I don't need my deck** first, then **Sub for a player** "
-                    "again; the pool stays theirs to ask for later.")
-        return _sub_busy_text(ctx)
+    refused = await _sub_busy_text(ctx)
+    if refused is not None:
+        return refused
 
     refused = await _with_another_sub_text(ctx)
     if refused is not None:
@@ -171,7 +182,9 @@ async def check_sub(ctx: SubContext) -> Optional[str]:
     library = await library_for(ctx.guild_id)
     if library is not None \
             and ctx.sub_id not in await may_borrow_many(library.id, [ctx.sub_id]):
-        return await why_not(library.id, ctx.sub_id)
+        # why_not speaks to the borrower; the presser is somebody else.
+        reason = (await why_not(library.id, ctx.sub_id)).removeprefix("🔒 ")
+        return f"📭 **{ctx.sub_name}** can't borrow from this library: {reason}"
 
     late = may_still_request(await draft_state(ctx.session_id), ctx.absent_id)
     if late == "closed":
@@ -196,9 +209,12 @@ async def offer_to_sub(ctx: SubContext) -> "int | str":
     a refusal. Run under the draft's panel lock, after check_sub; never awaits
     a panel sync (see the module docstring).
 
-    The absent player's own uncollected offer is retracted first. `ready_dm_at`
-    is left unset so the "deck waiting" DM reaches the sub."""
-    refused, _ = await _absent_holds(ctx)
+    The absent player's own uncollected offer is retracted first, by id and
+    without the dispatch lock (this runs under the panel lock): if it was
+    collected since it was read, the absent player has the deck out and the
+    sub is refused. `ready_dm_at` is left unset; the caller sends the "deck
+    waiting" DM once the lock is released."""
+    refused, own_offer = await _absent_holds(ctx)
     if refused is None:
         refused = await _with_another_sub_text(ctx)
     if refused is not None:
@@ -206,14 +222,22 @@ async def offer_to_sub(ctx: SubContext) -> "int | str":
     refused, cards, library = await _lendable_pool(ctx)
     if refused is not None:
         return refused
-    await decline_offer(ctx.absent_id, ctx.session_id)
+    # Before the retract: a sub who took a deck since check_sub would fail the
+    # insert below and leave the absent player with nothing.
+    refused = await _sub_busy_text(ctx)
+    if refused is not None:
+        return refused
+    if own_offer is not None and not await retract_offer(own_offer):
+        refused, _ = await _absent_holds(ctx)
+        if refused is not None:
+            return refused
     try:
         loan_id = await assign_deck(
             ctx.guild_id, ctx.sub_id, cards, source=loan_source(ctx.session_id),
             library_id=str(library.id), claimed_at=datetime.now(),
             on_behalf_of=ctx.absent_id)
     except IntegrityError:
-        return _sub_busy_text(ctx)
+        return await _sub_busy_text(ctx) or _cannot_build_text(ctx)
     except Exception:
         logger.exception("library sub: could not offer {}'s pool from {} to {}",
                          ctx.absent_id, ctx.session_id, ctx.sub_id)
@@ -233,8 +257,8 @@ def confirm_reply(ctx: SubContext) -> str:
     """The private reply to the Confirm press."""
     minutes = int(REQUEST_GRACE.total_seconds() // 60)
     return (f"✅ **{ctx.absent_name}**'s deck is offered to **{ctx.sub_name}**. They "
-            "collect it with **Borrow my deck** here or the **Borrow** button in "
-            f"their DM; the offer lasts {minutes} minutes.")
+            "collect it with **Borrow my deck** here or in their DM; the offer "
+            f"lasts {minutes} minutes.")
 
 
 async def sub_return_texts(loan: Any) -> Optional["tuple[str, str]"]:

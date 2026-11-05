@@ -151,7 +151,7 @@ async def test_an_outside_sub_is_named_from_the_member(test_db, library_on):
     ctx = await _ctx(sub="7000", name="Sal")
     assert (ctx.sub_in_draft, ctx.sub_name, ctx.team_key) == (False, "Sal", "A")
     assert chat_line(ctx) == "**Sal** is subbing for **Bob** and has been offered **Bob**'s deck."
-    assert confirm_reply(ctx) == "✅ **Bob**'s deck is offered to **Sal**. They collect it with **Borrow my deck** here or the **Borrow** button in their DM; the offer lasts 15 minutes."
+    assert confirm_reply(ctx) == "✅ **Bob**'s deck is offered to **Sal**. They collect it with **Borrow my deck** here or in their DM; the offer lasts 15 minutes."
 
 
 async def test_a_player_whose_own_pool_is_with_a_sub_may_still_sub(test_db, library_on):
@@ -202,3 +202,88 @@ async def test_own_loan_has_no_sub_return_texts(test_db, library_on):
     await _ready()
     await assign_deck(GUILD, ALICE, [{"name": "Lightning Bolt", "qty": 1}], source=f"draft:{SESSION}", library_id=LIBRARY)
     assert await sub_return_texts(await active_loan(ALICE)) is None
+
+
+async def test_an_offer_collected_after_the_checks_is_never_offered_to_the_sub(
+        test_db, library_on):
+    """Bob presses Borrow my deck while the Confirm is queued: his offer goes
+    out_pending between check_sub and offer_to_sub, and the sub is refused."""
+    await _ready()
+    own = await assign_deck(GUILD, BOB, [{"name": "Island", "qty": 1}],
+                            source=f"draft:{SESSION}", library_id=LIBRARY)
+    ctx = await _ctx()
+    assert await check_sub(ctx) is None
+    with patch("services.library_sub._absent_holds",
+               side_effect=_collected_after_first_read(own)):
+        assert await offer_to_sub(ctx) == (
+            "📭 **Bob** still has their deck out. It has to come back before a sub can take it.")
+    assert await sub_loan_for(f"draft:{SESSION}", BOB) is None
+    assert (await _loans())[BOB].state == "out_pending"
+
+
+def _collected_after_first_read(loan_id):
+    """offer_to_sub's first read sees Bob's offer still assigned; the borrow
+    lands right after it, before the retract."""
+    from services import library_sub
+    real = library_sub._absent_holds
+    calls = []
+
+    async def fake(ctx):
+        result = await real(ctx)
+        if not calls:
+            await _set_state(loan_id, "out_pending")
+        calls.append(result)
+        return result
+    return fake
+
+
+async def test_the_offer_retracted_for_the_sub_is_the_absent_players_own(
+        test_db, library_on):
+    await _ready()
+    own = await assign_deck(GUILD, BOB, [{"name": "Island", "qty": 1}],
+                            source=f"draft:{SESSION}", library_id=LIBRARY)
+    ctx = await _ctx()
+    assert await check_sub(ctx) is None
+    with patch("services.library_sub.decline_offer", create=True) as declined:
+        assert isinstance(await offer_to_sub(ctx), int)
+    declined.assert_not_called()
+    async with AsyncSessionLocal() as s:
+        assert (await s.get(CardLoan, own)).state == "expired"
+
+
+async def test_a_sub_who_took_a_deck_meanwhile_leaves_the_absent_offer_alone(
+        test_db, library_on):
+    await _ready()
+    own = await assign_deck(GUILD, BOB, [{"name": "Island", "qty": 1}],
+                            source=f"draft:{SESSION}", library_id=LIBRARY)
+    ctx = await _ctx()
+    assert await check_sub(ctx) is None
+    busy = await assign_deck(GUILD, ALICE, [{"name": "Lightning Bolt", "qty": 1}],
+                             source="draft:other", library_id=LIBRARY)
+    await _set_state(busy, "borrowed")
+    assert await offer_to_sub(ctx) == (
+        "📭 **Alice** still has a deck out. Press **Return my deck** first, then **Sub for a player** again. Their own pool stays theirs to borrow back later.")
+    async with AsyncSessionLocal() as s:
+        assert (await s.get(CardLoan, own)).state == "assigned"
+
+
+async def test_a_sub_with_an_offer_from_another_draft_is_told_to_decline_it(
+        test_db, library_on):
+    await _ready()
+    await assign_deck(GUILD, ALICE, [{"name": "Lightning Bolt", "qty": 1}],
+                      source="draft:other", library_id=LIBRARY)
+    assert await check_sub(await _ctx()) == (
+        "📭 **Alice** has a deck offer waiting from another draft. Press **I don't "
+        "need my deck** on that draft's library panel first, then **Sub for a "
+        "player** again.")
+
+
+async def test_a_sub_the_library_does_not_lend_to_is_named_in_the_refusal(
+        test_db, library_on):
+    await _ready()
+    with patch("services.library_sub.may_borrow_many", return_value=set()), \
+            patch("services.library_sub.why_not",
+                  return_value="🔒 This card library lends to players with 3+ drafts here, and you have 0."):
+        assert await check_sub(await _ctx()) == (
+            "📭 **Alice** can't borrow from this library: This card library lends "
+            "to players with 3+ drafts here, and you have 0.")
