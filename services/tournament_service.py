@@ -1246,8 +1246,8 @@ async def sync_linked_result(tournament_match_id, team_a_wins, team_b_wins):
             raise ValueError("Match not found.")
         if (match.team_a_wins, match.team_b_wins) == (team_a_wins, team_b_wins):
             return None
-        new_winner = _decided_winner(match, team_a_wins, team_b_wins)
-        winner_changed = new_winner is not None and _stored_winner(match) != new_winner
+        stored, new_winner = _stored_winner(match), _decided_winner(match, team_a_wins, team_b_wins)
+        winner_changed = new_winner is not None and stored != new_winner
         # set_result guards a finished tournament for playoff rounds only. That
         # was enough while this ran once, at the clinch: a swiss match could not
         # be reached after the event closed. It can now, on any late-landing
@@ -1261,9 +1261,7 @@ async def sync_linked_result(tournament_match_id, team_a_wins, team_b_wins):
             # A bracket match's score still follows its draft after the close
             # as long as its winner holds; anything else is a closed event.
             round_ = await session.get(TournamentRound, match.round_id)
-            stored = _stored_winner(match)
-            same_winner = (stored is not None
-                           and stored == _decided_winner(match, team_a_wins, team_b_wins))
+            same_winner = stored is not None and stored == new_winner
             if not (is_playoff(round_) and tournament.status == "completed" and same_winner):
                 return None
         written, completed_now = await record_result(

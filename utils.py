@@ -1009,10 +1009,7 @@ async def _sync_linked_tournament_match(bot, match_id, team_a_wins, team_b_wins,
             # At the clinch, and again only if a correction flips the winner:
             # reports that merely move a decided score are carried by the
             # refreshed control message.
-            try:
-                await post_result_to_thread(bot, match_id)
-            except Exception:
-                logger.exception(f"Result post to match {match_id}'s thread failed")
+            await post_result_to_thread(bot, match_id)
     except ValueError as e:
         logger.error(f"Failed to auto-record tournament match {match_id}: {e}")
 

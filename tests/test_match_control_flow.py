@@ -2,6 +2,7 @@
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import discord
 import pytest
 
 from conftest import match_control_db, seed_tournament_match  # noqa: F401  (fixture)
@@ -23,7 +24,8 @@ def patched_db(match_control_db):
 
 
 def make_thread(thread_id=900):
-    thread = MagicMock()
+    # A Thread by spec, so the as_messageable boundary check lets it through.
+    thread = MagicMock(spec=discord.Thread)
     thread.id = thread_id
     thread.mention = f"<#{thread_id}>"
     sent = MagicMock()
@@ -163,7 +165,7 @@ async def test_refresh_control_message_does_not_remention_roles(patched_db):
 
     control_message = MagicMock()
     control_message.edit = AsyncMock()
-    thread = MagicMock()
+    thread = MagicMock(spec=discord.Thread)
     thread.fetch_message = AsyncMock(return_value=control_message)
     bot = MagicMock()
     bot.get_channel.return_value = thread

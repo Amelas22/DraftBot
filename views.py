@@ -1666,12 +1666,6 @@ class PersistentView(discord.ui.View):
                     if bet_embed:
                         embeds.append(bet_embed)
 
-                    if session.tournament_match_id is not None:
-                        # First thing in the room: which match this is, and the
-                        # thread it was arranged in. The room's name says neither.
-                        from match_control_view import post_room_header
-                        await post_room_header(draft_chat_channel, session.tournament_match_id)
-
                     sign_up_tags = ' '.join(f"<@{user_id}>" for user_id in session.sign_ups.keys())
                     auto_text = " (Auto-created)" if interaction is None else ""
                     logger.debug("Sending pairing announcement")
@@ -1710,16 +1704,11 @@ class PersistentView(discord.ui.View):
 
                 # Post-commit
                 if session.tournament_match_id is not None:
-                    # First thing after the commit that stamped rooms_created_at
-                    # (what lets the control message point at the room), and
-                    # guarded: the marker is set, so this run cannot be retried,
-                    # and a signpost must neither be skipped by a later step
-                    # failing nor turn a finished room creation into an error.
-                    from match_control_view import announce_rooms_open
-                    try:
-                        await announce_rooms_open(bot, session.tournament_match_id)
-                    except Exception:
-                        logger.exception("Could not announce the rooms for session_id={}", session_id)
+                    # First, and right after the commit that stamped
+                    # rooms_created_at (what lets the control message point at
+                    # the room): a later step failing must not skip it.
+                    from match_control_view import on_tournament_rooms_created
+                    await on_tournament_rooms_created(bot, session.tournament_match_id)
 
                 logger.debug("Running post_pairings tasks")
                 await post_pairings(bot, guild, session.session_id)

@@ -1,22 +1,18 @@
 """A tournament draft's rooms and its match thread point at each other."""
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 import pytest
 
+from test_match_control_flow import make_thread
+
 LOBBY = "https://discord.com/channels/1/2/3"
+CHAT_ID, THREAD_ID = 555, 900
 
 
-def _fake_db_session():
-    @asynccontextmanager
-    async def fake():
-        yield MagicMock()
-    return fake
-
-
-def _match(thread_id="900", control_id="777"):
+def _match(thread_id=str(THREAD_ID), control_id="777"):
     match = MagicMock()
     match.id = 143
     match.team_a_wins = None
@@ -35,138 +31,143 @@ def _draft(rooms=True):
     draft.guild_id = "1"
     draft.draft_channel_id = "2"
     draft.message_id = "3"
-    draft.draft_chat_channel = "555"
+    draft.draft_chat_channel = str(CHAT_ID)
     draft.rooms_created_at = datetime(2026, 11, 5) if rooms else None
     return draft
 
 
-def _thread():
-    thread = MagicMock()
-    thread.id = 900
-    thread.send = AsyncMock()
-    thread.fetch_message = AsyncMock()
-    return thread
+def _chat():
+    chat = MagicMock(spec=discord.TextChannel)
+    chat.id = CHAT_ID
+    chat.send = AsyncMock(return_value=MagicMock())
+    chat.edit = AsyncMock()
+    return chat
+
+
+def _bot(chat=None, thread=None):
+    bot = MagicMock()
+    bot.get_channel.side_effect = {CHAT_ID: chat, THREAD_ID: thread}.get
+    bot.fetch_channel = AsyncMock(side_effect=discord.NotFound(MagicMock(status=404), "gone"))
+    return bot
+
+
+@contextmanager
+def _with_facts(facts):
+    """match_control_view reading these facts instead of a database."""
+    import match_control_view
+
+    @asynccontextmanager
+    async def fake_db():
+        yield MagicMock()
+
+    with patch.object(match_control_view, "match_facts", AsyncMock(return_value=facts)), \
+         patch.object(match_control_view, "db_session", fake_db):
+        yield
 
 
 def test_control_body_points_at_the_room_once_rooms_exist():
     from match_control_view import control_body_and_view
     body, _view = control_body_and_view(_match(), "Alpha", "Bravo", "Week 3", _draft(rooms=True))
-    assert "<#555>" in body and LOBBY not in body
+    assert f"<#{CHAT_ID}>" in body and LOBBY not in body
 
 
 def test_control_body_links_the_lobby_until_rooms_exist():
     from match_control_view import control_body_and_view
     body, _view = control_body_and_view(_match(), "Alpha", "Bravo", "Week 3", _draft(rooms=False))
-    assert LOBBY in body and "<#555>" not in body
+    assert LOBBY in body and f"<#{CHAT_ID}>" not in body
 
 
-@pytest.mark.asyncio
-async def test_room_header_is_posted_pinned_and_set_as_topic():
-    import match_control_view
-
-    channel = MagicMock(spec=discord.TextChannel)
-    posted = MagicMock()
-    channel.send = AsyncMock(return_value=posted)
-    channel.edit = AsyncMock()
-    channel.pins = AsyncMock(return_value=[])
-    facts = (_match(thread_id="900"), "Alpha", "Bravo", "Week 3", _draft())
-
-    with patch.object(match_control_view, "match_facts", AsyncMock(return_value=facts)), \
-         patch.object(match_control_view, "db_session", _fake_db_session()), \
-         patch.object(match_control_view, "safe_pin", AsyncMock()) as pin:
-        await match_control_view.post_room_header(channel, 143)
-
-    text = channel.send.call_args.args[0]
-    assert "#143 · Week 3" in text and "<#900>" in text
-    pin.assert_awaited_once_with(posted)
-    assert channel.edit.call_args.kwargs["topic"] == "#143 · Week 3 — Alpha vs Bravo"
-
+# --- when the rooms are created --------------------------------------------
 
 @pytest.mark.asyncio
-async def test_room_header_is_not_posted_twice_when_room_creation_resumes():
-    """A run that died after the header leaves it pinned; the retry that
-    finishes the rooms must not pin a second one."""
+async def test_rooms_created_heads_the_chat_tells_the_thread_and_refreshes():
     import match_control_view
 
-    channel = MagicMock(spec=discord.TextChannel)
-    channel.send = AsyncMock()
-    channel.edit = AsyncMock()
-    already = MagicMock()
-    already.content = "**#143 · Week 3 — Alpha vs Bravo**\nScheduling thread: <#900>\nResults record to the tournament automatically."
-    channel.pins = AsyncMock(return_value=[already])
-    facts = (_match(thread_id="900"), "Alpha", "Bravo", "Week 3", _draft())
-
-    with patch.object(match_control_view, "match_facts", AsyncMock(return_value=facts)), \
-         patch.object(match_control_view, "db_session", _fake_db_session()):
-        await match_control_view.post_room_header(channel, 143)
-
-    channel.send.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_room_header_failure_never_escapes_into_room_creation():
-    import match_control_view
-
-    channel = MagicMock(spec=discord.TextChannel)
-    channel.pins = AsyncMock(side_effect=discord.HTTPException(MagicMock(status=403), "nope"))
-    channel.send = AsyncMock(side_effect=discord.HTTPException(MagicMock(status=403), "nope"))
-    facts = (_match(), "Alpha", "Bravo", "Week 3", _draft())
-
-    with patch.object(match_control_view, "match_facts", AsyncMock(return_value=facts)), \
-         patch.object(match_control_view, "db_session", _fake_db_session()):
-        await match_control_view.post_room_header(channel, 143)  # no raise
-
-
-@pytest.mark.asyncio
-async def test_rooms_open_is_posted_to_the_thread_and_the_control_message_follows():
-    import match_control_view
-
-    thread = _thread()
-    bot = MagicMock()
-    bot.get_channel.return_value = thread
+    chat, thread = _chat(), make_thread(THREAD_ID)
+    bot = _bot(chat, thread)
     facts = (_match(), "Alpha", "Bravo", "Week 3", _draft(rooms=True))
 
-    with patch.object(match_control_view, "match_facts", AsyncMock(return_value=facts)), \
-         patch.object(match_control_view, "db_session", _fake_db_session()), \
+    with _with_facts(facts), \
+         patch.object(match_control_view, "safe_pin", AsyncMock()) as pin, \
          patch.object(match_control_view, "_refresh_match_views_with_facts", AsyncMock()) as refresh:
-        await match_control_view.announce_rooms_open(bot, 143)
+        await match_control_view.on_tournament_rooms_created(bot, 143)
 
-    text = thread.send.call_args.args[0]
-    assert "<#555>" in text and "Rooms are open" in text
+    header = chat.send.call_args.args[0]
+    assert "#143 · Week 3" in header and f"<#{THREAD_ID}>" in header
+    pin.assert_awaited_once_with(chat.send.return_value)
+    assert chat.edit.call_args.kwargs["topic"] == "#143 · Week 3 — Alpha vs Bravo"
+    opened = thread.send.call_args.args[0]
+    assert "Rooms are open" in opened and f"<#{CHAT_ID}>" in opened
     refresh.assert_awaited_once_with(bot, 143, facts)
 
 
 @pytest.mark.asyncio
-async def test_rooms_open_without_a_room_posts_nothing():
+async def test_rooms_created_without_rooms_does_nothing():
     import match_control_view
 
-    thread = _thread()
-    bot = MagicMock()
-    bot.get_channel.return_value = thread
+    chat, thread = _chat(), make_thread(THREAD_ID)
     facts = (_match(), "Alpha", "Bravo", "Week 3", _draft(rooms=False))
 
-    with patch.object(match_control_view, "match_facts", AsyncMock(return_value=facts)), \
-         patch.object(match_control_view, "db_session", _fake_db_session()), \
-         patch.object(match_control_view, "_refresh_match_views_with_facts", AsyncMock()):
-        await match_control_view.announce_rooms_open(bot, 143)
+    with _with_facts(facts), \
+         patch.object(match_control_view, "_refresh_match_views_with_facts", AsyncMock()) as refresh:
+        await match_control_view.on_tournament_rooms_created(_bot(chat, thread), 143)
 
+    chat.send.assert_not_awaited()
     thread.send.assert_not_awaited()
+    refresh.assert_not_awaited()
 
+
+@pytest.mark.asyncio
+async def test_rooms_created_without_a_thread_still_heads_the_chat():
+    import match_control_view
+
+    chat = _chat()
+    facts = (_match(thread_id=None), "Alpha", "Bravo", "Week 3", _draft(rooms=True))
+
+    with _with_facts(facts), \
+         patch.object(match_control_view, "safe_pin", AsyncMock()), \
+         patch.object(match_control_view, "_refresh_match_views_with_facts", AsyncMock()):
+        await match_control_view.on_tournament_rooms_created(_bot(chat, None), 143)
+
+    assert "<#" not in chat.send.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_rooms_created_swallows_a_refused_header():
+    """Room creation has already committed; a signpost failing must not turn
+    it into an error for the person who clicked."""
+    import match_control_view
+
+    chat = _chat()
+    chat.send = AsyncMock(side_effect=discord.HTTPException(MagicMock(status=403), "nope"))
+    facts = (_match(), "Alpha", "Bravo", "Week 3", _draft(rooms=True))
+
+    with _with_facts(facts), \
+         patch.object(match_control_view, "_refresh_match_views_with_facts", AsyncMock()):
+        await match_control_view.on_tournament_rooms_created(_bot(chat, make_thread(THREAD_ID)), 143)
+
+
+@pytest.mark.asyncio
+async def test_rooms_created_swallows_anything_else():
+    import match_control_view
+
+    with patch.object(match_control_view, "match_facts", AsyncMock(side_effect=RuntimeError("db down"))), \
+         patch.object(match_control_view, "db_session", MagicMock(side_effect=RuntimeError("db down"))):
+        await match_control_view.on_tournament_rooms_created(_bot(), 143)  # no raise
+
+
+# --- when the result lands ---------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_recorded_result_is_posted_to_the_thread_as_a_fresh_message():
     import match_control_view
 
-    thread = _thread()
-    bot = MagicMock()
-    bot.get_channel.return_value = thread
+    thread = make_thread(THREAD_ID)
     match = _match()
     match.team_a_wins, match.team_b_wins = 5, 3
-    facts = (match, "Alpha", "Bravo", "Week 3", _draft())
 
-    with patch.object(match_control_view, "match_facts", AsyncMock(return_value=facts)), \
-         patch.object(match_control_view, "db_session", _fake_db_session()):
-        await match_control_view.post_result_to_thread(bot, 143)
+    with _with_facts((match, "Alpha", "Bravo", "Week 3", _draft())):
+        await match_control_view.post_result_to_thread(_bot(None, thread), 143)
 
     text = thread.send.call_args.args[0]
     assert "Result recorded" in text and "5–3" in text
@@ -176,33 +177,39 @@ async def test_recorded_result_is_posted_to_the_thread_as_a_fresh_message():
 async def test_result_post_tolerates_a_vanished_thread():
     import match_control_view
 
-    bot = MagicMock()
-    bot.get_channel.return_value = None
-    bot.fetch_channel = AsyncMock(side_effect=discord.NotFound(MagicMock(status=404), "gone"))
     match = _match()
     match.team_a_wins, match.team_b_wins = 5, 3
-    facts = (match, "Alpha", "Bravo", "Week 3", None)
 
-    with patch.object(match_control_view, "match_facts", AsyncMock(return_value=facts)), \
-         patch.object(match_control_view, "db_session", _fake_db_session()):
-        await match_control_view.post_result_to_thread(bot, 143)  # no raise
+    with _with_facts((match, "Alpha", "Bravo", "Week 3", None)):
+        await match_control_view.post_result_to_thread(_bot(), 143)  # no raise
 
 
-# --- the victory chokepoint posts the result into the thread exactly once ----
+# --- the victory chokepoint posts the result when the winner changes ---------
+
+def _victory_patches(winner_changed, post):
+    return [
+        patch("services.tournament_service.sync_linked_result",
+              AsyncMock(return_value=(MagicMock(), False, winner_changed))),
+        patch("services.tournament_formatter.update_standings_message_for_match", AsyncMock()),
+        patch("cogs.tournament_commands.after_bracket_result", AsyncMock()),
+        patch("match_control_view.safe_refresh_match_views", AsyncMock()),
+        patch("match_control_view.post_result_to_thread", post),
+    ]
+
 
 @pytest.mark.asyncio
 async def test_victory_sync_posts_to_the_thread_on_the_clinch():
     import utils
 
-    bot = MagicMock()
-    with patch("services.tournament_service.sync_linked_result",
-               AsyncMock(return_value=(MagicMock(), False, True))), \
-         patch("services.tournament_formatter.update_standings_message_for_match", AsyncMock()), \
-         patch("cogs.tournament_commands.after_bracket_result", AsyncMock()), \
-         patch("match_control_view.safe_refresh_match_views", AsyncMock()), \
-         patch("match_control_view.post_result_to_thread", AsyncMock()) as post:
+    bot, post = MagicMock(), AsyncMock()
+    patches = _victory_patches(True, post)
+    for p in patches:
+        p.start()
+    try:
         await utils._sync_linked_tournament_match(bot, 143, 5, 3, "draft-1")
-
+    finally:
+        for p in patches:
+            p.stop()
     post.assert_awaited_once_with(bot, 143)
 
 
@@ -210,13 +217,13 @@ async def test_victory_sync_posts_to_the_thread_on_the_clinch():
 async def test_victory_sync_does_not_repost_a_corrected_score():
     import utils
 
-    bot = MagicMock()
-    with patch("services.tournament_service.sync_linked_result",
-               AsyncMock(return_value=(MagicMock(), False, False))), \
-         patch("services.tournament_formatter.update_standings_message_for_match", AsyncMock()), \
-         patch("cogs.tournament_commands.after_bracket_result", AsyncMock()), \
-         patch("match_control_view.safe_refresh_match_views", AsyncMock()), \
-         patch("match_control_view.post_result_to_thread", AsyncMock()) as post:
-        await utils._sync_linked_tournament_match(bot, 143, 7, 3, "draft-1")
-
+    post = AsyncMock()
+    patches = _victory_patches(False, post)
+    for p in patches:
+        p.start()
+    try:
+        await utils._sync_linked_tournament_match(MagicMock(), 143, 7, 3, "draft-1")
+    finally:
+        for p in patches:
+            p.stop()
     post.assert_not_awaited()

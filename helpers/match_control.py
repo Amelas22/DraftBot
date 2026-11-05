@@ -72,7 +72,7 @@ def render_match_control(
     the other is worse than tagging neither, since nothing on the message
     would explain the gap.
     """
-    header = f"**{match_label} — {a_name} vs {b_name}**"
+    header = f"**{match_headline(match_label, a_name, b_name)}**"
     booking = booking or Booking(None, None)
     if state == RECORDED:
         assert result is not None, "result required when state is RECORDED"
@@ -98,6 +98,12 @@ def render_match_control(
     return body
 
 
+def match_headline(match_label: str, a_name: str, b_name: str) -> str:
+    """"#143 · Week 3 — Alpha vs Bravo": the match as every surface names it --
+    the control message's first line, the room header's, and the room's topic."""
+    return f"{match_label} — {a_name} vs {b_name}"
+
+
 def rooms_open_text(room_id: str) -> str:
     """The thread's post when a match's draft rooms open.
 
@@ -117,16 +123,11 @@ def room_header_text(match_label: str, a_name: str, b_name: str,
     The room's name is a random draft id, so this is what says which match
     is being played in it, and the way back to the thread it was arranged in.
     """
-    lines = [f"**{match_label} — {a_name} vs {b_name}**"]
+    lines = [f"**{match_headline(match_label, a_name, b_name)}**"]
     if thread_id:
         lines.append(f"Scheduling thread: <#{thread_id}>")
     lines.append("Results record to the tournament automatically.")
     return "\n".join(lines)
-
-
-def room_topic(match_label: str, a_name: str, b_name: str) -> str:
-    """The shared room's channel topic: the match name, shown in the channel header."""
-    return f"{match_label} — {a_name} vs {b_name}"
 
 
 def render_pairing_line(
