@@ -173,3 +173,48 @@ def test_control_body_shows_booking_per_state():
     assert render_match_control(SCHEDULING, "A", "B", "#135 · Round 1") == (
         f"{hdr}\n{booking_line(none)}\n{ready}"
     )
+
+
+# --- the draft rooms and the match thread point at each other ---------------
+
+def test_drafting_body_points_at_the_room_once_rooms_exist():
+    body = render_match_control(DRAFTING, "Alpha", "Bravo", "Round 2",
+                                lobby_link=LINK, room_id="555")
+    assert "<#555>" in body
+    assert "Playing in" in body
+    # The lobby is over once rooms exist; the room replaces it rather than
+    # sitting beside it.
+    assert LINK not in body
+
+
+def test_drafting_body_without_rooms_still_links_the_lobby():
+    body = render_match_control(DRAFTING, "Alpha", "Bravo", "Round 2",
+                                lobby_link=LINK, room_id=None)
+    assert LINK in body and "Playing in" not in body
+
+
+def test_rooms_open_text_names_the_room_and_what_lives_there():
+    from helpers.match_control import rooms_open_text
+    text = rooms_open_text("555")
+    assert "<#555>" in text
+    assert "Pairings" in text and "result" in text.lower()
+
+
+def test_room_header_names_the_match_and_links_the_thread():
+    from helpers.match_control import room_header_text
+    text = room_header_text("#143 · Week 3", "Alpha", "Bravo", thread_id="900")
+    assert "#143 · Week 3" in text and "Alpha" in text and "Bravo" in text
+    assert "<#900>" in text
+    assert "record" in text.lower()
+
+
+def test_room_header_without_a_thread_drops_the_thread_line():
+    from helpers.match_control import room_header_text
+    text = room_header_text("#143 · Week 3", "Alpha", "Bravo", thread_id=None)
+    assert "<#" not in text and "thread" not in text.lower()
+
+
+def test_room_topic_is_the_match_name():
+    from helpers.match_control import room_topic
+    topic = room_topic("#143 · Week 3", "Alpha", "Bravo")
+    assert topic == "#143 · Week 3 — Alpha vs Bravo"
