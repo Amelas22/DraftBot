@@ -1,0 +1,151 @@
+"""Offering an absent teammate's pool to a sub.
+
+A pool is lent to one person at a time, so every check here is about who
+already holds what: the absent player, the sub, or another sub. The caller
+holds the draft's panel lock around check_sub and offer_to_sub; offer_to_sub
+re-runs the two pool checks so two Confirms for one pool cannot both land.
+"""
+import pytest
+from sqlalchemy import update
+
+from database.db_session import AsyncSessionLocal
+from models.card_loan import CardLoan
+from services.card_lending_service import assign_deck, sub_loan_for
+from services.library_sub import (
+    chat_line, check_sub, confirm_reply, offer_to_sub, sub_context)
+from test_draft_deck_assignment import (  # noqa: F401 -- library_on is a fixture
+    ALICE, BOB, GUILD, LIBRARY, SESSION, _loans, _log, _open_chat, _reported,
+    _seed, _stamp_draft, library_on)
+
+pytestmark = pytest.mark.asyncio
+
+CY = "1003"
+
+
+def _log_with_cy():
+    """The sibling file's log plus a third seat, so three sign-ups line up."""
+    log = _log()
+    log["users"]["dm_c"] = {"userName": "Cy", "seatNum": 2, "cards": ["c2"]}
+    return log
+
+
+async def _ctx(sub=ALICE, absent=BOB, name="Alice"):
+    return await sub_context(SESSION, absent, sub, name)
+
+
+async def _pod():
+    await _seed(draft_data=_log_with_cy(), sign_ups={ALICE: "Alice", BOB: "Bob", CY: "Cy"})
+    await _stamp_draft(team_a=[ALICE, BOB], team_b=[CY])
+
+
+async def _ready():
+    await _pod()
+    await _reported(SESSION, [(ALICE, "x", False), (BOB, CY, False)])
+    await _open_chat()
+
+
+async def _set_state(loan_id, state):
+    async with AsyncSessionLocal() as s:
+        await s.execute(update(CardLoan).where(CardLoan.id == loan_id).values(state=state))
+        await s.commit()
+
+
+async def test_a_clean_sub_offer_is_made_for_the_absent_players_pool(test_db, library_on):
+    await _ready()
+    ctx = await _ctx()
+    assert await check_sub(ctx) is None
+    loan_id = await offer_to_sub(ctx)
+    assert isinstance(loan_id, int)
+    found = await sub_loan_for(f"draft:{SESSION}", BOB)
+    assert found is not None
+    assert found.borrower_id == ALICE and found.state == "assigned"
+    assert found.claimed_at is not None and found.ready_dm_at is None
+    assert found.cards == [{"name": "Island", "qty": 1}]
+
+
+async def test_confirm_retracts_the_absent_players_uncollected_offer(test_db, library_on):
+    await _ready()
+    await assign_deck(GUILD, BOB, [{"name": "Island", "qty": 1}],
+                      source=f"draft:{SESSION}", library_id=LIBRARY)
+    ctx = await _ctx()
+    assert await check_sub(ctx) is None
+    await offer_to_sub(ctx)
+    rows = await _loans()           # {borrower: newest row}
+    assert rows[BOB].state == "expired" and rows[ALICE].state == "assigned"
+
+
+async def test_absent_player_with_deck_out_is_refused(test_db, library_on):
+    await _ready()
+    loan_id = await assign_deck(GUILD, BOB, [{"name": "Island", "qty": 1}],
+                                source=f"draft:{SESSION}", library_id=LIBRARY)
+    await _set_state(loan_id, "borrowed")
+    assert await check_sub(await _ctx()) == (
+        "📭 **Bob** still has their deck out. It has to come back before a sub can take it.")
+
+
+async def test_sub_holding_a_deck_is_refused(test_db, library_on):
+    await _ready()
+    loan_id = await assign_deck(GUILD, ALICE, [{"name": "Lightning Bolt", "qty": 1}],
+                                source=f"draft:{SESSION}", library_id=LIBRARY)
+    await _set_state(loan_id, "borrowed")
+    assert await check_sub(await _ctx()) == (
+        "📭 **Alice** still has a deck out. Press **Return my deck** first, then **Sub for a player** again. Their own pool stays theirs to borrow back later.")
+
+
+async def test_sub_with_own_uncollected_offer_is_refused(test_db, library_on):
+    await _ready()
+    await assign_deck(GUILD, ALICE, [{"name": "Lightning Bolt", "qty": 1}],
+                      source=f"draft:{SESSION}", library_id=LIBRARY)
+    assert await check_sub(await _ctx()) == (
+        "📭 **Alice** has their own deck waiting. Press **I don't need my deck** first, then **Sub for a player** again; the pool stays theirs to ask for later.")
+
+
+async def test_pool_already_with_another_sub_is_refused(test_db, library_on):
+    await _ready()
+    await assign_deck(GUILD, CY, [{"name": "Island", "qty": 1}],
+                      source=f"draft:{SESSION}", library_id=LIBRARY, on_behalf_of=BOB)
+    assert await check_sub(await _ctx()) == (
+        "📭 **Cy** already has **Bob**'s deck as their sub. It has to come back first.")
+
+
+async def test_sub_on_the_other_team_is_refused(test_db, library_on):
+    await _ready()
+    assert await check_sub(await _ctx(sub=CY, name="Cy")) == "📭 **Cy** plays for the other team."
+
+
+async def test_sub_is_the_absent_player_is_refused(test_db, library_on):
+    await _ready()
+    assert await check_sub(await _ctx(sub=BOB, name="Bob")) == "📭 Pick somebody else to sub for **Bob**."
+
+
+async def test_absent_player_with_everything_reported_is_over(test_db, library_on):
+    await _pod()
+    await _reported(SESSION, [(ALICE, "x", False), (BOB, CY, True)])
+    await _open_chat()
+    assert await check_sub(await _ctx()) == (
+        "📭 Every match of **Bob**'s in this draft is reported, so there's nothing left to sub for.")
+
+
+async def test_nothing_on_the_shelf_is_refused(test_db, library_on):
+    await _ready()
+    await assign_deck(GUILD, "2000", [{"name": "Island", "qty": 1}],
+                      source="draft:other", library_id=LIBRARY)
+    assert await check_sub(await _ctx()) == (
+        "📭 None of **Bob**'s deck is on the shelf right now — try again once the other decks are back.")
+
+
+async def test_confirm_twice_for_the_same_pool_refuses_the_second(test_db, library_on):
+    await _ready()
+    first = await _ctx()
+    assert isinstance(await offer_to_sub(first), int)
+    second = await _ctx(sub=CY, name="Cy")   # other team, but offer_to_sub is the backstop
+    assert await offer_to_sub(second) == (
+        "📭 **Alice** already has **Bob**'s deck as their sub. It has to come back first.")
+
+
+async def test_an_outside_sub_is_named_from_the_member(test_db, library_on):
+    await _ready()
+    ctx = await _ctx(sub="7000", name="Sal")
+    assert (ctx.sub_in_draft, ctx.sub_name, ctx.team_key) == (False, "Sal", "A")
+    assert chat_line(ctx) == "**Sal** is subbing for **Bob** and has been offered **Bob**'s deck."
+    assert confirm_reply(ctx) == "✅ **Bob**'s deck is offered to **Sal**. They collect it with **Borrow my deck** here or the **Borrow** button in their DM; the offer lasts 15 minutes."
