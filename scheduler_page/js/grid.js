@@ -31,6 +31,7 @@ export function layoutWindow(startUtc, zone) {
   const days = [];
   let week = 0;
   let leagueDay = null;
+  let last = null; // the cell before this one: the cutoff once the league's clock turns Sunday into Monday
   for (let j = 0; j < CELLS; j++) {
     const at = addCells(startUtc, j);
     const p = partsOf(at, zone);
@@ -41,12 +42,14 @@ export function layoutWindow(startUtc, zone) {
       days.push(day);
     }
     const league = partsOf(at, LEAGUE_ZONE).weekday;
-    if (leagueDay === "Sun" && league === "Mon") week++;
+    if (leagueDay === "Sun" && league === "Mon") { week++; last.cutoff = true; }
     leagueDay = league;
     const due = league === "Sun";
-    const cutoff = due && partsOf(addCells(startUtc, j + 1), LEAGUE_ZONE).weekday === "Mon";
-    day.cells.push({ j, minutes: Number(p.hour) * 60 + Number(p.minute), kind: due ? "due" : `wk${Math.min(week, 1)}`, cutoff });
+    last = { j, minutes: Number(p.hour) * 60 + Number(p.minute), kind: due ? "due" : `wk${Math.min(week, 1)}`, cutoff: false };
+    day.cells.push(last);
   }
+  // A window ending in Sunday's last half-hour: its last cell is the cutoff if the next one would be Monday.
+  if (leagueDay === "Sun" && partsOf(addCells(startUtc, CELLS), LEAGUE_ZONE).weekday === "Mon") last.cutoff = true;
   return days;
 }
 
@@ -102,6 +105,7 @@ export function gridFrame(columns, attrs, makeCell, openDate) {
   const kindClass = (x) => (x.kind ? ` ${x.kind}${x.cutoff ? " cutoff" : ""}` : "");
   const tabButtons = columns.map((c, i) => {
     const b = el("button", { type: "button", role: "tab", text: c.label, class: kindClass(c).trim() });
+    if (c.kind === "due") b.setAttribute("aria-label", `${c.label}, round ends`);
     b.addEventListener("click", () => setDay(i));
     tabs.append(b);
     return b;
@@ -131,9 +135,9 @@ export const legendKey = (kind, text) => el("span", { class: "keyitem" }, el("i"
 
 // The legend keys for a window grid's league tints (see gridFrame): the due key is the warning.
 export const weekKeys = () => [
-  legendKey("wk0", "this week"),
-  legendKey("due", "Sunday: matches due by midnight PT (3 AM ET Mon)"),
-  legendKey("wk1", "next week"),
+  legendKey("wk0", "this round"),
+  legendKey("due", "round ends: midnight PT Sunday (3 AM ET Mon)"),
+  legendKey("wk1", "next round"),
 ];
 
 // opts: { startUtc, zone, cellClass(j) -> string, cellLabel(j) -> string, onPick?(j), onHover?(j | null, byMouse), openDate? }
@@ -144,16 +148,20 @@ export const weekKeys = () => [
 export function mountHeatmap(container, opts) {
   const { startUtc, zone, cellClass, cellLabel, cellText, onPick, onHover, openDate } = opts;
   const nodes = new Map();
-  // Each cell's row classes, kept apart from cellClass so a redraw never drops them.
+  // Each cell's row classes, kept apart from cellClass so a redraw never drops them, and the words a due cell adds to
+  // its label, so the deadline reaches a screen reader as well as the eye.
   const rows = new Map();
+  const dueWords = new Map();
   const frame = gridFrame(windowColumns(startUtc, zone), {
     class: cellText ? "grid heat counted" : "grid heat", role: "grid",
     "aria-label": `Next 7 days, half-hour cells, times in ${zone.replaceAll("_", " ")}`,
-  }, ({ key: j }, row) => {
+  }, ({ key: j, kind, cutoff }, row) => {
     const n = el(onPick ? "button" : "div", { class: `hcell ${row}`, role: "gridcell", "data-j": String(j) });
     if (onPick) { n.type = "button"; n.addEventListener("click", () => onPick(j)); }
     nodes.set(j, n);
     rows.set(j, row);
+    if (cutoff) dueWords.set(j, " (round ends after this half-hour)");
+    else if (kind === "due") dueWords.set(j, " (round ends today)");
     return n;
   }, openDate);
   const { tabs, grid } = frame;
@@ -163,7 +171,7 @@ export function mountHeatmap(container, opts) {
     for (const [j, n] of nodes) {
       const cls = `hcell ${rows.get(j)} ${cellClass(j)}`.trim();
       if (n.className !== cls) n.className = cls;
-      const label = cellLabel(j);
+      const label = cellLabel(j) + (dueWords.get(j) ?? "");
       if (n.title !== label) { n.title = label; n.setAttribute("aria-label", label); }
       // Shown text only; the aria-label above is what a screen reader reads.
       if (cellText) { const t = cellText(j); if (n.textContent !== t) n.textContent = t; }

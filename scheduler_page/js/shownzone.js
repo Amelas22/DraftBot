@@ -23,17 +23,27 @@ export function rememberZone(zone, storage = browserStorage()) {
 }
 
 // The "Show times in" picker for a page's app bar, opened on shownZone. onChange(zone) runs after the pick is
-// remembered. Returns { zone, row }: the zone to draw in first, and the picker to place.
+// remembered. Returns { zone, row, idle, follow }: the zone to draw in first, the picker to place, idle(on) to
+// disable it while an editor with its own zone has the pane, and follow(zone) for when the fallback changes
+// (a usual week saved in another zone): a viewer who never picked moves with it, as a reload would show.
 // deps: { zones?: string[], storage? } for tests.
 export function shownZonePicker(fallback, onChange, deps = {}) {
   const zones = deps.zones || allZones(fallback);
   const storage = "storage" in deps ? deps.storage : browserStorage();
   const zone = shownZone(fallback, zones, storage);
+  let picked = shownZone(null, zones, storage) !== null; // this browser remembers a pick
   const { select, row } = zoneSelect(zone, zones, fallback, { id: "shown-zone", label: "Show times in" });
   select.addEventListener("change", () => {
+    picked = true;
     rememberZone(select.value, storage);
     onChange(select.value);
   });
   row.classList.add("shownzone");
-  return { zone, row };
+  const idle = (on) => { select.disabled = on; row.classList.toggle("idle", on); };
+  const follow = (next) => {
+    if (picked || next === select.value || !zones.includes(next)) return;
+    select.value = next;
+    onChange(next);
+  };
+  return { zone, row, idle, follow };
 }

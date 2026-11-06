@@ -217,12 +217,13 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
   const leave = async () => {
     await (await editor)?.flush();
     usualNow = await api.getUsual().catch(() => usualNow);
+    if (usualNow?.zone) picker.follow(usualNow.zone);
   };
   const toMine = async (w) => {
     if (which !== null) await leave();
     which = w;
     renderCard();
-    picker.row.classList.add("idle");
+    picker.idle(true);
     everyoneBox.hidden = true;
     mineBox.hidden = false;
     pane.setAttribute("aria-label", "Your availability");
@@ -244,7 +245,7 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
     await refresh();
     which = null;
     renderCard();
-    picker.row.classList.remove("idle");
+    picker.idle(false);
     mineBox.hidden = true;
     mineBox.replaceChildren();
     everyoneBox.hidden = false;

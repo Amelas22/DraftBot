@@ -119,3 +119,10 @@ test("a window opening on the league's Sunday shows that deadline and next week'
   assert.deepEqual(cols.map((c) => c.kind), ["due", "wk1", "wk1", "wk1", "wk1", "wk1", "wk1", "due"]);
   assert.equal(cols.flatMap((c) => c.cells.filter((x) => x.cutoff)).length, 1);
 });
+
+test("a window ending in the league's Sunday's last half-hour marks that cell as the cutoff", () => {
+  // Opens Sunday 8 Nov 2026 00:00 Pacific, so cell 335 is Sunday 11:30 PM Pacific: the last before Monday.
+  const cols = windowColumns(new Date("2026-11-08T08:00:00Z"), "America/Los_Angeles");
+  const cutoffs = cols.flatMap((c) => c.cells.filter((x) => x.cutoff).map((x) => x.label));
+  assert.deepEqual(cutoffs, ["Sun 8 Nov, 11:30 PM"]);
+});
