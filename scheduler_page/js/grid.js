@@ -17,19 +17,41 @@ function partsOf(date, zone) {
   return p;
 }
 
+// The league's deadline clock. A round runs Monday to Sunday, and every match must be finished by midnight Pacific at
+// the end of Sunday (3 AM Eastern on Monday), per the league rules page; so its days are counted in Pacific time.
+export const LEAGUE_ZONE = "America/Los_Angeles";
+
 // One column per local date, in order; each cell is a window index j with its local minutes-of-day.
 // A DST day simply has 46 or 50 cells; nothing assumes 48 per day.
+// Each cell also carries its league week, by the league's clock wherever the viewer is: kind is "due" on the league's
+// Sunday (the last day to get that round's matches finished), else "wk0" until the first cutoff (the last cell before
+// results are due) and "wk1" after it.
+// Pure in (startUtc, zone), and a page lays its window out again on every redraw, so the last layout is kept.
+let lastLayout = null;
 export function layoutWindow(startUtc, zone) {
+  const key = `${startUtc.getTime()} ${zone}`;
+  if (lastLayout?.key !== key) lastLayout = { key, days: layOutWindow(startUtc, zone) };
+  return lastLayout.days;
+}
+
+function layOutWindow(startUtc, zone) {
   const days = [];
+  let league = partsOf(startUtc, LEAGUE_ZONE).weekday;
+  let nextWeek = false;
   for (let j = 0; j < CELLS; j++) {
-    const p = partsOf(addCells(startUtc, j), zone);
+    const at = addCells(startUtc, j);
+    const p = partsOf(at, zone);
     const date = `${p.year}-${p.month}-${p.day}`;
     let day = days[days.length - 1];
     if (!day || day.date !== date) {
       day = { date, label: `${p.weekday} ${Number(p.day)}`, cells: [] };
       days.push(day);
     }
-    day.cells.push({ j, minutes: Number(p.hour) * 60 + Number(p.minute) });
+    const after = partsOf(addCells(startUtc, j + 1), LEAGUE_ZONE).weekday;
+    const cutoff = league === "Sun" && after === "Mon";
+    day.cells.push({ j, minutes: Number(p.hour) * 60 + Number(p.minute), kind: league === "Sun" ? "due" : nextWeek ? "wk1" : "wk0", cutoff });
+    if (cutoff) nextWeek = true;
+    league = after;
   }
   return days;
 }
@@ -54,11 +76,19 @@ export const formatCell = (startUtc, zone, j) => formatTime(addCells(startUtc, j
 
 // The window as a grid's columns (see weekColumns in usual.js), one per local date, keyed by window cell: the
 // heatmap and both week editors on a matchup draw these, so all three show the same days and times. A partial first
-// day starts part-way down (start, in half-hours after local midnight); date is the column's "YYYY-MM-DD".
+// day starts part-way down (start, in half-hours after local midnight); date is the column's "YYYY-MM-DD". Each cell's
+// league kind and cutoff (see layoutWindow) come along for the grid to tint, and the column's kind is the one most of
+// its cells have, for its name and tab.
 export const windowColumns = (startUtc, zone) => layoutWindow(startUtc, zone).map((d) => ({
-  label: d.label, date: d.date, start: Math.floor(d.cells[0].minutes / CELL_MINUTES),
-  cells: d.cells.map((c) => ({ key: c.j, label: formatCell(startUtc, zone, c.j) })),
+  label: d.label, date: d.date, kind: mostCommon(d.cells.map((c) => c.kind)), start: Math.floor(d.cells[0].minutes / CELL_MINUTES),
+  cells: d.cells.map((c) => ({ key: c.j, label: formatCell(startUtc, zone, c.j), kind: c.kind, cutoff: c.cutoff })),
 }));
+
+function mostCommon(xs) {
+  const counts = new Map();
+  for (const x of xs) counts.set(x, (counts.get(x) ?? 0) + 1);
+  return [...counts].reduce((a, b) => (b[1] > a[1] ? b : a))[0];
+}
 
 // "7 PM" for hour h (0-23): the hour column of every grid.
 export const hourLabel = (h) => `${h % 12 === 0 ? 12 : h % 12} ${h < 12 ? "AM" : "PM"}`;
@@ -70,12 +100,15 @@ export const rowClass = (row) => `${row % 2 ? "half" : "hr"}${Math.floor(row / 2
 // The frame both grids draw from a layout's columns (see windowColumns): day tabs (shown under 480px, where one day
 // fills the screen), the hour column, and a column per layout column with its name and the padding down to its first
 // row. makeCell(cell, rowClass) builds each cell's element, which carries its row's classes; attrs are the grid's
-// own. It opens on the first day's tab.
-export function gridFrame(columns, attrs, makeCell) {
+// own. Cells and columns with a league kind (windowColumns) are tinted by it, and the cutoff cell is underlined: those
+// classes ride along with the row's, and makeCell also gets the words a due cell adds to its label, so the deadline
+// reaches a screen reader as well as the eye. It opens on the tab of the column dated openDate, else the first.
+export function gridFrame(columns, attrs, makeCell, openDate) {
   const tabs = el("div", { class: "daytabs", role: "tablist", "aria-label": "Day" });
   const grid = el("div", attrs);
   const tabButtons = columns.map((c, i) => {
-    const b = el("button", { type: "button", role: "tab", text: c.label });
+    const b = el("button", { type: "button", role: "tab", text: c.label, class: kindClass(c) });
+    if (c.kind === "due") b.setAttribute("aria-label", `${c.label}, round ends`);
     b.addEventListener("click", () => setDay(i));
     tabs.append(b);
     return b;
@@ -88,41 +121,61 @@ export function gridFrame(columns, attrs, makeCell) {
   for (let h = 0; h < 48; h++) hours.append(el("div", { class: `hour ${rowClass(h)}`, text: h % 2 === 0 ? hourLabel(h / 2) : "" }));
   grid.append(hours);
   columns.forEach((c, d) => {
-    const col = el("div", { class: "col day", "data-day": String(d), role: "row" });
+    const col = el("div", { class: `col day ${kindClass(c)}`.trim(), "data-day": String(d), role: "row" });
     col.append(el("div", { class: "dayname", text: c.label, "aria-hidden": "true" }));
     for (let g = 0; g < c.start; g++) col.append(el("div", { class: `gap ${rowClass(g)}`, "aria-hidden": "true" }));
-    c.cells.forEach((cell, i) => col.append(makeCell(cell, rowClass(c.start + i))));
+    c.cells.forEach((cell, i) => col.append(makeCell(cell, `${rowClass(c.start + i)} ${kindClass(cell)}`.trim(), leagueWords(cell))));
     grid.append(col);
   });
-  setDay(0);
-  return { tabs, grid, setDay };
+  const dates = columns.map((c) => c.date);
+  setDay(Math.max(0, dates.indexOf(openDate)));
+  return { tabs, grid, setDay, openDate: () => dates[Number(grid.dataset.active)] };
 }
 
-// opts: { startUtc, zone, cellClass(j) -> string, cellLabel(j) -> string, onPick?(j), onHover?(j | null, byMouse) }
+// A cell's or column's league classes (see layoutWindow), and the words a due cell adds to its label.
+const kindClass = (x) => [x.kind, x.cutoff && "cutoff"].filter(Boolean).join(" ");
+const leagueWords = (cell) => (cell.cutoff ? " (round ends after this half-hour)" : cell.kind === "due" ? " (round ends today)" : "");
+
+// A zone as a person reads it: "America/New_York" is shown as "America/New York".
+export const zoneName = (zone) => zone.replaceAll("_", " ");
+
+// A legend key and its words, kept together when the legend wraps on a narrow screen.
+export const legendKey = (kind, text) => el("span", { class: "keyitem" }, el("i", { class: `key ${kind}` }), el("span", { text }));
+
+// The legend keys for a window grid's league tints (see gridFrame): the due key is the warning.
+export const weekKeys = () => [
+  legendKey("wk0", "this round"),
+  legendKey("due", "round ends: midnight PT Sunday (3 AM ET Mon)"),
+  legendKey("wk1", "next round"),
+];
+
+// opts: { startUtc, zone, cellClass(j) -> string, cellLabel(j) -> string, onPick?(j), onHover?(j | null, byMouse), openDate? }
 // onPick makes cells buttons (tap or Enter); onHover(j, byMouse) follows the pointer and keyboard focus, and onHover(null)
 // fires when a mouse leaves (byMouse says whether a mouse is over the cell now, as opposed to a finger or the keyboard).
+// openDate is the day tab to open on (see gridFrame): a page drawing its heatmap again passes the old one's openDate(),
+// so a narrow screen stays on the day it was showing.
 export function mountHeatmap(container, opts) {
-  const { startUtc, zone, cellClass, cellLabel, cellText, onPick, onHover } = opts;
-  const nodes = new Map();
-  // Each cell's row classes, kept apart from cellClass so a redraw never drops them.
-  const rows = new Map();
-  const { tabs, grid } = gridFrame(windowColumns(startUtc, zone), {
+  const { startUtc, zone, cellClass, cellLabel, cellText, onPick, onHover, openDate } = opts;
+  // Each cell's element with its row classes and league words (see gridFrame), kept apart from cellClass and
+  // cellLabel so a redraw never drops them.
+  const cells = new Map();
+  const frame = gridFrame(windowColumns(startUtc, zone), {
     class: cellText ? "grid heat counted" : "grid heat", role: "grid",
-    "aria-label": `Next 7 days, half-hour cells, times in ${zone.replaceAll("_", " ")}`,
-  }, ({ key: j }, row) => {
+    "aria-label": `Next 7 days, half-hour cells, times in ${zoneName(zone)}`,
+  }, ({ key: j }, row, words) => {
     const n = el(onPick ? "button" : "div", { class: `hcell ${row}`, role: "gridcell", "data-j": String(j) });
     if (onPick) { n.type = "button"; n.addEventListener("click", () => onPick(j)); }
-    nodes.set(j, n);
-    rows.set(j, row);
+    cells.set(j, { n, row, words });
     return n;
-  });
+  }, openDate);
+  const { tabs, grid } = frame;
 
   // Touch the DOM only for cells whose look or words changed: 336 cells redraw on every tap.
   const update = () => {
-    for (const [j, n] of nodes) {
-      const cls = `hcell ${rows.get(j)} ${cellClass(j)}`.trim();
+    for (const [j, { n, row, words }] of cells) {
+      const cls = `hcell ${row} ${cellClass(j)}`.trim();
       if (n.className !== cls) n.className = cls;
-      const label = cellLabel(j);
+      const label = cellLabel(j) + words;
       if (n.title !== label) { n.title = label; n.setAttribute("aria-label", label); }
       // Shown text only; the aria-label above is what a screen reader reads.
       if (cellText) { const t = cellText(j); if (n.textContent !== t) n.textContent = t; }
@@ -139,5 +192,5 @@ export function mountHeatmap(container, opts) {
 
   container.replaceChildren(tabs, grid);
   update();
-  return { update };
+  return { update, openDate: frame.openDate };
 }

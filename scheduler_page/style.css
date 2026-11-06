@@ -3,7 +3,9 @@
   --bg: #f3f8f4; --surface: #ffffff; --fg: #173b2a; --muted: #4f6e5b;
   --accent: #2f8a4f; --accent-fg: #ffffff; --chip: #e1eee5; --empty: #e9f0eb; --empty-alt: #dde7e0;
   --h1: #cfe8d6; --h2: #a3d6b1; --h3: #70bf88; --h4: #44a465; --h5: #2f8a4f; --h6: #1c6838;
-  --line: #d5e3d9; --warn: #b5651d; --warnbg: #fbf0e1;
+  --line: #d5e3d9; --warn: #b5651d; --warnbg: #fbf0e1; --warn-text: #9a5416;
+  --wk1-empty: #e4ebf6; --wk1-empty-alt: #d6e0f0; --wk1-fg: #2d4d7a;
+  --due-empty: #f8e6cf; --due-empty-alt: #f1d6b3;
   --font: "Karla", system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 @media (prefers-color-scheme: dark) {
@@ -11,7 +13,9 @@
     --bg: #0f1c15; --surface: #16271d; --fg: #e3f1e7; --muted: #9bb8a5;
     --accent: #4cb872; --accent-fg: #0b1a11; --chip: #213a2b; --empty: #1d3125; --empty-alt: #243b2d;
     --h1: #234a31; --h2: #2c6340; --h3: #3a7f52; --h4: #4a9d65; --h5: #5fbb7c; --h6: #86d9a0;
-    --line: #2a4434; --warn: #e3a066; --warnbg: #2e2416;
+    --line: #2a4434; --warn: #e3a066; --warnbg: #2e2416; --warn-text: #e3a066;
+    --wk1-empty: #1b2738; --wk1-empty-alt: #233247; --wk1-fg: #a9c3e6;
+    --due-empty: #3a2a17; --due-empty-alt: #4a341b;
   }
 }
 * { box-sizing: border-box; }
@@ -73,6 +77,10 @@ button:disabled { opacity: .6; cursor: default; }
 main.wide { max-width: 1080px; }
 .appbar.withaction .context { margin-right: auto; }
 .appbar.withaction .context::before { content: "· "; }
+/* The heatmap pages' "Show times in" picker; idle (disabled, dimmed) while an editor with its own zone has the pane */
+.appbar .shownzone { margin: 0; font-size: 13px; font-weight: 700; color: var(--muted); }
+.appbar .shownzone select { font-size: 13px; padding: 4px 8px; }
+.appbar .shownzone.idle { opacity: 0.55; }
 .small { min-height: 36px; padding: 0 14px; border-radius: 9px; font-weight: 800; cursor: pointer; }
 .cols { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 12px; align-items: start; }
 .rail, .pane, .openform { background: var(--surface); border-radius: 12px; padding: 12px; min-width: 0; display: grid; gap: 10px; align-content: start; }
@@ -115,6 +123,24 @@ button.hcell { cursor: pointer; }
 .s0 { background: var(--empty); } .alt.s0 { background: var(--empty-alt); } .s1 { background: var(--h1); } .s2 { background: var(--h2); } .s3 { background: var(--h3); }
 .s4 { background: var(--h4); } .s5 { background: var(--h5); } .s6 { background: var(--h6); }
 .legend span { padding: 0 3px; }
+
+/* A window grid's league weeks, Monday to Sunday Pacific (see layoutWindow). A cell's kind re-points the empty shades,
+   so every rule drawing an empty cell (heatmap or editor, plain or alt hour) follows; shaded and painted cells keep
+   their own colours. Next week is a cool tint; the league's Sunday, when results are due, is the warning colour, and
+   the last half-hour before the cutoff is underlined in it. Day names and tabs take their column's kind. */
+.wk1 { --empty: var(--wk1-empty); --empty-alt: var(--wk1-empty-alt); }
+.due { --empty: var(--due-empty); --empty-alt: var(--due-empty-alt); }
+.cutoff { position: relative; }
+.cutoff::before { content: ""; position: absolute; left: -1px; right: -1px; bottom: calc(-1 * var(--below, 1px) - 1px); height: 3px; border-radius: 2px; background: var(--warn); z-index: 2; pointer-events: none; }
+.col.day > .dayname { border-radius: 6px 6px 0 0; }
+.col.day.wk0 > .dayname { background: var(--chip); }
+.col.day.wk1 > .dayname, .daytabs button.wk1:not([aria-selected="true"]) { background: var(--wk1-empty-alt); color: var(--wk1-fg); }
+.col.day.due > .dayname { background: var(--warnbg); color: var(--warn-text); box-shadow: inset 0 -2px 0 var(--warn); }
+.daytabs button.due:not([aria-selected="true"]) { background: var(--warnbg); color: var(--warn-text); box-shadow: inset 0 0 0 2px var(--warn); }
+.legend .key.wk0 { background: var(--chip); }
+.legend .key.wk1 { background: var(--wk1-empty-alt); }
+.legend .key.due { background: var(--due-empty-alt); box-shadow: inset 0 -3px 0 var(--warn); }
+.legend .keyitem:has(.key.due) { color: var(--warn-text); font-weight: 700; }
 
 /* The viewer's own teams: the team card, a captain's requests and switches, or a member's way out */
 .mine { display: grid; gap: 8px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
