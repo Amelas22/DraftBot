@@ -274,7 +274,7 @@ async def test_publish_release_skips_when_disconnected():
     assert ds.data_received is True
 
 
-async def _run_end_draft(unlock_at, pools_posted=True):
+async def _run_end_draft(unlock_at):
     """Run _on_end_draft with its collaborators mocked; the row the manager
     reads back after capture says the log unlocks at `unlock_at`."""
     m = _manager()
@@ -290,7 +290,7 @@ async def _run_end_draft(unlock_at, pools_posted=True):
          patch.object(DraftSetupManager, "_load_log_state", AsyncMock(return_value=state)), \
          patch.object(DraftSetupManager, "release_draftmancer_log", AsyncMock()) as release, \
          patch.object(DraftSetupManager, "publish_draft_log", AsyncMock()) as pub, \
-         patch("services.draft_setup_manager.post_team_logs", AsyncMock(return_value=pools_posted)) as team, \
+         patch("services.draft_setup_manager.post_team_logs", AsyncMock(return_value=True)) as team, \
          patch("services.draft_setup_manager.assign_drafted_decks", AsyncMock()) as decks:
         await m._on_end_draft()
     return SimpleNamespace(m=m, bot=bot, team=team, decks=decks, release=release, pub=pub)
