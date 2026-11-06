@@ -21,7 +21,7 @@ from helpers.utils import not_none, reach_thread, ui_button
 from notification_service import send_dm
 from services.team_finder_sync import reconcile_after_command
 from services.tournament_registration import add_roster_members, register_captain
-from cogs.lfg_cog import ensure_lfg_board
+from cogs.lfg_cog import close_unless_registering, ensure_lfg_board
 from match_control_view import (
     MatchControlView,
     create_match_room,
@@ -1291,6 +1291,12 @@ class TournamentCog(commands.Cog):
             except Exception:
                 logger.exception(
                     f"[team-roles] could not fill missing roles for tournament {tournament_id}")
+            # Find a team is only open during registration. The minute loop
+            # finishes this if it fails here.
+            try:
+                await close_unless_registering(self.bot, str(ctx.guild.id))
+            except Exception:
+                logger.exception(f"lfg: could not close Find a team for tournament {tournament_id}")
             await self._refresh_board(tournament_id)
             unroled = await teams_missing_role(ctx.guild, tournament_id)
             pot_line = f" 🏦 Prize pool: **{res['pot']} tix**." if res["fee"] > 0 else ""

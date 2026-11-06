@@ -11,7 +11,7 @@ import { expiredMessage } from "./messages.js";
 import { plural, pluralWord } from "./words.js";
 import {
   CLOSE_CONFIRM, FORMAT, MULTI_TEAM_WARNING, NOTE_MAX, actionErrorText, cellText, createSync, declinedText, isFull,
-  joinNote, joinState, leaveConfirm, membersText, modeAfterSelect, myTeams, noteDrafts, noteError, onOtherTeam, rankTeams, refusalText, requestHeading,
+  REGISTRATION_CLOSED, isRegistrationClosed, joinNote, joinState, leaveConfirm, membersText, modeAfterSelect, myTeams, noteDrafts, noteError, onOtherTeam, rankTeams, refusalText, requestHeading,
   requestsFor, shadeLevel, slotsText, teamName, windowStart,
 } from "./teams.js";
 
@@ -61,6 +61,8 @@ async function showList(root, api, usualDoc, now, cleanups, notice, firstStatus,
     state = checkDoc(await api.get(TEAMS_PATH), FORMAT);
   } catch (e) {
     if (e instanceof LinkExpired) return notice(expiredMessage());
+    // A link lasts 7 days; a registration may not. The first load meets the refusal as often as a refresh does.
+    if (isRegistrationClosed(e)) return notice(REGISTRATION_CLOSED);
     throw e;
   }
 
@@ -407,6 +409,7 @@ async function showList(root, api, usualDoc, now, cleanups, notice, firstStatus,
       render();
     } catch (e) {
       if (e instanceof LinkExpired) notice(expiredMessage());
+      else if (isRegistrationClosed(e)) notice(REGISTRATION_CLOSED);
       else console.warn("teams refresh failed", e);
     }
   }

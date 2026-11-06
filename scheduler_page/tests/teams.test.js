@@ -5,7 +5,7 @@ import {
   fitTeam, rankTeams, halfHourFloor, onOtherTeam, joinState, noteError, refusalText, actionErrorText,
   cellText, declinedText, joinNote, modeAfterSelect, shadeLevel, teamName, MULTI_TEAM_WARNING, NETWORK_FAILED,
   isFull, requestsFor, myTeams, requestHeading, slotsText, createSync, windowStart, noteDrafts,
-  CLOSE_CONFIRM, leaveConfirm, membersText, memberFree, hasAvailability,
+  CLOSE_CONFIRM, leaveConfirm, membersText, memberFree, hasAvailability, REGISTRATION_CLOSED, isRegistrationClosed,
 } from "../js/teams.js";
 import { decodeCells, usualCellOf, CELLS, encodeDayCells } from "../js/week.js";
 import { LinkExpired, NeedsUpdate, NEEDS_UPDATE } from "../js/api.js";
@@ -118,6 +118,15 @@ test("action errors: expired, refusal over HTTP, network, server", () => {
   assert.equal(actionErrorText(new TypeError("Failed to fetch")), NETWORK_FAILED);
   assert.equal(NETWORK_FAILED, "Couldn't reach DraftBot. Check your connection and try again.");
   assert.notEqual(actionErrorText(Object.assign(new Error("x"), { code: "http_500", status: 500 })), NETWORK_FAILED);
+});
+
+test("a closed registration says when Find a team opens again, on an action", () => {
+  // The server sends it as a 403 for reads and actions alike.
+  const closed = Object.assign(new Error("x"), { code: "registration_closed", status: 403 });
+  assert.ok(isRegistrationClosed(closed));
+  assert.ok(!isRegistrationClosed(Object.assign(new Error("x"), { code: "wrong_view", status: 403 })));
+  assert.equal(actionErrorText(closed), REGISTRATION_CLOSED);
+  assert.match(REGISTRATION_CLOSED, /next tournament opens registration/);
 });
 
 test("cellText names who is free and who isn't", () => {

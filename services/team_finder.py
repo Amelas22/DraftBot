@@ -525,6 +525,37 @@ async def reconcile_registered(session: AsyncSession, guild_id: str, now: dateti
     return notices
 
 
+async def registration_open(session: AsyncSession, guild_id: str) -> bool:
+    """Whether Find a team is open: only while the server's tournament takes registrations."""
+    tournament = await get_active_tournament(session, guild_id)
+    return tournament is not None and tournament.status == "registration"
+
+
+async def close_forming_teams(session: AsyncSession, guild_id: str, now: datetime) -> int:
+    """Close every forming team and withdraw its pending requests, without notices.
+
+    For once registration has closed: a team that hadn't registered by then has
+    missed the tournament it was forming for, and the next registration starts
+    from an empty board. Idempotent; returns how many teams it closed. The caller
+    holds WRITE_LOCK and commits.
+    """
+    stamp = naive_utc(now)
+    teams = (
+        await session.execute(
+            select(LfgTeam).where(LfgTeam.guild_id == guild_id, LfgTeam.status.in_(("open", "full")))
+        )
+    ).scalars().all()
+    for team in teams:
+        for request in await _pending_requests(session, int(team.id)):
+            request.status = "withdrawn"
+            request.answered_utc = stamp
+        team.status = "closed"
+        team.closed_utc = stamp
+        team.taking_requests = False
+    await session.flush()
+    return len(teams)
+
+
 @dataclass(frozen=True)
 class BoardTeam:
     """A team the Discord board lists: still short of players and taking requests."""

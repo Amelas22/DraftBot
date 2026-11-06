@@ -170,6 +170,34 @@ async def test_start_freezes_the_board():
     cog._refresh_board.assert_awaited_once_with(1)
 
 
+@pytest.mark.asyncio
+async def test_start_closes_find_a_team_and_finishes_even_if_that_fails():
+    """Find a team is only open during registration. Closing it is cleanup: the
+    minute loop retries it, so it must never stop the start itself."""
+    from cogs.tournament_commands import TournamentCog
+
+    cog = TournamentCog(MagicMock())
+    cog._refresh_board = AsyncMock()
+    cog._post_schedule = AsyncMock()
+    cog._post_standings = AsyncMock()
+    ctx = _ctx()
+    close = AsyncMock(side_effect=RuntimeError("discord"))
+
+    res = {"tournament_id": 1, "name": "Cup", "pot": 0, "fee": 0}
+    with patch("cogs.tournament_commands.tournament_enabled", return_value=True), \
+         patch("cogs.tournament_commands.escrow.close_registration_and_seed",
+               AsyncMock(return_value=res)), \
+         patch("cogs.tournament_commands.db_session", lambda: _NullSession()), \
+         patch("cogs.tournament_commands.active_tournament_id", AsyncMock(return_value=None)), \
+         patch("cogs.tournament_commands.teams_missing_role", AsyncMock(return_value=[])), \
+         patch("cogs.tournament_commands.ensure_team_roles", AsyncMock(return_value={})), \
+         patch("cogs.tournament_commands.close_unless_registering", close):
+        await TournamentCog.start.callback(cog, ctx)
+
+    close.assert_awaited_once_with(cog.bot, str(ctx.guild.id))
+    cog._post_schedule.assert_awaited_once()
+
+
 def test_roster_commands_are_registered():
     from cogs.tournament_commands import TournamentCog
 

@@ -15,10 +15,12 @@ from helpers.display_names import plain_text
 from helpers.tournament_channels import FIND_A_TEAM, ensure_channel
 from helpers.utils import as_messageable, not_none, ui_button
 from services.scheduler_links import issue_link
-from services.team_finder import BoardTeam, board_teams
+from services import team_finder
+from services.team_finder import BoardTeam, board_teams, close_forming_teams, registration_open
 from services.team_finder_sync import run_reconcile
 
 NOT_ENABLED = "Find a team isn't turned on in this server."
+REGISTRATION_CLOSED = "Find a team opens when the next tournament opens registration."
 LINK_INTRO = ("Find teams that fit your week, or open your own. "
               "The link works for 7 days.")
 LINK_FAILED = "Couldn't make your link just now. Try again in a minute."
@@ -68,6 +70,9 @@ async def lfg_reply(guild_id: str, user_id: str,
     if not scheduler_enabled(guild_id):
         return NOT_ENABLED, None
     try:
+        async with db_session() as session:
+            if not await registration_open(session, guild_id):
+                return REGISTRATION_CLOSED, None
         url = await issue_link(user_id, guild_id, "lfg", now)
     except Exception:
         logger.exception("lfg: couldn't issue a link for {}", user_id)
@@ -119,6 +124,8 @@ class LfgCog(commands.Cog):
             guild_id = str(guild.id)
             try:
                 if not scheduler_enabled(guild_id):
+                    continue
+                if await close_unless_registering(self.bot, guild_id):
                     continue
                 await run_reconcile(self.bot, guild_id)
             except Exception:
@@ -187,6 +194,52 @@ async def refresh_lfg_board(bot: discord.Client, guild_id: str) -> None:
         return
     await message.edit(embed=embed)
     _rendered[message_id] = embed.description
+
+
+async def close_unless_registering(bot: discord.Client, guild_id: str) -> bool:
+    """Close Find a team unless the server's tournament is taking registrations.
+
+    Closing means closing every forming team, silently, and deleting the board.
+    /tournament start calls this the moment registration closes; the minute loop
+    calls it too, so a start whose teardown failed is finished a minute later.
+    Returns whether Find a team is closed.
+    """
+    async with team_finder.WRITE_LOCK:
+        async with db_session() as session:
+            if await registration_open(session, guild_id):
+                return False
+            closed = await close_forming_teams(session, guild_id, datetime.now(timezone.utc))
+            await session.commit()
+    if closed:
+        logger.info("lfg: registration is closed in guild {}; closed {} forming teams", guild_id, closed)
+    await take_down_lfg_board(bot, guild_id)
+    return True
+
+
+async def take_down_lfg_board(bot: discord.Client, guild_id: str) -> None:
+    """Delete the server's board, which takes its pin and its sticky with it.
+
+    A board that couldn't be deleted keeps its sticky record, so the next call tries again.
+    """
+    from database.message_management import LFG_BOARD_VIEW_TYPE, fetch_sticky_message
+
+    channel_id = (get_config(guild_id).get("tournament") or {}).get(FIND_A_TEAM.setting)
+    if not channel_id:
+        return
+    async with db_session() as session:
+        board = await fetch_sticky_message(str(channel_id), session)
+        if board is None or (board.view_metadata or {}).get("view_type") != LFG_BOARD_VIEW_TYPE:
+            return
+        message_id = str(board.message_id)
+    try:
+        channel = as_messageable(bot.get_channel(int(channel_id))
+                                 or await bot.fetch_channel(int(channel_id)))
+        await (await channel.fetch_message(int(message_id))).delete()
+    except discord.NotFound:
+        pass
+    await _drop_board(str(channel_id), message_id)
+    _rendered.pop(message_id, None)
+    logger.info("lfg: took down the Find a team board in channel {}", channel_id)
 
 
 async def _drop_board(channel_id: str, message_id: str) -> None:

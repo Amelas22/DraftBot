@@ -13,6 +13,7 @@ from services.team_finder import (
     accept,
     BoardTeam,
     board_teams,
+    close_forming_teams,
     close_team,
     decline,
     leave_team,
@@ -20,6 +21,7 @@ from services.team_finder import (
     open_team,
     overlap_hours,
     reconcile_registered,
+    registration_open,
     request_join,
     set_taking_requests,
     teams_state,
@@ -637,3 +639,35 @@ async def test_the_board_lists_teams_still_short_of_players(test_db):
         BoardTeam(team_id=alone, captain_name="Wren", others=(), size=4, note=""),
     ]
     assert teams[0].filled == 2
+
+
+@pytest.mark.asyncio
+async def test_find_a_team_is_open_only_during_registration(test_db):
+    async with db_session() as s:
+        assert not await registration_open(s, G)
+        t = await create_tournament(s, G, "Cup", 3)
+        assert await registration_open(s, G)
+        t.status = "active"
+        assert not await registration_open(s, G)
+
+
+@pytest.mark.asyncio
+async def test_closing_takes_every_forming_team_and_request_without_a_notice(test_db):
+    async with db_session() as s:
+        forming = await _open(s, "cap", "Rook")
+        await _ask(s, forming, "amy")
+        full = await _open(s, "cap2", "Pawn")
+        for user in ("ben", "cid"):
+            await _ask(s, full, user)
+            assert (await accept(s, G, "cap2", full, user, NOW)).ok
+        already = await _open(s, "cap3", "Fern")
+        assert (await close_team(s, G, "cap3", already, NOW)).ok
+        closed_at = (await _team_row(s, already)).closed_utc
+
+        assert await close_forming_teams(s, G, NOW + timedelta(hours=1)) == 2
+
+        assert [await _status(s, t) for t in (forming, full, already)] == ["closed"] * 3
+        assert (await _team_row(s, already)).closed_utc == closed_at, "an already-closed team is left alone"
+        request = (await s.execute(select(LfgRequest).where(LfgRequest.user_id == "amy"))).scalar_one()
+        assert request.status == "withdrawn"
+        assert await close_forming_teams(s, G, NOW) == 0

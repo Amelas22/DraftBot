@@ -24,6 +24,7 @@ async def test_flag_off_has_no_link_and_no_view():
 async def test_flag_on_returns_link_button():
     url = "http://localhost:8787/#tok"
     with patch.object(lfg_cog, "scheduler_enabled", return_value=True), \
+            patch.object(lfg_cog, "registration_open", new=AsyncMock(return_value=True)), \
             patch.object(lfg_cog, "issue_link", new=AsyncMock(return_value=url)) as issue:
         content, view = await lfg_cog.lfg_reply("1", "2", NOW)
     issue.assert_awaited_once_with("2", "1", "lfg", NOW)
@@ -37,10 +38,24 @@ async def test_flag_on_returns_link_button():
 @pytest.mark.asyncio
 async def test_link_failure_gives_retry_text():
     with patch.object(lfg_cog, "scheduler_enabled", return_value=True), \
+            patch.object(lfg_cog, "registration_open", new=AsyncMock(return_value=True)), \
             patch.object(lfg_cog, "issue_link", new=AsyncMock(side_effect=RuntimeError("db"))):
         content, view = await lfg_cog.lfg_reply("1", "2", NOW)
     assert content == "Couldn't make your link just now. Try again in a minute."
     assert view is None
+
+
+@pytest.mark.asyncio
+async def test_outside_registration_there_is_no_link():
+    """Find a team is for the tournament taking registrations; with none, a link
+    would open a page that refuses everything."""
+    with patch.object(lfg_cog, "scheduler_enabled", return_value=True), \
+            patch.object(lfg_cog, "registration_open", new=AsyncMock(return_value=False)), \
+            patch.object(lfg_cog, "issue_link", new=AsyncMock()) as issue:
+        content, view = await lfg_cog.lfg_reply("1", "2", NOW)
+    assert content == "Find a team opens when the next tournament opens registration."
+    assert view is None
+    issue.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -80,6 +95,7 @@ async def test_reconcile_loop_survives_a_failing_guild():
         calls.append(guild_id)
 
     with patch.object(lfg_cog, "scheduler_enabled", side_effect=enabled), \
+            patch.object(lfg_cog, "close_unless_registering", new=AsyncMock(return_value=False)), \
             patch.object(lfg_cog, "run_reconcile", new=run):
         await lfg_cog.LfgCog.reconcile_loop.coro(cog)
     assert calls == ["2"]
