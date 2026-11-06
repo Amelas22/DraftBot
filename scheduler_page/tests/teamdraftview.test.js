@@ -293,12 +293,10 @@ test("Show times in redraws the matchup in the picked zone and remembers it", as
   const zones = ["America/New_York", "Asia/Tokyo"];
   const { root, view } = await mount(fakeApi([], () => doc), { zonePicker: { zones, storage } });
   try {
-    const picker = root.find((n) => n.attrs.id === "shown-zone");
     const cellLabel = () => root.find((n) => n.attrs["data-j"] === "0").attrs["aria-label"];
     const before = cellLabel();
     const was = activeTab(root).textContent;
-    picker.value = "Asia/Tokyo";
-    for (const fn of picker.listeners.change) fn({});
+    pickZone(root, "Asia/Tokyo");
     assert.match(root.children[2].textContent, /Times in Asia\/Tokyo\./);
     assert.notEqual(cellLabel(), before);
     assert.deepEqual([...kept.values()], ["Asia/Tokyo"]);
@@ -308,6 +306,7 @@ test("Show times in redraws the matchup in the picked zone and remembers it", as
   }
 });
 
+const pickZone = (root, zone) => { const s = root.find((n) => n.attrs.id === "shown-zone"); s.value = zone; for (const fn of s.listeners.change) fn({}); };
 const allOf = (n, test, out = []) => { if (test(n)) out.push(n); for (const c of n.children) if (c.find) allOf(c, test, out); return out; };
 const activeTab = (root) => allOf(root, (n) => n.attrs.role === "tab")[Number(root.find((n) => n.attrs.role === "grid").dataset.active)];
 
@@ -318,9 +317,7 @@ test("the day tab a viewer picked stays picked across a zone change", async () =
     allOf(root, (n) => n.attrs.role === "tab")[2].click();
     const was = activeTab(root).textContent;
     assert.notEqual(was, allOf(root, (n) => n.attrs.role === "tab")[0].textContent);
-    const picker = root.find((n) => n.attrs.id === "shown-zone");
-    picker.value = "Asia/Tokyo";
-    for (const fn of picker.listeners.change) fn({});
+    pickZone(root, "Asia/Tokyo");
     assert.equal(activeTab(root).textContent, was); // a new grid, open on the same date
   } finally {
     view.dispose();

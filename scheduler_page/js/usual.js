@@ -4,7 +4,7 @@ import { LinkExpired, checkDoc } from "./api.js";
 import { expiredMessage, NOT_ENABLED } from "./messages.js";
 import { el } from "./dom.js";
 import { appBar } from "./appbar.js";
-import { gridFrame, hourLabel, windowColumns } from "./grid.js";
+import { gridFrame, hourLabel, windowColumns, zoneName } from "./grid.js";
 
 const FORMAT = "draftbot.scheduler.usual_week";
 const PER_DAY = 48;
@@ -226,16 +226,16 @@ export function paintGrid({ columns, gridLabel, cells: initial, onChange }) {
   };
 }
 
-// The time zone picker both editors and the heatmap pages show: zones (else every zone the browser knows, else
-// fallback), with zone first if missing, and zone selected. row is the labelled picker to place on the page; id and
-// label let a page hold two of them.
 // Every zone the browser knows, else just fallback on a browser without Intl.supportedValuesOf.
 export const allZones = (fallback) => (typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [fallback]);
 
+// The time zone picker both editors and the heatmap pages show: zones (else every zone the browser knows, else
+// fallback), with zone first if missing, and zone selected. row is the labelled picker to place on the page; id and
+// label let a page hold two of them.
 export function zoneSelect(zone, zones, fallback = zone, { id = "zone", label = "Time zone" } = {}) {
   const list = zones || allZones(fallback);
   const select = el("select", { id, "aria-label": label });
-  for (const z of list.includes(zone) ? list : [zone, ...list]) select.append(el("option", { value: z, text: z.replaceAll("_", " ") }));
+  for (const z of list.includes(zone) ? list : [zone, ...list]) select.append(el("option", { value: z, text: zoneName(z) }));
   select.value = zone;
   return { select, row: el("label", { class: "zonerow", for: id }, `${label} `, select) };
 }

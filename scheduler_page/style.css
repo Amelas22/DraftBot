@@ -134,9 +134,8 @@ button.hcell { cursor: pointer; }
 .cutoff::before { content: ""; position: absolute; left: -1px; right: -1px; bottom: calc(-1 * var(--below, 1px) - 1px); height: 3px; border-radius: 2px; background: var(--warn); z-index: 2; pointer-events: none; }
 .col.day > .dayname { border-radius: 6px 6px 0 0; }
 .col.day.wk0 > .dayname { background: var(--chip); }
-.col.day.wk1 > .dayname { background: var(--wk1-empty-alt); color: var(--wk1-fg); }
+.col.day.wk1 > .dayname, .daytabs button.wk1:not([aria-selected="true"]) { background: var(--wk1-empty-alt); color: var(--wk1-fg); }
 .col.day.due > .dayname { background: var(--warnbg); color: var(--warn-text); box-shadow: inset 0 -2px 0 var(--warn); }
-.daytabs button.wk1:not([aria-selected="true"]) { background: var(--wk1-empty-alt); color: var(--wk1-fg); }
 .daytabs button.due:not([aria-selected="true"]) { background: var(--warnbg); color: var(--warn-text); box-shadow: inset 0 0 0 2px var(--warn); }
 .legend .key.wk0 { background: var(--chip); }
 .legend .key.wk1 { background: var(--wk1-empty-alt); }

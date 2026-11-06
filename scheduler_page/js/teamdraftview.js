@@ -5,7 +5,7 @@
 // only draws and wires.
 import { LinkExpired, checkDoc } from "./api.js";
 import { CELLS, CELL_MS, addCells, isoSeconds } from "./week.js";
-import { mountHeatmap, formatCell, layoutWindow, legendKey, weekKeys } from "./grid.js";
+import { mountHeatmap, formatCell, layoutWindow, legendKey, weekKeys, zoneName } from "./grid.js";
 import { appBar } from "./appbar.js";
 import { shownZonePicker } from "./shownzone.js";
 import { mountUsual } from "./usual.js";
@@ -77,7 +77,7 @@ export async function mountTeamDraft(root, api, deps = {}) {
     if (e instanceof LinkExpired) { notice(expiredMessage()); return controller; }
     throw e;
   }
-  await showMatchup(root, api, paths, usual, now, cleanups, notice, deps.zonePicker || {});
+  await showMatchup(root, api, paths, usual, now, cleanups, notice, deps.zonePicker);
   return controller;
 }
 
@@ -94,9 +94,7 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
   // browser's. Picking one draws the heatmap again in it, on the same day tab.
   const picker = shownZonePicker(usualDoc?.zone || Intl.DateTimeFormat().resolvedOptions().timeZone, (z) => {
     zone = z;
-    hovered = null;
-    heat = makeHeat(heat.openDate());
-    if (clicked === null) setReadout(HOVER_HINT);
+    redraw();
     render();
   }, zoneDeps);
   let zone = picker.zone;
@@ -182,6 +180,12 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
     onHover: (j, byMouse) => { hovered = byMouse ? j : null; setReadout(j === null ? restingReadout() : label(j)); },
   });
   let heat = makeHeat();
+  // A new grid for a new zone or window, on the same day tab; a hover from the old one is dropped.
+  const redraw = () => {
+    hovered = null;
+    if (clicked === null) setReadout(HOVER_HINT);
+    heat = makeHeat(heat.openDate());
+  };
 
   const toggle = (next) => { off = next; render(); };
   // A toggle chip: the tick is decoration, so it stays out of the button's name; aria-pressed carries the state.
@@ -286,7 +290,7 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
   }
 
   const ledeText = () => {
-    const where = `Times in ${zone.replaceAll("_", " ")}.`;
+    const where = `Times in ${zoneName(zone)}.`;
     const showing = total() < everyone().length ? ` Showing ${total()} of ${everyone().length} players.` : "";
     if (!open()) return `This draft has started. ${where}${showing}`;
     return `Each box is a stretch when the same people stay free, with how many on each side at its top. ${where}${showing}`;
@@ -329,10 +333,8 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
         // The window slid forward: keep the picked moment, not its cell index.
         selected = shiftSelection(selected, startUtc, start);
         clicked = shiftSelection(clicked, startUtc, start);
-        hovered = null;
-        if (clicked === null) setReadout(HOVER_HINT);
         startUtc = start;
-        heat = makeHeat(heat.openDate());
+        redraw();
       }
       render();
     } catch (e) {

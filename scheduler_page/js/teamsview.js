@@ -4,7 +4,7 @@
 import { LinkExpired, NeedsUpdate, checkDoc } from "./api.js";
 import { decodeCells } from "./week.js";
 import { mountUsual, weekEditing } from "./usual.js";
-import { mountHeatmap, formatCell, weekKeys } from "./grid.js";
+import { mountHeatmap, formatCell, weekKeys, zoneName } from "./grid.js";
 import { appBar } from "./appbar.js";
 import { shownZonePicker } from "./shownzone.js";
 import { el } from "./dom.js";
@@ -41,7 +41,7 @@ export async function mountTeams(root, api, deps = {}) {
     if (e instanceof LinkExpired) { notice(expiredMessage()); return controller; }
     throw e;
   }
-  const list = (doc, firstStatus) => showList(root, api, doc, now, cleanups, notice, firstStatus, editWeek, deps.zonePicker || {}).catch((e) => {
+  const list = (doc, firstStatus) => showList(root, api, doc, now, cleanups, notice, firstStatus, editWeek, deps.zonePicker).catch((e) => {
     if (e instanceof LinkExpired) notice(expiredMessage());
     else { console.error(e); notice(actionErrorText(e)); }
   });
@@ -52,7 +52,7 @@ export async function mountTeams(root, api, deps = {}) {
     await mountUsual(root, api, { now, intro: PAINT_FIRST, onSaved: (doc) => list(doc, "Saved.") });
     return controller;
   }
-  await showList(root, api, checkDoc(usual, USUAL_FORMAT), now, cleanups, notice, "", editWeek, deps.zonePicker || {});
+  await showList(root, api, checkDoc(usual, USUAL_FORMAT), now, cleanups, notice, "", editWeek, deps.zonePicker);
   return controller;
 }
 
@@ -70,8 +70,7 @@ async function showList(root, api, usualDoc, now, cleanups, notice, firstStatus,
   // top (see shownzone.js), at first that same zone. Picking one draws the heatmap again in it, on the same day tab.
   const picker = shownZonePicker(usualDoc.zone, (z) => {
     zone = z;
-    heat = makeHeat(heat.openDate());
-    readout.textContent = HOVER_HINT;
+    redraw();
     render();
   }, zoneDeps);
   let zone = picker.zone;
@@ -156,6 +155,8 @@ async function showList(root, api, usualDoc, now, cleanups, notice, firstStatus,
     onHover: (j) => { readout.textContent = j === null ? HOVER_HINT : label(j); },
   });
   let heat = makeHeat();
+  // A new grid for a new zone or window, on the same day tab.
+  const redraw = () => { heat = makeHeat(heat.openDate()); readout.textContent = HOVER_HINT; };
 
   const renderLegend = () => {
     const total = Math.max(1, people().length);
@@ -369,7 +370,7 @@ async function showList(root, api, usualDoc, now, cleanups, notice, firstStatus,
       selected = fallback ? `t:${fallback.team_id}` : null;
     }
     if (confirming && !state.teams.some((t) => t.team_id === confirming.split(":")[1])) confirming = null;
-    lede.textContent = `Teams ranked by the hours you're all usually free over the next 7 days. Times in ${zone.replaceAll("_", " ")}.`;
+    lede.textContent = `Teams ranked by the hours you're all usually free over the next 7 days. Times in ${zoneName(zone)}.`;
     cols.hidden = ranked.length === 0;
     empty.hidden = ranked.length > 0;
     renderRail();
@@ -413,7 +414,7 @@ async function showList(root, api, usualDoc, now, cleanups, notice, firstStatus,
       if (!sync.isCurrent(ticket)) return;
       state = fresh;
       const start = windowStart(startUtc, now());
-      if (start !== startUtc) { startUtc = start; heat = makeHeat(heat.openDate()); readout.textContent = HOVER_HINT; }
+      if (start !== startUtc) { startUtc = start; redraw(); }
       render();
     } catch (e) {
       if (e instanceof LinkExpired) notice(expiredMessage());

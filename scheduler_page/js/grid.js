@@ -24,14 +24,20 @@ export const LEAGUE_ZONE = "America/Los_Angeles";
 // One column per local date, in order; each cell is a window index j with its local minutes-of-day.
 // A DST day simply has 46 or 50 cells; nothing assumes 48 per day.
 // Each cell also carries its league week, by the league's clock wherever the viewer is: kind is "due" on the league's
-// Sunday (the last day to get that round's matches finished), else "wk0" in the week the window opens in and "wk1" from the
-// next league Monday on. cutoff marks the last cell before results are due. A window opening in Sunday's last half-hour
-// of a spring-forward week ends one cell past a second Monday; that cell is tinted as the next week too.
+// Sunday (the last day to get that round's matches finished), else "wk0" until the first cutoff (the last cell before
+// results are due) and "wk1" after it.
+// Pure in (startUtc, zone), and a page lays its window out again on every redraw, so the last layout is kept.
+let lastLayout = null;
 export function layoutWindow(startUtc, zone) {
+  const key = `${startUtc.getTime()} ${zone}`;
+  if (lastLayout?.key !== key) lastLayout = { key, days: layOutWindow(startUtc, zone) };
+  return lastLayout.days;
+}
+
+function layOutWindow(startUtc, zone) {
   const days = [];
-  let week = 0;
-  let leagueDay = null;
-  let last = null; // the cell before this one: the cutoff once the league's clock turns Sunday into Monday
+  let league = partsOf(startUtc, LEAGUE_ZONE).weekday;
+  let nextWeek = false;
   for (let j = 0; j < CELLS; j++) {
     const at = addCells(startUtc, j);
     const p = partsOf(at, zone);
@@ -41,15 +47,12 @@ export function layoutWindow(startUtc, zone) {
       day = { date, label: `${p.weekday} ${Number(p.day)}`, cells: [] };
       days.push(day);
     }
-    const league = partsOf(at, LEAGUE_ZONE).weekday;
-    if (leagueDay === "Sun" && league === "Mon") { week++; last.cutoff = true; }
-    leagueDay = league;
-    const due = league === "Sun";
-    last = { j, minutes: Number(p.hour) * 60 + Number(p.minute), kind: due ? "due" : `wk${Math.min(week, 1)}`, cutoff: false };
-    day.cells.push(last);
+    const after = partsOf(addCells(startUtc, j + 1), LEAGUE_ZONE).weekday;
+    const cutoff = league === "Sun" && after === "Mon";
+    day.cells.push({ j, minutes: Number(p.hour) * 60 + Number(p.minute), kind: league === "Sun" ? "due" : nextWeek ? "wk1" : "wk0", cutoff });
+    if (cutoff) nextWeek = true;
+    league = after;
   }
-  // A window ending in Sunday's last half-hour: its last cell is the cutoff if the next one would be Monday.
-  if (leagueDay === "Sun" && partsOf(addCells(startUtc, CELLS), LEAGUE_ZONE).weekday === "Mon") last.cutoff = true;
   return days;
 }
 
@@ -98,21 +101,19 @@ export const rowClass = (row) => `${row % 2 ? "half" : "hr"}${Math.floor(row / 2
 // fills the screen), the hour column, and a column per layout column with its name and the padding down to its first
 // row. makeCell(cell, rowClass) builds each cell's element, which carries its row's classes; attrs are the grid's
 // own. Cells and columns with a league kind (windowColumns) are tinted by it, and the cutoff cell is underlined: those
-// classes ride along with the row's. It opens on the tab of the column dated openDate, else the first.
+// classes ride along with the row's, and makeCell also gets the words a due cell adds to its label, so the deadline
+// reaches a screen reader as well as the eye. It opens on the tab of the column dated openDate, else the first.
 export function gridFrame(columns, attrs, makeCell, openDate) {
   const tabs = el("div", { class: "daytabs", role: "tablist", "aria-label": "Day" });
   const grid = el("div", attrs);
-  const kindClass = (x) => (x.kind ? ` ${x.kind}${x.cutoff ? " cutoff" : ""}` : "");
   const tabButtons = columns.map((c, i) => {
-    const b = el("button", { type: "button", role: "tab", text: c.label, class: kindClass(c).trim() });
+    const b = el("button", { type: "button", role: "tab", text: c.label, class: kindClass(c) });
     if (c.kind === "due") b.setAttribute("aria-label", `${c.label}, round ends`);
     b.addEventListener("click", () => setDay(i));
     tabs.append(b);
     return b;
   });
-  let active = 0;
   const setDay = (day) => {
-    active = day;
     grid.dataset.active = String(day);
     tabButtons.forEach((b, i) => b.setAttribute("aria-selected", String(i === day)));
   };
@@ -120,15 +121,23 @@ export function gridFrame(columns, attrs, makeCell, openDate) {
   for (let h = 0; h < 48; h++) hours.append(el("div", { class: `hour ${rowClass(h)}`, text: h % 2 === 0 ? hourLabel(h / 2) : "" }));
   grid.append(hours);
   columns.forEach((c, d) => {
-    const col = el("div", { class: `col day${kindClass(c)}`, "data-day": String(d), role: "row" });
+    const col = el("div", { class: `col day ${kindClass(c)}`.trim(), "data-day": String(d), role: "row" });
     col.append(el("div", { class: "dayname", text: c.label, "aria-hidden": "true" }));
     for (let g = 0; g < c.start; g++) col.append(el("div", { class: `gap ${rowClass(g)}`, "aria-hidden": "true" }));
-    c.cells.forEach((cell, i) => col.append(makeCell(cell, rowClass(c.start + i) + kindClass(cell))));
+    c.cells.forEach((cell, i) => col.append(makeCell(cell, `${rowClass(c.start + i)} ${kindClass(cell)}`.trim(), leagueWords(cell))));
     grid.append(col);
   });
-  setDay(Math.max(0, columns.findIndex((c) => c.date === openDate)));
-  return { tabs, grid, setDay, openDate: () => columns[active].date };
+  const dates = columns.map((c) => c.date);
+  setDay(Math.max(0, dates.indexOf(openDate)));
+  return { tabs, grid, setDay, openDate: () => dates[Number(grid.dataset.active)] };
 }
+
+// A cell's or column's league classes (see layoutWindow), and the words a due cell adds to its label.
+const kindClass = (x) => [x.kind, x.cutoff && "cutoff"].filter(Boolean).join(" ");
+const leagueWords = (cell) => (cell.cutoff ? " (round ends after this half-hour)" : cell.kind === "due" ? " (round ends today)" : "");
+
+// A zone as a person reads it: "America/New_York" is shown as "America/New York".
+export const zoneName = (zone) => zone.replaceAll("_", " ");
 
 // A legend key and its words, kept together when the legend wraps on a narrow screen.
 export const legendKey = (kind, text) => el("span", { class: "keyitem" }, el("i", { class: `key ${kind}` }), el("span", { text }));
@@ -147,31 +156,26 @@ export const weekKeys = () => [
 // so a narrow screen stays on the day it was showing.
 export function mountHeatmap(container, opts) {
   const { startUtc, zone, cellClass, cellLabel, cellText, onPick, onHover, openDate } = opts;
-  const nodes = new Map();
-  // Each cell's row classes, kept apart from cellClass so a redraw never drops them, and the words a due cell adds to
-  // its label, so the deadline reaches a screen reader as well as the eye.
-  const rows = new Map();
-  const dueWords = new Map();
+  // Each cell's element with its row classes and league words (see gridFrame), kept apart from cellClass and
+  // cellLabel so a redraw never drops them.
+  const cells = new Map();
   const frame = gridFrame(windowColumns(startUtc, zone), {
     class: cellText ? "grid heat counted" : "grid heat", role: "grid",
-    "aria-label": `Next 7 days, half-hour cells, times in ${zone.replaceAll("_", " ")}`,
-  }, ({ key: j, kind, cutoff }, row) => {
+    "aria-label": `Next 7 days, half-hour cells, times in ${zoneName(zone)}`,
+  }, ({ key: j }, row, words) => {
     const n = el(onPick ? "button" : "div", { class: `hcell ${row}`, role: "gridcell", "data-j": String(j) });
     if (onPick) { n.type = "button"; n.addEventListener("click", () => onPick(j)); }
-    nodes.set(j, n);
-    rows.set(j, row);
-    if (cutoff) dueWords.set(j, " (round ends after this half-hour)");
-    else if (kind === "due") dueWords.set(j, " (round ends today)");
+    cells.set(j, { n, row, words });
     return n;
   }, openDate);
   const { tabs, grid } = frame;
 
   // Touch the DOM only for cells whose look or words changed: 336 cells redraw on every tap.
   const update = () => {
-    for (const [j, n] of nodes) {
-      const cls = `hcell ${rows.get(j)} ${cellClass(j)}`.trim();
+    for (const [j, { n, row, words }] of cells) {
+      const cls = `hcell ${row} ${cellClass(j)}`.trim();
       if (n.className !== cls) n.className = cls;
-      const label = cellLabel(j) + (dueWords.get(j) ?? "");
+      const label = cellLabel(j) + words;
       if (n.title !== label) { n.title = label; n.setAttribute("aria-label", label); }
       // Shown text only; the aria-label above is what a screen reader reads.
       if (cellText) { const t = cellText(j); if (n.textContent !== t) n.textContent = t; }

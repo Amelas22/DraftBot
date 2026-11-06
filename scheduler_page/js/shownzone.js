@@ -30,8 +30,9 @@ export function rememberZone(zone, storage = browserStorage()) {
 export function shownZonePicker(fallback, onChange, deps = {}) {
   const zones = deps.zones || allZones(fallback);
   const storage = "storage" in deps ? deps.storage : browserStorage();
-  const zone = shownZone(fallback, zones, storage);
-  let picked = shownZone(null, zones, storage) !== null; // this browser remembers a pick
+  const remembered = shownZone(null, zones, storage);
+  const zone = remembered ?? fallback;
+  let picked = remembered !== null; // a flag, not re-read: a browser that refuses storage still keeps a pick for this page
   const { select, row } = zoneSelect(zone, zones, fallback, { id: "shown-zone", label: "Show times in" });
   select.addEventListener("change", () => {
     picked = true;
