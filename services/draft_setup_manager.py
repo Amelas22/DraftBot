@@ -470,6 +470,15 @@ class DraftSetupManager:
                 await asyncio.sleep(DRAFT_LOG_WAIT_INTERVAL)
             if self.current_draft_log:
                 await self.capture_draft_log(self.current_draft_log)
+                # The capture may have made the log due at once (a tournament
+                # match, see capture_draft_log). The reconciler posts it to
+                # Discord on its next tick, but Draftmancer's own lock needs
+                # this socket, and the manager shuts itself down within seconds
+                # of unlock_at passing -- so unlock it here, before anything
+                # slower than a point-read.
+                state = await self._load_log_state()
+                if state and state.unlock_at is not None and state.unlock_at <= datetime.now():
+                    await self.release_draftmancer_log()
                 # Push-primary: post each team its own pools immediately (private
                 # team channels). The reconciler retries this if it fails.
                 try:
@@ -1556,9 +1565,10 @@ class DraftSetupManager:
                                 discord_user_pack_picks[discord_ids[idx]] = self.get_pack_first_picks(draft_data, draft_user_id)
                     draft_session.pack_first_picks = discord_user_pack_picks
                     draft_session.logs_captured_at = datetime.now()
-                    draft_session.unlock_at = draft_session.logs_captured_at + timedelta(
-                        seconds=PUBLISH_DELAY_SECONDS
-                    )
+                    # A tournament match is played with pools open, and the
+                    # public log says nothing the pools don't: it is due now.
+                    delay = 0 if draft_session.tournament_match_id is not None else PUBLISH_DELAY_SECONDS
+                    draft_session.unlock_at = draft_session.logs_captured_at + timedelta(seconds=delay)
                     draft_session.spaces_object_key = object_key
 
                 await session.commit()

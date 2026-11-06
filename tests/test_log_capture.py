@@ -48,12 +48,20 @@ def _mock_db_session(draft_session):
     return MagicMock(return_value=ctx), session
 
 
+def _uncaptured(**over):
+    """A session row as it stands when the draft ends: nothing captured yet."""
+    ds = SimpleNamespace(session_id="sid", sign_ups={"d1": "Alice", "d2": "Bob"},
+                         draft_data=None, pack_first_picks=None, logs_captured_at=None,
+                         unlock_at=None, data_received=False, tournament_match_id=None)
+    for k, v in over.items():
+        setattr(ds, k, v)
+    return ds
+
+
 @pytest.mark.asyncio
 async def test_capture_stores_data_and_stamps_without_publishing():
     m = _manager()
-    ds = SimpleNamespace(session_id="sid", sign_ups={"d1": "Alice", "d2": "Bob"},
-                         draft_data=None, pack_first_picks=None, logs_captured_at=None,
-                         unlock_at=None, data_received=False)
+    ds = _uncaptured()
     db_factory, session = _mock_db_session(ds)
     with patch("services.draft_setup_manager.db_session", db_factory), \
          patch.object(DraftSetupManager, "save_to_digitalocean_spaces", AsyncMock(return_value="team/x.json")) as spaces, \
@@ -71,6 +79,24 @@ async def test_capture_stores_data_and_stamps_without_publishing():
     assert ds.unlock_at > ds.logs_captured_at
     assert ds.spaces_object_key == "team/x.json"
     session.commit.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_capture_unlocks_at_once_for_a_tournament_match():
+    """A tournament match is played with pools open, and the public log says
+    nothing the pools don't -- so its publish gate is the capture time itself,
+    not three hours later."""
+    m = _manager()
+    ds = _uncaptured(tournament_match_id=7)
+    db_factory, _ = _mock_db_session(ds)
+    with patch("services.draft_setup_manager.db_session", db_factory), \
+         patch.object(DraftSetupManager, "save_to_digitalocean_spaces", AsyncMock(return_value="team/x.json")), \
+         patch.object(DraftSetupManager, "get_pack_first_picks", MagicMock(return_value={})):
+        ok = await m.capture_draft_log(_draft_data())
+
+    assert ok is True
+    assert ds.logs_captured_at is not None
+    assert ds.unlock_at == ds.logs_captured_at
 
 
 @pytest.mark.asyncio
@@ -248,8 +274,9 @@ async def test_publish_release_skips_when_disconnected():
     assert ds.data_received is True
 
 
-@pytest.mark.asyncio
-async def test_on_end_draft_posts_team_pools():
+async def _run_end_draft(unlock_at, pools_posted=True):
+    """Run _on_end_draft with its collaborators mocked; the row the manager
+    reads back after capture says the log unlocks at `unlock_at`."""
     m = _manager()
     m.draft_cancelled = False
     m.draft_channel_id = "999"
@@ -257,11 +284,40 @@ async def test_on_end_draft_posts_team_pools():
     bot = MagicMock()
     bot.get_guild.return_value = None
     bot.get_channel.return_value = None
+    state = SimpleNamespace(data_received=False, unlock_at=unlock_at)
     with patch("services.draft_setup_manager.get_bot", return_value=bot), \
          patch.object(DraftSetupManager, "capture_draft_log", AsyncMock()), \
-         patch("services.draft_setup_manager.post_team_logs", AsyncMock()) as team:
+         patch.object(DraftSetupManager, "_load_log_state", AsyncMock(return_value=state)), \
+         patch.object(DraftSetupManager, "release_draftmancer_log", AsyncMock()) as release, \
+         patch.object(DraftSetupManager, "publish_draft_log", AsyncMock()) as pub, \
+         patch("services.draft_setup_manager.post_team_logs", AsyncMock(return_value=pools_posted)) as team, \
+         patch("services.draft_setup_manager.assign_drafted_decks", AsyncMock()) as decks:
         await m._on_end_draft()
-    team.assert_awaited_once_with(m.session_id, bot)
+    return SimpleNamespace(m=m, bot=bot, team=team, decks=decks, release=release, pub=pub)
+
+
+@pytest.mark.asyncio
+async def test_on_end_draft_posts_team_pools():
+    run = await _run_end_draft(unlock_at=datetime(2099, 1, 1))
+    run.team.assert_awaited_once_with(run.m.session_id, run.bot)
+
+
+@pytest.mark.asyncio
+async def test_on_end_draft_releases_draftmancer_when_capture_made_the_log_due():
+    """A tournament match's capture makes its log due at once (see
+    capture_draft_log). The manager shuts down within seconds of unlock_at
+    passing, so Draftmancer is unlocked here, now, over this socket; the
+    Discord post is the reconciler's on its next tick, not an eager publish."""
+    run = await _run_end_draft(unlock_at=datetime(2020, 1, 1))
+    run.release.assert_awaited_once_with()
+    run.pub.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_on_end_draft_leaves_an_ordinary_draft_locked_until_its_timer():
+    run = await _run_end_draft(unlock_at=datetime(2099, 1, 1))
+    run.release.assert_not_awaited()
+    run.pub.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -321,7 +377,8 @@ def _captured(draft_data, **over):
                          unlock_at=datetime(2026, 11, 6, 1, 8),
                          team_logs_posted_at=datetime(2026, 11, 5, 22, 27),
                          drafttable_url="https://tables/first",
-                         spaces_object_key="team/first.json", data_received=False)
+                         spaces_object_key="team/first.json", data_received=False,
+                         tournament_match_id=None)
     for k, v in over.items():
         setattr(ds, k, v)
     return ds
