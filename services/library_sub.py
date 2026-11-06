@@ -136,7 +136,7 @@ async def _lendable_pool(ctx: SubContext
     meta = await _session_meta(ctx.session_id)
     if meta is None:
         return _cannot_build_text(ctx), [], None
-    guild_id, sign_ups = meta
+    guild_id, sign_ups, _ = meta
     cube = await _cube_of(ctx.session_id)
     library = await library_for(guild_id)
     if cube is None or library is None or not await offers(library.id, cube):

@@ -304,3 +304,140 @@ async def test_save_to_spaces_returns_object_key():
     with patch("services.draft_setup_manager.DigitalOceanHelper", return_value=fake_helper):
         key = await m.save_to_digitalocean_spaces({"time": 123, "sessionID": "DBABC"})
     assert key == "team/TestCube-123-DBABC.json"
+
+
+# --- A draft stopped and restarted produces a SECOND log --------------------
+#
+# The first run's log had been captured, so the second arrived to a guard that
+# only asked "was anything captured?" and was dropped: pools were posted from
+# two-pick pools, and deck assignment, having judged that log unseatable,
+# refused the real one for the rest of the process.
+
+
+def _captured(draft_data, **over):
+    ds = SimpleNamespace(session_id="sid", sign_ups={"d1": "Alice", "d2": "Bob"},
+                         draft_data=draft_data, pack_first_picks={"d1": ["old"]},
+                         logs_captured_at=datetime(2026, 11, 5, 22, 8),
+                         unlock_at=datetime(2026, 11, 6, 1, 8),
+                         team_logs_posted_at=datetime(2026, 11, 5, 22, 27),
+                         drafttable_url="https://tables/first",
+                         spaces_object_key="team/first.json", data_received=False)
+    for k, v in over.items():
+        setattr(ds, k, v)
+    return ds
+
+
+def _second_run():
+    log = _draft_data()
+    log["time"] = _draft_data()["time"] + 7 * 60 * 1000
+    return log
+
+
+def _supersede_patches(spaces_key, dropped=()):
+    return (
+        patch.object(DraftSetupManager, "save_to_digitalocean_spaces", AsyncMock(return_value=spaces_key)),
+        patch.object(DraftSetupManager, "get_pack_first_picks", MagicMock(return_value=["new"])),
+        patch("services.draft_setup_manager.drop_uncollected", AsyncMock(return_value=list(dropped))),
+        patch("services.draft_setup_manager.loan_changed", MagicMock()),
+    )
+
+
+@pytest.mark.asyncio
+async def test_capture_replaces_the_log_of_a_restarted_draft():
+    m = _manager()
+    ds = _captured(_draft_data())
+    db_factory, session = _mock_db_session(ds)
+    gone = SimpleNamespace(id=7)
+    spaces, picks, drop, panel = _supersede_patches("team/second.json", dropped=[gone])
+    with patch("services.draft_setup_manager.db_session", db_factory), spaces, picks, drop, panel:
+        ok = await m.capture_draft_log(_second_run())
+
+    assert ok is True
+    assert ds.draft_data == _second_run()
+    assert ds.spaces_object_key == "team/second.json"
+    assert ds.logs_captured_at > datetime(2026, 11, 5, 22, 8)
+    assert ds.unlock_at > ds.logs_captured_at
+    assert ds.pack_first_picks == {"d1": ["new"], "d2": ["new"]}
+    assert ds.team_logs_posted_at is None, "the pools posted from the first log are stale"
+    assert ds.drafttable_url is None, "the table page built from the first log is stale"
+    drop.new.assert_awaited_once_with(session, "draft:sid")
+    panel.new.assert_called_once_with(gone)
+    session.commit.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_superseding_capture_whose_upload_fails_leaves_the_row_uncaptured():
+    """The reconciler retries a capture by its NULL stamp. A supersede that
+    kept the first run's stamp after a failed upload would never be retried:
+    the new log is in the row, so the next attempt would read as the same run
+    and be skipped, with the first run's Spaces files, pools and first picks
+    left standing behind it."""
+    m = _manager()
+    ds = _captured(_draft_data())
+    db_factory, session = _mock_db_session(ds)
+    spaces, picks, drop, panel = _supersede_patches(None)
+    with patch("services.draft_setup_manager.db_session", db_factory), spaces, picks, drop, panel:
+        ok = await m.capture_draft_log(_second_run())
+
+    assert ok is False
+    assert ds.draft_data == _second_run()
+    assert ds.logs_captured_at is None
+    assert ds.spaces_object_key is None
+    assert ds.pack_first_picks is None
+    assert ds.unlock_at is None
+    assert ds.team_logs_posted_at is None
+    assert ds.drafttable_url is None
+    drop.new.assert_awaited_once_with(session, "draft:sid")
+    session.commit.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_capture_keeps_a_published_log_even_when_a_later_one_arrives():
+    m = _manager()
+    ds = _captured(_draft_data(), data_received=True)
+    db_factory, _ = _mock_db_session(ds)
+    spaces, picks, drop, panel = _supersede_patches("team/second.json")
+    with patch("services.draft_setup_manager.db_session", db_factory), spaces, picks, drop, panel:
+        ok = await m.capture_draft_log(_second_run())
+
+    assert ok is True
+    spaces.new.assert_not_called()
+    assert ds.draft_data == _draft_data()
+    assert ds.team_logs_posted_at is not None
+    drop.new.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_capture_ignores_the_same_run_s_log_sent_again():
+    m = _manager()
+    ds = _captured(_draft_data())
+    db_factory, _ = _mock_db_session(ds)
+    spaces, picks, drop, panel = _supersede_patches("team/second.json")
+    with patch("services.draft_setup_manager.db_session", db_factory), spaces, picks, drop, panel:
+        ok = await m.capture_draft_log(_draft_data())
+
+    assert ok is True
+    spaces.new.assert_not_called()
+    assert ds.team_logs_posted_at is not None
+    drop.new.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_start_draft_forgets_the_previous_run_s_log():
+    """A start is the run boundary: nothing in memory from the old run is this
+    draft's. The release-logs vote shares current_draft_log over the socket, and
+    the end-of-draft handler waits for a log only when none is held."""
+    m = _manager()
+    m.current_draft_log = _draft_data()
+    m.drafting = False
+    m.draft_finished = True
+
+    async def emit(event, callback=None, **_):
+        callback({})
+        return True
+
+    m.socket_client = SimpleNamespace(emit=AsyncMock(side_effect=emit))
+    await m.start_draft()
+
+    assert m.drafting is True
+    assert m.current_draft_log is None

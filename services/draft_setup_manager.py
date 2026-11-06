@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import socketio
 from collections import Counter
 from loguru import logger
@@ -28,8 +29,10 @@ from helpers.seating import resolve_seating_ids
 from helpers.stale_drafts import is_finished_draft
 from notification_service import send_ready_check_dms
 from services.draft_socket_client import DraftSocketClient
-from services.draft_log_store import post_team_logs
-from services.draft_deck_assignment import assign_drafted_decks
+from services.draft_log_store import post_team_logs, supersedes
+from services.draft_deck_assignment import assign_drafted_decks, loan_source
+from services.card_lending_service import dispatch_lock, drop_uncollected
+from services.library_panel import loan_changed
 from cube_views.pack_options import DEFAULT_PACKS_PER_PLAYER, DEFAULT_CARDS_PER_PACK
 from helpers.team_names import BLUE, RED
 
@@ -1470,28 +1473,49 @@ class DraftSetupManager:
         post from `draft_data` even if Spaces failed). `logs_captured_at` /
         `pack_first_picks` are only set when the Spaces upload succeeds, so a
         failed upload stays retryable (logs_captured_at stays NULL -> reconnect
-        re-captures). Idempotent: a session already captured is skipped.
+        re-captures). Idempotent: the same run's log delivered again is skipped.
+        A LATER run's log -- the draft was stopped and restarted in the same
+        room -- replaces an unpublished capture, along with everything derived
+        from the old log; a published one is kept.
         """
         if not draft_data:
             self.logger.warning("capture_draft_log called with no draft_data; skipping")
             return False
         try:
-            # Idempotency guard.
+            # Idempotency guard, keyed on WHICH log was captured.
             async with db_session() as session:
                 existing = (await session.execute(
-                    select(DraftSession).filter(DraftSession.session_id == self.session_id)
+                    select(DraftSession)
+                    .options(undefer(DraftSession.draft_data))
+                    .filter(DraftSession.session_id == self.session_id)
                 )).scalar_one_or_none()
                 if existing is None:
                     self.logger.warning(f"No draft session for {self.session_id}; skipping capture")
                     return False
                 if existing.logs_captured_at is not None:
-                    self.logger.info(f"Draft log already captured for {self.session_id}; skipping")
-                    return True
+                    if not supersedes(draft_data, existing.draft_data):
+                        self.logger.info(f"Draft log already captured for {self.session_id}; skipping")
+                        return True
+                    if existing.data_received:
+                        self.logger.warning(
+                            f"A later draft log arrived for {self.session_id} after its "
+                            f"first was published; keeping the published one")
+                        return True
+                    self.logger.warning(
+                        f"Draft {self.session_id} ended again with a later log "
+                        f"(started {draft_data.get('time')}, had "
+                        f"{(existing.draft_data or {}).get('time')}); replacing the capture")
+                superseding = existing.logs_captured_at is not None
 
             # Upload raw JSON + per-player MPT files to Spaces.
             object_key = await self.save_to_digitalocean_spaces(draft_data)
 
-            async with db_session() as session:
+            # Replacing a capture deletes the old log's uncollected decks in the
+            # same transaction, under the lending dispatch lock (see
+            # drop_uncollected); a first capture holds nothing.
+            dropped = []
+            async with (dispatch_lock() if superseding else contextlib.nullcontext()), \
+                    db_session() as session:
                 draft_session = (await session.execute(
                     select(DraftSession).filter(DraftSession.session_id == self.session_id)
                 )).scalar_one_or_none()
@@ -1499,6 +1523,20 @@ class DraftSetupManager:
                     # Spaces upload may already have happened; only the DB write failed.
                     self.logger.warning(f"No draft session for {self.session_id} (spaces_key={object_key})")
                     return False
+                if superseding:
+                    # Back to "uncaptured" first: everything derived from the
+                    # old log goes, and the stamps below are re-set only once
+                    # the new log's upload has succeeded. A failed upload then
+                    # leaves a NULL stamp for the reconciler to retry, exactly
+                    # as for a first capture -- keeping the old stamp would
+                    # read the next attempt as the same run and skip it.
+                    draft_session.logs_captured_at = None
+                    draft_session.unlock_at = None
+                    draft_session.spaces_object_key = None
+                    draft_session.pack_first_picks = None
+                    draft_session.team_logs_posted_at = None
+                    draft_session.drafttable_url = None
+                    dropped = await drop_uncollected(session, loan_source(self.session_id))
 
                 # Always persist the raw log so the data is never lost.
                 draft_session.draft_data = draft_data
@@ -1525,6 +1563,8 @@ class DraftSetupManager:
 
                 await session.commit()
 
+            if dropped:
+                loan_changed(dropped[0])  # one sync per draft: the panel is per session
             self.logger.info(f"Captured draft log for {self.session_id} (spaces_key={object_key})")
             return bool(object_key)
         except Exception as e:
@@ -1563,7 +1603,7 @@ class DraftSetupManager:
         try:
             async with db_session() as session:
                 # undefer: draft_data is deferred at the mapper (it is dead
-                # weight for ~128 other queries), and this is one of the two
+                # weight for ~128 other queries), and this is one of the few
                 # places that genuinely needs the log.
                 draft_session = (await session.execute(
                     select(DraftSession)
@@ -2348,6 +2388,11 @@ class DraftSetupManager:
                 else:
                     self.drafting = True
                     self.draft_finished = False
+                    # The run boundary: nothing in memory from the previous run
+                    # is this draft's. The release-logs vote shares this log over
+                    # the socket, and _on_end_draft waits for one only when none
+                    # is held.
+                    self.current_draft_log = None
                     self.logger.info("Draft started successfully")
             except asyncio.TimeoutError:
                 self.logger.warning("Timeout waiting for draft start response")
