@@ -171,7 +171,7 @@ def _role_guild(user_ids, role_names=("League Participant", "Active")):
         m.add_roles = AsyncMock()
         members[int(uid)] = m
     guild = MagicMock()
-    guild.roles = [SimpleNamespace(name=n) for n in role_names]
+    guild.roles = [SimpleNamespace(name=n, managed=False) for n in role_names]
     guild.members = members
     guild.get_member = MagicMock(side_effect=members.get)
     return guild

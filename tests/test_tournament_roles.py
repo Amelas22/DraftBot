@@ -629,7 +629,7 @@ async def test_ensure_refuses_to_create_a_clashing_role(test_db):
     _, pid = await _seed_team(test_db, name="mod")
     guild = _guild(present_user_ids=[10, 200])
     guild.id = "g1"
-    guild.roles = [SimpleNamespace(id=1, name="Team Mod")]
+    guild.roles = [SimpleNamespace(id=1, name="Team Mod", managed=False)]
     with _route_roles_at(test_db), \
             patch("helpers.permissions.get_config", return_value={}), \
             patch("services.league_roles.get_config", return_value={}), \
