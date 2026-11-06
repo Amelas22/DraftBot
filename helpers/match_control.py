@@ -50,8 +50,14 @@ def render_match_control(
     result: tuple[int, int] | None = None,
     role_mentions: tuple[str | None, str | None] | None = None,
     booking: Booking | None = None,
+    room_id: str | None = None,
 ) -> str:
     """Body text of the control message for a match in ``state``.
+
+    ``room_id`` is the draft's shared chat room once rooms exist. Drafting
+    then points at the room instead of the lobby: the lobby's job ended when
+    the draft did, and the room is where the pairings and result buttons are
+    -- the thing a player opening this thread mid-match is looking for.
 
     ``booking`` is the draft time the teams booked: scheduling always shows a
     time line (or the nudge to book one), drafting only once a time is set,
@@ -66,14 +72,17 @@ def render_match_control(
     the other is worse than tagging neither, since nothing on the message
     would explain the gap.
     """
-    header = f"**{match_label} — {a_name} vs {b_name}**"
+    header = f"**{match_headline(match_label, a_name, b_name)}**"
     booking = booking or Booking(None, None)
     if state == RECORDED:
         assert result is not None, "result required when state is RECORDED"
         a_wins, b_wins = result
         body = f"{header}\n{recorded_result_line(a_name, b_name, a_wins, b_wins)}"
     elif state == DRAFTING:
-        if lobby_link:
+        if room_id:
+            body = (f"{header}\n🟢 Playing in <#{room_id}> — pairings and "
+                    "results are posted there.")
+        elif lobby_link:
             body = f"{header}\n🟢 Draft in progress — [jump to the lobby]({lobby_link})"
         else:
             body = f"{header}\n🟢 Draft in progress."
@@ -87,6 +96,38 @@ def render_match_control(
     if role_mentions and all(role_mentions):
         body = f"<@&{role_mentions[0]}> <@&{role_mentions[1]}>\n" + body
     return body
+
+
+def match_headline(match_label: str, a_name: str, b_name: str) -> str:
+    """"#143 · Week 3 — Alpha vs Bravo": the match as every surface names it --
+    the control message's first line, the room header's, and the room's topic."""
+    return f"{match_label} — {a_name} vs {b_name}"
+
+
+def rooms_open_text(room_id: str) -> str:
+    """The thread's post when a match's draft rooms open.
+
+    Rooms open in another category under a name that says nothing about the
+    match, and the thread is where the teams have been talking all week, so
+    this is the one message a lost player is likely to find.
+    """
+    return (f"🏟️ Rooms are open → <#{room_id}>\n"
+            "Pairings and result buttons are posted there. "
+            "This thread stays for scheduling and the record.")
+
+
+def room_header_text(match_label: str, a_name: str, b_name: str,
+                     thread_id: str | None) -> str:
+    """The pinned first message of a tournament draft's shared room.
+
+    The room's name is a random draft id, so this is what says which match
+    is being played in it, and the way back to the thread it was arranged in.
+    """
+    lines = [f"**{match_headline(match_label, a_name, b_name)}**"]
+    if thread_id:
+        lines.append(f"Scheduling thread: <#{thread_id}>")
+    lines.append("Results record to the tournament automatically.")
+    return "\n".join(lines)
 
 
 def render_pairing_line(

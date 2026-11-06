@@ -1703,6 +1703,13 @@ class PersistentView(discord.ui.View):
                     logger.info("Database commit complete for session_id={}", session_id)
 
                 # Post-commit
+                if session.tournament_match_id is not None:
+                    # First, and right after the commit that stamped
+                    # rooms_created_at (what lets the control message point at
+                    # the room): a later step failing must not skip it.
+                    from match_control_view import on_tournament_rooms_created
+                    await on_tournament_rooms_created(bot, session.tournament_match_id)
+
                 logger.debug("Running post_pairings tasks")
                 await post_pairings(bot, guild, session.session_id)
                 from livedrafts import create_live_draft_summary

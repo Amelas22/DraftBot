@@ -991,7 +991,7 @@ async def _sync_linked_tournament_match(bot, match_id, team_a_wins, team_b_wins,
         written = await sync_linked_result(match_id, team_a_wins, team_b_wins)
         if written is None:
             return
-        _match, completed_now = written
+        _match, completed_now, winner_changed = written
         logger.info(f"Tournament match {match_id} auto-recorded "
                     f"{team_a_wins}-{team_b_wins} from draft {draft_session_id}")
         # First, so a refresh failing below cannot skip the champion's
@@ -1003,8 +1003,13 @@ async def _sync_linked_tournament_match(bot, match_id, team_a_wins, team_b_wins,
             # Draft victory processing must never be aborted by the bracket.
             logger.exception(f"Bracket follow-up failed for match {match_id}")
         await update_standings_message_for_match(bot, match_id)
-        from match_control_view import safe_refresh_match_views
+        from match_control_view import post_result_to_thread, safe_refresh_match_views
         await safe_refresh_match_views(bot, match_id)
+        if winner_changed:
+            # At the clinch, and again only if a correction flips the winner:
+            # reports that merely move a decided score are carried by the
+            # refreshed control message.
+            await post_result_to_thread(bot, match_id)
     except ValueError as e:
         logger.error(f"Failed to auto-record tournament match {match_id}: {e}")
 

@@ -4,10 +4,13 @@ from helpers.match_control import (
     RECORDED,
     SCHEDULING,
     launch_block_text,
+    match_headline,
     match_state,
     recorded_result_line,
     render_match_control,
     render_pairing_line,
+    room_header_text,
+    rooms_open_text,
 )
 
 LINK = "https://discord.com/channels/1/2/3"
@@ -173,3 +176,46 @@ def test_control_body_shows_booking_per_state():
     assert render_match_control(SCHEDULING, "A", "B", "#135 · Round 1") == (
         f"{hdr}\n{booking_line(none)}\n{ready}"
     )
+
+
+# --- the draft rooms and the match thread point at each other ---------------
+
+def test_drafting_body_points_at_the_room_once_rooms_exist():
+    body = render_match_control(DRAFTING, "Alpha", "Bravo", "Round 2",
+                                lobby_link=LINK, room_id="555")
+    assert "<#555>" in body
+    assert "Playing in" in body
+    # The lobby is over once rooms exist; the room replaces it rather than
+    # sitting beside it.
+    assert LINK not in body
+
+
+def test_drafting_body_without_rooms_still_links_the_lobby():
+    body = render_match_control(DRAFTING, "Alpha", "Bravo", "Round 2",
+                                lobby_link=LINK, room_id=None)
+    assert LINK in body and "Playing in" not in body
+
+
+def test_rooms_open_text_names_the_room_and_what_lives_there():
+    text = rooms_open_text("555")
+    assert "<#555>" in text
+    assert "Pairings" in text and "result" in text.lower()
+
+
+def test_room_header_names_the_match_and_links_the_thread():
+    text = room_header_text("#143 · Week 3", "Alpha", "Bravo", thread_id="900")
+    assert "#143 · Week 3" in text and "Alpha" in text and "Bravo" in text
+    assert "<#900>" in text
+    assert "record" in text.lower()
+
+
+def test_room_header_without_a_thread_drops_the_thread_line():
+    text = room_header_text("#143 · Week 3", "Alpha", "Bravo", thread_id=None)
+    assert "<#" not in text and "thread" not in text.lower()
+
+
+def test_match_headline_is_what_every_surface_shows():
+    headline = match_headline("#143 · Week 3", "Alpha", "Bravo")
+    assert headline == "#143 · Week 3 — Alpha vs Bravo"
+    assert f"**{headline}**" in render_match_control(SCHEDULING, "Alpha", "Bravo", "#143 · Week 3")
+    assert room_header_text("#143 · Week 3", "Alpha", "Bravo", None).startswith(f"**{headline}**")

@@ -23,6 +23,9 @@ from helpers.match_control import (
     render_match_control,
     match_tag,
     render_pairing_line,
+    match_headline,
+    room_header_text,
+    rooms_open_text,
 )
 from helpers.matchup import (
     MATCH_SCHEDULING_NOT_ENABLED,
@@ -40,6 +43,7 @@ from helpers.utils import (
     THREAD_ARCHIVE_MAX_MINUTES,
     as_messageable,
     is_bot,
+    reach_thread,
     resolve_display_name,
 )
 from models.draft_session import DraftSession
@@ -155,6 +159,18 @@ def lobby_link(draft: DraftSession | None) -> str | None:
             f"{draft.draft_channel_id}/{draft.message_id}")
 
 
+def room_id(draft: DraftSession | None) -> str | None:
+    """The linked draft's shared chat room, once its rooms exist, or None.
+
+    Gated on rooms_created_at rather than the chat id alone: the id is
+    committed while the FIRST of the rooms is being made, so on its own it
+    would point players at a room the pairings have not reached yet.
+    """
+    if draft is None or not draft.rooms_created_at or not draft.draft_chat_channel:
+        return None
+    return str(draft.draft_chat_channel)
+
+
 def block_for_facts(
     facts: tuple[TournamentMatch, str, str, str, DraftSession | None],
 ) -> str | None:
@@ -202,6 +218,7 @@ def control_body_and_view(
         result=(match.team_a_wins, match.team_b_wins),
         role_mentions=role_mentions,
         booking=Booking(match.booked_start_utc, match.booked_by_name),
+        room_id=room_id(draft),
     )
     return body, (MatchControlView(match.id) if state == SCHEDULING else None)
 
@@ -435,6 +452,34 @@ async def _refresh_pairing_message(
         logger.error(f"Failed to refresh pairing message for match {match.id}: {e}")
 
 
+async def _match_thread(
+    bot: discord.Client, match_id: int, thread_id: str
+) -> discord.abc.Messageable | None:
+    """A match's thread, or None (logged) when Discord can't produce it."""
+    channel = await reach_thread(bot, int(thread_id))
+    if channel is None:
+        logger.warning(f"Match {match_id} thread {thread_id} unreachable")
+        return None
+    return as_messageable(channel)
+
+
+async def _send_to_thread(bot: discord.Client, match_id: int, thread_id: str, text: str) -> None:
+    """Post into a match's thread; a refusal is logged, never raised."""
+    thread = await _match_thread(bot, match_id, thread_id)
+    if thread is None:
+        return
+    try:
+        await thread.send(text)
+    except discord.HTTPException as e:
+        logger.warning(f"Could not post to match {match_id}'s thread: {e}")
+
+
+async def _facts(match_id: int) -> "tuple[TournamentMatch, str, str, str, DraftSession | None] | None":
+    """match_facts in a session of its own."""
+    async with db_session() as session:
+        return await match_facts(session, match_id)
+
+
 async def _refresh_match_views_with_facts(
     bot: discord.Client,
     match_id: int,
@@ -451,18 +496,9 @@ async def _refresh_match_views_with_facts(
     body, view = control_body_and_view(match, a_name, b_name, name, draft)
 
     if match.control_message_id and match.thread_id:
-        thread_id, control_id = int(match.thread_id), int(match.control_message_id)
-        channel = bot.get_channel(thread_id)
-        if channel is None:
-            try:
-                channel = await bot.fetch_channel(thread_id)
-            except discord.HTTPException:
-                logger.warning(f"Match {match_id} thread {thread_id} unreachable; not refreshed")
-                channel = None
-        if channel is not None:
-            # The stored id always names a thread opened by create_match_room; the
-            # wider return type here covers channel ids in general.
-            thread = cast(discord.Thread, channel)
+        control_id = int(match.control_message_id)
+        thread = await _match_thread(bot, match_id, match.thread_id)
+        if thread is not None:
             try:
                 message = await thread.fetch_message(control_id)
                 await message.edit(content=body, view=view)
@@ -481,9 +517,7 @@ async def refresh_match_views(bot: discord.Client, match_id: int) -> None:
     facts by the time it needs a refresh and calls the with-facts helper
     directly instead of coming through here.
     """
-    async with db_session() as session:
-        facts = await match_facts(session, match_id)
-    await _refresh_match_views_with_facts(bot, match_id, facts)
+    await _refresh_match_views_with_facts(bot, match_id, await _facts(match_id))
 
 
 async def safe_refresh_match_views(bot: discord.Client, match_id: int) -> None:
@@ -540,8 +574,7 @@ async def announce_and_refresh(
     One path for both entry points (Start draft and /premade_draft in the
     thread), so a draft that counts always says so the same way.
     """
-    async with db_session() as session:
-        facts = await match_facts(session, match_id)
+    facts = await _facts(match_id)
     if facts is not None:
         match, a_name, b_name, name, _draft = facts
         await channel.send(
@@ -607,3 +640,68 @@ async def announce_match_booking(bot: discord.Client, match_id: int, change: Boo
         logger.exception(f"Match {match_id}: booking announcement failed")
     # After the send: another booking may have committed during it.
     await safe_refresh_match_views(bot, match_id)
+
+
+async def on_tournament_rooms_created(bot: discord.Client, match_id: int) -> None:
+    """After a linked draft's rooms exist: head the shared chat with the match,
+    tell the thread, and point the control message at the room.
+
+    Runs once, from room creation's post-commit step, and never raises: the
+    rooms are already made and the marker stamped, so a signpost failing can
+    neither be retried nor be allowed to report the creation as failed.
+
+    The header is posted and pinned in the chat and set as its topic because
+    the room's own name is a random draft id. It lands after the pairings
+    rather than before them -- the pin and the topic are what make it
+    findable, not its position.
+    """
+    try:
+        facts = await _facts(match_id)
+        if facts is None:
+            return
+        match, a_name, b_name, name, draft = facts
+        room = room_id(draft)
+        if room is None:
+            return
+        await _head_room(bot, match_id, room, match_tag(match.id, name), a_name, b_name, match.thread_id)
+        if match.thread_id:
+            await _send_to_thread(bot, match_id, match.thread_id, rooms_open_text(room))
+        await _refresh_match_views_with_facts(bot, match_id, facts)
+    except Exception:
+        logger.exception(f"Could not signpost the rooms for match {match_id}")
+
+
+async def _head_room(bot: discord.Client, match_id: int, room: str, label: str,
+                     a_name: str, b_name: str, thread_id: str | None) -> None:
+    channel = bot.get_channel(int(room))
+    if not isinstance(channel, discord.TextChannel):
+        logger.warning(f"Match {match_id}'s draft chat {room} is not a text channel; not headed")
+        return
+    try:
+        posted = await channel.send(room_header_text(label, a_name, b_name, thread_id))
+        await safe_pin(posted)
+        await channel.edit(topic=match_headline(label, a_name, b_name))
+    except discord.HTTPException as e:
+        logger.warning(f"Could not head the draft room for match {match_id}: {e}")
+
+
+async def post_result_to_thread(bot: discord.Client, match_id: int) -> None:
+    """Drop a match's recorded result into its thread as a fresh message.
+
+    The control message is edited in place when a result lands, and an edit
+    neither bumps the thread in the sidebar nor notifies anyone in it. A new
+    message does both, and it survives the draft rooms being cleaned up.
+    Never raises: it runs in the victory chokepoint, which must finish.
+    """
+    try:
+        facts = await _facts(match_id)
+        if facts is None:
+            return
+        match, a_name, b_name, _name, _draft = facts
+        if match.team_a_wins is None or not match.thread_id:
+            return
+        await _send_to_thread(
+            bot, match_id, match.thread_id,
+            recorded_result_line(a_name, b_name, match.team_a_wins, match.team_b_wins))
+    except Exception:
+        logger.exception(f"Could not post match {match_id}'s result to its thread")
