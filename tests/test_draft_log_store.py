@@ -1643,3 +1643,24 @@ def test_the_default_naming_rule_is_draftmancers_own():
 
     assert pool_items(log, "u1") == [
         {"name": "Brutal Cathar // Moonrage Brute", "qty": 1}]
+
+
+# --- A restarted draft's log supersedes the earlier run's -------------------
+
+def test_a_later_run_s_log_supersedes_the_earlier_one():
+    from services.draft_log_store import supersedes
+    assert supersedes({"time": 2000}, {"time": 1000}) is True
+
+
+def test_the_same_run_resent_does_not_supersede():
+    from services.draft_log_store import supersedes
+    assert supersedes({"time": 1000}, {"time": 1000}) is False
+
+
+def test_an_older_or_unidentified_log_never_supersedes():
+    from services.draft_log_store import supersedes
+    assert supersedes({"time": 500}, {"time": 1000}) is False
+    assert supersedes({}, {"time": 1000}) is False
+    assert supersedes({"time": 2000}, None) is False
+    assert supersedes({"time": 2000}, {}) is False
+    assert supersedes({"time": 2000}, "{}") is False

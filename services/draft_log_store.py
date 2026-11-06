@@ -106,6 +106,20 @@ def render_pool(draft_data: dict, user_id: str) -> str:
                      for item in pool_items(draft_data, user_id))
 
 
+def supersedes(new_log: Any, old_log: Any) -> bool:
+    """Whether `new_log` is a LATER run of the same room than `old_log`.
+
+    Draftmancer stamps a log with its run's start (`time`), and only that
+    differs between a draft stopped and restarted in the same room. The same
+    run re-delivered carries the same stamp and must not count; a log that
+    cannot be placed in time never wins over one already held.
+    """
+    try:
+        return int(new_log["time"]) > int(old_log["time"])
+    except (TypeError, ValueError, KeyError):
+        return False
+
+
 def map_discord_to_draftmancer(draft_data: dict, sign_ups: dict) -> dict[str, str]:
     """Map Discord user ids -> Draftmancer user ids by seat order, mirroring the
     mapping capture_draft_log uses for pack_first_picks (sign-up insertion order
@@ -679,7 +693,7 @@ async def post_team_logs(session_id: str, bot) -> bool:
 
 async def _post_team_logs_locked(session_id: str, bot) -> bool:
     async with db_session() as session:
-        # undefer: draft_data is deferred at the mapper; this is one of the two
+        # undefer: draft_data is deferred at the mapper; this is one of the few
         # places that genuinely needs the log.
         ds = (await session.execute(
             select(DraftSession)

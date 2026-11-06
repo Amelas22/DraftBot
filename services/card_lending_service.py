@@ -23,7 +23,7 @@ from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable, Optional
 
 from loguru import logger
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, delete, or_, select, update
 
 from config import is_money_server
 from database.db_session import AsyncSessionLocal, db_session
@@ -685,6 +685,55 @@ async def expire_stale_assignments(now: Optional[datetime] = None) -> int:
                     "borrower has no match left to play, or that nobody collected",
                     expired)
     return expired
+
+
+def dispatch_lock() -> asyncio.Lock:
+    """The lock a caller must hold to delete an offer from outside this module.
+
+    _dispatch reads a loan as "assigned", takes the collateral hold, opens the
+    trade and only then writes "out_pending", all under this lock. A delete
+    that ran between those steps would leave a hold with no loan and a trade
+    with no row; held, the lock means an "assigned" row is not mid-dispatch.
+    """
+    return _DISPATCH_LOCK
+
+
+async def drop_uncollected(session: Any, source: str) -> "list[Any]":
+    """Delete this draft's offers that nobody has collected, in the caller's
+    transaction. Returns the loans deleted; the caller commits.
+
+    For a draft whose captured log was replaced by a later run's (stopped and
+    restarted in the same room): a deck assigned from the old pools is a claim
+    on the wrong cards. While merely assigned it is only a row, so it is
+    deleted -- not expired, which assign_drafted_decks would still count as
+    done -- and the next pass rebuilds it from the real pools. One in any
+    other state has cards moving or moved and is left for a human.
+
+    Guarded in the statement, as _retract is, so another process cannot slip
+    a dispatch between the read and the delete; and run under dispatch_lock()
+    so this one cannot either.
+    """
+    loans = list((await session.scalars(
+        select(CardLoan).where(CardLoan.source == source))).all())
+    offers = [l for l in loans if l.state == "assigned"]
+    gone: "set[Any]" = set()
+    if offers:
+        gone = set((await session.scalars(
+            delete(CardLoan)
+            .where(CardLoan.id.in_([l.id for l in offers]), CardLoan.state == "assigned")
+            .returning(CardLoan.id))).all())
+    dropped = [l for l in offers if l.id in gone]
+    for loan in dropped:
+        logger.warning("library: dropped {}'s uncollected deck from {} (loan {}, "
+                       "{} cards): built from a superseded log",
+                       loan.borrower_id, source, loan.id,
+                       sum(int(c.get("qty") or 0) for c in (loan.cards or [])))
+    for loan in loans:
+        if loan not in dropped:
+            logger.error("library: loan {} ({}) from {} was built from a superseded "
+                         "log but is {} -- its cards may be wrong and need a look",
+                         loan.id, loan.borrower_id, source, loan.state)
+    return dropped
 
 
 async def _retract(session: Any, loans: "list[Any]") -> int:

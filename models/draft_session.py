@@ -55,7 +55,7 @@ class DraftSession(Base):
     # Deferred at the mapper, not per query. This column holds a whole
     # Draftmancer log (~0.59 MB average, 309 MB across the widest query in the
     # codebase) and almost nothing reads it: of ~128 select(DraftSession) sites,
-    # exactly two do. Loading it by default made the bulk queries fatal on a
+    # only a handful do. Loading it by default made the bulk queries fatal on a
     # 2 GB box -- the quiz selector materialized 487 MB per tick and OOM-killed
     # the bot daily. A reader must now ask: .options(undefer(DraftSession.draft_data)).
     # Note a deferred column does NOT lazy-load on attribute access here. Which

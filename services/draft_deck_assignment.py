@@ -48,10 +48,14 @@ from services.mtgo_tradebot_client import max_cards_per_trade, too_large
 # assign anybody warns once instead of once a minute for three days.
 _SAID: "set[str]" = set()
 
-# Sessions whose seating the mapper refused. Held separately because this one
-# also skips the WORK: the answer is derived from a captured log and a fixed
-# sign-up list, so it cannot come out differently on a later tick.
-_UNSEATABLE: "set[str]" = set()
+# Sessions whose seating the mapper refused, each with the capture stamp of
+# the log it judged. Held separately because this one also skips the WORK: the
+# answer is derived from a captured log and a fixed sign-up list, so it cannot
+# come out differently on a later tick -- for THAT log. A draft stopped and
+# restarted in the same room captures a second log, which gets its own
+# verdict; keyed on the stamp, the old one lapses on its own, whichever path
+# replaced the log.
+_UNSEATABLE: "dict[str, Optional[datetime]]" = {}
 
 # Sessions whose draft is settled. Held for the same reason as _UNSEATABLE:
 # asking costs a scan of match_results, which carries no index on session_id,
@@ -119,8 +123,9 @@ async def _cube_of(session_id: Any) -> "Optional[str]":
                 DraftSession.session_id == str(session_id)))
 
 
-async def _session_meta(session_id: Any) -> "Optional[tuple[Any, dict[str, Any]]]":
-    """(guild_id, sign_ups) WITHOUT touching draft_data.
+async def _session_meta(session_id: Any
+                        ) -> "Optional[tuple[Any, dict[str, Any], Optional[datetime]]]":
+    """(guild_id, sign_ups, logs_captured_at) WITHOUT touching draft_data.
 
     Kept apart from the log on purpose. The reconciler re-runs this for every
     draft captured in the last 72 hours, once a minute, so loading a draft's
@@ -133,7 +138,7 @@ async def _session_meta(session_id: Any) -> "Optional[tuple[Any, dict[str, Any]]
     if row is None:
         logger.warning("deck assignment: no session row for {}", session_id)
         return None
-    return (row.guild_id, dict(row.sign_ups or {}))
+    return (row.guild_id, dict(row.sign_ups or {}), row.logs_captured_at)
 
 
 async def _draft_log(session_id: Any) -> "Optional[dict[str, Any]]":
@@ -230,7 +235,7 @@ async def assign_drafted_decks(session_id: Any) -> int:
     meta = await _session_meta(session_id)
     if meta is None:
         return 0
-    guild_id, sign_ups = meta
+    guild_id, sign_ups, captured_at = meta
 
     # Offered by the LIBRARY this server draws on. A server admin can rewrite
     # their own configs/<guild>.json through the bot, so nothing they control
@@ -259,12 +264,12 @@ async def assign_drafted_decks(session_id: Any) -> int:
     # nothing about whether another still needs their cards.
     if str(session_id) in _OVER:
         return 0
-    if str(session_id) in _UNSEATABLE:
-        # Already decided, and the decision cannot change: the seating is read
-        # from this session's own sign-ups and log, neither of which moves once
-        # the draft is captured. Checked beside _OVER rather than after the
-        # eligibility read below, so a draft that can never seat does not pay
-        # an unindexed scan of match_results every tick to find that out.
+    if str(session_id) in _UNSEATABLE and _UNSEATABLE[str(session_id)] == captured_at:
+        # Already decided for this log, and the decision cannot change: the
+        # seating is read from this session's own sign-ups and that log.
+        # Checked beside _OVER rather than after the eligibility read below,
+        # so a draft that can never seat does not pay an unindexed scan of
+        # match_results every tick to find that out.
         return 0
     state = await draft_state(session_id)
     still_playing = who_can_still_use(state, candidates)
@@ -336,7 +341,7 @@ async def assign_drafted_decks(session_id: Any) -> int:
 
     duplicated = _shared_names(sign_ups)
     if duplicated:
-        _UNSEATABLE.add(str(session_id))
+        _UNSEATABLE[str(session_id)] = captured_at
         logger.warning(
             "deck assignment: {} has drafters sharing a display name ({}), so the "
             "seating cannot be tied to a Discord account -- assigning NOBODY a "
@@ -347,7 +352,7 @@ async def assign_drafted_decks(session_id: Any) -> int:
 
     seats = map_discord_to_draftmancer(draft_data, sign_ups)
     if not seats:
-        _UNSEATABLE.add(str(session_id))
+        _UNSEATABLE[str(session_id)] = captured_at
         logger.warning(
             "deck assignment: the seating for {} cannot be trusted ({} sign-ups), "
             "so NOBODY is being assigned a deck. Assigning the part that lined up "
@@ -519,7 +524,7 @@ async def pool_for_request(session_id: Any, player_id: Any
     meta = await _session_meta(session_id)
     if meta is None:
         return "not_drafter"
-    _, sign_ups = meta
+    _, sign_ups, _ = meta
     key = next((k for k in sign_ups if str(k) == str(player_id)), None)
     if key is None:
         return "not_drafter"
@@ -554,7 +559,7 @@ async def assign_on_request(session_id: Any, player_id: Any) -> RequestOutcome:
     meta = await _session_meta(session_id)
     if meta is None:
         return "not_drafter"
-    guild_id, sign_ups = meta
+    guild_id, sign_ups, _ = meta
     key = next((k for k in sign_ups if str(k) == player), None)
     if key is None:
         return "not_drafter"

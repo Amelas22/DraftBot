@@ -1340,3 +1340,91 @@ async def test_a_pool_that_went_to_a_sub_meanwhile_says_subbed(test_db, library_
     with patch("services.draft_deck_assignment.assign_deck",
                side_effect=PoolOutWithSub("out with a sub")):
         assert await svc.assign_on_request(SESSION, BOB) == "subbed"
+
+
+# --- The log was superseded by a restarted draft's ---------------------------
+
+from sqlalchemy import update as _update  # noqa: E402
+from services.card_lending_service import dispatch_lock, drop_uncollected  # noqa: E402
+
+
+async def _set(**cols):
+    async with AsyncSessionLocal() as s:
+        await s.execute(_update(DraftSession)
+                        .where(DraftSession.session_id == SESSION).values(**cols))
+        await s.commit()
+
+
+async def _drop():
+    async with dispatch_lock():
+        async with AsyncSessionLocal() as s:
+            dropped = await drop_uncollected(s, svc.loan_source(SESSION))
+            await s.commit()
+    return dropped
+
+
+async def test_an_uncollected_offer_is_dropped_but_a_collected_one_is_kept(
+        test_db, library_on):
+    """A deck assigned from a superseded log is a claim on the wrong cards.
+    Uncollected, it is only a row. One already dispatched has cards moving and
+    is left for a human."""
+    await _seed()
+    await assign_deck(GUILD, ALICE, [{"name": "Island", "qty": 1}],
+                      source=svc.loan_source(SESSION), library_id=LIBRARY)
+    bob = await assign_deck(GUILD, BOB, [{"name": "Island", "qty": 1}],
+                            source=svc.loan_source(SESSION), library_id=LIBRARY)
+    async with AsyncSessionLocal() as s:
+        (await s.get(CardLoan, bob)).state = "borrowed"
+        await s.commit()
+
+    dropped = await _drop()
+
+    assert [l.borrower_id for l in dropped] == [ALICE]
+    loans = await _loans()
+    assert ALICE not in loans
+    assert loans[BOB].state == "borrowed"
+
+
+async def test_a_dropped_offer_is_rebuilt_from_the_log_on_the_next_pass(
+        test_db, library_on):
+    await _seed()
+    await assign_deck(GUILD, ALICE, [{"name": "Island", "qty": 1}],
+                      source=svc.loan_source(SESSION), library_id=LIBRARY)
+
+    await _drop()
+    assert await svc.assign_drafted_decks(SESSION) == 2
+
+    loans = await _loans()
+    assert loans[ALICE].cards == [{"name": "Lightning Bolt", "qty": 2},
+                                  {"name": "Counterspell", "qty": 1}]
+
+
+def _three_seat_log():
+    log = _log()
+    log["users"]["dm_c"] = {"userName": "Carol", "seatNum": 2, "cards": ["c3"]}
+    return log
+
+
+async def test_a_seating_verdict_is_forgotten_when_a_later_log_is_captured(
+        test_db, library_on):
+    """The verdict was on ONE log. Keyed on which log it judged, it lapses by
+    itself when a later capture replaces that log -- whichever path replaced
+    it -- instead of refusing the draft for the rest of the process."""
+    first, second = datetime(2026, 11, 5, 22, 8), datetime(2026, 11, 5, 22, 44)
+    await _seed(draft_data=_three_seat_log())
+    await _set(logs_captured_at=first)
+    assert await svc.assign_drafted_decks(SESSION) == 0
+
+    await _set(draft_data=_log(), logs_captured_at=second)
+    assert await svc.assign_drafted_decks(SESSION) == 2
+
+
+async def test_a_seating_verdict_is_kept_while_the_log_is_the_same(
+        test_db, library_on):
+    await _seed(draft_data=_three_seat_log())
+    await _set(logs_captured_at=datetime(2026, 11, 5, 22, 8))
+    assert await svc.assign_drafted_decks(SESSION) == 0
+
+    with patch("services.draft_deck_assignment.map_discord_to_draftmancer") as mapper:
+        assert await svc.assign_drafted_decks(SESSION) == 0
+    mapper.assert_not_called()
