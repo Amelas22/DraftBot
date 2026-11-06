@@ -25,7 +25,8 @@ export const LEAGUE_ZONE = "America/Los_Angeles";
 // A DST day simply has 46 or 50 cells; nothing assumes 48 per day.
 // Each cell also carries its league week, by the league's clock wherever the viewer is: kind is "due" on the league's
 // Sunday (the last day to get that round's matches finished), else "wk0" in the week the window opens in and "wk1" from the
-// next league Monday on. cutoff marks the last cell before results are due. Seven days cross at most one Monday.
+// next league Monday on. cutoff marks the last cell before results are due. A window opening in Sunday's last half-hour
+// of a spring-forward week ends one cell past a second Monday; that cell is tinted as the next week too.
 export function layoutWindow(startUtc, zone) {
   const days = [];
   let week = 0;
@@ -44,7 +45,7 @@ export function layoutWindow(startUtc, zone) {
     leagueDay = league;
     const due = league === "Sun";
     const cutoff = due && partsOf(addCells(startUtc, j + 1), LEAGUE_ZONE).weekday === "Mon";
-    day.cells.push({ j, minutes: Number(p.hour) * 60 + Number(p.minute), kind: due ? "due" : `wk${week}`, cutoff });
+    day.cells.push({ j, minutes: Number(p.hour) * 60 + Number(p.minute), kind: due ? "due" : `wk${Math.min(week, 1)}`, cutoff });
   }
   return days;
 }

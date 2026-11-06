@@ -229,8 +229,11 @@ export function paintGrid({ columns, gridLabel, cells: initial, onChange }) {
 // The time zone picker both editors and the heatmap pages show: zones (else every zone the browser knows, else
 // fallback), with zone first if missing, and zone selected. row is the labelled picker to place on the page; id and
 // label let a page hold two of them.
+// Every zone the browser knows, else just fallback on a browser without Intl.supportedValuesOf.
+export const allZones = (fallback) => (typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [fallback]);
+
 export function zoneSelect(zone, zones, fallback = zone, { id = "zone", label = "Time zone" } = {}) {
-  const list = zones || (typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [fallback]);
+  const list = zones || allZones(fallback);
   const select = el("select", { id, "aria-label": label });
   for (const z of list.includes(zone) ? list : [zone, ...list]) select.append(el("option", { value: z, text: z.replaceAll("_", " ") }));
   select.value = zone;

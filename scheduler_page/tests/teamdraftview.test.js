@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { LinkExpired, createFixtureApi } from "../js/api.js";
 import { mountTeamDraft } from "../js/teamdraftview.js";
+import { gridFrame } from "../js/grid.js";
 import { windowColumns } from "../js/grid.js";
 
 const doc = JSON.parse(readFileSync(new URL("../fixtures/team-draft.json", import.meta.url)));
@@ -295,12 +296,43 @@ test("Show times in redraws the matchup in the picked zone and remembers it", as
     const picker = root.find((n) => n.attrs.id === "shown-zone");
     const cellLabel = () => root.find((n) => n.attrs["data-j"] === "0").attrs["aria-label"];
     const before = cellLabel();
+    const was = activeTab(root).textContent;
     picker.value = "Asia/Tokyo";
     for (const fn of picker.listeners.change) fn({});
     assert.match(root.children[2].textContent, /Times in Asia\/Tokyo\./);
     assert.notEqual(cellLabel(), before);
     assert.deepEqual([...kept.values()], ["Asia/Tokyo"]);
+    assert.equal(activeTab(root).textContent, was); // same date as before the change
   } finally {
     view.dispose();
   }
+});
+
+const allOf = (n, test, out = []) => { if (test(n)) out.push(n); for (const c of n.children) if (c.find) allOf(c, test, out); return out; };
+const activeTab = (root) => allOf(root, (n) => n.attrs.role === "tab")[Number(root.find((n) => n.attrs.role === "grid").dataset.active)];
+
+test("the day tab a viewer picked stays picked across a zone change", async () => {
+  const zones = ["America/New_York", "Asia/Tokyo"];
+  const { root, view } = await mount(fakeApi([], () => doc), { zonePicker: { zones, storage: null } });
+  try {
+    allOf(root, (n) => n.attrs.role === "tab")[2].click();
+    const was = activeTab(root).textContent;
+    assert.notEqual(was, allOf(root, (n) => n.attrs.role === "tab")[0].textContent);
+    const picker = root.find((n) => n.attrs.id === "shown-zone");
+    picker.value = "Asia/Tokyo";
+    for (const fn of picker.listeners.change) fn({});
+    assert.equal(activeTab(root).textContent, was); // a new grid, open on the same date
+  } finally {
+    view.dispose();
+  }
+});
+
+test("gridFrame opens on the column dated openDate, else the first, and reports the open date", () => {
+  const columns = ["2026-10-24", "2026-10-25", "2026-10-26"].map((date, i) => ({ date, label: `D${i}`, start: 0, cells: [] }));
+  const frame = gridFrame(columns, { role: "grid" }, () => new Node(), "2026-10-26");
+  assert.equal(frame.grid.dataset.active, "2");
+  assert.equal(frame.openDate(), "2026-10-26");
+  frame.setDay(1);
+  assert.equal(frame.openDate(), "2026-10-25");
+  assert.equal(gridFrame(columns, { role: "grid" }, () => new Node(), "2030-01-01").grid.dataset.active, "0");
 });

@@ -124,7 +124,7 @@ button.hcell { cursor: pointer; }
 .s4 { background: var(--h4); } .s5 { background: var(--h5); } .s6 { background: var(--h6); }
 .legend span { padding: 0 3px; }
 
-/* A window grid's league weeks, Monday to Sunday Eastern (see layoutWindow). A cell's kind re-points the empty shades,
+/* A window grid's league weeks, Monday to Sunday Pacific (see layoutWindow). A cell's kind re-points the empty shades,
    so every rule drawing an empty cell (heatmap or editor, plain or alt hour) follows; shaded and painted cells keep
    their own colours. Next week is a cool tint; the league's Sunday, when results are due, is the warning colour, and
    the last half-hour before the cutoff is underlined in it. Day names and tabs take their column's kind. */

@@ -174,7 +174,7 @@ export async function mountThisWeek(root, api, deps) {
 
   root.replaceChildren(
     paintLede(usual
-      ? "This starts from your usual week. Paint or erase the half-hours that are different this week. Your usual week stays as it is."
+      ? `This starts from your usual week. Paint or erase the half-hours that are different this week. Your usual week stays as it is. Times are in ${zone.replaceAll("_", " ")}, your usual week's zone.`
       : "A draft and its matches take a few hours. Drag or tap to paint this week. Times are local to the zone below. To keep them for every week, press Save as my usual week."),
     ...setup,
     paintBox,

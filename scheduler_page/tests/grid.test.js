@@ -85,6 +85,23 @@ test("the league's Sunday is due until midnight Pacific, 3 AM Eastern on Monday"
   assert.deepEqual(cutoffs, ["Mon 9 Nov, 2:30 AM"]);
 });
 
+test("league tints count Pacific weekdays, so the US fall-back Sunday stays due to its 50th cell", () => {
+  const cols = windowColumns(new Date("2026-10-29T15:00:00Z"), "America/New_York"); // Thursday 11 AM EDT
+  const sunday = cols.find((c) => c.label === "Sun 1");
+  assert.equal(sunday.cells.length, 50);
+  assert.deepEqual(kindRuns(sunday), [["wk0", 6], ["due", 44]]);
+  const cutoffs = cols.flatMap((c) => c.cells.filter((x) => x.cutoff).map((x) => x.label));
+  assert.deepEqual(cutoffs, ["Mon 2 Nov, 2:30 AM"]);
+});
+
+test("a window ending one cell past a second Monday tints that cell as next week, not a third", () => {
+  // Sunday 14 Mar 2027 11:30 PM Pacific: the week ahead loses an hour, so the last cell lands on Monday the 22nd.
+  const cols = windowColumns(new Date("2027-03-15T07:30:00Z"), "America/Los_Angeles");
+  const kinds = new Set(cols.flatMap((c) => c.cells.map((x) => x.kind)));
+  assert.deepEqual([...kinds].sort(), ["due", "wk0", "wk1"]);
+  assert.equal(cols.at(-1).cells.at(-1).kind, "wk1");
+});
+
 test("in London the deadline falls on the matching hours: until 8 AM Monday is still the league's Sunday", () => {
   const cols = windowColumns(new Date("2026-11-05T15:00:00Z"), "Europe/London");
   const sunday = cols.find((c) => c.label === "Sun 8");

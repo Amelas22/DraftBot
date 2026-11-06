@@ -94,6 +94,7 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
   // browser's. Picking one draws the heatmap again in it, on the same day tab.
   const picker = shownZonePicker(usualDoc?.zone || Intl.DateTimeFormat().resolvedOptions().timeZone, (z) => {
     zone = z;
+    hovered = null;
     heat = makeHeat(heat.openDate());
     if (clicked === null) setReadout(HOVER_HINT);
     render();
