@@ -200,9 +200,10 @@ async def test_the_first_result_of_a_tournament_match_unlocks_draftmancer(test_d
 
 
 def _a_live_manager():
-    """The draft's manager, still connected: its socket is the only way to unlock
-    the log in Draftmancer, and it disconnects within seconds of unlock_at."""
-    manager = MagicMock(release_draftmancer_log=AsyncMock())
+    """The draft's manager, still connected after the draft ended: its socket
+    is the only way to unlock the log in Draftmancer, and it disconnects
+    within seconds of unlock_at."""
+    manager = MagicMock(release_draftmancer_log=AsyncMock(), drafting=False)
     return manager, patch("services.draft_setup_manager.DraftSetupManager.get_active_manager",
                           side_effect=lambda sid: manager if sid == SID else None)
 
