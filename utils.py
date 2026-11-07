@@ -1015,19 +1015,20 @@ async def _sync_linked_tournament_match(bot, match_id, team_a_wins, team_b_wins,
 
 
 async def a_match_was_played(draft_session_id) -> bool:
-    """Whether any of the draft's matches has a result reported."""
+    """Whether any of the draft's matches has a winner. "No Match Played" is
+    reported with no winner, and is not a played match."""
     async with AsyncSessionLocal() as session:
         return (await session.execute(
             select(MatchResult.id)
             .filter(MatchResult.session_id == draft_session_id,
-                    or_(MatchResult.winner_id.isnot(None),
-                        MatchResult.result_submitted_at.isnot(None)))
+                    MatchResult.winner_id.isnot(None))
             .limit(1)
         )).first() is not None
 
 
 async def release_decided_draft_log(draft_session_id):
-    """Make a decided draft's public log due now instead of at its timer.
+    """Make a draft's public log due now instead of at its timer, once there
+    is nothing left for the timer to hide.
 
     The log is held back so a team can't study the other side's pools while
     the result is still open. Once one side clinches, nothing is left to hide,
@@ -1037,7 +1038,9 @@ async def release_decided_draft_log(draft_session_id):
     A tournament match is played with pools open, so its log hides nothing
     once the draft itself is over -- and the first match played is the proof
     of that, where the log alone cannot tell a finished draft from one stopped
-    early and about to be restarted in the same room.
+    early and about to be restarted in the same room. Rooms and the pairings
+    dropdown exist from the first ending, so a report that lands while the
+    room is being redrafted is a mis-click, not a played match.
 
     Sits beside settle_decided_draft, outside the transaction below, for the
     same reason: its own connection, and SQLite is single-writer. Idempotent;
@@ -1055,13 +1058,8 @@ async def release_decided_draft_log(draft_session_id):
         return
     from services.draft_setup_manager import DraftSetupManager  # imports utils back
     if draft_session.tournament_match_id is not None:
-        # Rooms and the pairings dropdown are made when the draft FIRST ends,
-        # so a draft stopped and restarted in the same room has a dropdown
-        # to mis-click while it is being redrafted. Nothing has been played
-        # then, whatever a row says, and the stopped run's log must stay
-        # locked for the real one to replace it.
         if DraftSetupManager.is_drafting(draft_session_id):
-            return
+            return                           # a redraft; see the docstring
         if not await a_match_was_played(draft_session_id):
             return
         why = "is a tournament match with a result in"

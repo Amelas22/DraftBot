@@ -24,23 +24,25 @@ B = ["b1", "b2", "b3"]
 NINE_MATCHES = 10   # match_counter names the NEXT match
 
 
-async def _a_captured_draft(*, a_wins, b_wins, draws=0, unplayed=0,
-                            stype="premade", data_received=False):
+async def _a_captured_draft(*, a_wins, b_wins, no_match_reports=0, unplayed=0,
+                            stype="premade", data_received=False,
+                            tournament_match_id=None):
     """A premade with its log captured and locked for three more hours.
 
-    A draw is a reported result with no winner; an unplayed match is a pairing
-    row with neither a winner nor a report time -- what room creation seeds."""
-    matches = ([(A[i % 3], B[i % 3], A[i % 3], None) for i in range(a_wins)]
-               + [(A[i % 3], B[i % 3], B[i % 3], None) for i in range(b_wins)]
-               + [(A[i % 3], B[i % 3], None, datetime.now()) for i in range(draws)]
+    A "No Match Played" report has a report time and no winner; an unplayed
+    match has neither -- the pairing row room creation seeds."""
+    now = datetime.now()
+    matches = ([(A[i % 3], B[i % 3], A[i % 3], now) for i in range(a_wins)]
+               + [(A[i % 3], B[i % 3], B[i % 3], now) for i in range(b_wins)]
+               + [(A[i % 3], B[i % 3], None, now) for i in range(no_match_reports)]
                + [(A[i % 3], B[i % 3], None, None) for i in range(unplayed)])
     await seed_session(SID, guild="1", stype=stype, stage="pairings", teams=(A, B),
                        matches=matches, match_counter=NINE_MATCHES)
-    now = datetime.now()
     async with AsyncSessionLocal() as s:
         await s.execute(update(DraftSession).where(DraftSession.session_id == SID).values(
             logs_captured_at=now, unlock_at=now + timedelta(hours=3),
-            team_logs_posted_at=now, data_received=data_received))
+            team_logs_posted_at=now, data_received=data_received,
+            tournament_match_id=tournament_match_id))
         await s.commit()
 
 
@@ -126,19 +128,10 @@ async def test_a_draft_whose_log_is_not_captured_yet_is_left_for_capture(test_db
     assert await _unlock_at() is None
 
 
-async def _link_to_tournament_match(match_id=7):
-    async with AsyncSessionLocal() as s:
-        await s.execute(update(DraftSession).where(DraftSession.session_id == SID)
-                        .values(tournament_match_id=match_id))
-        await s.commit()
-
-
 @pytest.mark.asyncio
 async def test_a_tournament_match_releases_its_log_at_the_first_result(test_db):
-    """A tournament match is played with pools open, so its log hides nothing
-    once the draft is over -- and a played match is the proof that it is."""
-    await _a_captured_draft(a_wins=1, b_wins=0)
-    await _link_to_tournament_match()
+    """Pools are open on a tournament match; a played match proves the draft is over."""
+    await _a_captured_draft(a_wins=1, b_wins=0, unplayed=8, tournament_match_id=7)
     assert not await _reconciler_publishes()
 
     await release_decided_draft_log(SID)
@@ -149,8 +142,7 @@ async def test_a_tournament_match_releases_its_log_at_the_first_result(test_db):
 @pytest.mark.asyncio
 async def test_a_tournament_match_with_no_result_yet_keeps_its_log_locked(test_db):
     """Pairing rows exist from room creation; none has been played."""
-    await _a_captured_draft(a_wins=0, b_wins=0, unplayed=9)
-    await _link_to_tournament_match()
+    await _a_captured_draft(a_wins=0, b_wins=0, unplayed=9, tournament_match_id=7)
     locked_until = await _unlock_at()
 
     await release_decided_draft_log(SID)
@@ -159,28 +151,24 @@ async def test_a_tournament_match_with_no_result_yet_keeps_its_log_locked(test_d
 
 
 @pytest.mark.asyncio
-async def test_a_drawn_match_counts_as_played(test_db):
-    await _a_captured_draft(a_wins=0, b_wins=0, draws=1, unplayed=8)
-    await _link_to_tournament_match()
+async def test_a_no_match_played_report_is_not_a_played_match(test_db):
+    await _a_captured_draft(a_wins=0, b_wins=0, no_match_reports=1, unplayed=8,
+                            tournament_match_id=7)
+    locked_until = await _unlock_at()
 
     await release_decided_draft_log(SID)
 
-    assert await _reconciler_publishes()
+    assert await _unlock_at() == locked_until
 
 
 @pytest.mark.asyncio
 async def test_a_report_during_a_redraft_releases_nothing(test_db):
-    """Rooms and the pairings dropdown are made when the draft first ends, so
-    a draft stopped and restarted in the same room has a dropdown to mis-click
-    while it is being redrafted. A result cannot have been played yet; the
-    stopped run's log must stay locked for the real one to replace it."""
-    await _a_captured_draft(a_wins=1, b_wins=0, unplayed=8)
-    await _link_to_tournament_match()
+    """A redraft in the same room still has the first run's dropdown."""
+    await _a_captured_draft(a_wins=1, b_wins=0, unplayed=8, tournament_match_id=7)
     locked_until = await _unlock_at()
-    manager, registry = _a_live_manager()
+    manager, registry = _a_live_manager(drafting=True)
 
-    with registry, patch("services.draft_setup_manager.DraftSetupManager.is_drafting",
-                         return_value=True):
+    with registry:
         await release_decided_draft_log(SID)
 
     assert await _unlock_at() == locked_until
@@ -189,8 +177,7 @@ async def test_a_report_during_a_redraft_releases_nothing(test_db):
 
 @pytest.mark.asyncio
 async def test_the_first_result_of_a_tournament_match_unlocks_draftmancer(test_db):
-    await _a_captured_draft(a_wins=1, b_wins=0)
-    await _link_to_tournament_match()
+    await _a_captured_draft(a_wins=1, b_wins=0, unplayed=8, tournament_match_id=7)
     manager, registry = _a_live_manager()
 
     with registry:
@@ -199,11 +186,11 @@ async def test_the_first_result_of_a_tournament_match_unlocks_draftmancer(test_d
     manager.release_draftmancer_log.assert_awaited_once()
 
 
-def _a_live_manager():
-    """The draft's manager, still connected after the draft ended: its socket
-    is the only way to unlock the log in Draftmancer, and it disconnects
-    within seconds of unlock_at."""
-    manager = MagicMock(release_draftmancer_log=AsyncMock(), drafting=False)
+def _a_live_manager(drafting=False):
+    """The draft's manager, still connected: its socket is the only way to
+    unlock the log in Draftmancer, and it disconnects within seconds of
+    unlock_at. `drafting` while the room is being redrafted."""
+    manager = MagicMock(release_draftmancer_log=AsyncMock(), drafting=drafting)
     return manager, patch("services.draft_setup_manager.DraftSetupManager.get_active_manager",
                           side_effect=lambda sid: manager if sid == SID else None)
 
