@@ -1410,7 +1410,11 @@ async def test_a_seating_verdict_is_forgotten_when_a_later_log_is_captured(
     """The verdict was on ONE log. Keyed on which log it judged, it lapses by
     itself when a later capture replaces that log -- whichever path replaced
     it -- instead of refusing the draft for the rest of the process."""
-    first, second = datetime(2026, 11, 5, 22, 8), datetime(2026, 11, 5, 22, 44)
+    # Relative, not fixed: a deck is only offered for an hour after the draft
+    # ends, so a capture stamped with a calendar date stops offering anything
+    # an hour after the test is written.
+    first, second = (datetime.now() - timedelta(minutes=40),
+                     datetime.now() - timedelta(minutes=4))
     await _seed(draft_data=_three_seat_log())
     await _set(logs_captured_at=first)
     assert await svc.assign_drafted_decks(SESSION) == 0
@@ -1422,7 +1426,7 @@ async def test_a_seating_verdict_is_forgotten_when_a_later_log_is_captured(
 async def test_a_seating_verdict_is_kept_while_the_log_is_the_same(
         test_db, library_on):
     await _seed(draft_data=_three_seat_log())
-    await _set(logs_captured_at=datetime(2026, 11, 5, 22, 8))
+    await _set(logs_captured_at=datetime.now() - timedelta(minutes=4))
     assert await svc.assign_drafted_decks(SESSION) == 0
 
     with patch("services.draft_deck_assignment.map_discord_to_draftmancer") as mapper:
