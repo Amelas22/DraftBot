@@ -1014,6 +1014,18 @@ async def _sync_linked_tournament_match(bot, match_id, team_a_wins, team_b_wins,
         logger.error(f"Failed to auto-record tournament match {match_id}: {e}")
 
 
+async def a_match_was_played(draft_session_id) -> bool:
+    """Whether any of the draft's matches has a result reported."""
+    async with AsyncSessionLocal() as session:
+        return (await session.execute(
+            select(MatchResult.id)
+            .filter(MatchResult.session_id == draft_session_id,
+                    or_(MatchResult.winner_id.isnot(None),
+                        MatchResult.result_submitted_at.isnot(None)))
+            .limit(1)
+        )).first() is not None
+
+
 async def release_decided_draft_log(draft_session_id):
     """Make a decided draft's public log due now instead of at its timer.
 
@@ -1021,6 +1033,11 @@ async def release_decided_draft_log(draft_session_id):
     the result is still open. Once one side clinches, nothing is left to hide,
     so the publish moves up to now and the log reconciler posts it on its next
     tick. Swiss drafts keep their timer: their rounds aren't a team score.
+
+    A tournament match is played with pools open, so its log hides nothing
+    once the draft itself is over -- and the first match played is the proof
+    of that, where the log alone cannot tell a finished draft from one stopped
+    early and about to be restarted in the same room.
 
     Sits beside settle_decided_draft, outside the transaction below, for the
     same reason: its own connection, and SQLite is single-writer. Idempotent;
@@ -1036,10 +1053,16 @@ async def release_decided_draft_log(draft_session_id):
     now = datetime.now()
     if draft_session.unlock_at <= now:
         return
-    team_a_wins, team_b_wins = await calculate_team_wins(draft_session_id)
-    if decides_draft(team_a_wins, team_b_wins,
-                     total_matches_in(draft_session.match_counter)) is None:
-        return
+    if draft_session.tournament_match_id is not None:
+        if not await a_match_was_played(draft_session_id):
+            return
+        why = "is a tournament match with a result in"
+    else:
+        team_a_wins, team_b_wins = await calculate_team_wins(draft_session_id)
+        if decides_draft(team_a_wins, team_b_wins,
+                         total_matches_in(draft_session.match_counter)) is None:
+            return
+        why = "is decided"
     async with AsyncSessionLocal() as session:
         async with session.begin():
             await session.execute(
@@ -1047,7 +1070,7 @@ async def release_decided_draft_log(draft_session_id):
                 .where(DraftSession.session_id == draft_session_id,
                        DraftSession.unlock_at > now)
                 .values(unlock_at=now))
-    logger.info(f"Draft {draft_session_id} is decided; its log publishes on the next reconciler tick")
+    logger.info(f"Draft {draft_session_id} {why}; its log publishes on the next reconciler tick")
     # Unlock Draftmancer too, and now: the manager holding the socket shuts
     # itself down within seconds of unlock_at passing, before the reconciler's
     # next tick could ask it to.

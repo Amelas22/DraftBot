@@ -120,6 +120,49 @@ async def test_a_draft_whose_log_is_not_captured_yet_is_left_for_capture(test_db
     assert await _unlock_at() is None
 
 
+async def _link_to_tournament_match(match_id=7):
+    async with AsyncSessionLocal() as s:
+        await s.execute(update(DraftSession).where(DraftSession.session_id == SID)
+                        .values(tournament_match_id=match_id))
+        await s.commit()
+
+
+@pytest.mark.asyncio
+async def test_a_tournament_match_releases_its_log_at_the_first_result(test_db):
+    """A tournament match is played with pools open, so its log hides nothing
+    once the draft is over -- and a played match is the proof that it is."""
+    await _a_captured_draft(a_wins=1, b_wins=0)
+    await _link_to_tournament_match()
+    assert not await _reconciler_publishes()
+
+    await release_decided_draft_log(SID)
+
+    assert await _reconciler_publishes()
+
+
+@pytest.mark.asyncio
+async def test_a_tournament_match_with_no_result_yet_keeps_its_log_locked(test_db):
+    await _a_captured_draft(a_wins=0, b_wins=0)
+    await _link_to_tournament_match()
+    locked_until = await _unlock_at()
+
+    await release_decided_draft_log(SID)
+
+    assert await _unlock_at() == locked_until
+
+
+@pytest.mark.asyncio
+async def test_the_first_result_of_a_tournament_match_unlocks_draftmancer(test_db):
+    await _a_captured_draft(a_wins=1, b_wins=0)
+    await _link_to_tournament_match()
+    manager, registry = _a_live_manager()
+
+    with registry:
+        await release_decided_draft_log(SID)
+
+    manager.release_draftmancer_log.assert_awaited_once()
+
+
 def _a_live_manager():
     """The draft's manager, still connected: its socket is the only way to unlock
     the log in Draftmancer, and it disconnects within seconds of unlock_at."""
