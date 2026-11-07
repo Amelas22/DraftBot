@@ -24,10 +24,16 @@ B = ["b1", "b2", "b3"]
 NINE_MATCHES = 10   # match_counter names the NEXT match
 
 
-async def _a_captured_draft(*, a_wins, b_wins, stype="premade", data_received=False):
-    """A premade with its log captured and locked for three more hours."""
+async def _a_captured_draft(*, a_wins, b_wins, draws=0, unplayed=0,
+                            stype="premade", data_received=False):
+    """A premade with its log captured and locked for three more hours.
+
+    A draw is a reported result with no winner; an unplayed match is a pairing
+    row with neither a winner nor a report time -- what room creation seeds."""
     matches = ([(A[i % 3], B[i % 3], A[i % 3], None) for i in range(a_wins)]
-               + [(A[i % 3], B[i % 3], B[i % 3], None) for i in range(b_wins)])
+               + [(A[i % 3], B[i % 3], B[i % 3], None) for i in range(b_wins)]
+               + [(A[i % 3], B[i % 3], None, datetime.now()) for i in range(draws)]
+               + [(A[i % 3], B[i % 3], None, None) for i in range(unplayed)])
     await seed_session(SID, guild="1", stype=stype, stage="pairings", teams=(A, B),
                        matches=matches, match_counter=NINE_MATCHES)
     now = datetime.now()
@@ -142,13 +148,43 @@ async def test_a_tournament_match_releases_its_log_at_the_first_result(test_db):
 
 @pytest.mark.asyncio
 async def test_a_tournament_match_with_no_result_yet_keeps_its_log_locked(test_db):
-    await _a_captured_draft(a_wins=0, b_wins=0)
+    """Pairing rows exist from room creation; none has been played."""
+    await _a_captured_draft(a_wins=0, b_wins=0, unplayed=9)
     await _link_to_tournament_match()
     locked_until = await _unlock_at()
 
     await release_decided_draft_log(SID)
 
     assert await _unlock_at() == locked_until
+
+
+@pytest.mark.asyncio
+async def test_a_drawn_match_counts_as_played(test_db):
+    await _a_captured_draft(a_wins=0, b_wins=0, draws=1, unplayed=8)
+    await _link_to_tournament_match()
+
+    await release_decided_draft_log(SID)
+
+    assert await _reconciler_publishes()
+
+
+@pytest.mark.asyncio
+async def test_a_report_during_a_redraft_releases_nothing(test_db):
+    """Rooms and the pairings dropdown are made when the draft first ends, so
+    a draft stopped and restarted in the same room has a dropdown to mis-click
+    while it is being redrafted. A result cannot have been played yet; the
+    stopped run's log must stay locked for the real one to replace it."""
+    await _a_captured_draft(a_wins=1, b_wins=0, unplayed=8)
+    await _link_to_tournament_match()
+    locked_until = await _unlock_at()
+    manager, registry = _a_live_manager()
+
+    with registry, patch("services.draft_setup_manager.DraftSetupManager.is_drafting",
+                         return_value=True):
+        await release_decided_draft_log(SID)
+
+    assert await _unlock_at() == locked_until
+    manager.release_draftmancer_log.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -1053,7 +1053,15 @@ async def release_decided_draft_log(draft_session_id):
     now = datetime.now()
     if draft_session.unlock_at <= now:
         return
+    from services.draft_setup_manager import DraftSetupManager  # imports utils back
     if draft_session.tournament_match_id is not None:
+        # Rooms and the pairings dropdown are made when the draft FIRST ends,
+        # so a draft stopped and restarted in the same room has a dropdown
+        # to mis-click while it is being redrafted. Nothing has been played
+        # then, whatever a row says, and the stopped run's log must stay
+        # locked for the real one to replace it.
+        if DraftSetupManager.is_drafting(draft_session_id):
+            return
         if not await a_match_was_played(draft_session_id):
             return
         why = "is a tournament match with a result in"
@@ -1074,7 +1082,6 @@ async def release_decided_draft_log(draft_session_id):
     # Unlock Draftmancer too, and now: the manager holding the socket shuts
     # itself down within seconds of unlock_at passing, before the reconciler's
     # next tick could ask it to.
-    from services.draft_setup_manager import DraftSetupManager  # imports utils back
     manager = DraftSetupManager.get_active_manager(draft_session_id)
     if manager is not None:
         await manager.release_draftmancer_log()
