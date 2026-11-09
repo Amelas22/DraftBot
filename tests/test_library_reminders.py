@@ -14,9 +14,9 @@ import pytest
 
 from conftest import seed_session
 import services.library_reminders as mod
-from services.library_reminders import (REMIND_AFTER_FINISH, REPEAT_AFTER,
-                                        deck_ready_message, reminder_due,
-                                        return_message, session_of)
+from services.library_reminders import (REPEAT_AFTER, deck_ready_message,
+                                        reminder_due, return_message,
+                                        session_of)
 
 NOW = datetime(2026, 9, 26, 12, 0, 0)
 
@@ -97,6 +97,8 @@ def test_a_loan_from_no_draft_names_nothing():
 # ---- when to ask for cards back --------------------------------------------
 
 def test_a_player_who_has_finished_playing_is_asked():
+    """At once, with no hour's grace: subbing for a teammate means borrowing
+    the absent player's deck, which they cannot do while they hold this one."""
     assert reminder_due(_loan(), done_playing=True, draft_settled=False, now=NOW)
 
 
@@ -130,52 +132,6 @@ def test_the_repeat_comes_on_the_hour_not_a_tick_later():
     loan = _loan(last_reminded_at=NOW - REPEAT_AFTER)
 
     assert reminder_due(loan, done_playing=True, draft_settled=True, now=NOW)
-
-
-def test_nobody_is_asked_in_the_first_hour_after_finishing():
-    """Room to hand the deck back unprompted, or to play a dead rubber."""
-    finished = NOW - REMIND_AFTER_FINISH + timedelta(minutes=1)
-
-    assert not reminder_due(_loan(), done_playing=True, draft_settled=False,
-                            finished_at=finished, now=NOW)
-
-
-def test_the_first_ask_comes_an_hour_after_finishing():
-    finished = NOW - REMIND_AFTER_FINISH
-
-    assert reminder_due(_loan(), done_playing=True, draft_settled=False,
-                        finished_at=finished, now=NOW)
-
-
-def test_the_hourly_repeat_holds_after_the_first_ask():
-    """Once asked, the finish time no longer matters -- only the last ask."""
-    loan = _loan(last_reminded_at=NOW - REPEAT_AFTER - timedelta(minutes=1))
-
-    assert reminder_due(loan, done_playing=True, draft_settled=False,
-                        finished_at=NOW - timedelta(hours=5), now=NOW)
-
-
-def test_a_result_reported_after_the_first_ask_does_not_postpone_the_next():
-    """A dead rubber reported after the first ask moves the draft's latest
-    result later. Only the first ask waits on the finish time."""
-    loan = _loan(last_reminded_at=NOW - REPEAT_AFTER)
-
-    assert reminder_due(loan, done_playing=False, draft_settled=True,
-                        finished_at=NOW - timedelta(minutes=10), now=NOW)
-
-
-def test_an_unknown_finish_time_asks_at_once():
-    """A draft settled with nothing reported (abandoned) has no finish time to
-    wait from, and holding the cards an extra hour helps nobody."""
-    assert reminder_due(_loan(), done_playing=False, draft_settled=True,
-                        finished_at=None, now=NOW)
-
-
-def test_a_decided_draft_asks_at_once():
-    """No hour's grace once a side clinches: the cards are what the rest of the
-    room's next draft is waiting on."""
-    assert reminder_due(_loan(), done_playing=True, draft_settled=True,
-                        finished_at=NOW - timedelta(minutes=1), now=NOW)
 
 
 def test_a_result_after_the_ask_in_a_decided_draft_asks_again():
@@ -395,10 +351,9 @@ async def test_a_finished_player_is_asked_once_not_once_per_tick(test_db, dm):
     await seed_session("s1", stype="random", stage="pairings",
                        matches=[("p1", "p2", "p1", NOW)])
     await _a_loan()
-    due = NOW + REMIND_AFTER_FINISH
 
-    first = await mod.send_due_reminders(now=due)
-    second = await mod.send_due_reminders(now=due + timedelta(minutes=10))
+    first = await mod.send_due_reminders(now=NOW)
+    second = await mod.send_due_reminders(now=NOW + timedelta(minutes=10))
 
     assert first == 1 and second == 0, dm.sent
     assert [sent[0] for sent in dm.sent] == ["p1"]
@@ -484,18 +439,17 @@ async def test_somebody_elses_dead_rubber_does_not_ask_again(test_db, dm):
 
 
 @pytest.mark.asyncio
-async def test_the_watchdog_times_a_borrower_from_their_own_last_result(test_db, dm):
-    """p1 finished long before the draft's latest result (p3 vs p4, later). The
-    hour runs from p1's own finish, not from the draft's last result."""
+async def test_the_watchdog_asks_as_soon_as_a_borrower_has_finished(test_db, dm):
+    """p1 has reported every match of theirs while p3 vs p4 keeps the draft
+    live. The next tick asks p1, and nobody else."""
     await seed_session("s1", stype="random", stage="pairings", matches=[
         ("p1", "p2", "p1", NOW),
-        ("p3", "p4", "p3", NOW + timedelta(minutes=30))])
+        ("p3", "p4", None, None)])
     await _a_loan()
+    await _a_loan(borrower="p3")
 
-    early = await mod.send_due_reminders(now=NOW + timedelta(minutes=50))
-    on_time = await mod.send_due_reminders(now=NOW + timedelta(minutes=60))
-
-    assert (early, on_time) == (0, 1), dm.sent
+    assert await mod.send_due_reminders(now=NOW) == 1
+    assert [sent[0] for sent in dm.sent] == ["p1"]
 
 
 @pytest.mark.asyncio
@@ -523,7 +477,7 @@ async def test_a_swiss_draft_that_settled_still_gets_chased(test_db, dm):
                        matches=[("p1", "p2", "p1", NOW)])
     await _a_loan()
 
-    assert await mod.send_due_reminders(now=NOW + REMIND_AFTER_FINISH) == 1, dm.sent
+    assert await mod.send_due_reminders(now=NOW) == 1, dm.sent
 
 
 @pytest.mark.asyncio
@@ -693,9 +647,9 @@ async def test_a_deck_claimed_late_is_chased_once_its_chat_is_closing(test_db, d
 
 
 @pytest.mark.asyncio
-async def test_a_deck_claimed_late_is_chased_an_hour_after_their_last_report(test_db, dm):
+async def test_a_deck_claimed_late_is_chased_once_they_have_reported(test_db, dm):
     await seed_session("s1", stype="random", stage="completed",
-                       matches=[("p1", "p2", "p1", NOW - timedelta(minutes=61))],
+                       matches=[("p1", "p2", "p1", NOW - timedelta(minutes=1))],
                        deletion_time=NOW + timedelta(hours=2))
     await _a_loan(claimed_at=NOW - timedelta(hours=2))
 
