@@ -144,9 +144,7 @@ async def book_server_hold(
                 draft_session_id=draft_session_id))
 
 
-async def release_server_hold(
-    draft_session_id: str, when: datetime, by: str | None = None,
-) -> bool:
+async def release_server_hold(draft_session_id: str, when: datetime) -> bool:
     """End the draft's live server hold, if it began by ``when``.
 
     True if there was one to release. A hold booked after ``when`` belongs to a
@@ -161,5 +159,5 @@ async def release_server_hold(
                     LibraryHold.kind == "server",
                     LibraryHold.released_at.is_(None),
                     LibraryHold.starts_at <= when)
-                .values(released_at=when, released_by=by))
+                .values(released_at=when))
             return bool(getattr(result, "rowcount", 0))

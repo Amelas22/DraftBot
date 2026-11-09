@@ -8,7 +8,8 @@ from datetime import datetime, timedelta
 from services.library_ledger import LEAGUE_KINDS, SERVER_SET_ASIDE, Span, peak_held
 
 DISCORD_LIMIT = 2000
-_HOURS = 24
+STATUS_WINDOW = timedelta(hours=24)
+_HOURS = int(STATUS_WINDOW / timedelta(hours=1))
 
 
 def status_lines(cube: str, owned: int, spans: list[Span], now: datetime) -> list[str]:

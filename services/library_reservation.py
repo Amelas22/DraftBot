@@ -45,7 +45,7 @@ from models.card_loan import CardLoan
 from models.draft_session import DraftSession
 from models.library_server import LibraryServer
 from models.match import MatchResult
-from services.library_ledger import Verdict
+from services.library_ledger import Span, Verdict, same_stock
 
 # A deck the borrower has taken, or is taking. A player holding one still needs
 # the reservation however many matches they have played.
@@ -278,6 +278,21 @@ async def reservations(library_id: Any) -> "list[DraftSession]":
                 DraftSession.library_released_at.is_(None),
                 DraftSession.guild_id.in_(guilds)))).all())
     return [d for d in candidates if await still_reserved(d, library_id=library_id)]
+
+
+async def held_spans(library_id: Any, cube_id: str, now: datetime,
+                     until: datetime) -> "list[Span]":
+    """The holds on this cube's stock between now and ``until``.
+
+    Reading the reservations first writes down any that have ended, so their
+    holds self-heal in the read; that write is why it takes the lock.
+    """
+    from services import library_ledger_store
+
+    async with _RESERVE_LOCK:
+        await reservations(library_id)
+        return await library_ledger_store.spans_overlapping(
+            str(library_id), now, until, now, same_stock(cube_id))
 
 
 async def users_if_reserved(draft: Any) -> "set[str]":

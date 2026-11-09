@@ -24,7 +24,7 @@ its ten-minute wait and fail -- which looks like a broken bot rather than an
 unaccepted trade.
 """
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Optional
 
 import discord
@@ -53,14 +53,12 @@ from services.card_lending_service import active_loan, card_lines
 from services.library_loan_actions import (
     SETUP_MESSAGES, deck_lines, loan_said, within_a_message,
 )
-from services.library_ledger import same_stock
-from services.library_ledger_store import owned_copies, spans_overlapping
+from services.library_ledger_store import owned_copies
 from services import library_reservation
-from services.library_reservation import _RESERVE_LOCK
 from services.library_service import (
     first_offered_cube, is_communal, library_for, offer_cube, offers,
 )
-from services.library_status_text import status_lines
+from services.library_status_text import STATUS_WINDOW, status_lines
 from services.mtgo_tradebot_client import get_lending_client, max_cards_per_trade
 
 
@@ -611,14 +609,8 @@ class LibraryCommands(commands.Cog):
                 ephemeral=True)
             return
         now = datetime.now()
-        # The read can heal-write stale holds, so it takes the reservation lock.
-        async with _RESERVE_LOCK:
-            # Reading the reservations writes down any that have ended, so
-            # their holds self-heal in the read below.
-            await library_reservation.reservations(str(library.id))
-            spans = await spans_overlapping(
-                str(library.id), now, now + timedelta(hours=24), now,
-                same_stock(cube_id))
+        spans = await library_reservation.held_spans(
+            library.id, cube_id, now, now + STATUS_WINDOW)
         await ctx.followup.send(
             "\n".join(status_lines(cube_id, owned, spans, now)), ephemeral=True)
 

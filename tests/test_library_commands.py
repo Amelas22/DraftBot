@@ -483,7 +483,8 @@ async def test_status_command_refreshes_reservations_before_reading_holds(monkey
     monkeypatch.setattr(mod, "offers", AsyncMock(return_value=True))
     monkeypatch.setattr(mod, "owned_copies", AsyncMock(return_value=2))
     monkeypatch.setattr(mod.library_reservation, "reservations", refresh)
-    monkeypatch.setattr(mod, "spans_overlapping", spans)
+    import services.library_ledger_store as store
+    monkeypatch.setattr(store, "spans_overlapping", spans)
 
     await mod.LibraryCommands.status.callback(cog, ctx, cube="somecube")
 
