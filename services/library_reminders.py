@@ -26,15 +26,11 @@ from typing import Any, Literal, NamedTuple, Optional
 
 from loguru import logger
 
-# When to ask. A decided draft asks at once, and again whenever the borrower
-# reports a dead rubber after an ask -- the deck is what the room's next draft
-# is waiting on. A borrower who finished while the draft is still live gets an
-# hour first: room to hand the deck back unprompted. Either way the asks then
-# repeat hourly until it comes back: a sponsor's cards sitting in a finished
+# How often to ask again while the deck stays out (reminder_due says when the
+# first ask falls due). Hourly: a sponsor's cards sitting in a finished
 # drafter's account help nobody, and a daily ask let a deck sit out for most of
 # a day. The lending watchdog evaluates this every ten minutes, so each ask
 # lands up to ten minutes after it falls due.
-REMIND_AFTER_FINISH = timedelta(hours=1)
 REPEAT_AFTER = timedelta(hours=1)
 
 # How long a deck offer stays good after the draft ends. The drafter's matches
@@ -86,15 +82,15 @@ def session_of(loan: Any) -> Optional[str]:
 
 
 def reminder_due(loan: Any, *, done_playing: bool, draft_settled: bool,
-                 finished_at: Optional[datetime] = None,
                  played_since_ask: bool = False,
                  now: Optional[datetime] = None) -> bool:
     """Should we ask for this deck back right now?
 
-    A settled draft asks at once. A borrower with no more matches to play while
-    the draft is still live is asked once REMIND_AFTER_FINISH has passed since
-    `finished_at`, the moment they finished; None means it isn't known, and
-    then the ask goes at once.
+    At once, as soon as the borrower has no more matches to play with the
+    deck -- their own are all reported, or the draft is settled. No grace
+    period for finishing early: the one thing a finished player might still
+    do with the library is sub for a teammate, and a sub is lent the absent
+    player's deck, which they cannot take while they hold this one.
 
     In a settled draft, `played_since_ask` -- a result in one of the borrower's
     matches reported after the last ask -- asks again without waiting for the
@@ -117,12 +113,11 @@ def reminder_due(loan: Any, *, done_playing: bool, draft_settled: bool,
         return False
     if not (done_playing or draft_settled):
         return False
-    at = now or datetime.now()
     if loan.last_reminded_at is None:
-        return (draft_settled or finished_at is None
-                or at - finished_at >= REMIND_AFTER_FINISH)
+        return True
     if draft_settled and played_since_ask:
         return True
+    at = now or datetime.now()
     # Repeats key on the last ask alone: a dead rubber reported after the first
     # ask must not push the next one back. Due ON the interval, not after it --
     # ">=" makes "due an hour after" mean exactly that at the boundary.
@@ -335,7 +330,7 @@ async def send_due_reminders(now: Optional[datetime] = None) -> int:
         state = verdicts[session_id]
         # A sub holds someone else's deck: it is due when THEIR draft is over.
         whose = str(loan.on_behalf_of or loan.borrower_id)
-        mine = state.done_at.get(whose)
+        done_playing = whose in state.done_at
         played = state.played_at.get(whose)
         # Up to now only: naive local timestamps repeat an hour when the clocks
         # go back, and a result dated past every ask stamped after it would
@@ -346,8 +341,8 @@ async def send_due_reminders(now: Optional[datetime] = None) -> int:
         # rubber. Settlement is why it was asked for, not a reason to want it
         # back; the chat closing is.
         decided = state.chat_closing(at) if loan.claimed_at is not None else state.settled
-        if reminder_due(loan, done_playing=mine is not None, draft_settled=decided,
-                        finished_at=mine, played_since_ask=played_since_ask, now=at):
+        if reminder_due(loan, done_playing=done_playing, draft_settled=decided,
+                        played_since_ask=played_since_ask, now=at):
             due.append((loan, decided))
 
     from library_views.dm_view import dm_view
