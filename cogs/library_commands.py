@@ -24,6 +24,7 @@ its ten-minute wait and fail -- which looks like a broken bot rather than an
 unaccepted trade.
 """
 import time
+from datetime import datetime
 from typing import Any, Optional
 
 import discord
@@ -52,7 +53,12 @@ from services.card_lending_service import active_loan, card_lines
 from services.library_loan_actions import (
     SETUP_MESSAGES, deck_lines, loan_said, within_a_message,
 )
-from services.library_service import is_communal, library_for, offer_cube
+from services.library_ledger_store import owned_copies
+from services import library_reservation
+from services.library_service import (
+    first_offered_cube, is_communal, library_for, offer_cube, offers,
+)
+from services.library_status_text import STATUS_WINDOW, status_lines
 from services.mtgo_tradebot_client import get_lending_client, max_cards_per_trade
 
 
@@ -574,6 +580,39 @@ class LibraryCommands(commands.Cog):
                 f"`/library deposits`.")
         await ctx.followup.send(f"✅ Cards returned to your MTGO account.{tail}",
                                 ephemeral=True)
+
+    @library.command(name="status",
+                      description="Copies of a cube the library owns, and who is holding them")
+    @discord.option("cube", str, required=False,
+                    description="The CubeCobra cube id (default: the server's first cube)")
+    async def status(self, ctx: discord.ApplicationContext,
+                     cube: Optional[str] = None) -> None:
+        if not await defer_if_usable(ctx):
+            return
+        library = await library_for(ctx.guild_id)
+        if library is None:
+            await ctx.followup.send(_NO_LIBRARY, ephemeral=True)
+            return
+        cube_id = cube or await first_offered_cube(library.id)
+        if cube_id is None:
+            await ctx.followup.send(
+                "This library doesn't offer any cubes yet.", ephemeral=True)
+            return
+        if not await offers(library.id, cube_id):
+            await ctx.followup.send(
+                f"The library doesn't lend for {cube_id}.", ephemeral=True)
+            return
+        owned = await owned_copies(str(library.id), cube_id)
+        if owned is None:
+            await ctx.followup.send(
+                "Couldn't read that cube right now; try again in a minute.",
+                ephemeral=True)
+            return
+        now = datetime.now()
+        spans = await library_reservation.held_spans(
+            library.id, cube_id, now, now + STATUS_WINDOW)
+        await ctx.followup.send(
+            "\n".join(status_lines(cube_id, owned, spans, now)), ephemeral=True)
 
     @library.command(name="deposits",
                       description="The cards of yours the library is holding for you")

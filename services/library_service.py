@@ -169,3 +169,16 @@ async def offer_cube(library_id: Any, cube_id: Any, added_by: str) -> bool:
         await session.commit()
     logger.info("library: {} now offers {}", library_id, cube_id)
     return True
+
+
+async def first_offered_cube(library_id: Any) -> "Optional[str]":
+    """The cube this library has offered longest, or None if it offers none."""
+    if not library_id:
+        return None
+    async with AsyncSessionLocal() as session:
+        row = await session.scalar(
+            select(LibraryCube.cube_id)
+            .where(LibraryCube.library_id == str(library_id))
+            .order_by(LibraryCube.added_at, LibraryCube.cube_id)
+            .limit(1))
+    return None if row is None else str(row)

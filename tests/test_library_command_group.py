@@ -1,4 +1,4 @@
-"""The six library commands are one group, and say so in what they tell people.
+"""The library commands are one group, and say so in what they tell people.
 
 They were six top-level commands across two cogs. At the top level `/borrow`,
 `/return` and `/deposit` are words a Discord server uses for plenty that has
@@ -16,10 +16,10 @@ import re
 import cogs.library_commands as mod
 from cogs.library_commands import LibraryCommands
 
-GROUPED = {"deposit", "withdraw", "deposits", "borrow", "return", "deck"}
+GROUPED = {"deposit", "withdraw", "deposits", "borrow", "return", "deck", "status"}
 
 
-def test_the_six_library_commands_are_one_group():
+def test_the_library_commands_are_one_group():
     assert {c.name for c in LibraryCommands.library.subcommands} == GROUPED
 
 
