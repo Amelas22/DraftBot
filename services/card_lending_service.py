@@ -28,7 +28,9 @@ from sqlalchemy import and_, delete, or_, select, update
 
 from config import is_money_server
 from database.db_session import AsyncSessionLocal, db_session
-from services.card_substitution_service import booked_names, learn_substitutions
+from services.card_substitution_service import (
+    booked_names, learn_substitutions, under_counted_names,
+)
 from database.retry import with_db_retry
 from models.card_loan import ACTIVE_STATES, CardLoan
 from models.library import Library
@@ -322,8 +324,9 @@ async def available_now(names: "Iterable[str]" = ()) -> "dict[str, int]":
     inventory = await get_lending_client().inventory(fallback_to_vault=True)
     if inventory is None:
         return {}
-    # Everything on the shelf in the vault's spelling...
-    stock = inventory.by_name(key=str)
+    # Everything on the shelf in the vault's spelling, a crossover card's two
+    # printings as the one card custody counts...
+    stock = await under_counted_names(inventory.by_name(key=str))
     # ...and, from a reading that can be trusted, every asked name in the
     # caller's spelling, zero when it is not there.
     #
@@ -332,7 +335,9 @@ async def available_now(names: "Iterable[str]" = ()) -> "dict[str, int]":
     # rest get zero. Giving each the full count would let a caller summing them
     # lend the same copies twice.
     if inventory.consistent:
-        held = inventory.by_name()
+        held: "dict[str, int]" = {}
+        for name, qty in stock.items():
+            held[card_key(name)] = held.get(card_key(name), 0) + qty
         for name in dict.fromkeys(names):
             stock[name] = held.pop(card_key(name), 0)
     async with AsyncSessionLocal() as session:

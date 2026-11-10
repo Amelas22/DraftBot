@@ -27,8 +27,9 @@ holder (see SYSTEM_IN_FLIGHT). While the trade is open those tix belong to that 
 so they're unspendable by the player without any special-casing in the balance query.
 Success books the boundary debit against in-flight; failure transfers them back.
 
-Reconciliation: services/inventory_reconcile.audit_tix checks vault tix == SUM over the
-*tix* wallet rows (other assets have no vault).
+Reconciliation: ``reconcile()`` asserts a tix figure == SUM over the *tix* wallet rows
+(other assets have no vault). services/inventory_reconcile.audit_tix is that check made
+against the custodian's own count, with the guard that says when a reading can be trusted.
 """
 import asyncio
 import uuid
@@ -443,3 +444,16 @@ async def adjust(guild_id: str, player_id: str, amount: int, notes: str, created
 # ---------------------------------------------------------------------------
 # reconciliation audit: physical vault tix == SUM(all wallet rows)
 # ---------------------------------------------------------------------------
+async def reconcile(bot_tix: int) -> dict:
+    """Compare the physical vault tix (from the serve ``/vault``) to the claim total.
+
+    Both sides are global (one custodian, one claim ledger). In-flight withdraws are
+    included: those tix are still physically in the vault until the trade completes, and
+    the in-flight holder still owns the matching claim, so both sides move together.
+    Returns {ok, wallet_total, bot_tix, diff}; ok when they match exactly."""
+    wallet_total = await total_wallets()
+    diff = bot_tix - wallet_total
+    ok = diff == 0
+    if not ok:
+        logger.warning(f"RECONCILE MISMATCH: bot_tix={bot_tix} wallets={wallet_total} diff={diff:+d}")
+    return {"ok": ok, "wallet_total": wallet_total, "bot_tix": bot_tix, "diff": diff}

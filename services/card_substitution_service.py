@@ -158,6 +158,25 @@ async def mtgo_names_for(cube_names: "list[str]") -> "dict[str, str]":
     return {str(r.cube_name): str(r.mtgo_name) for r in rows}
 
 
+async def under_counted_names(held: "dict[str, int]") -> "dict[str, int]":
+    """What an account holds, each card under the name custody counts it by.
+
+    The account can hold a crossover card as its other printing, the one MTGO
+    lists under the cube's name: booked_names books that copy as the learned
+    name, but it sits on the shelf under its own. Read name for name it is two
+    wrong answers at once -- the booked card is not there, and a card nobody
+    booked is.
+    """
+    renames = await mtgo_names_for(list(held))
+    if not renames:
+        return held
+    out: "dict[str, int]" = {}
+    for name, qty in held.items():
+        counted = renames.get(name, name)
+        out[counted] = out.get(counted, 0) + qty
+    return out
+
+
 async def to_mtgo_names(cards: "list[dict[str, Any]]") -> "list[dict[str, Any]]":
     """A card list in the serve's vocabulary, in the order it came.
 

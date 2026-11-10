@@ -37,6 +37,7 @@ from services import debt_service, wallet_service
 from services.card_deposit_service import JOB_KIND as CARD_DEPOSIT_KIND
 from services.card_deposit_service import WITHDRAW_KIND as CARD_WITHDRAW_KIND
 from services.card_lending_service import _PROMISED_STATES
+from services.card_substitution_service import under_counted_names
 from services.mtgo_tradebot_client import (
     Inventory, MtgoTradeBotClient, card_key, get_client, get_lending_client,
 )
@@ -127,9 +128,13 @@ def compare(expected: "dict[str, int]", held: "dict[str, int]"
             missing.append(line)
         elif line.diff > 0:
             extra.append(line)
-    missing.sort(key=lambda c: (c.diff, c.name.lower()))
-    extra.sort(key=lambda c: (-c.diff, c.name.lower()))
+    missing.sort(key=_largest_first)
+    extra.sort(key=_largest_first)
     return missing, extra
+
+
+def _largest_first(line: CardLine) -> "tuple[int, str]":
+    return (-abs(line.diff), line.name.lower())
 
 
 def _fold(counts: "dict[str, int]") -> "dict[str, tuple[str, int]]":
@@ -254,7 +259,9 @@ async def audit_library_cards(client: Optional[MtgoTradeBotClient] = None) -> Ca
         _read(client or get_lending_client()), expected_library_stock())
     if inventory is None:
         return CardAudit(UNREADABLE, reason=why)
-    held = inventory.by_name(key=str)
+    # Under the names the ledger counts by, or a crossover card held as its
+    # other printing is reported missing and, under that name, extra.
+    held = await under_counted_names(inventory.by_name(key=str))
     missing, extra = compare(expected, held)
     in_flight = await _jobs_in_flight(_CARD_JOB_KINDS) + await _loans_in_flight()
     # Extra copies are reported but are not what makes a mismatch: the account

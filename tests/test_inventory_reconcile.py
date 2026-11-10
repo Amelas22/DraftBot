@@ -191,6 +191,22 @@ async def test_card_audit_names_what_is_missing(test_db):
     assert "3x Lightning Bolt" in inventory_reconcile.describe_cards(audit)
 
 
+async def test_a_twin_printing_is_neither_missing_nor_extra(test_db):
+    """The shelf holds a crossover card as its other printing, under the cube's
+    name; the ledger counts it under the learned one. One card, in balance."""
+    from services.card_substitution_service import learn_substitutions
+    await learn_substitutions([{"got": "Makdee and Itla, Skysnarers",
+                                "satisfies": "Spider-Woman, Stunning Savior"}], job_id="j-x")
+    await a_library("lounge", stock={"Makdee and Itla, Skysnarers": 2})
+    serve = FakeLendingServe(stock={"Makdee and Itla, Skysnarers": 1,
+                                    "Spider-Woman, Stunning Savior": 1})
+
+    audit = await inventory_reconcile.audit_library_cards(serve)
+
+    assert audit.verdict == CLEAN
+    assert audit.missing == [] and audit.extra == []
+
+
 async def test_a_moving_loan_makes_a_difference_unsettled(test_db):
     from database.db_session import AsyncSessionLocal
     from models.card_loan import CardLoan
