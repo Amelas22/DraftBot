@@ -207,6 +207,41 @@ async def test_a_twin_printing_is_neither_missing_nor_extra(test_db):
     assert audit.missing == [] and audit.extra == []
 
 
+async def test_a_twin_printing_folds_whatever_case_the_serve_spells_it_in(test_db):
+    """The serve's spelling of the cube name need not match the learned row's
+    letter for letter; it is still the one card."""
+    from services.card_substitution_service import learn_substitutions
+    await learn_substitutions([{"got": "Makdee and Itla, Skysnarers",
+                                "satisfies": "Spider-Woman, Stunning Savior"}], job_id="j-x")
+    await a_library("lounge", stock={"Makdee and Itla, Skysnarers": 1})
+    serve = FakeLendingServe(stock={"SPIDER-WOMAN, Stunning Savior ": 1})
+
+    audit = await inventory_reconcile.audit_library_cards(serve)
+
+    assert audit.verdict == CLEAN
+    assert audit.missing == [] and audit.extra == []
+
+
+async def test_a_card_out_under_another_spelling_still_nets(test_db):
+    """Owned as one donor spelled it, out as the loan did: one card, and the
+    headline counts what should be on the shelf, not what is owned."""
+    await a_library("lounge", stock={"Lightning Bolt": 2})
+    await debt_service.create_card_loan(
+        guild_id=wallet_service.library_scope("lounge"),
+        lender_id=wallet_service.HOUSE_MTGO, borrower_id="111",
+        card_name="lightning bolt", quantity=1, created_by="test")
+
+    assert await inventory_reconcile.expected_library_stock() == {"Lightning Bolt": 1}
+    audit = await inventory_reconcile.audit_library_cards(
+        FakeLendingServe(stock={"Lightning Bolt": 1}))
+    assert audit.verdict == CLEAN and audit.expected_total == 1
+
+
+def test_a_malformed_vault_reply_is_unreadable_not_an_error():
+    assert Inventory.from_vault(
+        {"available": True, "tix": 0, "top": [{"name": "Lightning Bolt", "qty": "many"}]}) is None
+
+
 async def test_a_moving_loan_makes_a_difference_unsettled(test_db):
     from database.db_session import AsyncSessionLocal
     from models.card_loan import CardLoan

@@ -227,9 +227,12 @@ class Inventory:
         """
         if not isinstance(body, dict) or body.get("available") is not True:
             return None
-        top = [(0, str(i["name"]), int(i["qty"])) for i in (body.get("top") or [])
-               if isinstance(i, dict) and "name" in i and "qty" in i]
-        return cls(consistent=False, tix=int(body.get("tix") or 0), cards=tuple(top))
+        try:
+            top = [(0, str(i["name"]), int(i["qty"])) for i in (body.get("top") or [])
+                   if isinstance(i, dict) and "name" in i and "qty" in i]
+            return cls(consistent=False, tix=int(body.get("tix") or 0), cards=tuple(top))
+        except (TypeError, ValueError):
+            return None
 
     def by_name(self, key: "Callable[[str], str]" = card_key) -> "dict[str, int]":
         """Copies per card, every printing folded together. Keyed by card_key by

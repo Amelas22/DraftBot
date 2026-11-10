@@ -186,18 +186,22 @@ async def expected_library_stock() -> "dict[str, int]":
     Owned (custody the house owes its donors) minus out (copies borrowers owe the
     house back). A card fully out on loan nets to zero and is left out.
     """
-    stock: "dict[str, int]" = {}
+    # Netted by card_key, as compare() matches: a card owned under one donor's
+    # spelling and out under another's is still one card.
+    stock: "dict[str, tuple[str, int]]" = {}
     for scope in await _library_scopes():
-        owned = await debt_service.get_cards_owed_by(scope, wallet_service.HOUSE_LIBRARY)
-        for name, qty in owned.items():
-            stock[name] = stock.get(name, 0) + qty
-        out = await debt_service._open_card_groups(
-            scope, counterparty_id=wallet_service.HOUSE_MTGO)
-        for group in out.values():
-            if group["net"] < 0:   # the borrower's side: they owe the house copies
-                name = group["card_name"]
-                stock[name] = stock.get(name, 0) + group["net"]
-    return {name: qty for name, qty in stock.items() if qty != 0}
+        # One read per scope: both sides are positions in the same rows.
+        for group in (await debt_service._open_card_groups(scope)).values():
+            owned = (group["counterparty_id"] == wallet_service.HOUSE_LIBRARY
+                     and group["net"] > 0)
+            # The borrower's side: they owe the house copies.
+            out = (group["counterparty_id"] == wallet_service.HOUSE_MTGO
+                   and group["net"] < 0)
+            if owned or out:
+                key = card_key(group["card_name"])
+                name, qty = stock.get(key, (group["card_name"], 0))
+                stock[key] = (name, qty + group["net"])
+    return {name: qty for name, qty in stock.values() if qty != 0}
 
 
 async def _jobs_in_flight(kinds: "tuple[str, ...]") -> "list[InFlight]":

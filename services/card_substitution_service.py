@@ -21,6 +21,7 @@ from sqlalchemy import select
 
 from database.db_session import AsyncSessionLocal
 from models.card_substitution import CardSubstitution
+from services.mtgo_tradebot_client import card_key
 
 
 async def learn_substitutions(reported: "Optional[list[dict[str, Any]]]",
@@ -167,12 +168,17 @@ async def under_counted_names(held: "dict[str, int]") -> "dict[str, int]":
     wrong answers at once -- the booked card is not there, and a card nobody
     booked is.
     """
-    renames = await mtgo_names_for(list(held))
+    # The whole table, matched by card_key: it holds a row per crossover card,
+    # while an account holds thousands of names, and the serve's spelling of a
+    # name need not match the cube's letter for letter.
+    async with AsyncSessionLocal() as session:
+        rows = (await session.scalars(select(CardSubstitution))).all()
+    renames = {card_key(str(r.cube_name)): str(r.mtgo_name) for r in rows}
     if not renames:
         return held
     out: "dict[str, int]" = {}
     for name, qty in held.items():
-        counted = renames.get(name, name)
+        counted = renames.get(card_key(name), name)
         out[counted] = out.get(counted, 0) + qty
     return out
 
