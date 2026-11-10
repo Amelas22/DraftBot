@@ -21,6 +21,7 @@ from sqlalchemy import select
 
 from database.db_session import AsyncSessionLocal
 from models.card_substitution import CardSubstitution
+from services.mtgo_tradebot_client import card_key
 
 
 async def learn_substitutions(reported: "Optional[list[dict[str, Any]]]",
@@ -156,6 +157,30 @@ async def mtgo_names_for(cube_names: "list[str]") -> "dict[str, str]":
             select(CardSubstitution).where(
                 CardSubstitution.cube_name.in_(wanted)))).all()
     return {str(r.cube_name): str(r.mtgo_name) for r in rows}
+
+
+async def under_counted_names(held: "dict[str, int]") -> "dict[str, int]":
+    """What an account holds, each card under the name custody counts it by.
+
+    The account can hold a crossover card as its other printing, the one MTGO
+    lists under the cube's name: booked_names books that copy as the learned
+    name, but it sits on the shelf under its own. Read name for name it is two
+    wrong answers at once -- the booked card is not there, and a card nobody
+    booked is.
+    """
+    # The whole table, matched by card_key: it holds a row per crossover card,
+    # while an account holds thousands of names, and the serve's spelling of a
+    # name need not match the cube's letter for letter.
+    async with AsyncSessionLocal() as session:
+        rows = (await session.scalars(select(CardSubstitution))).all()
+    renames = {card_key(str(r.cube_name)): str(r.mtgo_name) for r in rows}
+    if not renames:
+        return held
+    out: "dict[str, int]" = {}
+    for name, qty in held.items():
+        counted = renames.get(card_key(name), name)
+        out[counted] = out.get(counted, 0) + qty
+    return out
 
 
 async def to_mtgo_names(cards: "list[dict[str, Any]]") -> "list[dict[str, Any]]":

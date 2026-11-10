@@ -123,15 +123,74 @@ async def test_a_short_library_reports_how_short_per_card(test_db, monkeypatch):
 async def test_a_card_the_vault_never_lists_is_not_assumed_missing(test_db, monkeypatch):
     """The two absences read opposite ways round, and this is the vault one.
 
-    /vault truncates its listing, so a card missing from it is unknown rather
-    than gone -- refusing on unknown would block legitimate borrows, and the
-    trade itself will say so if we are wrong. A card missing from the LEDGER
-    is the other case entirely: nobody gave this library that card, and lending
-    it would be spending another library's stock. So this card is entitled in
-    the ledger (see the fixture) and simply not listed by the vault."""
-    monkeypatch.setattr(svc, "get_lending_client", lambda: FakeLendingServe({"Swamp": 24}))
+    On a serve without /inventory, /vault truncates its listing, so a card
+    missing from it is unknown rather than gone -- refusing on unknown would
+    block legitimate borrows, and the trade itself will say so if we are wrong.
+    A card missing from the LEDGER is the other case entirely: nobody gave this
+    library that card, and lending it would be spending another library's
+    stock. So this card is entitled in the ledger (see the fixture) and simply
+    not listed by the vault."""
+    monkeypatch.setattr(svc, "get_lending_client",
+                        lambda: FakeLendingServe({"Swamp": 24}, inventory_route=False))
     short = await svc.shortfall(GUILD, [{"name": "Some Hidden Card", "qty": 1}])
     assert short == []
+
+
+async def test_a_card_the_full_inventory_does_not_list_is_missing(test_db, monkeypatch):
+    """/inventory lists the whole account, so there an unlisted card is a card
+    the shelf holds none of -- entitled in the ledger or not."""
+    monkeypatch.setattr(svc, "get_lending_client", lambda: FakeLendingServe({"Swamp": 24}))
+    short = await svc.shortfall(GUILD, [{"name": "Some Hidden Card", "qty": 1}])
+    assert short == [{"name": "Some Hidden Card", "want": 1, "have": 0}]
+
+
+async def _crossover(cube_name, mtgo_name):
+    """Teach the library that MTGO calls `cube_name` `mtgo_name`, and give it one."""
+    from services import debt_service, wallet_service
+    from services.card_substitution_service import learn_substitutions
+    await learn_substitutions([{"got": mtgo_name, "satisfies": cube_name}], job_id="j-x")
+    await debt_service.create_card_loan(
+        guild_id=wallet_service.library_scope(LIB), lender_id="donor",
+        borrower_id=wallet_service.HOUSE_LIBRARY, card_name=mtgo_name,
+        quantity=2, created_by="test", source_id=f"seed-{mtgo_name}")
+
+
+async def test_a_twin_printing_on_the_shelf_is_the_card_it_is_booked_as(test_db, monkeypatch):
+    """A crossover card has two MTGO printings, one under each name, and a
+    partner may hand over either. Custody is booked under the learned name
+    whichever crossed, so the full inventory can list the copy under the other
+    one -- and a complete listing that does not name the card would otherwise
+    read as the shelf holding none of it."""
+    await _crossover("Spider-Woman, Stunning Savior", "Makdee and Itla, Skysnarers")
+    monkeypatch.setattr(svc, "get_lending_client", lambda: FakeLendingServe(
+        {"Spider-Woman, Stunning Savior": 1}))
+
+    short = await svc.shortfall(GUILD, [{"name": "Makdee and Itla, Skysnarers", "qty": 1}])
+
+    assert short == []
+
+
+async def test_both_printings_of_a_crossover_card_are_one_stack(test_db, monkeypatch):
+    await _crossover("Spider-Woman, Stunning Savior", "Makdee and Itla, Skysnarers")
+    monkeypatch.setattr(svc, "get_lending_client", lambda: FakeLendingServe(
+        {"Spider-Woman, Stunning Savior": 1, "Makdee and Itla, Skysnarers": 1}))
+
+    available = await svc.lendable_now(LIB)
+
+    assert available["Makdee and Itla, Skysnarers"] == 2
+
+
+async def test_a_promised_twin_printing_is_not_offered_twice(test_db, monkeypatch):
+    """The promise is spelled as the loan is, under the learned name; the copy
+    it holds back is listed under the other one."""
+    await _crossover("Spider-Woman, Stunning Savior", "Makdee and Itla, Skysnarers")
+    await _loan("p1", "out_pending", [{"name": "Makdee and Itla, Skysnarers", "qty": 1}])
+    monkeypatch.setattr(svc, "get_lending_client", lambda: FakeLendingServe(
+        {"Spider-Woman, Stunning Savior": 1}))
+
+    short = await svc.shortfall(GUILD, [{"name": "Makdee and Itla, Skysnarers", "qty": 1}])
+
+    assert short == [{"name": "Makdee and Itla, Skysnarers", "want": 1, "have": 0}]
 
 
 async def test_taking_what_there_is_returns_the_offer(test_db, monkeypatch):

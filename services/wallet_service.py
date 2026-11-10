@@ -27,8 +27,9 @@ holder (see SYSTEM_IN_FLIGHT). While the trade is open those tix belong to that 
 so they're unspendable by the player without any special-casing in the balance query.
 Success books the boundary debit against in-flight; failure transfers them back.
 
-Reconciliation: ``reconcile()`` asserts vault tix == SUM over the *tix* wallet rows
-(other assets have no vault).
+Reconciliation: ``reconcile()`` asserts a tix figure == SUM over the *tix* wallet rows
+(other assets have no vault). services/inventory_reconcile.audit_tix is that check made
+against the custodian's own count, with the guard that says when a reading can be trusted.
 """
 import asyncio
 import uuid
@@ -98,7 +99,6 @@ def library_scope(library_id) -> str:
     if library_id is None or not str(library_id).strip():
         raise ValueError("A card movement must name its library")
     return f"{LIBRARY_SCOPE}:{library_id}"
-
 
 
 def prize_wallet_id(tournament_id) -> str:
