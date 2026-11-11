@@ -94,6 +94,20 @@ class CardLoan(Base):
     # the watchdog polls every ten minutes and without this it would ask every
     # ten minutes.
     last_reminded_at = Column(DateTime, nullable=True)
+    # How many return reminders actually landed. NULL means none counted, which
+    # is also every loan from before the count existed. Counted rather than
+    # derived from last_reminded_at because one timestamp cannot tell a single
+    # ask from a day of them, and that difference is what makes a deck overdue.
+    reminders_sent = Column(Integer, nullable=True)
+    # How many return reminders in a row did NOT land, since the last one that
+    # did. NULL or 0 means the borrower is reachable as far as we know. A run
+    # of these is a borrower with closed DMs, who can never be "asked twice"
+    # and is exactly who the moderators need to hear about.
+    reminders_failed = Column(Integer, nullable=True)
+    # When the moderators were told this deck is overdue (library_reminders.
+    # post_overdue_decks). NULL means not told; stamped only after the post
+    # landed, so a failed post is retried and a delivered one is never repeated.
+    overdue_posted_at = Column(DateTime, nullable=True)
     # When a deck asked for after its draft (draft_deck_assignment.
     # assign_on_request) staked its claim on the shelf. NULL for a deck handed
     # out with its draft, which carries the draft's own reservation forward from

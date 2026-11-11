@@ -660,7 +660,8 @@ async def expire_stale_assignments(now: Optional[datetime] = None) -> int:
     Asked per BORROWER, not per draft. Retracting the whole pod on its first
     reported result took the deck away from players who still had matches to
     play with it, and left them unable to borrow at all. It is the same rule
-    assignment mints by and reminder_due chases by, read from the third side.
+    assignment mints by, read from the other side. (reminder_due chases by it
+    too, and also by HOLD_LIMIT, which has no bearing on an uncollected offer.)
 
     Only 'assigned' is retracted. A collected deck really is out, and expiring
     it would abandon the claim on cards somebody is holding.
@@ -1206,6 +1207,14 @@ async def lending_jobs_watchdog(bot: Any = None, interval_s: float = RESCAN_INTE
             await send_due_reminders()
         except Exception:
             logger.exception("Card-library return-reminder scan failed")
+        try:
+            # Decks out a day and asked for more than once go to the moderators.
+            # After the reminders, so an ask sent this tick counts this tick.
+            if bot is not None:
+                from services.library_reminders import post_overdue_decks
+                await post_overdue_decks(bot)
+        except Exception:
+            logger.exception("Card-library overdue-deck scan failed")
         try:
             # Draft-chat library panels that missed their switch to return mode
             # or lost their message, e.g. to a restart between the decision and

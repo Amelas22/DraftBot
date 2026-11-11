@@ -16,8 +16,8 @@ Not the return record, which sounds more apt and is not usable: measured on
 no default history to price. The one signal that looks like misbehaviour is the
 reminder, and 17 of those 23 loans had one -- because the first reminder then
 fired an hour after the draft and the median deck was back in two. It now fires
-as soon as the borrower has finished playing (library_reminders.reminder_due),
-so nearly every loan will carry one. Rating on returns would mark the library's
+as soon as the borrower has finished playing, or has held the deck three hours
+(library_reminders.reminder_due), so nearly every loan will carry one. Rating on returns would mark the library's
 best borrowers untrustworthy.
 """
 from typing import Any, Optional

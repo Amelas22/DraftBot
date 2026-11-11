@@ -33,6 +33,13 @@ from loguru import logger
 # lands up to ten minutes after it falls due.
 REPEAT_AFTER = timedelta(hours=1)
 
+# How long a borrower may hold a deck before being asked for it whatever their
+# draft is doing. A deck is borrowed to play a match, not kept for the life of
+# a draft: a match left unplayed or unreported overnight otherwise keeps the
+# cards out, unasked-for, until somebody reports it. Past this the borrower is
+# asked to hand it back and borrow it again when they next need it.
+HOLD_LIMIT = timedelta(hours=3)
+
 # How long a deck offer stays good after the draft ends. The drafter's matches
 # start when the draft does, so an hour is room to collect and play; past it they
 # have shown they do not need the deck, and the offer is retracted -- for good,
@@ -47,6 +54,15 @@ OFFER_WINDOW = timedelta(hours=1)
 # Requests stop, and a requested deck is asked back, this long before the
 # draft's rooms are deleted (DraftState.chat_closes_at).
 CHAT_CLOSING = timedelta(minutes=30)
+
+# When a deck still out becomes the moderators' business. Both must hold: out
+# this long since it was collected, AND asked for more than once -- a deck kept
+# for a long draft that has only just been asked for is not yet anybody's
+# problem, and one DM can simply be missed. A borrower whose DMs do not land
+# can never be asked twice, so the same number of failed asks in a row counts
+# too: that deck is no less out, and the borrower does not know we want it.
+OVERDUE_AFTER = timedelta(hours=24)
+OVERDUE_MIN_REMINDERS = 2
 
 # The one state with anything to give back. An 'assigned' loan is an offer
 # nobody collected, which expire_stale_assignments retracts on its own, and the
@@ -81,6 +97,14 @@ def session_of(loan: Any) -> Optional[str]:
     return source[len(_DRAFT_SOURCE_PREFIX):] or None
 
 
+def held_too_long(loan: Any, now: Optional[datetime] = None) -> bool:
+    """Has this deck been out longer than HOLD_LIMIT since it was collected?"""
+    borrowed_at = getattr(loan, "borrowed_at", None)
+    if borrowed_at is None:
+        return False
+    return (now or datetime.now()) - borrowed_at > HOLD_LIMIT
+
+
 def reminder_due(loan: Any, *, done_playing: bool, draft_settled: bool,
                  played_since_ask: bool = False,
                  now: Optional[datetime] = None) -> bool:
@@ -100,8 +124,9 @@ def reminder_due(loan: Any, *, done_playing: bool, draft_settled: bool,
     four matches still unreported, and the cards should come back then. Whoever
     wants to play a dead rubber anyway can borrow again; holding a sponsor's
     cards against matches that no longer change anything is the wrong default.
-    A borrower whose own draft is still live is never asked -- there the cards
-    are how they play the rest of it.
+    A borrower whose own draft is still live is left alone for HOLD_LIMIT --
+    there the cards are how they play the rest of it -- and asked after that
+    regardless (held_too_long): they can return the deck and borrow it again.
 
     Then once per REPEAT_AFTER, which is the whole reason
     last_reminded_at exists: the watchdog re-evaluates every ten minutes and a
@@ -111,7 +136,7 @@ def reminder_due(loan: Any, *, done_playing: bool, draft_settled: bool,
         return False
     if session_of(loan) is None:
         return False
-    if not (done_playing or draft_settled):
+    if not (done_playing or draft_settled or held_too_long(loan, now)):
         return False
     if loan.last_reminded_at is None:
         return True
@@ -158,7 +183,8 @@ def deck_ready_message(cards: Any, collateral: int, *,
 
 
 def return_message(loan: Any, decided: bool = False,
-                   cards: Any = None, *, holding_for: Optional[str] = None) -> str:
+                   cards: Any = None, *, holding_for: Optional[str] = None,
+                   overstayed: bool = False, may_reborrow: bool = False) -> str:
     """The ask. Says what it is for, because a borrower who has finished a draft
     has no other reason to think about the cards again.
 
@@ -172,14 +198,24 @@ def return_message(loan: Any, decided: bool = False,
     they borrowed only some of it. Without it the loan's list is the best
     available description.
     """
-    lead = "Your draft is decided. " if decided else ""
+    # `overstayed` is the ask made only because of HOLD_LIMIT, to somebody
+    # who may still have a match to play, so it says why. `may_reborrow` adds
+    # that the deck is theirs to borrow again -- without it the ask reads as
+    # the library taking away cards they still need -- and is the caller's to
+    # decide, because it is a promise: it must be one a request would honour.
+    hours = int(HOLD_LIMIT.total_seconds() // 3600)
+    lead = ("Your draft is decided. " if decided else
+            f"You have had this deck for more than {hours} hours. " if overstayed
+            else "")
+    again = (" You can borrow it again when you need it for a match."
+             if may_reborrow else "")
     summary = deck_summary(cards if cards else loan.cards)
     what = (f"the deck you're holding for **{holding_for}**" if holding_for
             else "your borrowed deck")
     return (f"{lead}📦 Please return {what} — **{summary}**.\n"
             "Press **Return my deck** below, or run `/library return` in the "
             "server, and the library will collect it; the hold comes back with it.\n"
-            "Other drafters are waiting on those cards.")
+            f"Other drafters are waiting on those cards.{again}")
 
 
 async def name_in_draft(session_id: Any, player_id: Any) -> str:
@@ -224,6 +260,40 @@ async def _stamp(loan_id: Any, field: str, at: datetime) -> None:
         row = await session.get(CardLoan, loan_id)
         if row is not None:
             setattr(row, field, at)
+            await session.commit()
+
+
+async def _count_reminder(loan_id: Any, at: datetime) -> None:
+    """Record a delivered return reminder: when, and one more on the count.
+
+    One write for both, so the count can never run ahead of the timestamp that
+    paces the asks.
+    """
+    from database.db_session import db_session
+    from models.card_loan import CardLoan
+
+    async with db_session() as session:
+        row = await session.get(CardLoan, loan_id)
+        if row is not None:
+            row.last_reminded_at = at
+            row.reminders_sent = (row.reminders_sent or 0) + 1
+            row.reminders_failed = 0
+            await session.commit()
+
+
+async def _count_failed_reminder(loan_id: Any) -> None:
+    """Record a return reminder that did not land.
+
+    Leaves last_reminded_at alone, so the ask is retried next tick -- which is
+    why this is a run length, reset by the next delivery, and not a total.
+    """
+    from database.db_session import db_session
+    from models.card_loan import CardLoan
+
+    async with db_session() as session:
+        row = await session.get(CardLoan, loan_id)
+        if row is not None:
+            row.reminders_failed = (row.reminders_failed or 0) + 1
             await session.commit()
 
 
@@ -320,7 +390,7 @@ async def send_due_reminders(now: Optional[datetime] = None) -> int:
     # map is cached rather than a per-borrower answer, so one entry serves every
     # borrower in that pod.
     verdicts: "dict[str, DraftState]" = {}
-    due: "list[tuple[Any, bool]]" = []
+    due: "list[tuple[Any, bool, bool, bool]]" = []
     for loan in loans:
         session_id = session_of(loan)
         if session_id is None:
@@ -343,13 +413,19 @@ async def send_due_reminders(now: Optional[datetime] = None) -> int:
         decided = state.chat_closing(at) if loan.claimed_at is not None else state.settled
         if reminder_due(loan, done_playing=done_playing, draft_settled=decided,
                         played_since_ask=played_since_ask, now=at):
-            due.append((loan, decided))
+            overstayed = not (done_playing or decided)
+            # Only promised where a request would be honoured: their own deck,
+            # in a draft whose chat is still open to ask in. A sub's turn ends
+            # when they hand the deck back, so there is nothing to re-borrow.
+            may_reborrow = (overstayed and loan.on_behalf_of is None
+                            and may_still_request(state, whose, at) is None)
+            due.append((loan, decided, overstayed, may_reborrow))
 
     from library_views.dm_view import dm_view
     from services.card_lending_service import held_cards
 
     asked = 0
-    for loan, decided in due:
+    for loan, decided, overstayed, may_reborrow in due:
         # Re-read immediately before sending. The list was decided up front and
         # every DM is a network round trip, so a borrower can hand their deck
         # back while an earlier one is still in flight -- and asking them then
@@ -360,13 +436,195 @@ async def send_due_reminders(now: Optional[datetime] = None) -> int:
         holding_for = (await name_in_draft(session_of(loan), loan.on_behalf_of)
                        if loan.on_behalf_of else None)
         if await _dm(loan, return_message(loan, decided, cards=held,
-                                          holding_for=holding_for),
+                                          holding_for=holding_for,
+                                          overstayed=overstayed,
+                                          may_reborrow=may_reborrow),
                      "return reminder", view=dm_view("return")):
-            await _stamp(loan.id, "last_reminded_at", at)
+            await _count_reminder(loan.id, at)
             asked += 1
+        else:
+            await _count_failed_reminder(loan.id)
     if asked:
         logger.info("library reminders: asked {} borrower(s) to return a deck", asked)
     return asked
+
+
+def overdue(loan: Any, now: datetime) -> bool:
+    """Has this deck been out long enough, and asked for often enough, that the
+    moderators should hear about it -- and have they not heard yet?
+
+    Measured from when it was collected, not from when it fell due: "out for a
+    day" is a fact about the cards, and it is the one a moderator can check.
+    """
+    if loan.state != RETURNABLE_STATE or loan.overdue_posted_at is not None:
+        return False
+    if loan.borrowed_at is None:
+        return False
+    if (loan.reminders_sent or 0) < OVERDUE_MIN_REMINDERS and not dms_failing(loan):
+        return False
+    return now - loan.borrowed_at > OVERDUE_AFTER
+
+
+def dms_failing(loan: Any) -> bool:
+    """Are this borrower's reminders not getting through right now?"""
+    return (loan.reminders_failed or 0) >= OVERDUE_MIN_REMINDERS
+
+
+def overdue_line(loan: Any, cards: Any, now: datetime,
+                 holding_for: Optional[str] = None) -> str:
+    """One overdue deck, as the moderators need it: who, what, how long, how
+    many DMs reached them, and whether DMs have stopped getting through."""
+    hours = int((now - loan.borrowed_at).total_seconds() // 3600)
+    whose = f" (holding **{holding_for}**'s deck)" if holding_for else ""
+    sent = loan.reminders_sent or 0
+    failing = " — **DMs are failing**" if dms_failing(loan) else ""
+    return (f"• <@{loan.borrower_id}>{whose} — {deck_summary(cards)}, "
+            f"out {hours} hours, {sent} DM{'' if sent == 1 else 's'} sent{failing}")
+
+
+_OVERDUE_HEADER = (f"📚 **Library decks out for more than "
+                   f"{int(OVERDUE_AFTER.total_seconds() // 3600)} hours**\n"
+                   "Each borrower below still holds the deck after repeated "
+                   "DMs asking for it back.")
+
+# Discord refuses a message over 2000 characters; a refused post would be
+# retried every tick and never land. Leave room for the header.
+_POST_LIMIT = 1800
+
+_warned_no_mod_channel: "set[str]" = set()
+
+
+def _mod_channel(bot: Any, guild_id: str) -> Any:
+    """The guild's moderator channel, or None when it has none.
+
+    The same channel the activity sweep reports to (activity_tracking.
+    mod_chat_channel), read whether or not that sweep is enabled: it is the one
+    place a guild has already named as where its moderators read the bot.
+    """
+    import discord
+
+    from config import get_config
+
+    guild = bot.get_guild(int(guild_id)) if str(guild_id).isdigit() else None
+    if guild is None:
+        return None
+    name = get_config(str(guild_id)).get("activity_tracking", {}).get(
+        "mod_chat_channel", "mod-chat")
+    channel = discord.utils.get(guild.text_channels, name=name)
+    if channel is None and str(guild_id) not in _warned_no_mod_channel:
+        # Once per process: the watchdog asks every ten minutes.
+        _warned_no_mod_channel.add(str(guild_id))
+        logger.warning("library reminders: guild {} has no #{} channel, so "
+                       "overdue decks are not being reported", guild_id, name)
+    return channel
+
+
+async def post_overdue_decks(bot: Any, now: Optional[datetime] = None) -> int:
+    """Tell each guild's moderators about decks that have become overdue.
+    Returns how many decks were reported.
+
+    Once per loan: overdue_posted_at is stamped only after the post lands, so a
+    Discord failure is retried next tick and a delivered notice never repeats.
+    Called from the lending watchdog, so it must never raise.
+    """
+    from sqlalchemy import or_, select
+
+    from database.db_session import db_session
+    from models.card_loan import CardLoan
+    from services.card_lending_service import held_cards
+
+    at = now or datetime.now()
+    async with db_session() as session:
+        loans = list((await session.scalars(
+            select(CardLoan).where(
+                CardLoan.state == RETURNABLE_STATE,
+                CardLoan.overdue_posted_at.is_(None),
+                or_(CardLoan.reminders_sent >= OVERDUE_MIN_REMINDERS,
+                    CardLoan.reminders_failed >= OVERDUE_MIN_REMINDERS),
+            ).order_by(CardLoan.borrowed_at))).all())
+
+    by_guild: "dict[str, list[Any]]" = {}
+    for loan in loans:
+        if overdue(loan, at):
+            by_guild.setdefault(str(loan.guild_id), []).append(loan)
+
+    reported = 0
+    for guild_id, due in by_guild.items():
+        channel = _mod_channel(bot, guild_id)
+        if channel is None:
+            continue
+        entries: "list[tuple[Any, str]]" = []
+        for loan in due:
+            # Re-read before listing it, for the reason send_due_reminders
+            # does: the list was decided up front, and a deck handed back since
+            # must not be reported as still out.
+            if not await _still_out(loan.id):
+                continue
+            try:
+                held = await held_cards(loan)
+                holding_for = (await name_in_draft(session_of(loan), loan.on_behalf_of)
+                               if loan.on_behalf_of else None)
+            except Exception:
+                # One loan that cannot be described must not cost every other
+                # deck, in every guild, its notice.
+                logger.opt(exception=True).warning(
+                    "library reminders: could not describe overdue loan {}; "
+                    "leaving it for the next tick", loan.id)
+                continue
+            entries.append((loan, overdue_line(
+                loan, held if held else loan.cards, at, holding_for)))
+        for post in _posts(entries):
+            reported += await _post_overdue(channel, post, at)
+    if reported:
+        logger.info("library reminders: reported {} overdue deck(s) to moderators",
+                    reported)
+    return reported
+
+
+def _posts(entries: "list[tuple[Any, str]]") -> "list[list[tuple[Any, str]]]":
+    """Split (loan, line) pairs into posts that each fit under _POST_LIMIT."""
+    posts: "list[list[tuple[Any, str]]]" = []
+    size = 0
+    for entry in entries:
+        length = len(entry[1]) + 1
+        if not posts or size + length > _POST_LIMIT:
+            posts.append([])
+            size = 0
+        posts[-1].append(entry)
+        size += length
+    return posts
+
+
+async def _post_overdue(channel: Any, post: "list[tuple[Any, str]]",
+                        at: datetime) -> int:
+    """Send one notice and stamp the loans on it. How many were reported."""
+    import discord
+
+    loans = [loan for loan, _ in post]
+    lines = [line for _, line in post]
+    try:
+        # Mentions name the borrower without pinging them: this is a note for
+        # the moderators, and the borrower has had their own DMs.
+        await channel.send(_OVERDUE_HEADER + "\n" + "\n".join(lines),
+                           allowed_mentions=discord.AllowedMentions.none())
+    except discord.Forbidden:
+        # Stays owed, like a missing channel, and is said once for the same
+        # reason: the watchdog asks every ten minutes.
+        key = f"forbidden:{getattr(channel, 'id', id(channel))}"
+        if key not in _warned_no_mod_channel:
+            _warned_no_mod_channel.add(key)
+            logger.warning("library reminders: not allowed to post in #{}, so "
+                           "overdue decks are not being reported",
+                           getattr(channel, "name", "?"))
+        return 0
+    except discord.HTTPException:
+        logger.opt(exception=True).warning(
+            "library reminders: could not post {} overdue deck(s); retrying "
+            "next tick", len(loans))
+        return 0
+    for loan in loans:
+        await _stamp(loan.id, "overdue_posted_at", at)
+    return len(loans)
 
 
 async def _still_out(loan_id: Any) -> bool:
