@@ -1006,3 +1006,52 @@ async def test_the_notice_says_when_dms_are_failing(test_db):
     unreachable, went_quiet = channel.posts[0][0].splitlines()[-2:]
     assert "<@p1>" in unreachable and "0 DMs sent — **DMs are failing**" in unreachable
     assert "<@p2>" in went_quiet and "4 DMs sent — **DMs are failing**" in went_quiet
+
+
+# ---- a deck held past the limit is asked for whatever the draft is doing ----
+
+def _held(hours, **over):
+    return SimpleNamespace(id=1, borrower_id="p1", guild_id="g1",
+                           state=over.get("state", "borrowed"), source="draft:s1",
+                           last_reminded_at=over.get("last_reminded_at"),
+                           borrowed_at=NOW - timedelta(hours=hours),
+                           cards=[{"name": "Swamp", "qty": 4}])
+
+
+def test_a_deck_held_past_the_limit_is_asked_for_mid_draft():
+    assert reminder_due(_held(4), done_playing=False, draft_settled=False, now=NOW)
+
+
+def test_a_deck_inside_the_limit_is_left_alone_mid_draft():
+    assert not reminder_due(_held(2), done_playing=False, draft_settled=False, now=NOW)
+    assert not reminder_due(_held(3), done_playing=False, draft_settled=False, now=NOW)
+
+
+def test_a_deck_held_past_the_limit_is_still_asked_only_hourly():
+    asked = _held(5, last_reminded_at=NOW - timedelta(minutes=20))
+    assert not reminder_due(asked, done_playing=False, draft_settled=False, now=NOW)
+
+
+def test_the_ask_for_an_overstayed_deck_says_why_and_that_it_can_be_borrowed_again():
+    msg = return_message(_held(4), overstayed=True)
+    assert msg.startswith("You have had this deck for more than 3 hours.")
+    assert "borrow it again" in msg
+
+
+def test_the_ordinary_ask_does_not_offer_a_reborrow():
+    assert "borrow it again" not in return_message(_held(4))
+    assert "borrow it again" not in return_message(_held(4), decided=True,
+                                                   overstayed=True)
+
+
+@pytest.mark.asyncio
+async def test_the_watchdog_asks_for_a_deck_held_past_the_limit_mid_draft(test_db, dm):
+    """An unreported match used to keep the cards out, unasked-for, overnight."""
+    await seed_session("s1", stype="random", stage="pairings",
+                       matches=[("p1", "p2", None, None)])
+    early = await _a_loan(borrowed_at=NOW - timedelta(hours=2))
+    assert await mod.send_due_reminders(now=NOW) == 0
+
+    assert await mod.send_due_reminders(now=NOW + timedelta(hours=2)) == 1
+    assert dm.sent[0][1].startswith("You have had this deck for more than 3 hours.")
+    assert (await _stamps(early))[1] == NOW + timedelta(hours=2)

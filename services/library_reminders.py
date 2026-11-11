@@ -33,6 +33,13 @@ from loguru import logger
 # lands up to ten minutes after it falls due.
 REPEAT_AFTER = timedelta(hours=1)
 
+# How long a borrower may hold a deck before being asked for it whatever their
+# draft is doing. A deck is borrowed to play a match, not kept for the life of
+# a draft: a match left unplayed or unreported overnight otherwise keeps the
+# cards out, unasked-for, until somebody reports it. Past this the borrower is
+# asked to hand it back and borrow it again when they next need it.
+HOLD_LIMIT = timedelta(hours=3)
+
 # How long a deck offer stays good after the draft ends. The drafter's matches
 # start when the draft does, so an hour is room to collect and play; past it they
 # have shown they do not need the deck, and the offer is retracted -- for good,
@@ -90,6 +97,14 @@ def session_of(loan: Any) -> Optional[str]:
     return source[len(_DRAFT_SOURCE_PREFIX):] or None
 
 
+def held_too_long(loan: Any, now: Optional[datetime] = None) -> bool:
+    """Has this deck been out longer than HOLD_LIMIT since it was collected?"""
+    borrowed_at = getattr(loan, "borrowed_at", None)
+    if borrowed_at is None:
+        return False
+    return (now or datetime.now()) - borrowed_at > HOLD_LIMIT
+
+
 def reminder_due(loan: Any, *, done_playing: bool, draft_settled: bool,
                  played_since_ask: bool = False,
                  now: Optional[datetime] = None) -> bool:
@@ -109,8 +124,9 @@ def reminder_due(loan: Any, *, done_playing: bool, draft_settled: bool,
     four matches still unreported, and the cards should come back then. Whoever
     wants to play a dead rubber anyway can borrow again; holding a sponsor's
     cards against matches that no longer change anything is the wrong default.
-    A borrower whose own draft is still live is never asked -- there the cards
-    are how they play the rest of it.
+    A borrower whose own draft is still live is left alone for HOLD_LIMIT --
+    there the cards are how they play the rest of it -- and asked after that
+    regardless (held_too_long): they can return the deck and borrow it again.
 
     Then once per REPEAT_AFTER, which is the whole reason
     last_reminded_at exists: the watchdog re-evaluates every ten minutes and a
@@ -120,7 +136,7 @@ def reminder_due(loan: Any, *, done_playing: bool, draft_settled: bool,
         return False
     if session_of(loan) is None:
         return False
-    if not (done_playing or draft_settled):
+    if not (done_playing or draft_settled or held_too_long(loan, now)):
         return False
     if loan.last_reminded_at is None:
         return True
@@ -167,7 +183,8 @@ def deck_ready_message(cards: Any, collateral: int, *,
 
 
 def return_message(loan: Any, decided: bool = False,
-                   cards: Any = None, *, holding_for: Optional[str] = None) -> str:
+                   cards: Any = None, *, holding_for: Optional[str] = None,
+                   overstayed: bool = False) -> str:
     """The ask. Says what it is for, because a borrower who has finished a draft
     has no other reason to think about the cards again.
 
@@ -181,14 +198,23 @@ def return_message(loan: Any, decided: bool = False,
     they borrowed only some of it. Without it the loan's list is the best
     available description.
     """
-    lead = "Your draft is decided. " if decided else ""
+    # `overstayed` is the ask made only because of HOLD_LIMIT, to somebody
+    # who may still have a match to play. It says why, and that the deck is
+    # theirs to borrow again -- without that it reads as the library taking
+    # away cards they still need.
+    hours = int(HOLD_LIMIT.total_seconds() // 3600)
+    lead = ("Your draft is decided. " if decided else
+            f"You have had this deck for more than {hours} hours. " if overstayed
+            else "")
+    again = (" You can borrow it again when you need it for a match."
+             if overstayed and not decided else "")
     summary = deck_summary(cards if cards else loan.cards)
     what = (f"the deck you're holding for **{holding_for}**" if holding_for
             else "your borrowed deck")
     return (f"{lead}📦 Please return {what} — **{summary}**.\n"
             "Press **Return my deck** below, or run `/library return` in the "
             "server, and the library will collect it; the hold comes back with it.\n"
-            "Other drafters are waiting on those cards.")
+            f"Other drafters are waiting on those cards.{again}")
 
 
 async def name_in_draft(session_id: Any, player_id: Any) -> str:
@@ -363,7 +389,7 @@ async def send_due_reminders(now: Optional[datetime] = None) -> int:
     # map is cached rather than a per-borrower answer, so one entry serves every
     # borrower in that pod.
     verdicts: "dict[str, DraftState]" = {}
-    due: "list[tuple[Any, bool]]" = []
+    due: "list[tuple[Any, bool, bool]]" = []
     for loan in loans:
         session_id = session_of(loan)
         if session_id is None:
@@ -386,13 +412,14 @@ async def send_due_reminders(now: Optional[datetime] = None) -> int:
         decided = state.chat_closing(at) if loan.claimed_at is not None else state.settled
         if reminder_due(loan, done_playing=done_playing, draft_settled=decided,
                         played_since_ask=played_since_ask, now=at):
-            due.append((loan, decided))
+            overstayed = not (done_playing or decided)
+            due.append((loan, decided, overstayed))
 
     from library_views.dm_view import dm_view
     from services.card_lending_service import held_cards
 
     asked = 0
-    for loan, decided in due:
+    for loan, decided, overstayed in due:
         # Re-read immediately before sending. The list was decided up front and
         # every DM is a network round trip, so a borrower can hand their deck
         # back while an earlier one is still in flight -- and asking them then
@@ -403,7 +430,8 @@ async def send_due_reminders(now: Optional[datetime] = None) -> int:
         holding_for = (await name_in_draft(session_of(loan), loan.on_behalf_of)
                        if loan.on_behalf_of else None)
         if await _dm(loan, return_message(loan, decided, cards=held,
-                                          holding_for=holding_for),
+                                          holding_for=holding_for,
+                                          overstayed=overstayed),
                      "return reminder", view=dm_view("return")):
             await _count_reminder(loan.id, at)
             asked += 1
