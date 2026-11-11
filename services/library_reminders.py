@@ -51,7 +51,9 @@ CHAT_CLOSING = timedelta(minutes=30)
 # When a deck still out becomes the moderators' business. Both must hold: out
 # this long since it was collected, AND asked for more than once -- a deck kept
 # for a long draft that has only just been asked for is not yet anybody's
-# problem, and one DM can simply be missed.
+# problem, and one DM can simply be missed. A borrower whose DMs do not land
+# can never be asked twice, so the same number of failed asks in a row counts
+# too: that deck is no less out, and the borrower does not know we want it.
 OVERDUE_AFTER = timedelta(hours=24)
 OVERDUE_MIN_REMINDERS = 2
 
@@ -248,6 +250,23 @@ async def _count_reminder(loan_id: Any, at: datetime) -> None:
         if row is not None:
             row.last_reminded_at = at
             row.reminders_sent = (row.reminders_sent or 0) + 1
+            row.reminders_failed = 0
+            await session.commit()
+
+
+async def _count_failed_reminder(loan_id: Any) -> None:
+    """Record a return reminder that did not land.
+
+    Leaves last_reminded_at alone, so the ask is retried next tick -- which is
+    why this is a run length, reset by the next delivery, and not a total.
+    """
+    from database.db_session import db_session
+    from models.card_loan import CardLoan
+
+    async with db_session() as session:
+        row = await session.get(CardLoan, loan_id)
+        if row is not None:
+            row.reminders_failed = (row.reminders_failed or 0) + 1
             await session.commit()
 
 
@@ -388,6 +407,8 @@ async def send_due_reminders(now: Optional[datetime] = None) -> int:
                      "return reminder", view=dm_view("return")):
             await _count_reminder(loan.id, at)
             asked += 1
+        else:
+            await _count_failed_reminder(loan.id)
     if asked:
         logger.info("library reminders: asked {} borrower(s) to return a deck", asked)
     return asked
@@ -404,25 +425,32 @@ def overdue(loan: Any, now: datetime) -> bool:
         return False
     if loan.borrowed_at is None:
         return False
-    if (loan.reminders_sent or 0) < OVERDUE_MIN_REMINDERS:
+    if (loan.reminders_sent or 0) < OVERDUE_MIN_REMINDERS and not dms_failing(loan):
         return False
     return now - loan.borrowed_at > OVERDUE_AFTER
 
 
+def dms_failing(loan: Any) -> bool:
+    """Are this borrower's reminders not getting through right now?"""
+    return (loan.reminders_failed or 0) >= OVERDUE_MIN_REMINDERS
+
+
 def overdue_line(loan: Any, cards: Any, now: datetime,
                  holding_for: Optional[str] = None) -> str:
-    """One overdue deck, as the moderators need it: who, what, how long, and
-    how many times they have been asked."""
+    """One overdue deck, as the moderators need it: who, what, how long, how
+    many DMs reached them, and whether DMs have stopped getting through."""
     hours = int((now - loan.borrowed_at).total_seconds() // 3600)
     whose = f" (holding **{holding_for}**'s deck)" if holding_for else ""
+    sent = loan.reminders_sent or 0
+    failing = " — **DMs are failing**" if dms_failing(loan) else ""
     return (f"• <@{loan.borrower_id}>{whose} — {deck_summary(cards)}, "
-            f"out {hours} hours, asked {loan.reminders_sent} times")
+            f"out {hours} hours, {sent} DM{'' if sent == 1 else 's'} sent{failing}")
 
 
 _OVERDUE_HEADER = (f"📚 **Library decks out for more than "
                    f"{int(OVERDUE_AFTER.total_seconds() // 3600)} hours**\n"
-                   "Each borrower below has been asked by DM more than once "
-                   "and still holds the deck.")
+                   "Each borrower below still holds the deck after repeated "
+                   "DMs asking for it back.")
 
 # Discord refuses a message over 2000 characters; a refused post would be
 # retried every tick and never land. Leave room for the header.
@@ -464,7 +492,7 @@ async def post_overdue_decks(bot: Any, now: Optional[datetime] = None) -> int:
     Discord failure is retried next tick and a delivered notice never repeats.
     Called from the lending watchdog, so it must never raise.
     """
-    from sqlalchemy import select
+    from sqlalchemy import or_, select
 
     from database.db_session import db_session
     from models.card_loan import CardLoan
@@ -476,7 +504,8 @@ async def post_overdue_decks(bot: Any, now: Optional[datetime] = None) -> int:
             select(CardLoan).where(
                 CardLoan.state == RETURNABLE_STATE,
                 CardLoan.overdue_posted_at.is_(None),
-                CardLoan.reminders_sent >= OVERDUE_MIN_REMINDERS,
+                or_(CardLoan.reminders_sent >= OVERDUE_MIN_REMINDERS,
+                    CardLoan.reminders_failed >= OVERDUE_MIN_REMINDERS),
             ).order_by(CardLoan.borrowed_at))).all())
 
     by_guild: "dict[str, list[Any]]" = {}

@@ -1,7 +1,7 @@
 """count return reminders and record when the mods were told a deck is overdue
 
-Additive: two nullable columns. Every existing loan is NULL in both, which reads
-as "no reminder counted yet" and "mods not told", so a deck already out starts
+Additive: three nullable columns. Every existing loan is NULL in all of them,
+which reads as "no reminder counted yet" and "mods not told", so a deck already out starts
 counting from here and is flagged once it has been asked for again.
 
 Revision ID: loanoverdue01
@@ -18,6 +18,7 @@ depends_on = None
 
 _COLUMNS = (
     ('reminders_sent', sa.Integer()),
+    ('reminders_failed', sa.Integer()),
     ('overdue_posted_at', sa.DateTime()),
 )
 

@@ -30,7 +30,7 @@ def _loan(state="borrowed", last_reminded_at=None, source="draft:s1"):
 async def _a_loan(state="borrowed", *, last_reminded_at=None, ready_dm_at=None,
                   borrower="p1", session="s1", claimed_at=None,
                   on_behalf_of=None, guild="g", borrowed_at=None,
-                  reminders_sent=None):
+                  reminders_sent=None, reminders_failed=None):
     """One real CardLoan row. Returns its id."""
     from database.db_session import AsyncSessionLocal
     from models.card_loan import CardLoan
@@ -38,6 +38,7 @@ async def _a_loan(state="borrowed", *, last_reminded_at=None, ready_dm_at=None,
     async with AsyncSessionLocal() as s:
         loan = CardLoan(guild_id=guild, library_id="lib", borrower_id=borrower,
                         borrowed_at=borrowed_at, reminders_sent=reminders_sent,
+                        reminders_failed=reminders_failed,
                         cards=[{"name": "Swamp", "qty": 4}], state=state,
                         source=f"draft:{session}", ready_dm_at=ready_dm_at,
                         last_reminded_at=last_reminded_at, claimed_at=claimed_at,
@@ -732,6 +733,7 @@ def _out(hours, reminders, **over):
                            state=over.get("state", "borrowed"),
                            borrowed_at=NOW - timedelta(hours=hours),
                            reminders_sent=reminders,
+                           reminders_failed=over.get("failed"),
                            overdue_posted_at=over.get("overdue_posted_at"))
 
 
@@ -787,7 +789,7 @@ async def _overdue_stamp(loan_id):
 
     async with AsyncSessionLocal() as s:
         row = await s.get(CardLoan, loan_id)
-        return row.overdue_posted_at, row.reminders_sent
+        return row.overdue_posted_at, row.reminders_sent, row.reminders_failed
 
 
 @pytest.mark.asyncio
@@ -827,7 +829,7 @@ async def test_an_overdue_deck_is_reported_to_the_moderators_once(test_db):
     assert (first, second) == (1, 0)
     [(content, allowed)] = channel.posts
     assert "<@p1>" in content and "out 26 hours" in content
-    assert "asked 3 times" in content
+    assert "3 DMs sent" in content and "failing" not in content
     assert (await _overdue_stamp(loan_id))[0] == NOW
 
 
@@ -965,3 +967,42 @@ async def test_a_channel_the_bot_may_not_post_in_keeps_the_deck_owed(test_db):
 
     assert await mod.post_overdue_decks(_bot(_Locked()), now=NOW) == 0
     assert (await _overdue_stamp(loan_id))[0] is None
+
+
+# ---- a borrower the DMs cannot reach ----------------------------------------
+
+def test_a_deck_out_a_day_whose_dms_keep_failing_is_overdue():
+    """They can never be asked twice, and they are who a moderator must chase."""
+    assert mod.overdue(_out(25, None, failed=2), NOW)
+    assert not mod.overdue(_out(25, None, failed=1), NOW)
+    assert not mod.overdue(_out(23, None, failed=9), NOW)
+
+
+@pytest.mark.asyncio
+async def test_failed_reminders_are_counted_until_one_lands(test_db, dm):
+    await seed_session("s1", stype="random", stage="completed")
+    loan_id = await _a_loan()
+
+    dm.delivers = False
+    await mod.send_due_reminders(now=NOW)
+    await mod.send_due_reminders(now=NOW + timedelta(minutes=10))
+    assert (await _overdue_stamp(loan_id))[1:] == (None, 2)
+
+    dm.delivers = True
+    await mod.send_due_reminders(now=NOW + timedelta(minutes=20))
+    assert (await _overdue_stamp(loan_id))[1:] == (1, 0)
+
+
+@pytest.mark.asyncio
+async def test_the_notice_says_when_dms_are_failing(test_db):
+    await _a_loan(guild=GUILD, borrowed_at=NOW - timedelta(hours=26),
+                  reminders_sent=None, reminders_failed=7)
+    await _a_loan(guild=GUILD, borrower="p2",
+                  borrowed_at=NOW - timedelta(hours=25),
+                  reminders_sent=4, reminders_failed=3)
+    channel = _Channel()
+
+    assert await mod.post_overdue_decks(_bot(channel), now=NOW) == 2
+    unreachable, went_quiet = channel.posts[0][0].splitlines()[-2:]
+    assert "<@p1>" in unreachable and "0 DMs sent — **DMs are failing**" in unreachable
+    assert "<@p2>" in went_quiet and "4 DMs sent — **DMs are failing**" in went_quiet

@@ -99,6 +99,11 @@ class CardLoan(Base):
     # derived from last_reminded_at because one timestamp cannot tell a single
     # ask from a day of them, and that difference is what makes a deck overdue.
     reminders_sent = Column(Integer, nullable=True)
+    # How many return reminders in a row did NOT land, since the last one that
+    # did. NULL or 0 means the borrower is reachable as far as we know. A run
+    # of these is a borrower with closed DMs, who can never be "asked twice"
+    # and is exactly who the moderators need to hear about.
+    reminders_failed = Column(Integer, nullable=True)
     # When the moderators were told this deck is overdue (library_reminders.
     # post_overdue_decks). NULL means not told; stamped only after the post
     # landed, so a failed post is retried and a delivered one is never repeated.
