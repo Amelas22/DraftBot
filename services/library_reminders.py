@@ -491,9 +491,22 @@ async def post_overdue_decks(bot: Any, now: Optional[datetime] = None) -> int:
             continue
         entries: "list[tuple[Any, str]]" = []
         for loan in due:
-            held = await held_cards(loan)
-            holding_for = (await name_in_draft(session_of(loan), loan.on_behalf_of)
-                           if loan.on_behalf_of else None)
+            # Re-read before listing it, for the reason send_due_reminders
+            # does: the list was decided up front, and a deck handed back since
+            # must not be reported as still out.
+            if not await _still_out(loan.id):
+                continue
+            try:
+                held = await held_cards(loan)
+                holding_for = (await name_in_draft(session_of(loan), loan.on_behalf_of)
+                               if loan.on_behalf_of else None)
+            except Exception:
+                # One loan that cannot be described must not cost every other
+                # deck, in every guild, its notice.
+                logger.opt(exception=True).warning(
+                    "library reminders: could not describe overdue loan {}; "
+                    "leaving it for the next tick", loan.id)
+                continue
             entries.append((loan, overdue_line(
                 loan, held if held else loan.cards, at, holding_for)))
         for post in _posts(entries):
@@ -530,6 +543,16 @@ async def _post_overdue(channel: Any, post: "list[tuple[Any, str]]",
         # the moderators, and the borrower has had their own DMs.
         await channel.send(_OVERDUE_HEADER + "\n" + "\n".join(lines),
                            allowed_mentions=discord.AllowedMentions.none())
+    except discord.Forbidden:
+        # Stays owed, like a missing channel, and is said once for the same
+        # reason: the watchdog asks every ten minutes.
+        key = f"forbidden:{getattr(channel, 'id', id(channel))}"
+        if key not in _warned_no_mod_channel:
+            _warned_no_mod_channel.add(key)
+            logger.warning("library reminders: not allowed to post in #{}, so "
+                           "overdue decks are not being reported",
+                           getattr(channel, "name", "?"))
+        return 0
     except discord.HTTPException:
         logger.opt(exception=True).warning(
             "library reminders: could not post {} overdue deck(s); retrying "

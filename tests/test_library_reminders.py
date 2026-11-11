@@ -910,3 +910,58 @@ async def test_many_overdue_decks_are_split_under_discords_limit(test_db):
     assert len(channel.posts) > 1
     assert all(len(content) <= 2000 for content, _ in channel.posts)
     assert sum(content.count("<@") for content, _ in channel.posts) == 40
+
+
+@pytest.mark.asyncio
+async def test_a_deck_handed_back_mid_scan_is_not_reported(test_db, monkeypatch):
+    """The scan reads its list up front; a deck returned since is not out."""
+    from database.db_session import AsyncSessionLocal
+    from models.card_loan import CardLoan
+    import services.card_lending_service as lending
+
+    loan_id = await _a_loan(guild=GUILD, borrowed_at=NOW - timedelta(hours=26),
+                            reminders_sent=2)
+    await _a_loan(guild=GUILD, borrower="p2",
+                  borrowed_at=NOW - timedelta(hours=25), reminders_sent=2)
+    real = lending.held_cards
+
+    async def returns_the_other_deck(loan):
+        async with AsyncSessionLocal() as s:
+            (await s.get(CardLoan, loan_id + 1)).state = "return_pending"
+            await s.commit()
+        return await real(loan)
+
+    monkeypatch.setattr(lending, "held_cards", returns_the_other_deck)
+    channel = _Channel()
+
+    assert await mod.post_overdue_decks(_bot(channel), now=NOW) == 1
+    [(content, _)] = channel.posts
+    assert "<@p1>" in content and "<@p2>" not in content
+
+
+@pytest.mark.asyncio
+async def test_a_guild_without_a_mod_channel_does_not_cost_another_its_notice(test_db):
+    await _a_loan(guild="777", borrowed_at=NOW - timedelta(hours=30),
+                  reminders_sent=2)
+    await _a_loan(guild=GUILD, borrower="p2",
+                  borrowed_at=NOW - timedelta(hours=26), reminders_sent=2)
+    channel = _Channel()
+
+    assert await mod.post_overdue_decks(_bot(channel), now=NOW) == 1
+    assert "<@p2>" in channel.posts[0][0]
+
+
+@pytest.mark.asyncio
+async def test_a_channel_the_bot_may_not_post_in_keeps_the_deck_owed(test_db):
+    import discord
+
+    class _Locked(_Channel):
+        async def send(self, content, allowed_mentions=None):
+            raise discord.Forbidden(
+                SimpleNamespace(status=403, reason="no"), "no")
+
+    loan_id = await _a_loan(guild=GUILD, borrowed_at=NOW - timedelta(hours=26),
+                            reminders_sent=2)
+
+    assert await mod.post_overdue_decks(_bot(_Locked()), now=NOW) == 0
+    assert (await _overdue_stamp(loan_id))[0] is None
