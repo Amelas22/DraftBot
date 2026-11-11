@@ -965,8 +965,18 @@ async def test_a_channel_the_bot_may_not_post_in_keeps_the_deck_owed(test_db):
     loan_id = await _a_loan(guild=GUILD, borrowed_at=NOW - timedelta(hours=26),
                             reminders_sent=2)
 
-    assert await mod.post_overdue_decks(_bot(_Locked()), now=NOW) == 0
+    warnings = []
+    handle = mod.logger.add(lambda m: warnings.append(str(m)), level="WARNING")
+    try:
+        locked = _bot(_Locked())
+        assert await mod.post_overdue_decks(locked, now=NOW) == 0
+        assert await mod.post_overdue_decks(locked, now=NOW) == 0
+    finally:
+        mod.logger.remove(handle)
+
     assert (await _overdue_stamp(loan_id))[0] is None
+    assert len([w for w in warnings if "not allowed to post" in w]) == 1, \
+        "said once, not on every ten-minute tick"
 
 
 # ---- a borrower the DMs cannot reach ----------------------------------------
@@ -1033,15 +1043,14 @@ def test_a_deck_held_past_the_limit_is_still_asked_only_hourly():
 
 
 def test_the_ask_for_an_overstayed_deck_says_why_and_that_it_can_be_borrowed_again():
-    msg = return_message(_held(4), overstayed=True)
+    msg = return_message(_held(4), overstayed=True, may_reborrow=True)
     assert msg.startswith("You have had this deck for more than 3 hours.")
     assert "borrow it again" in msg
 
 
-def test_the_ordinary_ask_does_not_offer_a_reborrow():
+def test_the_ask_does_not_offer_a_reborrow_unless_told_one_is_possible():
     assert "borrow it again" not in return_message(_held(4))
-    assert "borrow it again" not in return_message(_held(4), decided=True,
-                                                   overstayed=True)
+    assert "borrow it again" not in return_message(_held(4), overstayed=True)
 
 
 @pytest.mark.asyncio
@@ -1054,4 +1063,54 @@ async def test_the_watchdog_asks_for_a_deck_held_past_the_limit_mid_draft(test_d
 
     assert await mod.send_due_reminders(now=NOW + timedelta(hours=2)) == 1
     assert dm.sent[0][1].startswith("You have had this deck for more than 3 hours.")
+    assert "borrow it again" in dm.sent[0][1]
     assert (await _stamps(early))[1] == NOW + timedelta(hours=2)
+
+
+@pytest.mark.asyncio
+async def test_no_reborrow_is_promised_once_the_draft_chat_is_closing(test_db, dm):
+    """A request is refused once the chat is closing, so the DM must not offer one."""
+    await seed_session("s1", stype="random", stage="pairings",
+                       matches=[("p1", "p2", None, None)],
+                       deletion_time=NOW + timedelta(minutes=10))
+    await _a_loan(borrowed_at=NOW - timedelta(hours=4))
+
+    assert await mod.send_due_reminders(now=NOW) == 1
+    assert dm.sent[0][1].startswith("You have had this deck for more than 3 hours.")
+    assert "borrow it again" not in dm.sent[0][1]
+
+
+@pytest.mark.asyncio
+async def test_a_sub_is_not_promised_a_reborrow(test_db, dm):
+    """Handing a subbed deck back ends the sub's turn; there is nothing to re-borrow."""
+    await seed_session("s1", stype="random", stage="pairings",
+                       matches=[("p9", "p2", None, None)],
+                       sign_ups={"p9": "Absent"})
+    await _a_loan(borrowed_at=NOW - timedelta(hours=4), on_behalf_of="p9")
+
+    assert await mod.send_due_reminders(now=NOW) == 1
+    assert "holding for **Absent**" in dm.sent[0][1]
+    assert "borrow it again" not in dm.sent[0][1]
+
+
+@pytest.mark.asyncio
+async def test_a_loan_that_cannot_be_described_does_not_cost_the_others(test_db, monkeypatch):
+    import services.card_lending_service as lending
+
+    broken = await _a_loan(guild=GUILD, borrowed_at=NOW - timedelta(hours=30),
+                           reminders_sent=2)
+    await _a_loan(guild=GUILD, borrower="p2",
+                  borrowed_at=NOW - timedelta(hours=26), reminders_sent=2)
+    real = lending.held_cards
+
+    async def fails_for_one(loan):
+        if loan.id == broken:
+            raise RuntimeError("unreadable ledger")
+        return await real(loan)
+
+    monkeypatch.setattr(lending, "held_cards", fails_for_one)
+    channel = _Channel()
+
+    assert await mod.post_overdue_decks(_bot(channel), now=NOW) == 1
+    assert "<@p2>" in channel.posts[0][0] and "<@p1>" not in channel.posts[0][0]
+    assert (await _overdue_stamp(broken))[0] is None

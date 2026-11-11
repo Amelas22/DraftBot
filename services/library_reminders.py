@@ -184,7 +184,7 @@ def deck_ready_message(cards: Any, collateral: int, *,
 
 def return_message(loan: Any, decided: bool = False,
                    cards: Any = None, *, holding_for: Optional[str] = None,
-                   overstayed: bool = False) -> str:
+                   overstayed: bool = False, may_reborrow: bool = False) -> str:
     """The ask. Says what it is for, because a borrower who has finished a draft
     has no other reason to think about the cards again.
 
@@ -199,15 +199,16 @@ def return_message(loan: Any, decided: bool = False,
     available description.
     """
     # `overstayed` is the ask made only because of HOLD_LIMIT, to somebody
-    # who may still have a match to play. It says why, and that the deck is
-    # theirs to borrow again -- without that it reads as the library taking
-    # away cards they still need.
+    # who may still have a match to play, so it says why. `may_reborrow` adds
+    # that the deck is theirs to borrow again -- without it the ask reads as
+    # the library taking away cards they still need -- and is the caller's to
+    # decide, because it is a promise: it must be one a request would honour.
     hours = int(HOLD_LIMIT.total_seconds() // 3600)
     lead = ("Your draft is decided. " if decided else
             f"You have had this deck for more than {hours} hours. " if overstayed
             else "")
     again = (" You can borrow it again when you need it for a match."
-             if overstayed and not decided else "")
+             if may_reborrow else "")
     summary = deck_summary(cards if cards else loan.cards)
     what = (f"the deck you're holding for **{holding_for}**" if holding_for
             else "your borrowed deck")
@@ -389,7 +390,7 @@ async def send_due_reminders(now: Optional[datetime] = None) -> int:
     # map is cached rather than a per-borrower answer, so one entry serves every
     # borrower in that pod.
     verdicts: "dict[str, DraftState]" = {}
-    due: "list[tuple[Any, bool, bool]]" = []
+    due: "list[tuple[Any, bool, bool, bool]]" = []
     for loan in loans:
         session_id = session_of(loan)
         if session_id is None:
@@ -413,13 +414,18 @@ async def send_due_reminders(now: Optional[datetime] = None) -> int:
         if reminder_due(loan, done_playing=done_playing, draft_settled=decided,
                         played_since_ask=played_since_ask, now=at):
             overstayed = not (done_playing or decided)
-            due.append((loan, decided, overstayed))
+            # Only promised where a request would be honoured: their own deck,
+            # in a draft whose chat is still open to ask in. A sub's turn ends
+            # when they hand the deck back, so there is nothing to re-borrow.
+            may_reborrow = (overstayed and loan.on_behalf_of is None
+                            and may_still_request(state, whose, at) is None)
+            due.append((loan, decided, overstayed, may_reborrow))
 
     from library_views.dm_view import dm_view
     from services.card_lending_service import held_cards
 
     asked = 0
-    for loan, decided, overstayed in due:
+    for loan, decided, overstayed, may_reborrow in due:
         # Re-read immediately before sending. The list was decided up front and
         # every DM is a network round trip, so a borrower can hand their deck
         # back while an earlier one is still in flight -- and asking them then
@@ -431,7 +437,8 @@ async def send_due_reminders(now: Optional[datetime] = None) -> int:
                        if loan.on_behalf_of else None)
         if await _dm(loan, return_message(loan, decided, cards=held,
                                           holding_for=holding_for,
-                                          overstayed=overstayed),
+                                          overstayed=overstayed,
+                                          may_reborrow=may_reborrow),
                      "return reminder", view=dm_view("return")):
             await _count_reminder(loan.id, at)
             asked += 1

@@ -811,9 +811,10 @@ async def test_a_preference_read_that_fails_is_not_read_as_nobody_asking(
 # A drafter may borrow from the moment their pool is assigned until they have no
 # match left that can change the draft. Two things end it, and they are asked
 # per PLAYER, not per pod: the draft being decided, or that player's own matches
-# all being in. The same rule decides when the library asks for a deck BACK
-# (services.library_reminders.reminder_due), so the moment it would chase a deck
-# is the moment it stops handing one out.
+# all being in. The same rule is the first thing that makes the library ask for
+# a deck BACK (services.library_reminders.reminder_due); the other is the deck
+# simply having been out past HOLD_LIMIT, which asks while one may still be
+# handed out again.
 
 async def _reported(session_id, pairs):
     """Give the draft its matches. `pairs` is (p1, p2, reported?) per match."""

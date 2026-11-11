@@ -660,7 +660,8 @@ async def expire_stale_assignments(now: Optional[datetime] = None) -> int:
     Asked per BORROWER, not per draft. Retracting the whole pod on its first
     reported result took the deck away from players who still had matches to
     play with it, and left them unable to borrow at all. It is the same rule
-    assignment mints by and reminder_due chases by, read from the third side.
+    assignment mints by, read from the other side. (reminder_due chases by it
+    too, and also by HOLD_LIMIT, which has no bearing on an uncollected offer.)
 
     Only 'assigned' is retracted. A collected deck really is out, and expiring
     it would abandon the claim on cards somebody is holding.
