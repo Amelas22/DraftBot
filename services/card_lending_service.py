@@ -1207,6 +1207,14 @@ async def lending_jobs_watchdog(bot: Any = None, interval_s: float = RESCAN_INTE
         except Exception:
             logger.exception("Card-library return-reminder scan failed")
         try:
+            # Decks out a day and asked for more than once go to the moderators.
+            # After the reminders, so an ask sent this tick counts this tick.
+            if bot is not None:
+                from services.library_reminders import post_overdue_decks
+                await post_overdue_decks(bot)
+        except Exception:
+            logger.exception("Card-library overdue-deck scan failed")
+        try:
             # Draft-chat library panels that missed their switch to return mode
             # or lost their message, e.g. to a restart between the decision and
             # the repost.

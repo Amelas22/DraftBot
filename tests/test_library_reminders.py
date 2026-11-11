@@ -29,13 +29,15 @@ def _loan(state="borrowed", last_reminded_at=None, source="draft:s1"):
 
 async def _a_loan(state="borrowed", *, last_reminded_at=None, ready_dm_at=None,
                   borrower="p1", session="s1", claimed_at=None,
-                  on_behalf_of=None):
+                  on_behalf_of=None, guild="g", borrowed_at=None,
+                  reminders_sent=None):
     """One real CardLoan row. Returns its id."""
     from database.db_session import AsyncSessionLocal
     from models.card_loan import CardLoan
 
     async with AsyncSessionLocal() as s:
-        loan = CardLoan(guild_id="g", library_id="lib", borrower_id=borrower,
+        loan = CardLoan(guild_id=guild, library_id="lib", borrower_id=borrower,
+                        borrowed_at=borrowed_at, reminders_sent=reminders_sent,
                         cards=[{"name": "Swamp", "qty": 4}], state=state,
                         source=f"draft:{session}", ready_dm_at=ready_dm_at,
                         last_reminded_at=last_reminded_at, claimed_at=claimed_at,
@@ -718,3 +720,193 @@ async def test_the_ready_dm_for_a_sub_names_whose_deck_it_is(test_db, dm):
 
     assert await mod.announce_one(loan_id, at=NOW) is True
     assert dm.sent[0][1].startswith("📚 **Bo**'s drafted deck is ready for you to borrow as their sub")
+
+
+# ---- overdue decks go to the moderators -------------------------------------
+
+GUILD = "4242"
+
+
+def _out(hours, reminders, **over):
+    return SimpleNamespace(id=1, borrower_id="p1", guild_id=GUILD,
+                           state=over.get("state", "borrowed"),
+                           borrowed_at=NOW - timedelta(hours=hours),
+                           reminders_sent=reminders,
+                           overdue_posted_at=over.get("overdue_posted_at"))
+
+
+def test_a_deck_out_a_day_and_asked_for_twice_is_overdue():
+    assert mod.overdue(_out(25, 2), NOW)
+
+
+def test_a_deck_out_a_day_but_asked_for_once_is_not_yet_overdue():
+    """One DM can be missed; the moderators hear about a pattern, not a blip."""
+    assert not mod.overdue(_out(30, 1), NOW)
+    assert not mod.overdue(_out(30, None), NOW)
+
+
+def test_a_deck_asked_for_often_inside_the_day_is_not_overdue():
+    assert not mod.overdue(_out(23, 9), NOW)
+
+
+def test_overdue_means_more_than_a_day_not_a_day():
+    assert not mod.overdue(_out(24, 5), NOW)
+
+
+def test_a_deck_already_reported_is_not_overdue_again():
+    assert not mod.overdue(_out(40, 5, overdue_posted_at=NOW), NOW)
+
+
+def test_a_deck_on_its_way_back_is_not_overdue():
+    assert not mod.overdue(_out(40, 5, state="return_pending"), NOW)
+
+
+class _Channel:
+    def __init__(self, name="mod-chat", fails=False):
+        self.name = name
+        self.fails = fails
+        self.posts = []
+
+    async def send(self, content, allowed_mentions=None):
+        if self.fails:
+            import discord
+            raise discord.HTTPException(
+                SimpleNamespace(status=500, reason="boom"), "boom")
+        self.posts.append((content, allowed_mentions))
+
+
+def _bot(*channels, guild=GUILD):
+    home = SimpleNamespace(id=int(guild), text_channels=list(channels))
+    return SimpleNamespace(
+        get_guild=lambda gid: home if str(gid) == guild else None)
+
+
+async def _overdue_stamp(loan_id):
+    from database.db_session import AsyncSessionLocal
+    from models.card_loan import CardLoan
+
+    async with AsyncSessionLocal() as s:
+        row = await s.get(CardLoan, loan_id)
+        return row.overdue_posted_at, row.reminders_sent
+
+
+@pytest.mark.asyncio
+async def test_each_delivered_reminder_is_counted(test_db, dm):
+    await seed_session("s1", stype="random", stage="completed")
+    loan_id = await _a_loan()
+
+    await mod.send_due_reminders(now=NOW)
+    await mod.send_due_reminders(now=NOW + REPEAT_AFTER)
+
+    assert (await _overdue_stamp(loan_id))[1] == 2
+
+
+@pytest.mark.asyncio
+async def test_an_undelivered_reminder_is_not_counted(test_db, dm):
+    """A borrower with closed DMs has not been asked, however often we tried."""
+    dm.delivers = False
+    await seed_session("s1", stype="random", stage="completed")
+    loan_id = await _a_loan()
+
+    await mod.send_due_reminders(now=NOW)
+
+    assert (await _overdue_stamp(loan_id))[1] is None
+
+
+@pytest.mark.asyncio
+async def test_an_overdue_deck_is_reported_to_the_moderators_once(test_db):
+    """The watchdog runs every ten minutes; the moderators want one notice."""
+    loan_id = await _a_loan(guild=GUILD, borrowed_at=NOW - timedelta(hours=26),
+                            reminders_sent=3)
+    channel = _Channel()
+
+    first = await mod.post_overdue_decks(_bot(channel), now=NOW)
+    second = await mod.post_overdue_decks(_bot(channel),
+                                          now=NOW + timedelta(minutes=10))
+
+    assert (first, second) == (1, 0)
+    [(content, allowed)] = channel.posts
+    assert "<@p1>" in content and "out 26 hours" in content
+    assert "asked 3 times" in content
+    assert (await _overdue_stamp(loan_id))[0] == NOW
+
+
+@pytest.mark.asyncio
+async def test_the_notice_names_the_borrower_without_pinging_them(test_db):
+    import discord
+
+    await _a_loan(guild=GUILD, borrowed_at=NOW - timedelta(hours=26),
+                  reminders_sent=2)
+    channel = _Channel()
+
+    await mod.post_overdue_decks(_bot(channel), now=NOW)
+
+    allowed = channel.posts[0][1]
+    assert isinstance(allowed, discord.AllowedMentions)
+    assert allowed.users is False and allowed.everyone is False
+
+
+@pytest.mark.asyncio
+async def test_a_deck_not_yet_overdue_is_not_reported(test_db):
+    await _a_loan(guild=GUILD, borrowed_at=NOW - timedelta(hours=26),
+                  reminders_sent=1)
+    await _a_loan(guild=GUILD, borrower="p2",
+                  borrowed_at=NOW - timedelta(hours=5), reminders_sent=4)
+    channel = _Channel()
+
+    assert await mod.post_overdue_decks(_bot(channel), now=NOW) == 0
+    assert channel.posts == []
+
+
+@pytest.mark.asyncio
+async def test_a_notice_that_did_not_post_is_tried_again(test_db):
+    loan_id = await _a_loan(guild=GUILD, borrowed_at=NOW - timedelta(hours=26),
+                            reminders_sent=2)
+
+    failed = await mod.post_overdue_decks(_bot(_Channel(fails=True)), now=NOW)
+    working = _Channel()
+    retried = await mod.post_overdue_decks(_bot(working),
+                                           now=NOW + timedelta(minutes=10))
+
+    assert (failed, retried) == (0, 1)
+    assert len(working.posts) == 1
+    assert (await _overdue_stamp(loan_id))[0] == NOW + timedelta(minutes=10)
+
+
+@pytest.mark.asyncio
+async def test_a_guild_with_no_mod_channel_reports_nothing_and_keeps_the_deck_owed(test_db):
+    """Not stamped: the notice is still owed if the channel appears later."""
+    loan_id = await _a_loan(guild=GUILD, borrowed_at=NOW - timedelta(hours=26),
+                            reminders_sent=2)
+
+    assert await mod.post_overdue_decks(_bot(_Channel(name="general")), now=NOW) == 0
+    assert (await _overdue_stamp(loan_id))[0] is None
+
+
+@pytest.mark.asyncio
+async def test_the_mod_channel_is_the_one_the_guild_configured(test_db, monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "get_config", lambda guild_id: {
+        "activity_tracking": {"enabled": False, "mod_chat_channel": "staff"}})
+    await _a_loan(guild=GUILD, borrowed_at=NOW - timedelta(hours=26),
+                  reminders_sent=2)
+    staff, other = _Channel(name="staff"), _Channel(name="mod-chat")
+
+    assert await mod.post_overdue_decks(_bot(other, staff), now=NOW) == 1
+    assert len(staff.posts) == 1 and other.posts == []
+
+
+@pytest.mark.asyncio
+async def test_many_overdue_decks_are_split_under_discords_limit(test_db):
+    """A post over 2000 characters is refused, and a refused notice would be
+    retried every tick without ever landing."""
+    for n in range(40):
+        await _a_loan(guild=GUILD, borrower=f"1234567890123456{n:02d}",
+                      borrowed_at=NOW - timedelta(hours=30), reminders_sent=6)
+    channel = _Channel()
+
+    assert await mod.post_overdue_decks(_bot(channel), now=NOW) == 40
+    assert len(channel.posts) > 1
+    assert all(len(content) <= 2000 for content, _ in channel.posts)
+    assert sum(content.count("<@") for content, _ in channel.posts) == 40
