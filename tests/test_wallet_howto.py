@@ -11,7 +11,7 @@ GUILD = "g1"
 
 
 def _on_money_server(value=True):
-    return patch("helpers.money_gate.is_money_server", return_value=value)
+    return patch("helpers.money_gate.wallet_enabled", return_value=value)
 
 
 def test_nothing_on_a_server_without_the_wallet():

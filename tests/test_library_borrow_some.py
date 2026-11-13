@@ -300,7 +300,7 @@ async def test_short_funds_on_a_small_borrow_quotes_the_small_hold(
         lib = await s.get(Library, LIB)
         lib.collateral_tix, lib.small_loan_tix_untrusted = 500, 50
         await s.commit()
-    monkeypatch.setattr(lending_svc, "is_money_server", lambda gid: True)
+    monkeypatch.setattr(lending_svc, "wallet_enabled", lambda gid: True)
     seen: list = []
     real = actions.hold_shortfall
 
@@ -524,7 +524,7 @@ async def _short_of_the_small_hold(monkeypatch):
         lib = await s.get(Library, LIB)
         lib.collateral_tix, lib.small_loan_tix_untrusted = 500, 50
         await s.commit()
-    monkeypatch.setattr(lending_svc, "is_money_server", lambda gid: True)
+    monkeypatch.setattr(lending_svc, "wallet_enabled", lambda gid: True)
 
 
 @pytest.mark.parametrize("waiting", [False, True])

@@ -40,7 +40,7 @@ def client(monkeypatch):
     stub_library(monkeypatch, svc, collateral=0, stock=_STOCK)
     # A cube that charges needs the wallet enabled; the refusal for one
     # that does not has its own test.
-    monkeypatch.setattr(svc, "is_money_server", lambda gid: True)
+    monkeypatch.setattr(svc, "wallet_enabled", lambda gid: True)
     return c
 
 

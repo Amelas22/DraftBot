@@ -67,7 +67,7 @@ def test_field_on_every_page():
 def _money_server(value=True):
     """Patch the real gate, not the helper under test: patching add_wallet_howto would
     make the silent-on-free-servers test assert that a stubbed no-op does nothing."""
-    return patch("helpers.money_gate.is_money_server", return_value=value)
+    return patch("helpers.money_gate.wallet_enabled", return_value=value)
 
 
 def test_guild_summary_carries_the_wallet_howto_once_on_the_last_page():

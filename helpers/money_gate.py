@@ -3,7 +3,7 @@ Shared gating/identity helpers for the money stack (wallet + tournament escrow c
 
 One home for the checks every money-touching command runs, so the rules and their
 user-facing wording can't drift between cogs:
-  * gate_read  — the guild must be money-enabled (wallet views, internal pays).
+  * gate_read  — the guild must have the tix wallet (wallet views, internal pays).
   * gate_serve — read gate + the TradeBot serve must be configured (trades).
   * linked_username — the caller's /link_mtgo identity, required to trade.
   * custodian_name — the vault account's display name (cached; it only changes
@@ -19,7 +19,7 @@ import asyncio
 
 from loguru import logger
 
-from config import is_money_server
+from config import wallet_enabled
 from models.mtgo_account import MtgoAccount
 from services.mtgo_tradebot_client import get_client
 
@@ -52,7 +52,7 @@ def wallet_howto(guild_id, *, brief=False) -> str | None:
     refuses is worse than saying nothing, and this is the check they'd each otherwise
     have to remember.
     """
-    if not is_money_server(str(guild_id)):
+    if not wallet_enabled(str(guild_id)):
         return None
     if brief:
         return ("Entries are paid from your tix wallet — `/wallet deposit <n>` "
@@ -123,11 +123,11 @@ def mtgo_job_footer(job_id: str) -> str:
 
 
 def gate_read(ctx) -> str | None:
-    """Wallet must be used in a money server. Returns an error string, or None."""
+    """Wallet must be used in a server that has one. Returns an error string, or None."""
     if not ctx.guild:
         return "Wallet commands can only be used in a server."
-    if not is_money_server(str(ctx.guild.id)):
-        return "The tix wallet is only available on money-enabled servers."
+    if not wallet_enabled(str(ctx.guild.id)):
+        return "The tix wallet isn't enabled on this server."
     return None
 
 

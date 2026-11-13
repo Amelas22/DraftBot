@@ -176,7 +176,7 @@ async def test_a_charging_cube_refuses_before_any_cards_move(test_db, monkeypatc
     async def handle(_):
         return "Borrower01"
     monkeypatch.setattr(svc, "_mtgo_handle", handle)
-    monkeypatch.setattr(svc, "is_money_server", lambda gid: False)
+    monkeypatch.setattr(svc, "wallet_enabled", lambda gid: False)
 
     await _priced(25)
     await _drafted_loan()

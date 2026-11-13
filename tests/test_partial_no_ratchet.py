@@ -130,7 +130,7 @@ async def test_the_trade_offers_what_was_agreed_not_the_whole_deck(test_db, monk
     stub_library(monkeypatch, svc, collateral=0)
     # A cube that charges needs the wallet enabled; the refusal for one
     # that does not has its own test.
-    monkeypatch.setattr(svc, "is_money_server", lambda gid: True)
+    monkeypatch.setattr(svc, "wallet_enabled", lambda gid: True)
     loan_id = await _seed()
 
     await svc.start_borrow(GUILD, BORROWER, partial)
@@ -152,7 +152,7 @@ async def test_a_lost_response_keeps_the_offer(test_db, monkeypatch):
     stub_library(monkeypatch, svc, collateral=0)
     # A cube that charges needs the wallet enabled; the refusal for one
     # that does not has its own test.
-    monkeypatch.setattr(svc, "is_money_server", lambda gid: True)
+    monkeypatch.setattr(svc, "wallet_enabled", lambda gid: True)
 
     async def handle(_):
         return "Borrower01"
@@ -201,7 +201,7 @@ async def test_a_second_click_cannot_change_a_trade_in_flight(test_db, monkeypat
     stub_library(monkeypatch, svc, collateral=0)
     # A cube that charges needs the wallet enabled; the refusal for one
     # that does not has its own test.
-    monkeypatch.setattr(svc, "is_money_server", lambda gid: True)
+    monkeypatch.setattr(svc, "wallet_enabled", lambda gid: True)
     sent = [{"name": "Swamp", "qty": 6}]
     loan_id = await _seed()
     await svc.start_borrow(GUILD, BORROWER, sent)
