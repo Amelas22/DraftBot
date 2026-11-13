@@ -31,7 +31,7 @@ async def shelves(test_db, monkeypatch):
         monkeypatch.setattr(module, "get_lending_client", lambda: serve)
         monkeypatch.setattr(module, "_mtgo_handle", AsyncMock(return_value="Player"))
     monkeypatch.setattr(lending, "on_inflow", AsyncMock())
-    monkeypatch.setattr(lending, "is_money_server", lambda _: True)
+    monkeypatch.setattr(lending, "wallet_enabled", lambda _: True)
     return serve
 
 

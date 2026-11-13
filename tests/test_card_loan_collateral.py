@@ -40,7 +40,7 @@ def rig(monkeypatch):
     stub_library(monkeypatch, svc, collateral=5, stock=_STOCK)
     # A cube that charges needs the wallet enabled; the refusal for one
     # that does not has its own test.
-    monkeypatch.setattr(svc, "is_money_server", lambda gid: True)
+    monkeypatch.setattr(svc, "wallet_enabled", lambda gid: True)
 
     # Every hold movement, as a target: ("set", borrower, amount). The real
     # figures are covered in test_collateral_target_hold.py; what matters here
@@ -148,7 +148,7 @@ async def test_a_library_that_charges_nothing_touches_no_wallet(test_db, rig, mo
     stub_library(monkeypatch, svc, collateral=0, stock=_STOCK)
     # A cube that charges needs the wallet enabled; the refusal for one
     # that does not has its own test.
-    monkeypatch.setattr(svc, "is_money_server", lambda gid: True)
+    monkeypatch.setattr(svc, "wallet_enabled", lambda gid: True)
     loan_id = await _seed()
 
     status, _ = await svc.start_borrow(GUILD, BORROWER)
@@ -199,7 +199,7 @@ def small_rig(monkeypatch):
     async def handle(_):
         return HANDLE
     monkeypatch.setattr(svc, "_mtgo_handle", handle)
-    monkeypatch.setattr(svc, "is_money_server", lambda gid: True)
+    monkeypatch.setattr(svc, "wallet_enabled", lambda gid: True)
     return client
 
 

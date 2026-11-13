@@ -3,8 +3,10 @@ Shared gating/identity helpers for the money stack (wallet + tournament escrow c
 
 One home for the checks every money-touching command runs, so the rules and their
 user-facing wording can't drift between cogs:
-  * gate_read  — the guild must be money-enabled (wallet views, internal pays).
+  * gate_read  — the guild must have the tix wallet (wallet views, internal pays).
   * gate_serve — read gate + the TradeBot serve must be configured (trades).
+  * unlinked_refusal / short_funds_message — the two refusals every player-to-player
+    tix transfer (/wallet pay, /escrow open) gives, worded once.
   * linked_username — the caller's /link_mtgo identity, required to trade.
   * custodian_name — the vault account's display name (cached; it only changes
     when the serve is re-attached to a different MTGO login, i.e. on a restart
@@ -17,9 +19,10 @@ it can't be garbage-collected mid-poll).
 """
 import asyncio
 
+import discord
 from loguru import logger
 
-from config import is_money_server
+from config import wallet_enabled
 from models.mtgo_account import MtgoAccount
 from services.mtgo_tradebot_client import get_client
 
@@ -52,7 +55,7 @@ def wallet_howto(guild_id, *, brief=False) -> str | None:
     refuses is worse than saying nothing, and this is the check they'd each otherwise
     have to remember.
     """
-    if not is_money_server(str(guild_id)):
+    if not wallet_enabled(str(guild_id)):
         return None
     if brief:
         return ("Entries are paid from your tix wallet — `/wallet deposit <n>` "
@@ -123,11 +126,11 @@ def mtgo_job_footer(job_id: str) -> str:
 
 
 def gate_read(ctx) -> str | None:
-    """Wallet must be used in a money server. Returns an error string, or None."""
+    """Wallet must be used in a server that has one. Returns an error string, or None."""
     if not ctx.guild:
         return "Wallet commands can only be used in a server."
-    if not is_money_server(str(ctx.guild.id)):
-        return "The tix wallet is only available on money-enabled servers."
+    if not wallet_enabled(str(ctx.guild.id)):
+        return "The tix wallet isn't enabled on this server."
     return None
 
 
@@ -145,6 +148,38 @@ def gate_serve(ctx) -> str | None:
 async def linked_username(discord_id) -> str | None:
     acct = await MtgoAccount.get_for_discord(discord_id)
     return acct.mtgo_username if acct else None
+
+
+async def unlinked_refusal(sender: discord.Member | discord.User,
+                           recipient: discord.Member | discord.User) -> str | None:
+    """Why tix can't move between these two players, or None if both are linked.
+
+    Both parties need a /link_mtgo identity so the recipient can actually use the tix
+    later. One batch query; the sender is checked first.
+    """
+    linked = await MtgoAccount.usernames_for_discord_ids([sender.id, recipient.id])
+    if str(sender.id) not in linked:
+        return "Link your MTGO account first with `/link_mtgo`."
+    if str(recipient.id) not in linked:
+        return (f"{recipient.display_name} hasn't linked an MTGO account yet, so they can't "
+                f"receive tix. Ask them to run `/link_mtgo` first.")
+    return None
+
+
+def short_funds_message(have: int, amount: int, verb: str) -> str:
+    """The player hasn't got the tix. ``verb`` is what they were trying to do with them
+    ("sending", "holding").
+
+    Says where an arriving deposit goes rather than telling the player to do
+    arithmetic about it: settle_deposit_inflow spends it on a pending tournament entry
+    first and debts second, so someone with either would otherwise be surprised to find
+    their deposit gone.
+    """
+    return (f"You have **{have} tix** — {verb} **{amount}** needs "
+            f"**{amount - have}** more.\n"
+            f"Use `/wallet deposit` to trade tix in from MTGO. Deposits "
+            f"automatically cover any pending tournament entry first, then any "
+            f"outstanding debts — `/debts summary` shows what you owe.")
 
 
 async def serve_busy_reason(client=None) -> str | None:

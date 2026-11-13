@@ -76,6 +76,7 @@ class Config:
                 "voice_channels": False,
                 "bot_detection": False,
                 "money_server": False,
+                "wallet": False,
                 "vouchers": False,
                 "scheduler": False,
                 "tournament": True,
@@ -180,6 +181,7 @@ class Config:
                 "voice_channels": True,
                 "bot_detection": True,
                 "money_server": False,
+                "wallet": False,
                 "vouchers": False,
                 "scheduler": False,
                 "tournament": True,
@@ -320,9 +322,17 @@ def update_setting(guild_id, path, value):
     return bot_config.update_guild_setting(guild_id, path, value)
 
 def is_money_server(guild_id):
-    """Helper function to check if this guild is configured for money drafts"""
+    """Whether drafts here are staked. This alone decides what /draft opens; whether
+    the server has a tix wallet is wallet_enabled."""
     config = get_config(guild_id)
     return config.get("features", {}).get("money_server", False)
+
+
+def wallet_enabled(guild_id):
+    """Whether this guild has the tix wallet: its own flag, or any money server, which
+    needs one to stake. A server can have the wallet without staking its drafts."""
+    features = get_config(guild_id).get("features", {})
+    return bool(features.get("wallet", False) or features.get("money_server", False))
 
 
 def vouchers_enabled(guild_id):

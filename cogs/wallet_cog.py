@@ -36,7 +36,8 @@ from services.mtgo_tradebot_client import DEFAULT_MAX_CARDS_PER_TRADE, EVENT_TIC
 from services.tournament_formatter import refresh_boards
 from helpers.money_gate import (
     DEFAULT_WAIT_MINUTES, custodian_name, explain_trade_failure, gate_read, gate_serve,
-    linked_username, mtgo_job_footer, mtgo_trade_prompt, spawn_followup,
+    linked_username, mtgo_job_footer, mtgo_trade_prompt, short_funds_message,
+    spawn_followup, unlinked_refusal,
 )
 from helpers.permissions import has_bot_manager_role
 from wallet_history_view import wallet_embed
@@ -349,15 +350,9 @@ class WalletCommands(commands.Cog):
             return await ctx.followup.send(err, ephemeral=True)
         if player.id == ctx.author.id:
             return await ctx.followup.send("You can't pay yourself.", ephemeral=True)
-        # both parties linked so the recipient can actually use the tix later (one batch query)
-        linked = await MtgoAccount.usernames_for_discord_ids([ctx.author.id, player.id])
-        if str(ctx.author.id) not in linked:
-            return await ctx.followup.send(
-                "Link your MTGO account first with `/link_mtgo`.", ephemeral=True)
-        if str(player.id) not in linked:
-            return await ctx.followup.send(
-                f"{player.display_name} hasn't linked an MTGO account yet, so they can't "
-                f"receive tix. Ask them to run `/link_mtgo` first.", ephemeral=True)
+        refusal = await unlinked_refusal(ctx.author, player)
+        if refusal:
+            return await ctx.followup.send(refusal, ephemeral=True)
 
         guild_id = str(ctx.guild.id)
         res = await resolution.pay(
@@ -366,17 +361,8 @@ class WalletCommands(commands.Cog):
         if not res.get("ok"):
             if res.get("code") == wallet_service.INSUFFICIENT_FUNDS:
                 have = res.get("available", 0)
-                # Says where an arriving deposit goes rather than telling the player to
-                # do arithmetic about it: settle_deposit_inflow spends it on a pending
-                # tournament entry first and debts second, so someone with either would
-                # otherwise be surprised to find their deposit gone.
                 return await ctx.followup.send(
-                    f"You have **{have} tix** — sending **{amount}** needs "
-                    f"**{amount - have}** more.\n"
-                    f"Use `/wallet deposit` to trade tix in from MTGO. Deposits "
-                    f"automatically cover any pending tournament entry first, then any "
-                    f"outstanding debts — `/debts summary` shows what you owe.",
-                    ephemeral=True)
+                    short_funds_message(have, amount, "sending"), ephemeral=True)
             return await ctx.followup.send(f"Couldn't send tix: {res.get('error')}", ephemeral=True)
 
         payer_bal = await wallet_service.get_balance(guild_id, str(ctx.author.id))

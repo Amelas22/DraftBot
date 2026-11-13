@@ -36,7 +36,7 @@ def serve(monkeypatch):
     async def handle(_):
         return "Borrower01"
     monkeypatch.setattr(svc, "_mtgo_handle", handle)
-    monkeypatch.setattr(svc, "is_money_server", lambda gid: True)
+    monkeypatch.setattr(svc, "wallet_enabled", lambda gid: True)
     return client
 
 

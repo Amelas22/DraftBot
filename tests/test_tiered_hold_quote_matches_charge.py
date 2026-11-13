@@ -34,7 +34,7 @@ def serve(monkeypatch):
     with a serve that accepts every trade."""
     client = FakeLendingServe({"Swamp": 99}, job={"state": "done"})
     monkeypatch.setattr(svc, "get_lending_client", lambda: client)
-    monkeypatch.setattr(svc, "is_money_server", lambda _: True)
+    monkeypatch.setattr(svc, "wallet_enabled", lambda _: True)
 
     async def handle(_):
         return "Borrower01"

@@ -106,9 +106,14 @@ def prize_wallet_id(tournament_id) -> str:
     return f"prize:tourney:{tournament_id}"
 
 
+def escrow_holder_id(escrow_id: int) -> str:
+    """The holder that owns one escrow's locked tix until it is decided."""
+    return f"escrow:hold:{escrow_id}"
+
+
 def is_system_account(player_id: str) -> bool:
     """True for synthetic holders. Real holders are Discord snowflakes, so anything
-    non-numeric is ours (in-flight, prize pools) — used wherever holders are rendered
+    non-numeric is ours (in-flight, prize pools, escrow holds) — used wherever holders are rendered
     or iterated as people."""
     return not (player_id or "").isdigit()
 

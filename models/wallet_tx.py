@@ -29,7 +29,8 @@ class WalletTx(Base):
 
     Holders are Discord ids, plus synthetic ones for claims no person holds yet:
     ``system:in-flight`` (tix committed to an open withdraw trade) and
-    ``prize:tourney:<id>`` (a tournament pot). See wallet_service.is_system_account.
+    ``prize:tourney:<id>`` (a tournament pot), ``escrow:hold:<id>`` (tix locked in an
+    escrow). See wallet_service.is_system_account.
 
     Reconciliation invariant: bot's on-MTGO tix == SUM(amount) over tix rows.
 

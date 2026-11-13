@@ -38,6 +38,7 @@ from .trophy_quiz_submission import TrophyQuizSubmission
 from .mtgo_account import MtgoAccount
 from .mtgo_job import MtgoJob
 from .wallet_tx import WalletTx
+from .escrow_hold import EscrowHold
 from .scheduler import PlayerAvailability, PlayerDayOverride, SchedulerLink
 from .team_finder import LfgAction, LfgRequest, LfgTeam, LfgTeamMember
 from .team_draft import TeamDraft, TeamDraftAction
@@ -83,6 +84,7 @@ __all__ = [
     'MtgoAccount',
     'MtgoJob',
     'WalletTx',
+    'EscrowHold',
     'Library',
     'LibraryServer',
     'CardSubstitution',

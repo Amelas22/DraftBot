@@ -26,7 +26,7 @@ from typing import Any, Awaitable, Callable, Optional
 from loguru import logger
 from sqlalchemy import and_, delete, or_, select, update
 
-from config import is_money_server
+from config import wallet_enabled
 from database.db_session import AsyncSessionLocal, db_session
 from services.card_substitution_service import (
     booked_names, learn_substitutions, under_counted_names,
@@ -961,7 +961,7 @@ async def _dispatch(guild_id: Any, borrower_id: Any, *, from_state: str, to_stat
                            "from {}", guild_id, borrower_id, library_id)
             return ("unavailable", loan)
         collateral = held
-        if collateral and not is_money_server(guild_id):
+        if collateral and not wallet_enabled(guild_id):
             # A library that charges needs the wallet, and finding that out at
             # transfer time -- after the borrower has been promised a deck --
             # is the bad version. A library that charges nothing needs no
