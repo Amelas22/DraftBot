@@ -5,6 +5,8 @@ One home for the checks every money-touching command runs, so the rules and thei
 user-facing wording can't drift between cogs:
   * gate_read  — the guild must have the tix wallet (wallet views, internal pays).
   * gate_serve — read gate + the TradeBot serve must be configured (trades).
+  * unlinked_refusal / short_funds_message — the two refusals every player-to-player
+    tix transfer (/wallet pay, /escrow open) gives, worded once.
   * linked_username — the caller's /link_mtgo identity, required to trade.
   * custodian_name — the vault account's display name (cached; it only changes
     when the serve is re-attached to a different MTGO login, i.e. on a restart
@@ -17,6 +19,7 @@ it can't be garbage-collected mid-poll).
 """
 import asyncio
 
+import discord
 from loguru import logger
 
 from config import wallet_enabled
@@ -145,6 +148,38 @@ def gate_serve(ctx) -> str | None:
 async def linked_username(discord_id) -> str | None:
     acct = await MtgoAccount.get_for_discord(discord_id)
     return acct.mtgo_username if acct else None
+
+
+async def unlinked_refusal(sender: discord.Member | discord.User,
+                           recipient: discord.Member | discord.User) -> str | None:
+    """Why tix can't move between these two players, or None if both are linked.
+
+    Both parties need a /link_mtgo identity so the recipient can actually use the tix
+    later. One batch query; the sender is checked first.
+    """
+    linked = await MtgoAccount.usernames_for_discord_ids([sender.id, recipient.id])
+    if str(sender.id) not in linked:
+        return "Link your MTGO account first with `/link_mtgo`."
+    if str(recipient.id) not in linked:
+        return (f"{recipient.display_name} hasn't linked an MTGO account yet, so they can't "
+                f"receive tix. Ask them to run `/link_mtgo` first.")
+    return None
+
+
+def short_funds_message(have: int, amount: int, verb: str) -> str:
+    """The player hasn't got the tix. ``verb`` is what they were trying to do with them
+    ("sending", "holding").
+
+    Says where an arriving deposit goes rather than telling the player to do
+    arithmetic about it: settle_deposit_inflow spends it on a pending tournament entry
+    first and debts second, so someone with either would otherwise be surprised to find
+    their deposit gone.
+    """
+    return (f"You have **{have} tix** — {verb} **{amount}** needs "
+            f"**{amount - have}** more.\n"
+            f"Use `/wallet deposit` to trade tix in from MTGO. Deposits "
+            f"automatically cover any pending tournament entry first, then any "
+            f"outstanding debts — `/debts summary` shows what you owe.")
 
 
 async def serve_busy_reason(client=None) -> str | None:
