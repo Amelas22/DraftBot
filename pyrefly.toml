@@ -19,6 +19,7 @@ project-includes = [
     "models/scheduler.py",
     "models/team_finder.py",
     "models/escrow_hold.py",
+    "services/escrow_service.py",
     "models/team_draft.py",
     "services/team_finder.py",
     "services/team_finder_sync.py",

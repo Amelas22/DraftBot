@@ -7,7 +7,8 @@ import functools
 
 import discord
 from loguru import logger
-from helpers.display_names import get_member_name_plain
+from helpers.display_names import get_member_name_plain, plain_text
+from models.escrow_hold import RELEASED
 from preference_service import get_players_dm_notification_preferences
 from services.debt_service import get_balance_with
 
@@ -324,6 +325,40 @@ async def notify_payment_received(bot, guild_id: str, recipient_id: str, sender_
     if note:
         msg += f" ({note})"
     await send_dm(bot, recipient_id, msg, label=f"payment to {recipient_id}")
+
+
+@_best_effort
+async def notify_escrow_opened(bot, guild_id: str, recipient_id: str, *, escrow_id: int,
+                               funder_id: str, counterparty_id: str, amount: int, note: str):
+    """Tix were locked in escrow; sent to both parties."""
+    funder = _wallet_name(bot, guild_id, funder_id)
+    counterparty = _wallet_name(bot, guild_id, counterparty_id)
+    # The note is user-written: shown as plain words, so it can neither ping nor restyle.
+    safe_note = plain_text(note)
+    if recipient_id == funder_id:
+        msg = (f"🔒 Escrow #{escrow_id}: **{amount} tix** from your wallet are held for "
+               f"{counterparty}. A moderator will release or return them. Note: {safe_note}")
+    else:
+        msg = (f"🔒 Escrow #{escrow_id}: {funder} put **{amount} tix** in escrow for you. "
+               f"A moderator will release or return them. Note: {safe_note}")
+    await send_dm(bot, recipient_id, msg, label=f"escrow opened to {recipient_id}")
+
+
+@_best_effort
+async def notify_escrow_decided(bot, guild_id: str, recipient_id: str, *, escrow_id: int,
+                                funder_id: str, counterparty_id: str, amount: int,
+                                outcome: str, decided_by: str, note: str):
+    """A moderator decided an escrow; sent to both parties. The note says which deal it
+    was, for a player holding more than one escrow."""
+    mod = _wallet_name(bot, guild_id, decided_by)
+    safe_note = plain_text(note)
+    if outcome == RELEASED:
+        counterparty = _wallet_name(bot, guild_id, counterparty_id)
+        msg = f"✅ Escrow #{escrow_id}: **{amount} tix** released to {counterparty} by {mod}. Note: {safe_note}"
+    else:
+        funder = _wallet_name(bot, guild_id, funder_id)
+        msg = f"↩️ Escrow #{escrow_id}: **{amount} tix** returned to {funder} by {mod}. Note: {safe_note}"
+    await send_dm(bot, recipient_id, msg, label=f"escrow decided to {recipient_id}")
 
 
 @_best_effort

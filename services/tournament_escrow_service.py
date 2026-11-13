@@ -1,6 +1,7 @@
 """
 Tournament entry fees — the tournament side of the tix ledger, bridging tournament_service
-(the participant row) and wallet_service (the money).
+(the participant row) and wallet_service (the money). Player-to-player escrow, released
+by a moderator, is a different thing: see services/escrow_service.py.
 
 Every movement is a plain transfer between wallet holders, tagged with a per-participant
 ``source`` so it's idempotent and reversible:
