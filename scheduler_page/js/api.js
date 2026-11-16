@@ -1,6 +1,7 @@
 // The page's only door to the bot: a JSON API on the same origin, authorised by the link token. No DOM;
 // fetch is injectable for tests.
 import { CELL_MS, DAY_CELLS, decodeCells, decodeDayCells, encodeCells, isoSeconds, localDateOf, weekdayOfDate } from "./week.js";
+import { addDays, deadlineOnOrAfter, weekWindow } from "./rounds.js";
 
 export class LinkExpired extends Error {
   constructor(message = "link expired") { super(message); this.name = "LinkExpired"; }
@@ -252,6 +253,20 @@ const TEAM_DRAFT_FIXTURES = {
   "team-draft-new": { user: "900000000000000023", usualFile: null },
 };
 
+// The fixture's matchup is shown one unnumbered week at a time, Sunday to Sunday Pacific, picked with ?week=<first
+// day> (the server's query); with none, the week ending on this Sunday. All of a week is open for booking.
+const fixtureWeek = (path) => {
+  const week = new URLSearchParams(path.split("?")[1] ?? "").get("week") ?? addDays(deadlineOnOrAfter(new Date()), -7);
+  const lastDay = addDays(week, 7);
+  const { startUtc, cells } = weekWindow(lastDay);
+  return {
+    window: { start_utc: isoSeconds(startUtc), cell_minutes: 30, cells, shape: "round" },
+    round: { number: null, first_day: week, last_day: lastDay, prev: { week: addDays(week, -7) }, next: { week: lastDay } },
+    bookable: { start_utc: isoSeconds(startUtc), end_utc: isoSeconds(new Date(startUtc.getTime() + cells * CELL_MS)) },
+  };
+};
+const pathOnly = (path) => path.split("?")[0];
+
 function teamDraftFixtureApi(read, { user: viewer, usualFile }) {
   let state = null;
   let week;
@@ -259,17 +274,20 @@ function teamDraftFixtureApi(read, { user: viewer, usualFile }) {
     if (!state) {
       state = await read("fixtures/team-draft.json");
       if (viewer) state.me.user = viewer;
-      const start = new Date(Math.floor(Date.now() / CELL_MS) * CELL_MS);
-      state.window.start_utc = isoSeconds(start);
-      // Overrides are dated for the real week, so move them to tomorrow, inside the now-based window.
-      const tomorrow = new Date(start.getTime() + 24 * 3600000);
-      for (const side of state.sides) for (const p of side.people) for (const o of p.overrides) o.date = localDateOf(tomorrow, o.zone);
+      // Overrides are dated for the real week, so move them into the week shown first: tomorrow, or its Sunday noon
+      // (Pacific) when tomorrow is past it.
+      const { window } = fixtureWeek("");
+      const end = Date.parse(window.start_utc) + window.cells * CELL_MS;
+      const day = new Date(Math.min(Date.now() + 24 * 3600000, end - 12 * 3600000));
+      for (const side of state.sides) for (const p of side.people) for (const o of p.overrides) o.date = localDateOf(day, o.zone);
       week = usualFile ? await read(usualFile) : null;
     }
     return state;
   };
+  // The state as it reads for the week a path asks for.
+  const stateFor = (path) => ({ ...state, ...fixtureWeek(path) });
   const user = () => state.me.user;
-  const answer = (code) => structuredClone({ ok: code === null, code, state });
+  const answer = (code, path) => structuredClone({ ok: code === null, code, state: stateFor(path) });
   const viewerRows = () => state.sides.flatMap((s) => s.people).filter((p) => p.user === user());
   const thisWeek = fixtureThisWeek();
   const setOverrides = (overrides) => { for (const p of viewerRows()) p.overrides = structuredClone(overrides); };
@@ -280,27 +298,28 @@ function teamDraftFixtureApi(read, { user: viewer, usualFile }) {
     return doc;
   };
 
-  async function act(body) {
+  async function act(path, body) {
     await load();
     const booking = state.booking;
-    if (state.matchup.state !== "open") return answer("started");
-    if (body.seen_version !== booking.version) return answer("changed");
+    const reply = (code) => answer(code, path);
+    if (state.matchup.state !== "open") return reply("started");
+    if (body.seen_version !== booking.version) return reply("changed");
     if (body.kind === "book") {
       const at = Date.parse(body.start_utc);
-      const first = Date.parse(state.window.start_utc);
-      if (at < Date.now()) return answer("past");
-      if (at >= first + state.window.cells * CELL_MS) return answer("out_of_window");
+      const { bookable } = fixtureWeek(path);
+      if (at < Date.now()) return reply("past");
+      if (at < Date.parse(bookable.start_utc) || at >= Date.parse(bookable.end_utc)) return reply("out_of_window");
       booking.start_utc = body.start_utc;
       booking.by_name = state.sides.flatMap((s) => s.people).find((p) => p.user === user())?.name ?? null;
     } else if (body.kind === "clear") {
-      if (booking.start_utc === null) return answer("not_booked");
+      if (booking.start_utc === null) return reply("not_booked");
       booking.start_utc = null;
       booking.by_name = null;
     } else {
-      return answer("bad_input");
+      return reply("bad_input");
     }
     booking.version += 1;
-    return answer(null);
+    return reply(null);
   }
 
   return {
@@ -328,12 +347,13 @@ function teamDraftFixtureApi(read, { user: viewer, usualFile }) {
     },
     clearThisWeek: async () => { await load(); setOverrides([]); return thisWeek.clearThisWeek(); },
     get: async (path) => {
-      if (path !== "/api/team-draft") throw new Error(`no fixture for ${path}`);
-      return structuredClone(await load());
+      if (pathOnly(path) !== "/api/team-draft") throw new Error(`no fixture for ${path}`);
+      await load();
+      return structuredClone(stateFor(path));
     },
     post: async (path, body) => {
-      if (path !== "/api/team-draft/actions") throw new Error(`no fixture for ${path}`);
-      return act(body);
+      if (pathOnly(path) !== "/api/team-draft/actions") throw new Error(`no fixture for ${path}`);
+      return act(path, body);
     },
   };
 }

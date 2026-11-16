@@ -2,9 +2,10 @@
 // boxed and its counts written once, Book / Move / Clear for the matchup's time, and a card saying how the grid counts
 // the viewer, whose Everyone | My availability swaps the heatmap for their own this week or usual week. Pressing a
 // side or a player leaves them out of the grid until pressed again. Every decision lives in teamdraft.js; this file
-// only draws and wires.
+// only draws and wires. A round's matchup shows one round (or unnumbered week) at a time, with arrows to the ones
+// around it; every read and action names the round being viewed.
 import { LinkExpired, checkDoc } from "./api.js";
-import { CELLS, CELL_MS, addCells, isoSeconds } from "./week.js";
+import { CELL_MS, addCells, isoSeconds, localDateOf } from "./week.js";
 import { mountHeatmap, formatCell, layoutWindow, legendKey, weekKeys, zoneName } from "./grid.js";
 import { appBar } from "./appbar.js";
 import { shownZonePicker } from "./shownzone.js";
@@ -12,9 +13,10 @@ import { mountUsual } from "./usual.js";
 import { mountThisWeek } from "./thisweek.js";
 import { el } from "./dom.js";
 import { expiredMessage } from "./messages.js";
+import { roundLabel, roundQuery } from "./rounds.js";
 import { actionErrorText, createSync, hasAvailability, shadeLevel } from "./teams.js";
 import {
-  FORMAT, bookable, bookingLine, countText, freeBySide, freeRuns, refusalText, shiftSelection, sideCounts, toggleSide,
+  FORMAT, bookable, bookingLine, cellState, countText, freeBySide, freeRuns, refusalText, shiftSelection, sideCounts, toggleSide,
   togglePerson, whoIsFree, whoText, withoutPeople,
 } from "./teamdraft.js";
 
@@ -83,6 +85,10 @@ export async function mountTeamDraft(root, api, deps = {}) {
 
 async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zoneDeps) {
   root.replaceChildren(el("p", { class: "status", text: "Loading…" }));
+  // The round being viewed, as the server's query (?round=N or ?week=YYYY-MM-DD); "" is the one the server picks.
+  let query = "";
+  // The query the drawn state was read with.
+  let shownQuery = "";
   let state;
   try {
     state = checkDoc(await api.get(paths.get), FORMAT);
@@ -117,6 +123,10 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
   let usualNow = usualDoc;
 
   const heading = el("h1");
+  const prevBtn = el("button", { type: "button", class: "roundarrow", text: "‹" });
+  const nextBtn = el("button", { type: "button", class: "roundarrow", text: "›" });
+  const roundText = el("span", { class: "roundlabel" });
+  const roundNav = el("div", { class: "roundnav" }, prevBtn, roundText, nextBtn);
   const ledeEl = el("p", { class: "lede" });
   const bookLine = el("p", { class: "bookline", role: "status", "aria-live": "polite" });
   const threadLink = el("a", { class: "threadlink", text: "Open the thread", target: "_blank", rel: "noopener" });
@@ -141,10 +151,11 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
   const everyone = () => state.sides.flatMap((s) => s.people);
   const total = () => shown().sides.reduce((n, s) => n + s.people.length, 0);
   const freeCount = (j) => sideCounts(freeSides, j).reduce((a, b) => a + b, 0);
+  const cells = () => state.window.cells;
   const bookedCell = () => {
     if (!state.booking.start_utc) return null;
     const j = (Date.parse(state.booking.start_utc) - startUtc.getTime()) / CELL_MS;
-    return Number.isInteger(j) && j >= 0 && j < CELLS ? j : null;
+    return Number.isInteger(j) && j >= 0 && j < cells() ? j : null;
   };
   const isBooked = () => state.booking.start_utc !== null;
   const draftCells = () => state.rules.draft_cells;
@@ -165,10 +176,16 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
     if (run) classes.push("run", ...(run.first ? ["rfirst"] : []), ...(run.last ? ["rlast"] : []));
     if (booked !== null && j >= booked && j < booked + draftCells()) classes.push("booked");
     if (j === selected) classes.push("picked");
+    const mark = cellState(j, state, now(), startUtc);
+    if (mark) classes.push(mark);
     return classes.join(" ");
   };
+  // The grid's name for a screen reader: the round it shows, else the rolling default.
+  const gridLabel = () => (state.window.shape === "round" && state.round
+    ? `${roundLabel(state.round)}, half-hour cells, times in ${zoneName(zone)}` : undefined);
   const makeHeat = (openDate) => mountHeatmap(heatBox, {
-    startUtc, zone, openDate, cellClass, cellLabel: label, cellText: (j) => (runs[j]?.first ? countText(sideCounts(freeSides, j)) : ""),
+    startUtc, zone, openDate, cells: cells(), shape: state.window.shape, gridLabel: gridLabel(), cellClass, cellLabel: label,
+    cellText: (j) => (runs[j]?.first ? countText(sideCounts(freeSides, j)) : ""),
     onPick: (j) => {
       selected = open() && bookable(j, state, now(), startUtc) ? j : null;
       clicked = j;
@@ -179,12 +196,20 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
     },
     onHover: (j, byMouse) => { hovered = byMouse ? j : null; setReadout(j === null ? restingReadout() : label(j)); },
   });
-  let heat = makeHeat();
-  // A new grid for a new zone or window, on the same day tab; a hover from the old one is dropped.
-  const redraw = () => {
+  // The day a new round opens on: today, when some of it is in view and still ahead (not just the last hours of a
+  // round already over), else the first.
+  const startDay = () => {
+    const today = localDateOf(now(), zone);
+    const day = layoutWindow(startUtc, zone, cells(), state.window.shape).find((d) => d.date === today);
+    return day && addCells(startUtc, day.cells.at(-1).j + 1) > now() ? today : null;
+  };
+  let heat = makeHeat(startDay());
+  // A new grid for a new zone or window, on the same day tab (or for another round, on startDay); a hover from the
+  // old one is dropped.
+  const redraw = (openDate = heat.openDate()) => {
     hovered = null;
     if (clicked === null) setReadout(HOVER_HINT);
-    heat = makeHeat(heat.openDate());
+    heat = makeHeat(openDate);
   };
 
   const toggle = (next) => { off = next; render(); };
@@ -237,7 +262,9 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
     mineBox.replaceChildren(segmented("Which week", [
       ["This week", w === "thisWeek", () => toMine("thisWeek")], ["Usual week", w === "usual", () => toMine("usual")],
     ]), box);
-    editor = (w === "usual" ? mountUsual : mountThisWeek)(box, api, { now, usualDoc: usualNow, startUtc, onKeptAsUsual: () => toMine("usual") }).catch((e) => {
+    editor = (w === "usual" ? mountUsual : mountThisWeek)(box, api, {
+      now, usualDoc: usualNow, startUtc, cells: cells(), shape: state.window.shape, onKeptAsUsual: () => toMine("usual"),
+    }).catch((e) => {
       if (e instanceof LinkExpired) notice(expiredMessage());
       else { console.error(e); box.replaceChildren(el("p", { class: "status", text: actionErrorText(e) })); }
       return null;
@@ -259,9 +286,35 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
   const renderLegend = () => {
     const swatches = [];
     for (let n = 0; n <= total(); n++) swatches.push(el("i", { class: `s${shadeLevel(n, Math.max(1, total()))}` }));
+    const at = now();
+    let nobook = false;
+    for (let j = 0; j < cells() && !nobook; j++) nobook = cellState(j, state, at, startUtc) === "nobook";
     legend.replaceChildren(el("span", { text: "nobody" }), ...swatches, el("span", { text: `all ${total()} free` }),
-      legendKey("run", "same people throughout"), legendKey("booked", "booked"), ...weekKeys());
+      legendKey("run", "same people throughout"), legendKey("booked", "booked"), ...weekKeys(state.window.shape),
+      legendKey("past", "already passed"), ...(nobook ? [legendKey("nobook", "can't book here")] : []));
   };
+
+  // The round row: its label, and an arrow to each round around it that exists. Hidden on a rolling window.
+  const renderRound = () => {
+    const { round } = state;
+    roundNav.hidden = round === null;
+    if (round === null) return;
+    roundText.textContent = roundLabel(round);
+    const unit = round.number == null ? "week" : "round";
+    prevBtn.setAttribute("aria-label", `Earlier ${unit}`);
+    nextBtn.setAttribute("aria-label", `Later ${unit}`);
+    prevBtn.hidden = !round.prev;
+    nextBtn.hidden = !round.next;
+  };
+  // An arrow: view that round, and in My availability mount its editor again on the new window.
+  const go = async (ref) => {
+    if (!ref) return;
+    query = roundQuery(ref);
+    await refresh();
+    if (which !== null) await toMine(which);
+  };
+  prevBtn.addEventListener("click", () => go(state.round?.prev));
+  nextBtn.addEventListener("click", () => go(state.round?.next));
 
   function renderActions() {
     const canPick = open();
@@ -275,11 +328,13 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
 
   function render() {
     heading.textContent = state.matchup.name;
+    renderRound();
     bookLine.textContent = bookingLine(state, zone);
     threadLink.hidden = !state.matchup.thread_url;
     if (state.matchup.thread_url) threadLink.href = state.matchup.thread_url;
     freeSides = freeBySide(shown(), startUtc);
-    runs = freeRuns(freeSides, new Set(layoutWindow(startUtc, zone).map((d) => d.cells[0].j)));
+    const columnStarts = new Set(layoutWindow(startUtc, zone, cells(), state.window.shape).map((d) => d.cells[0].j));
+    runs = freeRuns(freeSides, columnStarts, cells());
     ledeEl.textContent = ledeText();
     renderCard();
     renderSides();
@@ -301,12 +356,18 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
     const done = sync.startAction();
     for (const b of [bookBtn, moveBtn, clearBtn]) b.disabled = true;
     status.textContent = "Sending…";
+    const sentFor = query;
     try {
-      const r = await api.post(paths.actions, { action_id: crypto.randomUUID(), seen_version: state.booking.version, ...body });
-      state = checkDoc(r?.state, FORMAT);
+      const r = await api.post(paths.actions + query, { action_id: crypto.randomUUID(), seen_version: state.booking.version, ...body });
+      const fresh = checkDoc(r?.state, FORMAT);
       selected = null;
-      render();
+      // The answer is for the round the action was sent from; once the viewer has moved on, read the one they're on.
+      if (sentFor === query) {
+        state = fresh;
+        render();
+      }
       status.textContent = r.ok ? "" : refusalText(r.code);
+      if (sentFor !== query) { done(); refresh(); }
     } catch (e) {
       status.textContent = actionErrorText(e);
       if (e instanceof LinkExpired) cleanups.forEach((c) => c());
@@ -324,18 +385,23 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
   async function refresh() {
     const ticket = sync.startRefresh();
     if (!ticket) return;
+    const asked = query;
+    const moved = asked !== shownQuery;
     try {
-      const fresh = checkDoc(await api.get(paths.get), FORMAT);
-      if (!sync.isCurrent(ticket)) return;
+      const fresh = checkDoc(await api.get(paths.get + asked), FORMAT);
+      // A read for a round the viewer has since left is dropped; the read for the new one follows.
+      if (!sync.isCurrent(ticket) || asked !== query) return;
+      const was = state.window;
       state = fresh;
       const start = new Date(state.window.start_utc);
-      if (start.getTime() !== startUtc.getTime()) {
-        // The window slid forward: keep the picked moment, not its cell index.
-        selected = shiftSelection(selected, startUtc, start);
-        clicked = shiftSelection(clicked, startUtc, start);
+      if (start.getTime() !== startUtc.getTime() || was.cells !== state.window.cells || was.shape !== state.window.shape) {
+        // A new window (it slid forward, or another round): keep the picked moment, not its cell index.
+        selected = shiftSelection(selected, startUtc, start, state.window.cells);
+        clicked = shiftSelection(clicked, startUtc, start, state.window.cells);
         startUtc = start;
-        redraw();
+        redraw(moved ? startDay() : heat.openDate());
       }
+      shownQuery = asked;
       render();
     } catch (e) {
       if (e instanceof LinkExpired) notice(expiredMessage());
@@ -351,6 +417,6 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
   const bar = appBar("Team draft");
   bar.classList.add("withaction");
   bar.append(picker.row);
-  root.replaceChildren(bar, heading, ledeEl, bookLine, threadLink, cardBox, sidesBox, pane);
+  root.replaceChildren(bar, heading, roundNav, ledeEl, bookLine, threadLink, cardBox, sidesBox, pane);
   render();
 }

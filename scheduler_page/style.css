@@ -191,6 +191,13 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 
 /* Team draft: the two sides, the booking line and the shared heatmap with runs of the same people boxed */
 .bookline { margin: 0 0 8px; font-weight: 800; }
+/* A round's matchup: the round shown, between arrows to the rounds around it. A missing arrow keeps its place, so the
+   label never shifts as the viewer steps through the rounds. */
+.roundnav { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; }
+.roundlabel { font-weight: 800; font-variant-numeric: tabular-nums; }
+.roundarrow { width: 36px; height: 36px; border: 2px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--fg); font-size: 20px; line-height: 1; cursor: pointer; }
+.roundarrow:hover { border-color: var(--accent); }
+.roundarrow[hidden] { display: inline-block !important; visibility: hidden; }
 .threadlink { display: inline-block; margin-bottom: 10px; color: var(--accent); font-weight: 700; }
 .sides { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
 .side { background: var(--surface); border-radius: 12px; padding: 12px; min-width: 0; }

@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createApi, createFixtureApi, apiFromHash, checkDoc, LinkExpired, NeedsUpdate, NotEnabled, NEEDS_UPDATE } from "../js/api.js";
-import { decodeCells, encodeDayCells, localDateOf } from "../js/week.js";
+import { decodeCells, encodeDayCells, isoSeconds, localDateOf } from "../js/week.js";
+import { addDays, deadlineOnOrAfter, weekWindow } from "../js/rounds.js";
 
 const TOKEN = "abcdefghijklmnopqrstuv"; // 22 chars, like a real link token
 const reply = (status, body) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
@@ -281,34 +282,46 @@ test("the team-draft-new fixture is Fern, who has no week until she saves one, t
   assert.deepEqual([fern.zone, fern.cells], ["Europe/London", "AAAA"]);
 });
 
-test("the team-draft fixture's window starts at the current half hour, so cells can be booked", async () => {
+test("the team-draft fixture opens on the week whose Sunday is this one, with arrows to the weeks around it", async () => {
   const api = createFixtureApi("team-draft", diskFetch());
-  const { window } = await api.get("/api/team-draft");
-  const start = Date.parse(window.start_utc);
-  assert.equal(start % 1800000, 0);
-  assert.ok(Math.abs(start - Date.now()) <= 1800000);
+  const s = await api.get("/api/team-draft");
+  const first = addDays(deadlineOnOrAfter(new Date()), -7);
+  assert.deepEqual([s.window.start_utc, s.window.shape, s.round.number, s.round.first_day, s.round.last_day, s.round.prev, s.round.next],
+    [isoSeconds(weekWindow(addDays(first, 7)).startUtc), "round", null, first, addDays(first, 7), { week: addDays(first, -7) }, { week: addDays(first, 7) }]);
+  const start = Date.parse(s.window.start_utc);
+  assert.ok(start <= Date.now() && Date.now() < start + s.window.cells * 1800000);
+  assert.deepEqual(s.bookable, { start_utc: s.window.start_utc, end_utc: isoSeconds(new Date(start + s.window.cells * 1800000)) });
+});
+
+test("the team-draft fixture serves the week it is asked for", async () => {
+  const s = await createFixtureApi("team-draft", diskFetch()).get("/api/team-draft?week=2026-11-08");
+  assert.deepEqual([s.window.start_utc, s.window.cells, s.window.shape, s.round.first_day, s.round.prev], ["2026-11-08T08:00:00Z", 384, "round", "2026-11-08", { week: "2026-11-01" }]);
 });
 
 test("the team-draft fixture books, moves and clears in memory, bumping the version", async () => {
   const fake = diskFetch();
   const api = createFixtureApi("team-draft", fake);
-  const { window } = await api.get("/api/team-draft");
+  // The week after next, so every cell is still ahead.
+  const week = addDays(deadlineOnOrAfter(new Date()), 7);
+  const q = `?week=${week}`;
+  const { window } = await api.get(`/api/team-draft${q}`);
   const at = (j) => new Date(Date.parse(window.start_utc) + j * 1800000).toISOString().replace(/\.\d{3}Z$/, "Z");
+  const act = (body) => api.post(`${TD}${q}`, { action_id: uuid(), ...body });
   const before = fake.calls.length;
 
-  let r = await td(api, { kind: "book", start_utc: at(100), seen_version: 0 });
+  let r = await act({ kind: "book", start_utc: at(100), seen_version: 0 });
   assert.deepEqual([r.ok, r.code, r.state.booking.start_utc, r.state.booking.version, r.state.booking.by_name], [true, null, at(100), 1, "Ben"]);
-  r = await td(api, { kind: "book", start_utc: at(101), seen_version: 0 });
+  r = await act({ kind: "book", start_utc: at(101), seen_version: 0 });
   assert.deepEqual([r.ok, r.code, r.state.booking.start_utc, r.state.booking.version], [false, "changed", at(100), 1]);
-  r = await td(api, { kind: "book", start_utc: at(101), seen_version: 1 });
-  assert.deepEqual([r.ok, r.state.booking.start_utc, r.state.booking.version], [true, at(101), 2]);
-  r = await td(api, { kind: "book", start_utc: at(-1), seen_version: 2 });
+  r = await act({ kind: "book", start_utc: at(101), seen_version: 1 });
+  assert.deepEqual([r.ok, r.state.booking.start_utc, r.state.booking.version, r.state.window.start_utc], [true, at(101), 2, window.start_utc]);
+  r = await act({ kind: "book", start_utc: "2020-01-01T00:00:00Z", seen_version: 2 });
   assert.deepEqual([r.ok, r.code], [false, "past"]);
-  r = await td(api, { kind: "book", start_utc: at(336), seen_version: 2 });
+  r = await act({ kind: "book", start_utc: at(window.cells), seen_version: 2 });
   assert.deepEqual([r.ok, r.code], [false, "out_of_window"]);
-  r = await td(api, { kind: "clear", seen_version: 2 });
+  r = await act({ kind: "clear", seen_version: 2 });
   assert.deepEqual([r.ok, r.state.booking.start_utc, r.state.booking.version], [true, null, 3]);
-  r = await td(api, { kind: "clear", seen_version: 3 });
+  r = await act({ kind: "clear", seen_version: 3 });
   assert.deepEqual([r.ok, r.code], [false, "not_booked"]);
   assert.equal((await api.get("/api/team-draft")).booking.version, 3);
   assert.equal(fake.calls.length, before);
