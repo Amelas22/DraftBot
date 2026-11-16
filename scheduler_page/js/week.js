@@ -92,10 +92,13 @@ export function windowCells(zone, usual, startUtc, count = CELLS) {
 }
 
 // The usual week with window cells painted in as instants: each window cell's usual-week cell (its local time in zone)
-// is set or cleared as `painted` has it; usual-week cells the window never reaches keep their value.
-export function usualWithWindow(usual, painted, zone, startUtc) {
+// is set or cleared as `painted` has it; usual-week cells the window never reaches keep their value. A window longer
+// than a week reaches some usual-week cells twice, and the later cell wins. With previous (the painting the window was
+// last drawn as) only the cells painted differently are written, so a change on one of two same-weekday days stands.
+export function usualWithWindow(usual, painted, zone, startUtc, count = CELLS, previous = null) {
   const out = new Set(usual);
-  for (let j = 0; j < CELLS; j++) {
+  for (let j = 0; j < count; j++) {
+    if (previous && previous.has(j) === painted.has(j)) continue;
     const u = usualCellOf(addCells(startUtc, j), zone);
     if (painted.has(j)) out.add(u);
     else out.delete(u);

@@ -26,6 +26,9 @@ const TOKEN_RE = /^[A-Za-z0-9_-]{20,64}$/;
 const USUAL_PATH = "/api/usual-week";
 const THIS_WEEK_PATH = "/api/this-week";
 
+// The this-week path, for the dates from..to ("YYYY-MM-DD", inclusive) when a range is given, else every date.
+const thisWeekPath = (range) => (range ? `${THIS_WEEK_PATH}?${new URLSearchParams({ from: range.from, to: range.to })}` : THIS_WEEK_PATH);
+
 // A player with no overrides: the server answers this on a first read, and the fixtures start from it.
 const emptyThisWeek = () => ({ format: "draftbot.scheduler.this_week", version: 1, zone: null, days: [] });
 // A this-week doc's days as a usual week: each date's cells become its weekday's.
@@ -38,7 +41,8 @@ function daysAsWeek(days) {
   }
   return cells;
 }
-// The in-memory this-week behaviour the fixture apis share; a saved doc comes back without its `also_usual`.
+// The in-memory this-week behaviour the fixture apis share; a saved doc comes back without its `also_usual`. A range
+// on a read or a reset is ignored.
 function fixtureThisWeek() {
   let doc = emptyThisWeek();
   return {
@@ -89,10 +93,10 @@ export function createApi(token, fetchFn = fetch) {
       return res.json();
     },
     putUsual: (doc) => json("PUT", USUAL_PATH, doc),
-    getThisWeek: () => json("GET", THIS_WEEK_PATH),
+    getThisWeek: (range) => json("GET", thisWeekPath(range)),
     putThisWeek: (doc) => json("PUT", THIS_WEEK_PATH, doc),
-    async clearThisWeek() {
-      const res = await call("DELETE", THIS_WEEK_PATH);
+    async clearThisWeek(range) {
+      const res = await call("DELETE", thisWeekPath(range));
       if (!res.ok) throw await failure(res);
       return null;
     },

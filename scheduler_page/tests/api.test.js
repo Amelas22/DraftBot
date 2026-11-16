@@ -365,3 +365,17 @@ test("the team-draft fixture stores only the days that differ from the usual wee
   const ben = (await api.get("/api/team-draft")).sides.flatMap((s) => s.people).find((p) => p.user === "900000000000000002");
   assert.deepEqual(ben.overrides.map((o) => o.date), ["2026-10-27"]);
 });
+
+test("getThisWeek and clearThisWeek pass a range as from/to", async () => {
+  const fake = recorder(200, { format: "draftbot.scheduler.this_week", version: 1, zone: null, days: [] });
+  const api = createApi(TOKEN, fake);
+  const range = { from: "2026-11-15", to: "2026-11-23" };
+  await api.getThisWeek(range);
+  await api.clearThisWeek(range);
+  await api.getThisWeek();
+  await api.clearThisWeek();
+  assert.deepEqual(fake.calls.map(([u, o]) => [o.method, u]), [
+    ["GET", "/api/this-week?from=2026-11-15&to=2026-11-23"], ["DELETE", "/api/this-week?from=2026-11-15&to=2026-11-23"],
+    ["GET", "/api/this-week"], ["DELETE", "/api/this-week"],
+  ]);
+});

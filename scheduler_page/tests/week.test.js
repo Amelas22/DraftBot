@@ -96,3 +96,14 @@ test("usualWithWindow writes window cells back to their usual-week cells and kee
   assert.deepEqual(windowCells(NY, usualWithWindow(new Set(), new Set([0, 5, 300]), NY, start), start), new Set([0, 5, 300]));
   assert.ok(!out.has(100));
 });
+
+test("usualWithWindow with previous writes only what changed, so a stroke on one Sunday survives the other", () => {
+  const start = new Date("2026-11-15T08:00:00Z"); // Sun 15 Nov, midnight in Los Angeles
+  const LA = "America/Los_Angeles";
+  const got = usualWithWindow(new Set(), new Set([0]), LA, start, 384, new Set());
+  assert.deepEqual(got, new Set([6 * 48])); // Sunday 00:00, and nothing else touched
+  // Without previous the trailing Sunday (window cell 336, unpainted) writes the same usual cell back to busy.
+  assert.ok(!usualWithWindow(new Set(), new Set([0]), LA, start, 384).has(6 * 48));
+  // The window's last cell, past the usual week's 336, is written too: Sunday 11:30 PM.
+  assert.deepEqual(usualWithWindow(new Set(), new Set([383]), LA, start, 384, new Set()), new Set([6 * 48 + 47]));
+});

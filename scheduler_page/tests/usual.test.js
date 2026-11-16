@@ -1,6 +1,6 @@
-import test from "node:test";
+import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
-import { applyStroke, toFile, loadWeek, saveFailedMessage, actionButtons, autosaver } from "../js/usual.js";
+import { applyStroke, toFile, loadWeek, saveFailedMessage, actionButtons, autosaver, mountUsual } from "../js/usual.js";
 import { decodeCells } from "../js/week.js";
 import { NeedsUpdate } from "../js/api.js";
 
@@ -22,6 +22,11 @@ test("applyStroke erases and does not mutate its input", () => {
   const snapshot = new Set(start);
   assert.equal(applyStroke(start, cell(2, 19), cell(2, 20, 1), false).size, 8);
   assert.deepEqual(start, snapshot);
+});
+
+test("applyStroke leaves locked cells as they were", () => {
+  assert.deepEqual(applyStroke(new Set([3]), 0, 5, true, undefined, new Set([2, 3])), new Set([0, 1, 3, 4, 5]));
+  assert.deepEqual(applyStroke(new Set([0, 1, 2, 3]), 0, 3, false, undefined, new Set([2])), new Set([2]));
 });
 
 test("toFile shape", () => {
@@ -129,4 +134,52 @@ test("autosaver cancel drops a pending change", async () => {
   r.auto.cancel();
   await r.auto.flush();
   assert.equal(r.saves, 0);
+});
+
+// A just-enough DOM: elements keep their children, attributes, classes and listeners.
+class Node {
+  constructor() { this.children = []; this.attrs = {}; this.listeners = {}; this.dataset = {}; this.className = ""; this.textContent = ""; this.classes = new Set(); }
+  append(...kids) { this.children.push(...kids); }
+  replaceChildren(...kids) { this.children = kids; }
+  setAttribute(k, v) { this.attrs[k] = v; if (k.startsWith("data-")) this.dataset[k.slice(5)] = v; }
+  addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
+  get classList() {
+    const c = this.classes;
+    return { add: (...n) => n.forEach((x) => c.add(x)), remove: (...n) => n.forEach((x) => c.delete(x)), toggle: (n, on) => (on ? c.add(n) : c.delete(n)) };
+  }
+  closest(sel) { return this.className.split(" ").includes(sel.slice(1)) ? this : null; }
+  find(test) { return test(this) ? this : this.children.map((c) => c.find?.(test)).find(Boolean); }
+}
+
+let savedDocument;
+before(() => {
+  savedDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
+  globalThis.document = { createElement: () => new Node() };
+});
+after(() => {
+  if (savedDocument) Object.defineProperty(globalThis, "document", savedDocument);
+  else delete globalThis.document;
+});
+
+test("on a round view a stroke on one Sunday shows on both", async () => {
+  const LA = "America/Los_Angeles";
+  const puts = [];
+  const api = {
+    getUsual: async () => toFile(LA, new Set(), new Date()),
+    putUsual: async (doc) => { puts.push(doc); return doc; },
+  };
+  const root = new Node();
+  const editor = await mountUsual(root, api, {
+    startUtc: new Date("2026-11-15T08:00:00Z"), cells: 384, shape: "round", zones: [LA], defaultZone: LA,
+  });
+  const node = (j) => root.find((n) => n.attrs["data-i"] === String(j));
+  const grid = root.find((n) => n.attrs.role === "grid");
+  for (const fn of grid.listeners.keydown) fn({ target: node(0), key: " ", preventDefault() {} });
+  assert.ok(node(0).classes.has("on"));
+  assert.ok(!node(336).classes.has("on"));
+  await editor.flush();
+  assert.equal(puts.length, 1);
+  assert.deepEqual(decodeCells(puts[0].cells), new Set([6 * 48]));
+  assert.ok(node(0).classes.has("on"));
+  assert.ok(node(336).classes.has("on"));
 });
