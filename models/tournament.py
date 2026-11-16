@@ -3,6 +3,7 @@ from datetime import datetime
 from sqlalchemy import (
     Boolean,
     Column,
+    Date,
     DateTime,
     ForeignKey,
     Integer,
@@ -59,6 +60,10 @@ class Tournament(Base):
     # Every board links to it as another view of the same teams, standings and
     # pairings; None links nothing.
     website_url = Column(String(512), nullable=True)
+    # Round 1's deadline, the Sunday (Pacific) it ends; later rounds follow at
+    # seven-day steps (see services/round_weeks.py). NULL = no round calendar.
+    # Set outside the bot's commands.
+    round1_deadline = Column(Date, nullable=True)
     # While this tournament is active, its players borrow from the libraries its
     # server draws on with no hold and no member/draft gate
     # (services/library_tournament_exemption). Off unless somebody turns it on,
