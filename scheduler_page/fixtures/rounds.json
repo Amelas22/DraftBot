@@ -1,0 +1,14 @@
+{
+  "format": "draftbot.scheduler.test_rounds", "version": 1,
+  "weeks": [
+    {"name": "lotus-round-1-fall-back", "last_day": "2026-11-08", "start_utc": "2026-11-01T07:00:00Z", "cells": 386},
+    {"name": "lotus-round-3", "last_day": "2026-11-22", "start_utc": "2026-11-15T08:00:00Z", "cells": 384},
+    {"name": "spring-forward-on-the-deadline", "last_day": "2027-03-14", "start_utc": "2027-03-07T08:00:00Z", "cells": 382},
+    {"name": "spring-forward-on-the-first-day", "last_day": "2027-03-21", "start_utc": "2027-03-14T08:00:00Z", "cells": 382}
+  ],
+  "deadlines": [
+    {"name": "monday-of-round-3", "now_utc": "2026-11-16T12:00:00Z", "deadline": "2026-11-22"},
+    {"name": "last-minute-of-sunday-pacific", "now_utc": "2026-11-23T07:59:00Z", "deadline": "2026-11-22"},
+    {"name": "monday-midnight-pacific", "now_utc": "2026-11-23T08:00:00Z", "deadline": "2026-11-29"}
+  ]
+}
