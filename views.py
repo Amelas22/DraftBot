@@ -30,6 +30,7 @@ from helpers.draft_rooms import (
 )
 from helpers.draft_outcome import decides_draft, standings_after, total_matches_in
 from helpers.opponent_threads import spawn_opponent_threads
+from helpers.pairing_labels import pairing_labels, reported_field
 from helpers.permissions import bot_manager_button
 from helpers.team_names import heads_field, labels_for
 from services.donation_service import SIGNUP_DONATION_NOTE
@@ -2324,6 +2325,11 @@ class MatchResultSelect(Select):
             player2 = guild.get_member(int(match_result.player2_id))
             player1_name = get_display_name(player1, guild)
             player2_name = get_display_name(player2, guild)
+            # The field is found by the bare names above; it is rewritten with the labels.
+            labels = await pairing_labels(guild, [match_result.player1_id, match_result.player2_id],
+                                          draft_session.sign_ups)
+            player1_label = labels[str(match_result.player1_id)]
+            player2_label = labels[str(match_result.player2_id)]
 
             # Update the embed with new match results
             for match_result in match_results_for_this_message:
@@ -2338,7 +2344,10 @@ class MatchResultSelect(Select):
                             winning_team_emoji = blue.prefix
                     
                     # Update the field with the appropriate emoji
-                    updated_value = f"{winning_team_emoji}**Match {match_result.match_number}**\n{player1_name}: {match_result.player1_wins} wins\n{player2_name}: {match_result.player2_wins} wins"
+                    updated_value = reported_field(
+                        winning_team_emoji, match_result.match_number,
+                        player1_label, match_result.player1_wins,
+                        player2_label, match_result.player2_wins)
                     
                     # Use a more robust method to find the right field - match the match number and player names
                     found_match = False
