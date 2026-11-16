@@ -10,7 +10,7 @@ Create Date: 2026-11-16
 """
 import logging
 from datetime import date, datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from alembic import op
 import sqlalchemy as sa
@@ -40,11 +40,17 @@ def backfill_confirmations(conn: Connection, now_utc: datetime) -> int:
         "SELECT user_id, local_date, zone FROM player_day_override")).fetchall()
     inserted = 0
     for user_id, local_date, zone in rows:
-        day = date.fromisoformat(str(local_date)[:10])
-        tz = ZoneInfo(zone)
-        start = datetime(day.year, day.month, day.day, tzinfo=tz).astimezone(timezone.utc)
-        end = datetime(day.year, day.month, day.day, tzinfo=tz) + timedelta(days=1)
-        end = end.astimezone(timezone.utc) - timedelta(seconds=1)
+        # Approximation of the live painted-cells rule: confirms every week the stored local day overlaps.
+        try:
+            day = date.fromisoformat(str(local_date)[:10])
+            tz = ZoneInfo(zone)
+            start = datetime(day.year, day.month, day.day, tzinfo=tz).astimezone(timezone.utc)
+            end = datetime(day.year, day.month, day.day, tzinfo=tz) + timedelta(days=1)
+            end = end.astimezone(timezone.utc) - timedelta(seconds=1)
+        except (ZoneInfoNotFoundError, ValueError, TypeError, KeyError):
+            log.warning("confirmround01: skipping override for user %s with local_date=%r zone=%r",
+                        user_id, local_date, zone)
+            continue
         weeks = {_pacific_monday(start), _pacific_monday(end)} & wanted
         for monday in sorted(weeks):
             result = conn.execute(sa.text(

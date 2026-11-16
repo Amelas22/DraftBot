@@ -78,3 +78,13 @@ def test_backfill_with_no_overrides_inserts_nothing():
     conn = _conn()
     assert backfill_confirmations(conn, NOW) == 0
     assert _rows(conn) == set()
+
+
+def test_backfill_skips_malformed_override_rows_and_keeps_the_rest():
+    conn = _conn()
+    _override(conn, "bad_zone", "2026-11-17", "Not/AZone")
+    _override(conn, "null_zone", "2026-11-17", None)
+    _override(conn, "bad_date", "not-a-date", "America/Los_Angeles")
+    _override(conn, "u1", "2026-11-17", "America/Los_Angeles")
+    assert backfill_confirmations(conn, NOW) == 1
+    assert _rows(conn) == {("u1", "2026-11-16", "backfill")}
