@@ -14,6 +14,7 @@ import { autosaver, paintGrid, paintLede, saveFailedMessage, toFile, touchHint, 
 const FORMAT = "draftbot.scheduler.this_week";
 const RESET_FAILED = "Could not reset. Check your connection and press Reset again.";
 const ALL_PAST = "These days are over, so they can't be changed.";
+const ZONE_FAILED = "Could not change the time zone. Check your connection and try again.";
 
 // The grid's cells: column d shows the override saved for dates[d], else the usual week's cells for that weekday.
 // usual: { zone, cells: Set<0..335> } | null; overrides: [{ date, cells: Set<0..47> }].
@@ -100,9 +101,10 @@ export async function mountThisWeek(root, api, deps) {
     columns = windowColumns(startUtc, zone, count, shape);
     dates = columns.map((c) => c.date);
   };
-  const readDates = async () => {
-    if (read && read.from <= dates[0] && dates.at(-1) <= read.to) return null;
-    const range = { from: dates[0], to: dates.at(-1) };
+  // Reads the overrides for ds (a layout's dates) unless the last read covered them.
+  const readDates = async (ds) => {
+    if (read && read.from <= ds[0] && ds.at(-1) <= read.to) return null;
+    const range = { from: ds[0], to: ds.at(-1) };
     const saved = checkDoc(await api.getThisWeek(range), FORMAT);
     overrides = saved.days.map((d) => ({ date: d.date, cells: decodeDayCells(d.cells) }));
     read = range;
@@ -112,12 +114,12 @@ export async function mountThisWeek(root, api, deps) {
   root.replaceChildren(el("p", { class: "status", text: "Loading your week…" }));
   try {
     lay();
-    const saved = await readDates();
+    const saved = await readDates(dates);
     // Without a usual week the times are in the zone this week was last saved in, which may show other dates.
     if (!usual && saved.zone && saved.zone !== zone) {
       zone = saved.zone;
       lay();
-      await readDates();
+      await readDates(dates);
     }
   } catch (e) {
     if (e instanceof LinkExpired) { root.replaceChildren(el("p", { class: "notice", text: expiredMessage() })); return; }
@@ -153,17 +155,23 @@ export async function mountThisWeek(root, api, deps) {
   if (!usual) {
     const { select, row } = zoneSelect(zone, deps.zones);
     // The painting stays on the same moments; the window's dates and hours are drawn again in the new zone.
+    // The new zone takes over only once its dates are read, so a save never writes a date it hasn't read; until then
+    // (and after a failed read, which puts the old zone back) saves go on in the old zone.
     select.addEventListener("change", async () => {
-      const painted = painter.cells();
-      zone = select.value;
-      lay();
-      // A failed read leaves the overrides already read; the next zone change tries again.
+      const next = select.value;
+      const nextColumns = windowColumns(startUtc, next, count, shape);
+      const nextDates = nextColumns.map((c) => c.date);
       try {
-        await readDates();
+        await readDates(nextDates);
       } catch (e) {
-        if (e instanceof LinkExpired) status.textContent = expiredMessage();
-        else console.error(e);
+        select.value = zone;
+        status.textContent = e instanceof LinkExpired ? expiredMessage() : ZONE_FAILED;
+        return;
       }
+      const painted = painter.cells();
+      zone = next;
+      columns = nextColumns;
+      dates = nextDates;
       days = prefill(dates, usual, overrides);
       draw(painted);
       touched();

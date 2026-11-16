@@ -330,7 +330,34 @@ test("a window entirely in the past is shown, says so, and never saves", async (
   assert.ok(root.find((n) => n.attrs["data-i"] === "383").className.split(" ").includes("past"));
   press(root, 100);
   const select = root.find((n) => n.attrs.id === "zone");
-  if (select) for (const fn of select.listeners.change || []) fn({});
+  if (select) for (const fn of select.listeners.change || []) await fn({});
   await root.editor.flush();
   assert.deepEqual(calls, []);
+});
+
+test("a zone change whose dates can't be read keeps the old zone and never saves a date it hasn't read", async () => {
+  const calls = [];
+  const reads = [];
+  const api = {
+    ...fakeApi(calls),
+    getThisWeek: async (r) => {
+      reads.push(r);
+      if (reads.length > 1) throw new TypeError("fetch failed");
+      return { format: "draftbot.scheduler.this_week", version: 1, zone: null, days: [] };
+    },
+  };
+  const root = await mount(api, { ...ROUND, usualDoc: null, defaultZone: LA, zones: [LA, NY], now: () => new Date("2026-11-14T00:00:00Z") });
+  press(root, 100);
+  const select = root.find((n) => n.attrs.id === "zone");
+  select.value = NY; // in New York the window reaches Mon 23, which was never read
+  for (const fn of select.listeners.change) await fn({});
+  assert.deepEqual(reads, [{ from: "2026-11-15", to: "2026-11-22" }, { from: "2026-11-15", to: "2026-11-23" }]);
+  assert.equal(select.value, LA);
+  assert.ok(byText(root, "Could not change the time zone. Check your connection and try again."));
+  await root.editor.flush();
+  assert.equal(calls.length, 1);
+  const [kind, doc] = calls[0];
+  assert.equal(kind, "put");
+  assert.equal(doc.zone, LA);
+  assert.deepEqual(doc.days.map((d) => d.date), range(15, 23).map((d) => `2026-11-${d}`));
 });

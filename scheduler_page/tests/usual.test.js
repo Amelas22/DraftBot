@@ -183,3 +183,33 @@ test("on a round view a stroke on one Sunday shows on both", async () => {
   assert.ok(node(0).classes.has("on"));
   assert.ok(node(336).classes.has("on"));
 });
+
+test("a save that lands mid-stroke keeps both Sundays: the stroke lands on the redrawn cells", async () => {
+  const LA = "America/Los_Angeles";
+  const puts = [];
+  const api = {
+    getUsual: async () => toFile(LA, new Set(), new Date()),
+    putUsual: async (doc) => { puts.push(doc); return doc; },
+  };
+  const root = new Node();
+  const editor = await mountUsual(root, api, {
+    startUtc: new Date("2026-11-15T08:00:00Z"), cells: 384, shape: "round", zones: [LA], defaultZone: LA,
+  });
+  const node = (j) => root.find((n) => n.attrs["data-i"] === String(j));
+  const grid = root.find((n) => n.attrs.role === "grid");
+  for (const fn of grid.listeners.keydown) fn({ target: node(0), key: " ", preventDefault() {} });
+  document.elementFromPoint = (x) => node(x);
+  try {
+    for (const fn of grid.listeners.pointerdown) fn({ button: 0, pointerType: "touch", clientX: 100, pointerId: 1 });
+    await editor.flush(); // the save lands and redraws Sunday 22 while the stroke is still down
+    assert.ok(node(336).classes.has("on"));
+    for (const fn of grid.listeners.pointermove) fn({ clientX: 101 });
+    for (const fn of grid.listeners.pointerup) fn({});
+  } finally {
+    delete document.elementFromPoint;
+  }
+  await editor.flush();
+  assert.ok(node(0).classes.has("on"));
+  assert.ok(node(336).classes.has("on"));
+  assert.ok(decodeCells(puts.at(-1).cells).has(6 * 48));
+});
