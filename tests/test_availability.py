@@ -1,7 +1,8 @@
 import base64
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -40,16 +41,29 @@ def _utc(s: str) -> datetime:
     return datetime.fromisoformat(s.replace("Z", "+00:00"))
 
 
+def _assert_window(
+    got: frozenset[int], start: datetime, count: int, case: dict[str, Any]
+) -> None:
+    """A case with window_cell_count is checked by instants only: the bitmap holds 336 cells."""
+    free = [
+        (start + timedelta(minutes=30 * j)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        for j in sorted(got)
+    ]
+    assert free == case["expected_free_utc"], case["name"]
+    if "window_cell_count" not in case:
+        assert got == decode_cells(case["expected_window_cells"]), case["name"]
+
+
 def test_conversion_fixture_cases() -> None:
     data = json.loads((FIXTURES / "conversion.json").read_text())
     assert data["cases"]
     for case in data["cases"]:
+        start = _utc(case["window_start_utc"])
+        count = case.get("window_cell_count", CELLS)
         got = window_cells(
-            case["zone"],
-            decode_cells(case["usual_cells"]),
-            _utc(case["window_start_utc"]),
+            case["zone"], decode_cells(case["usual_cells"]), start, count
         )
-        assert got == decode_cells(case["expected_window_cells"]), case["name"]
+        _assert_window(got, start, count, case)
 
 
 def test_override_fixture_cases() -> None:
@@ -66,8 +80,10 @@ def test_override_fixture_cases() -> None:
             )
             for o in case["overrides"]
         ]
-        got = effective_window_cells(week, overrides, _utc(case["window_start_utc"]))
-        assert got == decode_cells(case["expected_window_cells"]), case["name"]
+        start = _utc(case["window_start_utc"])
+        count = case.get("window_cell_count", CELLS)
+        got = effective_window_cells(week, overrides, start, count)
+        _assert_window(got, start, count, case)
 
 
 def test_day_cells_round_trip() -> None:

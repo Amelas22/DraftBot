@@ -6,16 +6,23 @@ import { dirname, join } from "node:path";
 import {
   decodeCells, encodeCells, windowCells, usualCellOf, CELLS,
   decodeDayCells, encodeDayCells, effectiveWindowCells,
-  weekdayOfDate, usualWithWindow,
+  weekdayOfDate, usualWithWindow, addCells, isoSeconds,
 } from "../js/week.js";
 
 const fx = (name) =>
   JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures", name), "utf8"));
 
+// A case with window_cell_count is checked by instants only: the bitmap holds 336 cells.
+function assertWindow(got, c) {
+  const start = new Date(c.window_start_utc);
+  const free = [...got].sort((a, b) => a - b).map((j) => isoSeconds(addCells(start, j)));
+  assert.deepEqual(free, c.expected_free_utc, c.name);
+  if (c.window_cell_count === undefined) assert.equal(encodeCells(got), c.expected_window_cells, c.name);
+}
+
 test("conversion fixture cases match", () => {
   for (const c of fx("conversion.json").cases) {
-    const got = encodeCells(windowCells(c.zone, decodeCells(c.usual_cells), new Date(c.window_start_utc)));
-    assert.equal(got, c.expected_window_cells, c.name);
+    assertWindow(windowCells(c.zone, decodeCells(c.usual_cells), new Date(c.window_start_utc), c.window_cell_count ?? CELLS), c);
   }
 });
 
@@ -23,8 +30,7 @@ test("override fixture cases match", () => {
   for (const c of fx("override.json").cases) {
     const usual = c.usual && { zone: c.usual.zone, cells: decodeCells(c.usual.cells) };
     const overrides = c.overrides.map((o) => ({ zone: o.zone, date: o.date, cells: decodeDayCells(o.cells) }));
-    const got = encodeCells(effectiveWindowCells(usual, overrides, new Date(c.window_start_utc)));
-    assert.equal(got, c.expected_window_cells, c.name);
+    assertWindow(effectiveWindowCells(usual, overrides, new Date(c.window_start_utc), c.window_cell_count ?? CELLS), c);
   }
 });
 

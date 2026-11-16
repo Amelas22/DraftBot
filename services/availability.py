@@ -97,12 +97,12 @@ def decode_cells(b64: str) -> frozenset[int]:
 
 
 def window_cells(
-    zone: str, usual: frozenset[int], start_utc: datetime
+    zone: str, usual: frozenset[int], start_utc: datetime, count: int = CELLS
 ) -> frozenset[int]:
-    """Window cell j is free iff the local time of start + 30 min * j is painted."""
+    """Window cell j (of count) is free iff the local time of start + 30 min * j is painted."""
     tz = ZoneInfo(zone)
     out: set[int] = set()
-    for j in range(CELLS):
+    for j in range(count):
         local = (start_utc + timedelta(minutes=CELL_MINUTES * j)).astimezone(tz)
         cell = local.weekday() * 48 + (local.hour * 60 + local.minute) // CELL_MINUTES
         if cell in usual:
@@ -124,15 +124,18 @@ def day_cells_from_bytes(data: bytes) -> frozenset[int]:
 
 
 def effective_window_cells(
-    usual: UsualWeek | None, overrides: Sequence[DayOverride], start_utc: datetime
+    usual: UsualWeek | None,
+    overrides: Sequence[DayOverride],
+    start_utc: datetime,
+    count: int = CELLS,
 ) -> frozenset[int]:
     """Window cells a person is free: a dated override wins over the usual week for its local day."""
-    base = window_cells(usual.zone, usual.cells, start_utc) if usual else frozenset()
+    base = window_cells(usual.zone, usual.cells, start_utc, count) if usual else frozenset()
     if not overrides:
         return base
     zones = {o.zone: ZoneInfo(o.zone) for o in overrides}
     out: set[int] = set()
-    for j in range(CELLS):
+    for j in range(count):
         moment = start_utc + timedelta(minutes=CELL_MINUTES * j)
         for o in overrides:
             local = moment.astimezone(zones[o.zone])
