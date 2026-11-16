@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  FORMAT, bookable, bookingLine, countText, freeBySide, freeRuns, refusalText, shiftSelection, sideCounts, toggleSide,
+  FORMAT, bookable, bookingLine, cellState, countText, freeBySide, freeRuns, refusalText, shiftSelection, sideCounts, toggleSide,
   togglePerson, whoIsFree, whoText, withoutPeople,
 } from "../js/teamdraft.js";
 import { encodeCells, CELLS } from "../js/week.js";
@@ -14,6 +14,8 @@ const person = (user, zone, cells) => ({ user, name: user, zone, cells: cells ? 
 const range = (a, b) => Array.from({ length: b - a }, (_, i) => a + i);
 // A usual week painted on every day at the given local half-hour cells.
 const daily = (cells) => new Set(range(0, 7).flatMap((d) => cells.map((c) => d * 48 + c)));
+const at = (j) => new Date(start.getTime() + j * 1800000);
+const iso = (d) => d.toISOString().replace(/\.\d{3}Z$/, "Z");
 const doc = (a, b, extra = {}) => ({ ...base, ...extra, sides: [{ label: "A", people: a }, { label: "B", people: b }] });
 
 test("FORMAT", () => assert.equal(FORMAT, "draftbot.scheduler.team_draft"));
@@ -28,17 +30,39 @@ test("freeBySide gives one set per person, in order; no week is never free", () 
 });
 
 test("bookable: future, inside the window, matchup open", () => {
-  const at = (j) => new Date(start.getTime() + j * 1800000);
   const now = at(10);
-  assert.equal(bookable(20, base, now, start), true);
-  assert.equal(bookable(10, base, now, start), false);
-  assert.equal(bookable(5, base, now, start), false);
-  assert.equal(bookable(CELLS, base, now, start), false);
-  assert.equal(bookable(CELLS - 1, base, now, start), true);
-  assert.equal(bookable(-1, base, now, start), false);
-  const started = { ...base, matchup: { ...base.matchup, state: "started" } };
+  const open = { ...base, bookable: { start_utc: base.window.start_utc, end_utc: iso(at(CELLS)) } };
+  assert.equal(bookable(20, open, now, start), true);
+  assert.equal(bookable(10, open, now, start), false);
+  assert.equal(bookable(5, open, now, start), false);
+  assert.equal(bookable(CELLS, open, now, start), false);
+  assert.equal(bookable(CELLS - 1, open, now, start), true);
+  assert.equal(bookable(-1, open, now, start), false);
+  const started = { ...open, matchup: { ...open.matchup, state: "started" } };
   assert.equal(bookable(20, started, now, start), false);
 });
+
+const round = { ...base, window: { ...base.window, cells: 384, shape: "round" },
+  bookable: { start_utc: iso(at(48)), end_utc: iso(at(96)) } };
+test("bookable: only inside the subject's span, and never in the past", () => {
+  assert.equal(bookable(47, round, at(0), start), false); assert.equal(bookable(48, round, at(0), start), true);
+  assert.equal(bookable(95, round, at(0), start), true); assert.equal(bookable(96, round, at(0), start), false);
+  assert.equal(bookable(60, round, at(60), start), false); assert.equal(bookable(61, round, at(60), start), true);
+  assert.equal(bookable(383, { ...round, bookable: { start_utc: iso(at(0)), end_utc: iso(at(384)) } }, at(0), start), true);
+});
+test("cellState: past wins, then outside the span", () => {
+  assert.equal(cellState(10, round, at(20), start), "past"); assert.equal(cellState(30, round, at(20), start), "nobook");
+  assert.equal(cellState(50, round, at(20), start), "");
+  const started = { ...round, matchup: { ...round.matchup, state: "started" } };
+  assert.equal(cellState(30, started, at(20), start), "", "a closed matchup is not marked unbookable");
+});
+test("freeRuns covers the whole window", () => assert.equal(freeRuns([[new Set([383])]], new Set([0]), 384).length, 384));
+test("freeBySide covers the window's length", () => {
+  const long = doc([person("a", "UTC", daily(range(0, 48)))], [], { window: { ...base.window, cells: 384 } });
+  assert.ok(freeBySide(long, start)[0][0].has(383));
+});
+test("shiftSelection keeps a late cell of a long window", () => assert.equal(shiftSelection(380, start, start, 384), 380));
+test("out_of_window names the booking dates", () => assert.equal(refusalText("out_of_window"), "That time is outside the dates open for booking."));
 
 test("bookingLine", () => {
   assert.equal(bookingLine(base, "America/New_York"), "No time booked yet");
