@@ -148,7 +148,7 @@ async function paintAndSave(keepAsUsual) {
 
     byText(root, "My availability").click();
     await tick();
-    byText(root, "This week").click();
+    byText(root, "This round").click();
     await tick();
     const grid = mineBox(root).find((n) => n.attrs.role === "grid");
     const target = mineBox(root).find((n) => n.attrs["data-i"] === String(noon.key));
@@ -168,7 +168,7 @@ async function paintAndSave(keepAsUsual) {
 test("changing this week saves overrides alone and the heatmap counts them", async () => {
   const { root, api, before, after } = await paintAndSave(false);
   assert.equal(after, before + 1);
-  assert.equal(cardTitle(root), "You're counted from this week's changes");
+  assert.equal(cardTitle(root), "You're counted from this round's changes");
   assert.equal(await api.getUsual(), null);
 });
 
@@ -568,4 +568,64 @@ test("an action's answer whose window has moved on is drawn on a new grid", asyn
   } finally {
     view.dispose();
   }
+});
+
+// Text of every node, to find a sentence wherever the page puts it.
+const textsOf = (n, out = []) => { if (n.textContent) out.push(n.textContent); (n.children || []).forEach((c) => textsOf(c, out)); return out; };
+
+test("a round whose every time has passed says so, by number or as a week, and a live round does not", async () => {
+  const over = () => new Date("2026-11-24T00:00:00Z");
+  let m = await mount(fakeApi([], () => r3), { now: over });
+  assert.ok(textsOf(m.root).includes("Round 3 is over, so its times can't be booked any more."));
+  m.view.dispose();
+  const week = { ...r3, round: { ...r3.round, number: null } };
+  m = await mount(fakeApi([], () => week), { now: over });
+  assert.ok(textsOf(m.root).includes("This week is over, so its times can't be booked any more."));
+  m.view.dispose();
+  m = await mount(fakeApi([], () => r3), { now: () => new Date("2026-11-17T00:00:00Z") });
+  assert.ok(!textsOf(m.root).some((t) => /is over, so its times/.test(t)));
+  m.view.dispose();
+});
+
+test("a round-shaped page says this round, a rolling one this week", async () => {
+  const { root, view } = await mount(fakeApi([], () => r3), { now: () => new Date("2026-11-17T00:00:00Z") });
+  try {
+    assert.ok(textsOf(root).includes("Changing this round only"));
+    byText(root, "My availability").click();
+    await tick();
+    assert.ok(textsOf(root).includes("This round"));
+    assert.ok(!textsOf(root).some((t) => /this week/i.test(t) && /Changing|Just these|counted/.test(t)));
+  } finally { view.dispose(); }
+  const rolling = await mount(fakeApi([], () => ({ ...r3, round: null })), { now: () => new Date("2026-11-17T00:00:00Z") });
+  try {
+    assert.ok(textsOf(rolling.root).includes("Changing this week only"));
+    byText(rolling.root, "My availability").click();
+    await tick();
+    assert.ok(textsOf(rolling.root).includes("This week"));
+  } finally { rolling.view.dispose(); }
+});
+
+test("a refresh refused as bad input for the shown query falls back to the default round", async () => {
+  const calls = [];
+  const bad = Object.assign(new Error("bad_input (HTTP 400)"), { code: "bad_input", status: 400 });
+  let broken = false;
+  const api = fakeApi(calls, (path) => { if (broken && path.endsWith("?round=2")) throw bad; return byRound(path); });
+  let visible = null;
+  const was = globalThis.document.addEventListener;
+  globalThis.document.addEventListener = (type, fn) => { if (type === "visibilitychange") visible = fn; };
+  const { root, view } = await mount(api);
+  globalThis.document.addEventListener = was;
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    byLabel(root, "Earlier round").click();
+    await tick();
+    assert.ok(byText(root, "Round 2 · Sun Nov 8 – Sun Nov 15"));
+    broken = true;
+    globalThis.document.visibilityState = "visible";
+    visible();
+    await tick();
+    assert.deepEqual(calls.filter((c) => c[0] === "get").slice(-2), [["get", "/api/team-draft?round=2"], ["get", "/api/team-draft"]]);
+    assert.ok(byText(root, "Round 3 · Sun Nov 15 – Sun Nov 22"));
+  } finally { globalThis.document.visibilityState = "hidden"; console.warn = warn; view.dispose(); }
 });

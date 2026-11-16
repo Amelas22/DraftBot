@@ -26,20 +26,21 @@ const HOVER_HINT = "Hover or tap a half-hour to see who's free on each side. Tap
 const TOGGLE_HINT = "Tap a team or a player to leave them out of the grid; tap again to bring them back.";
 const NO_WEEK = "no availability entered";
 // The card's words in My availability, per week being changed.
-const MINE_TEXT = {
-  thisWeek: { title: "Changing this week only", sub: "Just these days, for this matchup and every other." },
+// unit is "round" on a round-shaped page, "week" on a rolling one.
+const mineText = (unit) => ({
+  thisWeek: { title: `Changing this ${unit} only`, sub: "Just these days, for this matchup and every other." },
   usual: { title: "Changing your usual week", sub: "It repeats every week you haven't changed." },
-};
+});
 
 // The viewer's card on Everyone: how the grid counts them. me is their place on a side, or undefined.
-export function everyoneText(me) {
+export function everyoneText(me, unit = "week") {
   if (!me) return { tone: "", title: "Your availability", sub: "You aren't on either side of this matchup." };
   if (!hasAvailability(me)) {
     return { tone: "warn", title: "The grid can't count you yet",
       sub: "You haven't entered when you're free, so every half-hour shows you as not free." };
   }
-  if (me.overrides?.length) return { tone: "", title: "You're counted from this week's changes", sub: "Your usual week, with the days you changed this week." };
-  return { tone: "", title: "You're counted from your usual week", sub: "Busy one night? Open My availability to change this week only." };
+  if (me.overrides?.length) return { tone: "", title: `You're counted from this ${unit}'s changes`, sub: `Your usual week, with the days you changed this ${unit}.` };
+  return { tone: "", title: "You're counted from your usual week", sub: `Busy one night? Open My availability to change this ${unit} only.` };
 }
 
 // A row of pressable choices, [text, on, go] each; pressing the one already on does nothing.
@@ -52,8 +53,8 @@ const segmented = (label, items) => el("div", { class: "seg", role: "group", "ar
 // The card: its words, and Everyone | My availability (which is null on Everyone, else the week being changed).
 // Every view's words are laid in the same spot and only the current one shows, so the card is as tall as its longest
 // words in every view and switching never moves the pane below it.
-function statusCard({ everyoneWords, which, onEveryone, onMine }) {
-  const views = [[null, everyoneWords], ...Object.entries(MINE_TEXT).map(([w, words]) => [w, { ...words, tone: "mine" }])];
+function statusCard({ everyoneWords, unit, which, onEveryone, onMine }) {
+  const views = [[null, everyoneWords], ...Object.entries(mineText(unit)).map(([w, words]) => [w, { ...words, tone: "mine" }])];
   const tone = views.find(([w]) => w === which)[1].tone;
   return el("section", { class: `mecard ${tone}`.trim(), "aria-label": "Your availability" },
     el("div", { class: "mehead" },
@@ -142,12 +143,14 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
   const actions = el("div", { class: "actions" }, bookBtn, moveBtn, clearBtn);
   const status = el("p", { class: "status", role: "status", "aria-live": "polite" });
   // Everyone and My availability share the pane: one is hidden, so the page around it never moves.
-  const everyoneBox = el("div", { class: "everyone" }, heatBox, legend, readout, actions, status);
+  const overLine = el("p", { class: "status over" });
+  const everyoneBox = el("div", { class: "everyone" }, heatBox, legend, readout, actions, overLine, status);
   const mineBox = el("div", { class: "minehost" });
   mineBox.hidden = true;
   const pane = el("section", { class: "pane", "aria-label": "Pick a time" }, everyoneBox, mineBox);
 
   const open = () => state.matchup.state === "open";
+  const unitNow = () => (state.round != null ? "round" : "week");
   const shown = () => withoutPeople(state, off);
   const everyone = () => state.sides.flatMap((s) => s.people);
   const total = () => shown().sides.reduce((n, s) => n + s.people.length, 0);
@@ -237,7 +240,7 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
 
   const me = () => everyone().find((p) => p.user === state.me?.user);
   const renderCard = () => {
-    cardBox.replaceChildren(statusCard({ everyoneWords: everyoneText(me()), which, onEveryone: toEveryone, onMine: () => toMine(firstWeek()) }));
+    cardBox.replaceChildren(statusCard({ everyoneWords: everyoneText(me(), unitNow()), unit: unitNow(), which, onEveryone: toEveryone, onMine: () => toMine(firstWeek()) }));
   };
   // My availability opens on this week, or on the usual week for a viewer with nothing entered yet.
   const firstWeek = () => (me() && !hasAvailability(me()) ? "usual" : "thisWeek");
@@ -261,7 +264,7 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
     // changes draws into a box no longer shown.
     const box = el("div");
     mineBox.replaceChildren(segmented("Which week", [
-      ["This week", w === "thisWeek", () => toMine("thisWeek")], ["Usual week", w === "usual", () => toMine("usual")],
+      [unitNow() === "round" ? "This round" : "This week", w === "thisWeek", () => toMine("thisWeek")], ["Usual week", w === "usual", () => toMine("usual")],
     ]), box);
     editor = (w === "usual" ? mountUsual : mountThisWeek)(box, api, {
       now, usualDoc: usualNow, startUtc, cells: cells(), shape: state.window.shape, onKeptAsUsual: () => toMine("usual"),
@@ -330,6 +333,12 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
     moveBtn.hidden = !(picked && isBooked() && selected !== bookedCell());
     clearBtn.hidden = !(canPick && isBooked());
     actions.hidden = bookBtn.hidden && moveBtn.hidden && clearBtn.hidden;
+    // A round with no time still ahead has nothing to book: say why instead of leaving the page silent.
+    let ahead = false;
+    for (let j = 0; j < cells() && !ahead; j++) ahead = cellState(j, state, now(), startUtc) !== "past";
+    const over = open() && state.round != null && !ahead;
+    overLine.hidden = !over;
+    overLine.textContent = !over ? "" : `${state.round.number == null ? "This week" : `Round ${state.round.number}`} is over, so its times can't be booked any more.`;
   }
 
   function render() {
@@ -413,7 +422,11 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
       return true;
     } catch (e) {
       if (e instanceof LinkExpired) notice(expiredMessage());
-      else console.warn("team draft refresh failed", e);
+      else if (e?.status === 400 && asked !== "") {
+        // The calendar moved on under a page left open on a round or week that no longer exists: read the default.
+        shownQuery = wantedQuery = "";
+        return refresh();
+      } else console.warn("team draft refresh failed", e);
       return false;
     }
   }
