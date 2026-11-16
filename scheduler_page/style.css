@@ -142,7 +142,8 @@ button.hcell { cursor: pointer; }
 /* A cell already gone by (any shade, dimmed and hatched) and one that can be seen but not booked (a muted dashed
    outline over its own shade, so availability still reads and it never looks like the past; both may apply to one cell). The paint grid's past cells are not interactive. */
 .hcell.past, .cell.past { opacity: .45; background-image: repeating-linear-gradient(135deg, transparent 0 3px, var(--line) 3px 4px); }
-.hcell.past, .cell.past { pointer-events: none; cursor: default; }
+.hcell.past { cursor: default; }
+.cell.past { pointer-events: none; cursor: default; }
 .hcell.nobook { outline: 1px dashed var(--muted); outline-offset: -1px; cursor: not-allowed; }
 .legend .key.past { opacity: .45; background-image: repeating-linear-gradient(135deg, transparent 0 3px, var(--line) 3px 4px); }
 .legend .key.nobook { background: var(--surface); outline: 1px dashed var(--muted); outline-offset: -1px; }
