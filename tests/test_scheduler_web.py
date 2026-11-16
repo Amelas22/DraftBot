@@ -400,3 +400,71 @@ async def test_this_week_writes_are_rate_limited_like_usual_week(client):
     codes = [(await client.delete("/api/this-week", headers=headers)).status for _ in range(61)]
     assert codes[:60] == [204] * 60
     assert codes[60] == 429
+
+
+_CONF = "/api/confirmation"
+_RANGE = "?from=2026-10-19&to=2026-10-26"
+
+
+@pytest.mark.asyncio
+async def test_confirmation_starts_on_with_nothing_confirmed(client):
+    resp = await client.get(_CONF + _RANGE, headers=await _auth())
+    assert resp.status == 200
+    assert await resp.json() == {
+        "format": "draftbot.scheduler.confirmation",
+        "version": 1,
+        "trusts_usual": True,
+        "confirmed_rounds": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_switch_off_then_confirm_a_round(client):
+    headers = await _auth()
+    resp = await client.put(_CONF + _RANGE, data=json.dumps({"trusts_usual": False}), headers=headers)
+    assert resp.status == 200
+    assert (await resp.json())["trusts_usual"] is False
+    resp = await client.post(_CONF + "/rounds" + _RANGE, data=json.dumps({"round": "2026-10-26"}), headers=headers)
+    assert resp.status == 200
+    doc = await resp.json()
+    assert doc["confirmed_rounds"] == ["2026-10-26"] and doc["trusts_usual"] is False
+
+
+@pytest.mark.asyncio
+async def test_confirm_refuses_an_ended_week(client):
+    headers = await _auth()
+    url = _CONF + "/rounds" + _RANGE
+    resp = await client.post(url, data=json.dumps({"round": "2026-10-12"}), headers=headers)
+    assert resp.status == 400
+    resp = await client.post(url, data=json.dumps({"round": "2026-10-19"}), headers=headers)
+    assert resp.status == 200
+
+
+@pytest.mark.asyncio
+async def test_confirm_refuses_a_non_monday_or_beyond_the_horizon(client):
+    headers = await _auth()
+    url = _CONF + "/rounds" + _RANGE
+    for bad in ("2026-10-20", "2026-11-16"):
+        resp = await client.post(url, data=json.dumps({"round": bad}), headers=headers)
+        assert resp.status == 400
+    resp = await client.post(url, data=json.dumps({"round": "2026-11-09"}), headers=headers)
+    assert resp.status == 200
+
+
+@pytest.mark.asyncio
+async def test_confirmation_range_and_body_are_validated(client):
+    headers = await _auth()
+    cases = [
+        ("get", _CONF, None),
+        ("get", _CONF + "?from=2026-10-26&to=2026-10-19", None),
+        ("put", _CONF + _RANGE, {"trusts_usual": "no"}),
+        ("post", _CONF + "/rounds" + _RANGE, {"round": 5}),
+        ("post", _CONF + "/rounds", {"round": "2026-10-26"}),
+    ]
+    for method, url, body in cases:
+        kwargs = {"headers": headers}
+        if body is not None:
+            kwargs["data"] = json.dumps(body)
+        resp = await getattr(client, method)(url, **kwargs)
+        assert resp.status == 400, (method, url)
+        assert await resp.json() == {"error": "bad_input"}

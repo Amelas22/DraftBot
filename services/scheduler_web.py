@@ -1,4 +1,5 @@
 """The scheduler web app: static page plus the token-authenticated JSON API."""
+import json
 import re
 from collections import deque
 from collections.abc import Awaitable, Callable, Collection
@@ -39,6 +40,8 @@ from services.scheduler_http import (
     read_body,
     utc_now,
 )
+from services.round_confirmation import confirm_round, confirmation_doc, set_trusts_usual
+from services.round_weeks import parse_monday, week_ending
 from services.scheduler_calendar import this_week_horizon
 from services.scheduler_links import resolve_token
 from services.scheduler_match_api import routes as match_routes
@@ -217,6 +220,81 @@ async def delete_this_week(request: web.Request) -> web.Response:
         return error(400, "bad_input")
     await clear_day_overrides(identity(request).user_id, request.app[NOW](), dates)
     return web.Response(status=204)
+
+
+def _required_range(request: web.Request) -> tuple[date, date]:
+    """The mandatory ``from``/``to`` dates; ValueError when absent or malformed."""
+    dates = _date_range(request)
+    if dates is None:
+        raise ValueError("from and to are required")
+    return dates
+
+
+async def _json_object(request: web.Request) -> dict[str, object] | None:
+    raw = await read_body(request, MAX_FILE_BYTES)
+    if raw is None:
+        return None
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+@routes.get("/api/confirmation")
+async def get_confirmation(request: web.Request) -> web.Response:
+    try:
+        first, last = _required_range(request)
+    except ValueError:
+        return error(400, "bad_input")
+    return web.json_response(await confirmation_doc(identity(request).user_id, first, last))
+
+
+@routes.put("/api/confirmation")
+async def put_confirmation(request: web.Request) -> web.Response:
+    try:
+        first, last = _required_range(request)
+    except ValueError:
+        return error(400, "bad_input")
+    body = await _json_object(request)
+    if body is None:
+        return error(413, "too_large")
+    value = body.get("trusts_usual")
+    if not isinstance(value, bool):
+        return error(400, "bad_input")
+    who = identity(request)
+    await set_trusts_usual(who.user_id, value)
+    return web.json_response(await confirmation_doc(who.user_id, first, last))
+
+
+@routes.post("/api/confirmation/rounds")
+async def post_confirmation_round(request: web.Request) -> web.Response:
+    try:
+        first, last = _required_range(request)
+    except ValueError:
+        return error(400, "bad_input")
+    body = await _json_object(request)
+    if body is None:
+        return error(413, "too_large")
+    text = body.get("round")
+    if not isinstance(text, str):
+        return error(400, "bad_input")
+    try:
+        monday = parse_monday(text)
+    except ValueError:
+        return error(400, "bad_input")
+    who = identity(request)
+    now = request.app[NOW]()
+    # The league week runs Mon 00:00 PT to the next Mon 00:00 PT; week_ending
+    # spans Sun-to-Sun, so its end for monday+6 and its start for monday+7 are those instants.
+    ends = week_ending(monday + timedelta(days=6)).end_utc
+    starts = week_ending(monday + timedelta(days=7)).start_utc
+    async with db_session() as session:
+        horizon = await this_week_horizon(session, who.guild_id, now)
+    if ends <= now or starts >= horizon:
+        return error(400, "bad_input")
+    await confirm_round(who.user_id, monday, now)
+    return web.json_response(await confirmation_doc(who.user_id, first, last))
 
 
 _STATIC_TYPES = {
