@@ -85,10 +85,11 @@ export async function mountTeamDraft(root, api, deps = {}) {
 
 async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zoneDeps) {
   root.replaceChildren(el("p", { class: "status", text: "Loading…" }));
-  // The round being viewed, as the server's query (?round=N or ?week=YYYY-MM-DD); "" is the one the server picks.
-  let query = "";
-  // The query the drawn state was read with.
+  // The round shown, as the server's query (?round=N or ?week=YYYY-MM-DD; "" is the one the server picks): the query
+  // the drawn state was read with, which every action posts with. An arrow asks for wantedQuery, which becomes shownQuery
+  // only once its read lands.
   let shownQuery = "";
+  let wantedQuery = "";
   let state;
   try {
     state = checkDoc(await api.get(paths.get), FORMAT);
@@ -306,11 +307,16 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
     prevBtn.hidden = !round.prev;
     nextBtn.hidden = !round.next;
   };
-  // An arrow: view that round, and in My availability mount its editor again on the new window.
+  // An arrow: view that round, and in My availability mount its editor again on the new window. A read that fails or
+  // can't run (an action is in flight) leaves the page on the round it shows, as if the arrow was never pressed.
   const go = async (ref) => {
     if (!ref) return;
-    query = roundQuery(ref);
-    await refresh();
+    const q = roundQuery(ref);
+    wantedQuery = q;
+    if (!(await refresh())) {
+      if (wantedQuery === q) wantedQuery = shownQuery;
+      return;
+    }
     if (which !== null) await toMine(which);
   };
   prevBtn.addEventListener("click", () => go(state.round?.prev));
@@ -356,18 +362,12 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
     const done = sync.startAction();
     for (const b of [bookBtn, moveBtn, clearBtn]) b.disabled = true;
     status.textContent = "Sending…";
-    const sentFor = query;
     try {
-      const r = await api.post(paths.actions + query, { action_id: crypto.randomUUID(), seen_version: state.booking.version, ...body });
-      const fresh = checkDoc(r?.state, FORMAT);
+      const r = await api.post(paths.actions + shownQuery, { action_id: crypto.randomUUID(), seen_version: state.booking.version, ...body });
       selected = null;
-      // The answer is for the round the action was sent from; once the viewer has moved on, read the one they're on.
-      if (sentFor === query) {
-        state = fresh;
-        render();
-      }
+      // Its answer is the round shown (refreshes wait for an action), maybe with a window that has since moved on.
+      show(checkDoc(r?.state, FORMAT), false);
       status.textContent = r.ok ? "" : refusalText(r.code);
-      if (sentFor !== query) { done(); refresh(); }
     } catch (e) {
       status.textContent = actionErrorText(e);
       if (e instanceof LinkExpired) cleanups.forEach((c) => c());
@@ -382,30 +382,39 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
   moveBtn.addEventListener("click", book);
   clearBtn.addEventListener("click", () => send({ kind: "clear" }));
 
+  // Draws a state read from the server. A new window (it slid forward, the server's round moved on, or the viewer
+  // stepped to another round) gets a new grid, keeping the picked moment rather than its cell index; another round
+  // opens on startDay.
+  function show(fresh, anotherRound) {
+    const was = state.window;
+    state = fresh;
+    const start = new Date(state.window.start_utc);
+    if (start.getTime() !== startUtc.getTime() || was.cells !== state.window.cells || was.shape !== state.window.shape) {
+      selected = shiftSelection(selected, startUtc, start, state.window.cells);
+      clicked = shiftSelection(clicked, startUtc, start, state.window.cells);
+      startUtc = start;
+      redraw(anotherRound ? startDay() : heat.openDate());
+    }
+    render();
+  }
+
+  // Reads the wanted round and draws it; resolves true when it did.
   async function refresh() {
     const ticket = sync.startRefresh();
-    if (!ticket) return;
-    const asked = query;
-    const moved = asked !== shownQuery;
+    if (!ticket) return false;
+    const asked = wantedQuery;
     try {
       const fresh = checkDoc(await api.get(paths.get + asked), FORMAT);
       // A read for a round the viewer has since left is dropped; the read for the new one follows.
-      if (!sync.isCurrent(ticket) || asked !== query) return;
-      const was = state.window;
-      state = fresh;
-      const start = new Date(state.window.start_utc);
-      if (start.getTime() !== startUtc.getTime() || was.cells !== state.window.cells || was.shape !== state.window.shape) {
-        // A new window (it slid forward, or another round): keep the picked moment, not its cell index.
-        selected = shiftSelection(selected, startUtc, start, state.window.cells);
-        clicked = shiftSelection(clicked, startUtc, start, state.window.cells);
-        startUtc = start;
-        redraw(moved ? startDay() : heat.openDate());
-      }
+      if (!sync.isCurrent(ticket) || asked !== wantedQuery) return false;
+      const anotherRound = asked !== shownQuery;
       shownQuery = asked;
-      render();
+      show(fresh, anotherRound);
+      return true;
     } catch (e) {
       if (e instanceof LinkExpired) notice(expiredMessage());
       else console.warn("team draft refresh failed", e);
+      return false;
     }
   }
   const timer = setInterval(() => { if (document.visibilityState === "visible") refresh(); }, REFRESH_MS);

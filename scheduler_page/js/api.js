@@ -245,9 +245,9 @@ function teamsFixtureApi(read, { file, usualFile, name }) {
 }
 
 // `#fixture=team-draft`: Ben, on a link for Rook's team vs Ash's team. `#fixture=team-draft-new`: Fern, on the
-// same link, who has never painted a usual week. The window starts at the current half hour so cells are bookable
-// whenever the page is opened; book and clear change an in-memory booking and bump its version, answering like the
-// server. A saved week or this week shows up as the viewer's row, as the server's next read would have it.
+// same link, who has never painted a usual week. It opens on the week ending this Sunday (see fixtureWeek), so cells
+// ahead of now are bookable whenever the page is opened; book and clear change an in-memory booking and bump its
+// version, answering like the server. A saved week or this week shows up as the viewer's row, as the server's next read would have it.
 const TEAM_DRAFT_FIXTURES = {
   "team-draft": { user: null, usualFile: "fixtures/usual-week.json" },
   "team-draft-new": { user: "900000000000000023", usualFile: null },

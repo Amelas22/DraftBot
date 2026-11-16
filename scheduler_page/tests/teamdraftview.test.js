@@ -36,10 +36,15 @@ after(() => {
   else delete globalThis.document;
 });
 
+// get(path) is the state each read returns; an action answers with the state get gives for the same query, booked.
 const fakeApi = (calls, get) => ({
   getUsual: async () => ({}),
   get: async (path) => { calls.push(["get", path]); return get(path); },
-  post: async (path, body) => { calls.push(["post", path, body]); return { ok: true, state: doc }; },
+  post: async (path, body) => {
+    calls.push(["post", path, body]);
+    const state = get(`/api/team-draft${path.includes("?") ? `?${path.split("?")[1]}` : ""}`);
+    return { ok: true, state: { ...state, booking: { ...state.booking, start_utc: body.start_utc ?? null, version: state.booking.version + 1 } } };
+  },
 });
 const mount = async (api, deps) => {
   const root = new Node();
@@ -343,6 +348,12 @@ test("gridFrame opens on the column dated openDate, else the first, and reports 
 const r3 = { ...doc, window: { start_utc: "2026-11-15T08:00:00Z", cell_minutes: 30, cells: 384, shape: "round" },
   round: { number: 3, first_day: "2026-11-15", last_day: "2026-11-22", prev: { round: 2 }, next: { round: 4 } },
   bookable: { start_utc: "2026-11-15T08:00:00Z", end_utc: "2026-11-23T08:00:00Z" } };
+// The round before it.
+const r2 = { ...r3, window: { ...r3.window, start_utc: "2026-11-08T08:00:00Z" },
+  round: { ...r3.round, number: 2, first_day: "2026-11-08", last_day: "2026-11-15", prev: { round: 1 }, next: { round: 3 } },
+  bookable: { start_utc: "2026-11-08T08:00:00Z", end_utc: "2026-11-16T08:00:00Z" } };
+// Each round's state by the query asking for it.
+const byRound = (path) => (path.endsWith("?round=2") ? r2 : r3);
 const roundNav = (root) => root.find((n) => n.className === "roundnav");
 const byLabel = (root, label) => root.find((n) => n.attrs["aria-label"] === label);
 const shown = (n) => n && !n.hidden;
@@ -381,10 +392,7 @@ test("‹ fetches the round before, and coming back from My availability stays o
 
 test("an arrow pressed in My availability mounts the editor again on the new window", async () => {
   const calls = [];
-  const r2 = { ...r3, window: { ...r3.window, start_utc: "2026-11-08T08:00:00Z" },
-    round: { ...r3.round, number: 2, first_day: "2026-11-08", last_day: "2026-11-15", prev: { round: 1 }, next: { round: 3 } },
-    bookable: { start_utc: "2026-11-08T08:00:00Z", end_utc: "2026-11-16T08:00:00Z" } };
-  const api = { ...fakeApi(calls, (path) => (path.endsWith("?round=2") ? r2 : r3)), getThisWeek: async (range) => { calls.push(["week", range]); return { format: "draftbot.scheduler.this_week", version: 1, zone: null, days: [] }; } };
+  const api = { ...fakeApi(calls, byRound), getThisWeek: async (range) => { calls.push(["week", range]); return { format: "draftbot.scheduler.this_week", version: 1, zone: null, days: [] }; } };
   const { root, view } = await mount(api);
   try {
     byText(root, "My availability").click();
@@ -401,14 +409,19 @@ test("an arrow pressed in My availability mounts the editor again on the new win
 
 test("a booking from a browsed round posts with that round", async () => {
   const calls = [];
-  const { root, view } = await mount(fakeApi(calls, () => r3));
+  const { root, view } = await mount(fakeApi(calls, byRound));
   try {
     byLabel(root, "Earlier round").click();
     await tick();
     cellOf(root, 100).click();
     byText(root, "Book this time").click();
     await tick();
-    assert.equal(calls.find((c) => c[0] === "post")[1], "/api/team-draft/actions?round=2");
+    const post = calls.find((c) => c[0] === "post");
+    assert.equal(post[1], "/api/team-draft/actions?round=2");
+    assert.equal(post[2].start_utc, "2026-11-10T10:00:00Z");
+    // The answer, Round 2 booked, is drawn on Round 2's grid.
+    assert.ok(byText(root, "Round 2 · Sun Nov 8 – Sun Nov 15"));
+    assert.match(cellOf(root, 100).className, /\bbooked\b/);
   } finally {
     view.dispose();
   }
@@ -500,17 +513,58 @@ test("the first draw opens on today's tab when today is in view", async () => {
 });
 
 test("stepping to a round that is over opens on its first day, not the sliver of today at its end", async () => {
-  const r2 = { ...r3, window: { ...r3.window, start_utc: "2026-11-08T08:00:00Z" },
-    round: { ...r3.round, number: 2, first_day: "2026-11-08", last_day: "2026-11-15", prev: { round: 1 }, next: { round: 3 } },
-    bookable: { start_utc: "2026-11-08T08:00:00Z", end_utc: "2026-11-16T08:00:00Z" } };
   // Mon 16 Nov, 7 AM New York: today's first hours, already gone, sit at the end of Round 2 in that zone.
-  const api = { ...fakeApi([], (path) => (path.endsWith("?round=2") ? r2 : r3)), getUsual: async () => ({ zone: "America/New_York" }) };
+  const api = { ...fakeApi([], byRound), getUsual: async () => ({ zone: "America/New_York" }) };
   const { root, view } = await mount(api, { now: () => new Date("2026-11-16T12:00:00Z"), zonePicker: { storage: null } });
   try {
     assert.equal(activeTab(root).textContent, "Mon 16");
     byLabel(root, "Earlier round").click();
     await tick();
     assert.equal(activeTab(root).textContent, "Sun 8");
+  } finally {
+    view.dispose();
+  }
+});
+
+test("an arrow whose read fails leaves the page on the round it shows, and a booking posts with that round", async () => {
+  const calls = [];
+  const api = fakeApi(calls, (path) => { if (path.endsWith("?round=2")) throw new Error("offline"); return r3; });
+  const warn = console.warn;
+  console.warn = () => {};
+  const { root, view } = await mount(api);
+  try {
+    byLabel(root, "Earlier round").click();
+    await tick();
+    assert.ok(byText(root, "Round 3 · Sun Nov 15 – Sun Nov 22"));
+    cellOf(root, 100).click();
+    byText(root, "Book this time").click();
+    await tick();
+    const post = calls.find((c) => c[0] === "post");
+    assert.deepEqual([post[1], post[2].start_utc], ["/api/team-draft/actions", "2026-11-17T10:00:00Z"]);
+  } finally {
+    console.warn = warn;
+    view.dispose();
+  }
+});
+
+test("an action's answer whose window has moved on is drawn on a new grid", async () => {
+  // The server's current round flipped to Round 4 while the page showed Round 3.
+  const r4 = { ...r3, window: { ...r3.window, start_utc: "2026-11-22T08:00:00Z" },
+    round: { ...r3.round, number: 4, first_day: "2026-11-22", last_day: "2026-11-29", prev: { round: 3 }, next: null },
+    bookable: { start_utc: "2026-11-22T08:00:00Z", end_utc: "2026-11-30T08:00:00Z" } };
+  let current = r3;
+  const { root, view } = await mount(fakeApi([], () => current));
+  try {
+    cellOf(root, 100).click();
+    current = r4;
+    byText(root, "Book this time").click();
+    await tick();
+    assert.ok(byText(root, "Round 4 · Sun Nov 22 – Sun Nov 29"));
+    assert.match(root.find((n) => n.attrs.role === "grid").attrs["aria-label"], /^Round 4/);
+    // Booked at Round 3's cell 100 (Tue 17 Nov), outside Round 4's window: nothing on the new grid reads booked.
+    assert.equal(allOf(root, (n) => /\bbooked\b/.test(n.className) && n.attrs["data-j"] !== undefined).length, 0);
+    // The new grid starts on Round 4's first Sunday.
+    assert.match(cellOf(root, 0).attrs["aria-label"], /^Sun 22 Nov/);
   } finally {
     view.dispose();
   }
