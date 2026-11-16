@@ -18,6 +18,7 @@ from quiz_views_module.trophy_quiz_views import TrophyQuizView
 from helpers.draft_footer import apply_draft_footer_from_session
 from helpers.draft_outcome import decides_draft, total_matches_in
 from helpers.draft_rooms import BLUE_SIDE, RED_SIDE, SHARED_CHAT_TEAM
+from helpers.pairing_labels import pairing_labels, unplayed_field
 from helpers.team_names import RED, labels_for
 from services.draft_pool_service import (format_entries, format_outcomes,
                                          pool_balance, release_draft_pool,
@@ -375,6 +376,26 @@ async def calculate_pairings(session, db_session):
           
 
 
+async def _post_round_pairings(bot, guild, draft_session, match_results_by_round, channel, db_session):
+    """One pairings embed per round, each match shown as yet unplayed."""
+    from views import create_pairings_view
+    labels = await pairing_labels(guild, [pid for ms in match_results_by_round.values()
+                                          for m in ms for pid in (m.player1_id, m.player2_id)],
+                                  draft_session.sign_ups)
+    for round_number, match_results in match_results_by_round.items():
+        embed = discord.Embed(title=f"Round {round_number} Pairings", color=discord.Color.blue())
+        view = await create_pairings_view(bot, guild, draft_session.session_id, match_results,
+                                          draft_session.team_a, draft_session.team_b)
+        for m in match_results:
+            embed.add_field(name="\u200b", inline=False, value=unplayed_field(
+                m.match_number, labels[str(m.player1_id)], labels[str(m.player2_id)]))
+        pairings_message = await channel.send(embed=embed, view=view)
+
+        for match_result in match_results:
+            match_result.pairing_message_id = str(pairings_message.id)
+            db_session.add(match_result)
+
+
 async def post_pairings(bot, guild, session_id):
     async with AsyncSessionLocal() as db_session:
         # Fetch the draft session
@@ -401,26 +422,8 @@ async def post_pairings(bot, guild, session_id):
                 round_number = (match_result.match_number - 1) // (len(draft_session.team_a) or 1) + 1
                 match_results_by_round.setdefault(round_number, []).append(match_result)
 
-            for round_number, match_results in match_results_by_round.items():
-                embed = discord.Embed(title=f"Round {round_number} Pairings", color=discord.Color.blue())
-                from views import create_pairings_view
-                view = await create_pairings_view(bot, guild, session_id, match_results,
-                                                  draft_session.team_a, draft_session.team_b)
-
-                for match_result in match_results:
-                    player_name = get_display_name_by_id(match_result.player1_id, guild)
-                    opponent_name = get_display_name_by_id(match_result.player2_id, guild)
-
-                    # Formatting the pairings without wins - add black circle emoji for all initial matches
-                    match_info = f"⚫ **Match {match_result.match_number}**\n{player_name} v.\n{opponent_name}"
-                    embed.add_field(name="\u200b", value=match_info, inline=False)
-                # Post the pairings message for the current round
-                pairings_message = await draft_chat_channel_obj.send(embed=embed, view=view)
-
-                # Update the pairing_message_id for each MatchResult in the round
-                for match_result in match_results:
-                    match_result.pairing_message_id = str(pairings_message.id)
-                    db_session.add(match_result)
+            await _post_round_pairings(bot, guild, draft_session, match_results_by_round,
+                                       draft_chat_channel_obj, db_session)
             await draft_chat_channel_obj.send("**REMINDER**: You can report results using the `/report_results` command after each round. Good luck in your matches!")
         else:
             round_number = (draft_session.match_counter - 1) // 4
@@ -431,26 +434,8 @@ async def post_pairings(bot, guild, session_id):
             round_number = (draft_session.match_counter - 1) // 4
             for match_result in match_results:
                 match_results_by_round.setdefault(round_number, []).append(match_result)
-            for round_number, match_results in match_results_by_round.items():
-                embed = discord.Embed(title=f"Round {round_number} Pairings", color=discord.Color.blue())
-                from views import create_pairings_view
-                view = await create_pairings_view(bot, guild, session_id, match_results,
-                                                  draft_session.team_a, draft_session.team_b)
-
-                for match_result in match_results:
-                    player_name = get_display_name_by_id(match_result.player1_id, guild)
-                    opponent_name = get_display_name_by_id(match_result.player2_id, guild)
-
-                    # Formatting the pairings without wins - add black circle emoji for all initial matches
-                    match_info = f"⚫ **Match {match_result.match_number}**\n{player_name} v.\n{opponent_name}"
-                    embed.add_field(name="\u200b", value=match_info, inline=False)
-                # Post the pairings message for the current round
-                pairings_message = await draft_chat_channel_obj.send(embed=embed, view=view)
-
-                # Update the pairing_message_id for each MatchResult in the round
-                for match_result in match_results:
-                    match_result.pairing_message_id = str(pairings_message.id)
-                    db_session.add(match_result)
+            await _post_round_pairings(bot, guild, draft_session, match_results_by_round,
+                                       draft_chat_channel_obj, db_session)
         # Commit the transaction to save the updates to the database
         await db_session.commit()
 
