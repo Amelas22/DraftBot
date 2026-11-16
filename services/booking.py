@@ -75,8 +75,12 @@ async def change(
     start_utc: datetime | None,
     seen_version: int,
     now: datetime,
+    span: BookingSpan | None = None,
 ) -> BookingChange:
-    """Shared body of book and clear; ``start_utc`` None means clear."""
+    """Shared body of book and clear; ``start_utc`` None means clear.
+
+    Booking a time needs the ``span`` it must start in; a clear never reads it.
+    """
     current = await store.current(session)
     if current is None:
         return BookingChange(False, "gone", None, None, name, seen_version)
@@ -92,7 +96,9 @@ async def change(
             return BookingChange(False, "bad_input", old_aware, None, name, version)
         if start_utc < now:
             return BookingChange(False, "past", old_aware, None, name, version)
-        if start_utc >= floor_half_hour(now) + WINDOW_CELLS * _CELL:
+        if span is None:
+            raise ValueError("booking a time needs the span it must fall in")
+        if start_utc < span.start_utc or start_utc >= span.end_utc:
             return BookingChange(False, "out_of_window", old_aware, None, name, version)
     elif old is None:
         return BookingChange(False, "not_booked", None, None, name, version)

@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import delete, update
@@ -6,7 +6,7 @@ from sqlalchemy import delete, update
 from conftest import seed_session, seed_tournament_match, test_db  # noqa: F401
 from database.db_session import db_session
 from models.draft_session import DraftSession
-from models.tournament import TournamentMatch
+from models.tournament import Tournament, TournamentMatch, TournamentRound
 from services.match_booking import MatchStore, book_match, clear_match
 
 UTC = timezone.utc
@@ -142,3 +142,26 @@ async def test_schedulable_match_names_its_guild_and_checks_it_only_when_asked(t
         assert (trusted.match.id, trusted.a.id) == (match_id, trusted.match.team_a_participant_id)
         assert await schedulable_match(s, trusted.guild_id, match_id) == trusted
         assert await schedulable_match(s, trusted.guild_id + "0", match_id) is None
+
+
+@pytest.mark.asyncio
+async def test_a_calendar_match_books_only_inside_its_round(test_db):  # noqa: F811
+    match_id = await _make()
+    async with db_session() as s:
+        await s.execute(update(Tournament).values(round1_deadline=date(2026, 11, 1)))
+        await s.commit()
+    edge = datetime(2026, 11, 2, 8, 0, tzinfo=UTC)
+    assert (await _book(match_id, start=edge)).code == "out_of_window"
+    assert (await _book(match_id, start=edge - timedelta(minutes=30))).ok
+
+
+@pytest.mark.asyncio
+async def test_a_playoff_match_keeps_the_seven_day_limit(test_db):  # noqa: F811
+    match_id = await _make()
+    async with db_session() as s:
+        await s.execute(update(Tournament).values(round1_deadline=date(2026, 11, 1)))
+        await s.execute(update(TournamentRound).values(stage="playoff"))
+        await s.commit()
+    edge = datetime(2026, 11, 2, 12, 0, tzinfo=UTC)
+    assert (await _book(match_id, start=edge)).code == "out_of_window"
+    assert (await _book(match_id, start=edge - timedelta(minutes=30))).ok

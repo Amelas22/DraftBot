@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from models.draft_session import DraftSession
 from models.tournament import Tournament, TournamentMatch, TournamentParticipant, TournamentRound
 from services.booking import BookingChange, change
+from services.scheduler_calendar import match_schedule
 
 
 def _has_draft(match_id: int):
@@ -109,7 +110,8 @@ async def book_match(
     now: datetime,
 ) -> BookingChange:
     """Book or move the match's time. The caller commits."""
-    return await change(session, MatchStore(match_id), user_id, name, start_utc, seen_version, now)
+    span = (await match_schedule(session, match_id, {}, now)).span
+    return await change(session, MatchStore(match_id), user_id, name, start_utc, seen_version, now, span)
 
 
 async def clear_match(
