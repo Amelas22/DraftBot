@@ -297,11 +297,12 @@ async def test_also_usual_ignored_when_usual_exists(test_db) -> None:
 @pytest.mark.asyncio
 async def test_clear_day_overrides(test_db) -> None:
     await replace_day_overrides("1", [_day(TODAY, {8})], False, NOW)
-    await clear_day_overrides("1")
+    await clear_day_overrides("1", NOW)
     assert await load_day_overrides("1", NOW) == []
 
 
 TW_NOW = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
+TW_UNTIL = datetime(2026, 12, 1, tzinfo=timezone.utc)
 
 
 def _day_b64(cells: set[int]) -> str:
@@ -338,27 +339,53 @@ def _days(*dates: str) -> list[dict[str, str]]:
         _tw(also_usual="yes"),
         _tw(days="nope"),
         _tw(days=["2026-10-22"]),
-        _tw(days=_days("2026-10-21", "2026-10-21")),
-        _tw(days=_days("2026-10-20")),
-        _tw(days=_days("2026-10-30")),
+        _tw(days=_days("2026-10-22", "2026-10-22")),
+        _tw(days=_days(*[f"2026-10-{d}" for d in range(21, 32)])),
         _tw(days=_days("not-a-date")),
         _tw(days=_days("20261022")),
         _tw(days=[{"date": "2026-10-22", "cells": base64.b64encode(bytes(7)).decode()}]),
         _tw(days=[{"date": "2026-10-22", "cells": "!!!not base64!!!"}]),
-        _tw(days=_days(*[f"2026-10-{d}" for d in range(21, 31)])),
     ],
 )
 def test_parse_this_week_refuses(raw: bytes) -> None:
     with pytest.raises(InvalidWeek):
-        parse_this_week(raw, TW_NOW)
+        parse_this_week(raw, TW_NOW, TW_UNTIL)
 
 
-def test_parse_this_week_accepts_window_edges_in_the_zone() -> None:
-    week = parse_this_week(_tw(zone="Asia/Tokyo", also_usual=True, days=_days("2026-10-21", "2026-10-29")), TW_NOW)
+def test_this_week_drops_days_entirely_in_the_past() -> None:
+    week = parse_this_week(_tw(days=_days("2026-10-21", "2026-10-22")), TW_NOW, TW_UNTIL)
+    assert [d.local_date for d in week.days] == [date(2026, 10, 22)]
+
+
+def test_parse_this_week_keeps_zone_and_also_usual() -> None:
+    week = parse_this_week(
+        _tw(zone="Asia/Tokyo", also_usual=True, days=_days("2026-10-22", "2026-10-29")), TW_NOW, TW_UNTIL)
     assert week.zone == "Asia/Tokyo" and week.also_usual
-    assert [d.local_date for d in week.days] == [date(2026, 10, 21), date(2026, 10, 29)]
+    assert [d.local_date for d in week.days] == [date(2026, 10, 22), date(2026, 10, 29)]
     assert week.days[0].cells == frozenset({1})
-    assert len(parse_this_week(_tw(days=_days(*[f"2026-10-{d}" for d in range(21, 30)])), TW_NOW).days) == 9
+
+
+def test_this_week_refuses_days_at_or_after_the_horizon() -> None:
+    until = _utc("2026-11-02T08:00:00Z")  # midnight Nov 2 in New York is 04:00Z, Nov 3 is 05:00Z
+    ny = {"zone": "America/New_York"}
+    assert len(parse_this_week(_tw(days=_days("2026-11-02"), **ny), TW_NOW, until).days) == 1
+    with pytest.raises(InvalidWeek):
+        parse_this_week(_tw(days=_days("2026-11-03"), **ny), TW_NOW, until)
+
+
+def test_this_week_accepts_tokyos_ninth_date() -> None:
+    until = _utc("2026-11-23T08:00:00Z")
+    tokyo = {"zone": "Asia/Tokyo"}
+    assert len(parse_this_week(_tw(days=_days("2026-11-23"), **tokyo), TW_NOW, until).days) == 1
+    with pytest.raises(InvalidWeek):
+        parse_this_week(_tw(days=_days("2026-11-24"), **tokyo), TW_NOW, until)
+
+
+def test_this_week_takes_ten_days_and_refuses_eleven() -> None:
+    ten = _days(*[f"2026-10-{d}" for d in range(22, 32)])
+    assert len(parse_this_week(_tw(days=ten), TW_NOW, TW_UNTIL).days) == 10
+    with pytest.raises(InvalidWeek):
+        parse_this_week(_tw(days=ten + _days("2026-11-01")), TW_NOW, TW_UNTIL)
 
 
 def test_this_week_doc_shape() -> None:
@@ -380,3 +407,48 @@ async def test_day_overrides_loads_the_window_including_the_past(test_db) -> Non
     async with db_session() as session:
         got = await day_overrides(session, ["1"], start, start + timedelta(days=8))
     assert [o.local_date for o in got["1"]] == [date(2026, 10, 20)]
+
+
+@pytest.mark.asyncio
+async def test_replace_keeps_dates_it_does_not_cover(test_db) -> None:
+    await replace_day_overrides("1", [_day(date(2026, 10, 23), {4})], False, NOW)
+    await replace_day_overrides("1", [_day(date(2026, 10, 24), {5})], False, NOW)
+    got = await load_day_overrides("1", NOW)
+    assert [d.local_date for d in got] == [date(2026, 10, 23), date(2026, 10, 24)]
+
+
+@pytest.mark.asyncio
+async def test_replace_drops_the_old_override_for_a_day_set_back_to_usual(test_db) -> None:
+    await save_usual_week("1", _usual(weekday=date(2026, 10, 23).weekday(), cells={20}), NOW)
+    await replace_day_overrides("1", [_day(date(2026, 10, 23), {4})], False, NOW)
+    await replace_day_overrides("1", [_day(date(2026, 10, 23), {20})], False, NOW)
+    assert await load_day_overrides("1", NOW) == []
+
+
+@pytest.mark.asyncio
+async def test_load_with_dates_returns_past_rows_in_range(test_db) -> None:
+    await replace_day_overrides("1", [_day(date(2026, 10, 1), {4})], False, NOW)
+    assert await load_day_overrides("1", NOW) == []
+    got = await load_day_overrides("1", NOW, (date(2026, 10, 1), date(2026, 10, 31)))
+    assert [d.local_date for d in got] == [date(2026, 10, 1)]
+
+
+async def _three_days() -> None:
+    await replace_day_overrides(
+        "1", [_day(date(2026, 10, 21), {1}), _day(TODAY, {2}), _day(date(2026, 10, 23), {3})], False, NOW)
+
+
+@pytest.mark.asyncio
+async def test_clear_keeps_the_past(test_db) -> None:
+    await _three_days()
+    await clear_day_overrides("1", NOW)
+    got = await load_day_overrides("1", NOW, (date(2026, 10, 1), date(2026, 10, 31)))
+    assert [d.local_date for d in got] == [date(2026, 10, 21)]
+
+
+@pytest.mark.asyncio
+async def test_clear_with_dates_keeps_other_dates(test_db) -> None:
+    await _three_days()
+    await clear_day_overrides("1", NOW, (date(2026, 10, 23), date(2026, 10, 23)))
+    got = await load_day_overrides("1", NOW)
+    assert [d.local_date for d in got] == [date(2026, 10, 21), TODAY]

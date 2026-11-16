@@ -2,12 +2,13 @@
 import re
 from collections import deque
 from collections.abc import Awaitable, Callable, Collection
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from aiohttp import web
 
 from config import scheduler_enabled, scheduler_trusted_proxies
+from database.db_session import db_session
 from helpers.matchup import Roster
 from services.availability import (
     MAX_FILE_BYTES,
@@ -38,6 +39,7 @@ from services.scheduler_http import (
     read_body,
     utc_now,
 )
+from services.scheduler_calendar import this_week_horizon
 from services.scheduler_links import resolve_token
 from services.scheduler_match_api import routes as match_routes
 from services.scheduler_team_draft_api import routes as team_draft_routes
@@ -167,9 +169,26 @@ async def put_usual_week(request: web.Request) -> web.Response:
     return web.json_response(usual_week_doc(week))
 
 
+def _date_range(request: web.Request) -> tuple[date, date] | None:
+    """The optional ``from``/``to`` dates of a request; ValueError when malformed or half-given."""
+    start, end = request.query.get("from"), request.query.get("to")
+    if start is None and end is None:
+        return None
+    if start is None or end is None or len(start) != 10 or len(end) != 10:
+        raise ValueError("from and to come together")
+    first, last = date.fromisoformat(start), date.fromisoformat(end)
+    if first > last:
+        raise ValueError("from after to")
+    return first, last
+
+
 @routes.get("/api/this-week")
 async def get_this_week(request: web.Request) -> web.Response:
-    days = await load_day_overrides(identity(request).user_id, request.app[NOW]())
+    try:
+        dates = _date_range(request)
+    except ValueError:
+        return error(400, "bad_input")
+    days = await load_day_overrides(identity(request).user_id, request.app[NOW](), dates)
     return web.json_response(this_week_doc(days))
 
 
@@ -178,18 +197,25 @@ async def put_this_week(request: web.Request) -> web.Response:
     raw = await read_body(request, MAX_FILE_BYTES)
     if raw is None:
         return error(413, "too_large")
+    who = identity(request)
     now = request.app[NOW]()
+    async with db_session() as session:
+        until = await this_week_horizon(session, who.guild_id, now)
     try:
-        week = parse_this_week(raw, now)
+        week = parse_this_week(raw, now, until)
     except InvalidWeek:
         return error(400, "bad_input")
-    stored = await replace_day_overrides(identity(request).user_id, week.days, week.also_usual, now)
+    stored = await replace_day_overrides(who.user_id, week.days, week.also_usual, now)
     return web.json_response(this_week_doc(stored))
 
 
 @routes.delete("/api/this-week")
 async def delete_this_week(request: web.Request) -> web.Response:
-    await clear_day_overrides(identity(request).user_id)
+    try:
+        dates = _date_range(request)
+    except ValueError:
+        return error(400, "bad_input")
+    await clear_day_overrides(identity(request).user_id, request.app[NOW](), dates)
     return web.Response(status=204)
 
 

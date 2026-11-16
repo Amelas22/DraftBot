@@ -10,7 +10,7 @@ import binascii
 import json
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from functools import cache
 from zoneinfo import ZoneInfo, available_timezones
 
@@ -29,7 +29,7 @@ _DAY_BYTES = DAY_CELLS // 8
 _FORMAT = "draftbot.scheduler.usual_week"
 _VERSION = 1
 _THIS_WEEK_FORMAT = "draftbot.scheduler.this_week"
-MAX_THIS_WEEK_DAYS = 9
+MAX_THIS_WEEK_DAYS = 10
 
 
 class InvalidWeek(ValueError):
@@ -192,8 +192,12 @@ class ThisWeek:
     also_usual: bool
 
 
-def parse_this_week(raw: bytes, now_utc: datetime) -> ThisWeek:
-    """Validate a ``draftbot.scheduler.this_week`` v1 body; dates must fall in today-1 .. today+7 in its zone."""
+def parse_this_week(raw: bytes, now_utc: datetime, until_utc: datetime) -> ThisWeek:
+    """Validate a ``draftbot.scheduler.this_week`` v1 body.
+
+    A day starting (00:00 in the body's zone) at or after ``until_utc`` is
+    refused; a day before today in that zone is dropped.
+    """
     if len(raw) > MAX_FILE_BYTES:
         raise InvalidWeek("file too large")
     try:
@@ -230,11 +234,13 @@ def parse_this_week(raw: bytes, now_utc: datetime) -> ThisWeek:
             data = base64.b64decode(cells, validate=True)
         except (binascii.Error, ValueError) as exc:
             raise InvalidWeek("bad date or cells") from exc
-        if not today - timedelta(days=1) <= local <= today + timedelta(days=7):
+        if datetime.combine(local, time(), tzinfo=ZoneInfo(zone)) >= until_utc:
             raise InvalidWeek("date out of range")
         if local in seen:
             raise InvalidWeek("date repeated")
         seen.add(local)
+        if local < today:
+            continue
         days.append(DayOverride(zone, local, day_cells_from_bytes(data)))
     return ThisWeek(zone, tuple(days), also_usual)
 
@@ -400,30 +406,41 @@ async def day_overrides(
     return out
 
 
-async def load_day_overrides(user_id: str, now_utc: datetime) -> list[DayOverride]:
-    """A player's live dated overrides, sorted by date."""
+async def load_day_overrides(
+    user_id: str, now_utc: datetime, dates: tuple[date, date] | None = None
+) -> list[DayOverride]:
+    """A player's dated overrides, sorted by date.
+
+    With ``dates``, every row in that inclusive range, past ones included;
+    without, only the live ones.
+    """
     async with db_session() as session:
-        rows = (
-            await session.execute(
-                select(PlayerDayOverride)
-                .where(PlayerDayOverride.user_id == user_id)
-                .order_by(PlayerDayOverride.local_date)
+        query = select(PlayerDayOverride).where(PlayerDayOverride.user_id == user_id)
+        if dates is not None:
+            query = query.where(
+                PlayerDayOverride.local_date >= dates[0],
+                PlayerDayOverride.local_date <= dates[1],
             )
+        rows = (
+            await session.execute(query.order_by(PlayerDayOverride.local_date))
         ).scalars()
-        return [_override(r) for r in rows if _is_live(r, now_utc)]
+        return [_override(r) for r in rows if dates is not None or _is_live(r, now_utc)]
 
 
 async def replace_day_overrides(
     user_id: str, days: Sequence[DayOverride], also_usual: bool, now_utc: datetime
 ) -> list[DayOverride]:
-    """Make ``days`` the player's overrides, dropping every earlier row.
+    """Store ``days`` as the player's overrides, replacing only the rows on those dates.
 
     A day matching the usual week is not stored. With ``also_usual`` and no
     saved usual week, the days first become the usual week (in the first day's zone).
     """
     async with db_session() as session:
         await session.execute(
-            delete(PlayerDayOverride).where(PlayerDayOverride.user_id == user_id)
+            delete(PlayerDayOverride).where(
+                PlayerDayOverride.user_id == user_id,
+                PlayerDayOverride.local_date.in_([d.local_date for d in days]),
+            )
         )
         week_row = await session.get(PlayerAvailability, user_id)
         usual = (
@@ -464,9 +481,17 @@ async def replace_day_overrides(
         return stored
 
 
-async def clear_day_overrides(user_id: str) -> None:
-    """Drop all of a player's dated overrides."""
+async def clear_day_overrides(
+    user_id: str, now_utc: datetime, dates: tuple[date, date] | None = None
+) -> None:
+    """Drop a player's overrides dated today or later in their own zone, within ``dates`` when given."""
     async with db_session() as session:
-        await session.execute(
-            delete(PlayerDayOverride).where(PlayerDayOverride.user_id == user_id)
-        )
+        query = select(PlayerDayOverride).where(PlayerDayOverride.user_id == user_id)
+        if dates is not None:
+            query = query.where(
+                PlayerDayOverride.local_date >= dates[0],
+                PlayerDayOverride.local_date <= dates[1],
+            )
+        for row in (await session.execute(query)).scalars():
+            if row.local_date >= now_utc.astimezone(ZoneInfo(str(row.zone))).date():
+                await session.delete(row)
