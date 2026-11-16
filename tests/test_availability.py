@@ -368,3 +368,15 @@ def test_this_week_doc_shape() -> None:
     doc = this_week_doc([DayOverride("UTC", date(2026, 10, 22), frozenset({1}))])
     assert doc["zone"] == "UTC"
     assert doc["days"] == [{"date": "2026-10-22", "cells": _day_b64({1})}]
+
+
+@pytest.mark.asyncio
+async def test_day_overrides_loads_the_window_including_the_past(test_db) -> None:
+    from database.db_session import db_session
+    from services.availability import day_overrides
+
+    await replace_day_overrides("1", [_day(date(2026, 10, 1), {1}), _day(date(2026, 10, 20), {2})], False, NOW)
+    start = datetime(2026, 10, 18, 7, tzinfo=timezone.utc)
+    async with db_session() as session:
+        got = await day_overrides(session, ["1"], start, start + timedelta(days=8))
+    assert [o.local_date for o in got["1"]] == [date(2026, 10, 20)]

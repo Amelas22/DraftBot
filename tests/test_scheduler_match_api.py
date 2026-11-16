@@ -16,7 +16,7 @@ from database.db_session import db_session
 from helpers.matchup import Roster
 from match_control_view import match_side_rosters
 from models.team_draft import TeamDraftAction
-from models.tournament import Tournament, TournamentMatch
+from models.tournament import Tournament, TournamentMatch, TournamentRound
 from services.availability import DayOverride, UsualWeek, day_cells_to_bytes, replace_day_overrides, save_usual_week
 from services.scheduler_links import issue_link
 from services.scheduler_web import build_app
@@ -300,3 +300,42 @@ async def test_another_guilds_match_is_refused_by_the_api_not_the_hook(client, a
     announce.assert_not_awaited()
     async with db_session() as s:
         assert (await s.get(TournamentMatch, match_id)).booking_version == 0
+
+
+async def _calendar(deadline=date(2026, 11, 1), rounds=4):
+    async with db_session() as s:
+        await s.execute(update(Tournament).values(round1_deadline=deadline, total_rounds=rounds, status="active"))
+
+
+@pytest.mark.asyncio
+async def test_a_calendar_match_opens_on_its_round(client):
+    match_id = await seed()
+    await _calendar()
+    body = await (await client.get("/api/tournament-match", headers=await _auth(match_id))).json()
+    assert body["round"]["number"] == 1
+    assert body["round"]["prev"] is None
+    assert body["round"]["next"] == {"round": 2}
+    assert body["bookable"]["end_utc"] == "2026-11-02T08:00:00Z"
+
+
+@pytest.mark.asyncio
+async def test_round_parameter_steps_to_another_round(client):
+    match_id = await seed()
+    await _calendar()
+    headers = await _auth(match_id)
+    body = await (await client.get("/api/tournament-match?round=2", headers=headers)).json()
+    assert body["round"]["number"] == 2
+    assert body["round"]["first_day"] == "2026-11-01"
+    assert (await client.get("/api/tournament-match?round=5", headers=headers)).status == 400
+
+
+@pytest.mark.asyncio
+async def test_a_playoff_match_has_no_round_and_a_rolling_window(client):
+    match_id = await seed()
+    await _calendar()
+    async with db_session() as s:
+        row = await s.get(TournamentMatch, match_id)
+        rnd = await s.get(TournamentRound, row.round_id)
+        rnd.stage = "playoff"
+    body = await (await client.get("/api/tournament-match", headers=await _auth(match_id))).json()
+    assert body["round"] is None and body["window"]["shape"] == "rolling" and body["window"]["cells"] == 336

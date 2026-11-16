@@ -5,13 +5,17 @@ same document as a team draft's, through the same handlers. Every committed
 action is announced in the match's thread; an announcement that fails is logged
 and never fails the booking.
 """
+from collections.abc import Mapping
+from datetime import datetime
+
 from aiohttp import web
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.db_session import db_session
 from helpers.matchup import matchup_state
 from services.match_booking import MatchStore, book_match, clear_match, schedulable_match
-from services.scheduler_http import MATCH_ANNOUNCE, MATCH_PEOPLE, identity
+from services.scheduler_calendar import Schedule, match_schedule
+from services.scheduler_http import MATCH_ANNOUNCE, MATCH_PEOPLE, NOW, identity
 from services.scheduler_team_draft_api import LinkSubject, booking_doc, build_state, serve_action, serve_state
 
 VIEW = "tournament_match"
@@ -30,6 +34,7 @@ async def _state(request: web.Request, match_id: int) -> dict[str, object] | Non
             return None
         row = found.match
         thread_id, booked_by = row.thread_id, row.booked_by_name
+        schedule = await match_schedule(session, match_id, request.query, request.app[NOW]())
     rosters = await request.app[MATCH_PEOPLE](who.guild_id, match_id)
     if rosters is None:
         return None
@@ -41,11 +46,17 @@ async def _state(request: web.Request, match_id: int) -> dict[str, object] | Non
         "state": matchup_state(started),
     }
     booking = booking_doc(start, booked_by, version)
-    return await build_state(request, who, matchup, booking, rosters)
+    return await build_state(request, who, matchup, booking, rosters, schedule)
 
 
 async def _match_exists(session: AsyncSession, guild_id: str, match_id: int) -> bool:
     return await schedulable_match(session, guild_id, match_id) is not None
+
+
+async def _match_schedule(
+    session: AsyncSession, _guild_id: str, match_id: int, query: Mapping[str, str], now: datetime
+) -> Schedule:
+    return await match_schedule(session, match_id, query, now)
 
 
 MATCH = LinkSubject(
@@ -56,6 +67,7 @@ MATCH = LinkSubject(
     book=book_match,
     clear=clear_match,
     state=_state,
+    schedule=_match_schedule,
     announce=MATCH_ANNOUNCE,
 )
 

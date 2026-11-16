@@ -373,29 +373,44 @@ def _is_live(row: PlayerDayOverride, now_utc: datetime) -> bool:
 
 
 async def day_overrides(
-    session: AsyncSession, users: list[str], now_utc: datetime
+    session: AsyncSession, users: list[str], start_utc: datetime, end_utc: datetime
 ) -> dict[str, list[DayOverride]]:
-    """The live dated overrides of ``users``, sorted by date; anyone without one is left out."""
+    """Dated overrides of ``users`` near ``[start_utc, end_utc)``, sorted by date.
+
+    Rows within a day either side of the window's UTC dates are returned, past
+    ones included, so an earlier round shows what was entered. Anyone without
+    one is left out.
+    """
     if not users:
         return {}
     rows = (
         await session.execute(
             select(PlayerDayOverride)
-            .where(PlayerDayOverride.user_id.in_(users))
+            .where(
+                PlayerDayOverride.user_id.in_(users),
+                PlayerDayOverride.local_date >= start_utc.date() - timedelta(days=1),
+                PlayerDayOverride.local_date <= end_utc.date() + timedelta(days=1),
+            )
             .order_by(PlayerDayOverride.local_date)
         )
     ).scalars()
     out: dict[str, list[DayOverride]] = {}
     for r in rows:
-        if _is_live(r, now_utc):
-            out.setdefault(str(r.user_id), []).append(_override(r))
+        out.setdefault(str(r.user_id), []).append(_override(r))
     return out
 
 
 async def load_day_overrides(user_id: str, now_utc: datetime) -> list[DayOverride]:
     """A player's live dated overrides, sorted by date."""
     async with db_session() as session:
-        return (await day_overrides(session, [user_id], now_utc)).get(user_id, [])
+        rows = (
+            await session.execute(
+                select(PlayerDayOverride)
+                .where(PlayerDayOverride.user_id == user_id)
+                .order_by(PlayerDayOverride.local_date)
+            )
+        ).scalars()
+        return [_override(r) for r in rows if _is_live(r, now_utc)]
 
 
 async def replace_day_overrides(
