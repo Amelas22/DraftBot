@@ -1,9 +1,19 @@
-import test from "node:test";
+import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
-import { layoutWindow, formatCell, formatTime, hourLabel, rowClass, windowColumns } from "../js/grid.js";
+import { layoutWindow, formatCell, formatTime, hourLabel, rowClass, windowColumns, weekKeys } from "../js/grid.js";
 import { CELLS } from "../js/week.js";
 
 const start = new Date("2026-10-21T04:00:00Z");
+
+// A just-enough DOM for the legend keys, which are built with el().
+class Node {
+  constructor() { this.children = []; this.className = ""; this.textContent = ""; }
+  append(...kids) { this.children.push(...kids); }
+  setAttribute() {}
+}
+let saved;
+before(() => { saved = Object.getOwnPropertyDescriptor(globalThis, "document"); globalThis.document = { createElement: () => new Node() }; });
+after(() => { if (saved) Object.defineProperty(globalThis, "document", saved); else delete globalThis.document; });
 
 test("layoutWindow across the London fall-back has a 25-hour Sunday", () => {
   const days = layoutWindow(start, "Europe/London");
@@ -125,4 +135,30 @@ test("a window ending in the league's Sunday's last half-hour marks that cell as
   const cols = windowColumns(new Date("2026-11-08T08:00:00Z"), "America/Los_Angeles");
   const cutoffs = cols.flatMap((c) => c.cells.filter((x) => x.cutoff).map((x) => x.label));
   assert.deepEqual(cutoffs, ["Sun 8 Nov, 11:30 PM"]);
+});
+
+test("a round window tints both Sundays due and the six days between this round", () => {
+  const cols = windowColumns(new Date("2026-11-15T08:00:00Z"), "America/Los_Angeles", 384, "round");
+  assert.deepEqual(cols.map((c) => [c.label, c.kind]), [["Sun 15", "due"], ["Mon 16", "wk0"], ["Tue 17", "wk0"],
+    ["Wed 18", "wk0"], ["Thu 19", "wk0"], ["Fri 20", "wk0"], ["Sat 21", "wk0"], ["Sun 22", "due"]]);
+  assert.deepEqual(cols.flatMap((c) => c.cells.filter((x) => x.cutoff).map((x) => x.label)),
+    ["Sun 15 Nov, 11:30 PM", "Sun 22 Nov, 11:30 PM"]);
+});
+test("a round in Tokyo is nine date columns, the first from 5 PM and the last until 5 PM", () => {
+  const cols = windowColumns(new Date("2026-11-15T08:00:00Z"), "Asia/Tokyo", 384, "round");
+  assert.deepEqual(cols.map((c) => c.date), ["2026-11-15", "2026-11-16", "2026-11-17", "2026-11-18",
+    "2026-11-19", "2026-11-20", "2026-11-21", "2026-11-22", "2026-11-23"]);
+  assert.equal(cols[0].start, 34); assert.equal(cols[0].cells.length, 14); assert.equal(cols.at(-1).cells.length, 34);
+  assert.ok(cols.every((c) => c.cells.every((x) => x.kind !== "wk1")));
+});
+test("the fall-back round's first Sunday has 50 cells", () => {
+  const cols = windowColumns(new Date("2026-11-01T07:00:00Z"), "America/Los_Angeles", 386, "round");
+  assert.equal(cols.length, 8); assert.equal(cols[0].cells.length, 50);
+});
+test("the spring-forward round's last Sunday has 46 cells", () => {
+  assert.equal(windowColumns(new Date("2027-03-07T08:00:00Z"), "America/Los_Angeles", 382, "round").at(-1).cells.length, 46);
+});
+test("weekKeys for a round has no next round", () => {
+  assert.deepEqual(weekKeys("round").map((k) => k.children[1].textContent),
+    ["this round", "round ends: midnight PT Sunday (3 AM ET Mon)"]);
 });

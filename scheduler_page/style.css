@@ -139,6 +139,13 @@ button.hcell { cursor: pointer; }
 .daytabs button.due:not([aria-selected="true"]) { background: var(--warnbg); color: var(--warn-text); box-shadow: inset 0 0 0 2px var(--warn); }
 .legend .key.wk0 { background: var(--chip); }
 .legend .key.wk1 { background: var(--wk1-empty-alt); }
+/* A cell already gone by (any shade, dimmed and hatched) and one that can be seen but not booked (a muted dashed
+   outline over a flat fill, so it never reads as the past). The paint grid's past cells are not interactive. */
+.hcell.past, .cell.past { opacity: .45; background-image: repeating-linear-gradient(135deg, transparent 0 3px, var(--line) 3px 4px); }
+.cell.past { pointer-events: none; cursor: default; }
+.hcell.nobook { background: var(--surface); box-shadow: inset 0 0 0 1px var(--line); color: var(--muted); cursor: not-allowed; }
+.legend .key.past { background: var(--empty); opacity: .45; background-image: repeating-linear-gradient(135deg, transparent 0 3px, var(--line) 3px 4px); }
+.legend .key.nobook { background: var(--surface); box-shadow: inset 0 0 0 1px var(--muted); }
 .legend .key.due { background: var(--due-empty-alt); box-shadow: inset 0 -3px 0 var(--warn); }
 .legend .keyitem:has(.key.due) { color: var(--warn-text); font-weight: 700; }
 
