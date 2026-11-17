@@ -139,7 +139,8 @@ export function weekEditing(root, api, { now, backLabel, dispose, show }) {
 }
 
 // The paintable grid both week editors draw, in gridFrame's frame, laid out by columns (see weekColumns).
-// onChange runs after every stroke or key toggle. It opens on the first day's tab with the given cells (keys) painted.
+// onChange(keys) runs after every stroke or key toggle with the keys it covered, locked ones left out (none for a
+// cancelled stroke). It opens on the first day's tab with the given cells (keys) painted.
 // Locked keys (cells already in the past) are shown as they are and can't be changed: marked past and aria-disabled,
 // a stroke can't start on one or change one, and Space/Enter does nothing on one.
 export function paintGrid({ columns, gridLabel, cells: initial, onChange, locked = new Set() }) {
@@ -179,10 +180,11 @@ export function paintGrid({ columns, gridLabel, cells: initial, onChange, locked
   let drag = null; // { anchor, paint, base, current }
   const endStroke = (commit) => {
     if (!drag) return;
+    const covered = commit ? stroke(new Set(), drag.anchor, drag.current, true) : new Set();
     if (commit) cells = stroke(drag.base, drag.anchor, drag.current, drag.paint);
     drag = null;
     paintView(cells);
-    onChange();
+    onChange(covered);
   };
   grid.addEventListener("pointerdown", (e) => {
     if (e.button !== 0 && e.pointerType === "mouse") return;
@@ -221,7 +223,7 @@ export function paintGrid({ columns, gridLabel, cells: initial, onChange, locked
       if (locked.has(i)) return;
       cells = stroke(cells, i, i, !cells.has(i));
       paintView(cells);
-      onChange();
+      onChange(stroke(new Set(), i, i, true));
     }
   });
 

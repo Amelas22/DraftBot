@@ -6,6 +6,7 @@ import {
   weekdayOfDate,
 } from "./week.js";
 import { LinkExpired, checkDoc } from "./api.js";
+import { weeksOfCells } from "./rounds.js";
 import { expiredMessage } from "./messages.js";
 import { el } from "./dom.js";
 import { windowColumns, zoneName } from "./grid.js";
@@ -63,13 +64,14 @@ export function pastCells(startUtc, count, now) {
 }
 
 // The PUT body: every one of the dates, painted or not, so a date emptied this week stays empty.
-export function toThisWeekFile(zone, dates, cells) {
+// paintedWeeks: the league Mondays (ISO dates) whose half-hours were painted since the last save; the server confirms them.
+export function toThisWeekFile(zone, dates, cells, paintedWeeks = []) {
   const days = dates.map((date, d) => {
     const own = new Set();
     for (let h = 0; h < DAY_CELLS; h++) if (cells.has(d * DAY_CELLS + h)) own.add(h);
     return { date, cells: encodeDayCells(own) };
   });
-  return { format: FORMAT, version: 1, zone, days };
+  return { format: FORMAT, version: 1, zone, days, painted_weeks: paintedWeeks };
 }
 
 // deps: { startUtc: Date, cells?: number, shape?: string, now?: () => Date, usualDoc: usual-week doc | null,
@@ -132,15 +134,23 @@ export async function mountThisWeek(root, api, deps) {
   const status = el("p", { class: "status", role: "status", "aria-live": "polite" });
   // painter is set below, before any change can fire. Every date not yet over is sent, so a date painted back to
   // the usual week drops its old change.
+  // The league weeks painted since the last save went through; a failed save keeps them for the next one.
+  const painted = new Set();
   const write = async () => {
     days = withPainted(dates, days, painter.cells(), startUtc, zone, count);
-    const file = toThisWeekFile(zone, dates, days);
+    const sent = [...painted].sort();
+    const file = toThisWeekFile(zone, dates, days, sent);
     const doc = { ...file, days: file.days.filter((d) => d.date >= today()) };
     await api.putThisWeek(doc);
+    for (const w of sent) painted.delete(w);
     deps.onSaved?.(doc);
   };
   const auto = autosaver(write, (text) => { status.textContent = text; }, deps.saveDelay);
-  const touched = allPast ? () => {} : () => { status.textContent = ""; auto.touch(); };
+  const touched = allPast ? () => {} : (keys = new Set()) => {
+    for (const w of weeksOfCells(keys, startUtc)) painted.add(w);
+    status.textContent = "";
+    auto.touch();
+  };
   let painter;
   const paintBox = el("div");
   const draw = (cells) => {
@@ -168,12 +178,12 @@ export async function mountThisWeek(root, api, deps) {
         status.textContent = e instanceof LinkExpired ? expiredMessage() : ZONE_FAILED;
         return;
       }
-      const painted = painter.cells();
+      const shown = painter.cells();
       zone = next;
       columns = nextColumns;
       dates = nextDates;
       days = prefill(dates, usual, overrides);
-      draw(painted);
+      draw(shown);
       touched();
     });
     setup.push(row);
@@ -186,7 +196,7 @@ export async function mountThisWeek(root, api, deps) {
     keep.addEventListener("click", async () => {
       keep.disabled = true;
       paintBox.inert = true;
-      auto.cancel();
+      // Flushed, not cancelled: a stroke still waiting to save is sent now, so the weeks it painted are confirmed.
       await auto.flush();
       status.textContent = "Saving…";
       try {

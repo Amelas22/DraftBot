@@ -1,6 +1,6 @@
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
-import { applyStroke, toFile, loadWeek, saveFailedMessage, actionButtons, autosaver, mountUsual } from "../js/usual.js";
+import { paintGrid, weekColumns, applyStroke, toFile, loadWeek, saveFailedMessage, actionButtons, autosaver, mountUsual } from "../js/usual.js";
 import { decodeCells } from "../js/week.js";
 import { NeedsUpdate } from "../js/api.js";
 
@@ -212,4 +212,24 @@ test("a save that lands mid-stroke keeps both Sundays: the stroke lands on the r
   assert.ok(node(0).classes.has("on"));
   assert.ok(node(336).classes.has("on"));
   assert.ok(decodeCells(puts.at(-1).cells).has(6 * 48));
+});
+
+test("a stroke reports the cells it covered, never locked ones", () => {
+  const seen = [];
+  const painter = paintGrid({ columns: weekColumns(), gridLabel: "g", cells: new Set(), onChange: (keys) => seen.push(keys), locked: new Set([2]) });
+  const node = (j) => painter.grid.find((n) => n.attrs["data-i"] === String(j));
+  document.elementFromPoint = (x) => node(x);
+  try {
+    for (const fn of painter.grid.listeners.pointerdown) fn({ button: 0, pointerType: "touch", clientX: 0, pointerId: 1 });
+    for (const fn of painter.grid.listeners.pointermove) fn({ clientX: 4 });
+    for (const fn of painter.grid.listeners.pointerup) fn({});
+    assert.deepEqual(seen.at(-1), new Set([0, 1, 3, 4]));
+    for (const fn of painter.grid.listeners.pointerdown) fn({ button: 0, pointerType: "touch", clientX: 7, pointerId: 1 });
+    for (const fn of painter.grid.listeners.pointercancel) fn({});
+    assert.deepEqual(seen.at(-1), new Set());
+  } finally {
+    delete document.elementFromPoint;
+  }
+  for (const fn of painter.grid.listeners.keydown) fn({ target: node(6), key: " ", preventDefault() {} });
+  assert.deepEqual(seen.at(-1), new Set([6]));
 });

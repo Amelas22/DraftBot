@@ -352,7 +352,7 @@ test("every fixture api keeps an in-memory this-week doc", async () => {
     const empty = { format: "draftbot.scheduler.this_week", version: 1, zone: null, days: [] };
     assert.deepEqual(await api.getThisWeek(), empty);
     const doc = { ...empty, zone: "UTC", days: [{ date: "2026-10-22", cells: "AAAAAAAA" }] };
-    assert.deepEqual(await api.putThisWeek({ ...doc, also_usual: false }), doc);
+    assert.deepEqual(await api.putThisWeek({ ...doc, also_usual: false, painted_weeks: ["2026-10-19"] }), doc);
     assert.deepEqual(await api.getThisWeek(), doc);
     assert.equal(await api.clearThisWeek(), null);
     assert.deepEqual(await api.getThisWeek(), empty);
@@ -391,4 +391,29 @@ test("getThisWeek and clearThisWeek pass a range as from/to", async () => {
     ["GET", "/api/this-week?from=2026-11-15&to=2026-11-23"], ["DELETE", "/api/this-week?from=2026-11-15&to=2026-11-23"],
     ["GET", "/api/this-week"], ["DELETE", "/api/this-week"],
   ]);
+});
+
+test("confirmation calls carry the range", async () => {
+  const fake = recorder(200, { trusts_usual: true, confirmed_rounds: [] });
+  const api = createApi(TOKEN, fake);
+  const range = { from: "2026-11-16", to: "2026-11-16" };
+  await api.getConfirmation(range);
+  await api.setTrustsUsual(false, range);
+  await api.confirmRound("2026-11-16", range);
+  assert.deepEqual(fake.calls.map(([u, o]) => [o.method, u, o.body]), [
+    ["GET", "/api/confirmation?from=2026-11-16&to=2026-11-16", undefined],
+    ["PUT", "/api/confirmation?from=2026-11-16&to=2026-11-16", '{"trusts_usual":false}'],
+    ["POST", "/api/confirmation/rounds?from=2026-11-16&to=2026-11-16", '{"round":"2026-11-16"}'],
+  ]);
+});
+
+test("fixture confirmation remembers the switch and confirmed rounds", async () => {
+  const range = { from: "2026-11-16", to: "2026-11-16" };
+  for (const name of ["usual-week", "teams", "team-draft"]) {
+    const api = createFixtureApi(name, diskFetch());
+    assert.deepEqual(await api.getConfirmation(range), { trusts_usual: true, confirmed_rounds: [] });
+    await api.setTrustsUsual(false, range);
+    await api.confirmRound("2026-11-16", range);
+    assert.deepEqual(await api.getConfirmation(range), { trusts_usual: false, confirmed_rounds: ["2026-11-16"] });
+  }
 });

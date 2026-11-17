@@ -26,9 +26,14 @@ const FIXTURE_RE = /^[A-Za-z0-9._-]+$/;
 const TOKEN_RE = /^[A-Za-z0-9_-]{20,64}$/;
 const USUAL_PATH = "/api/usual-week";
 const THIS_WEEK_PATH = "/api/this-week";
+const CONFIRMATION_PATH = "/api/confirmation";
+export const CONFIRMATION_FORMAT = "draftbot.scheduler.confirmation";
 
 // The this-week path, for the dates from..to ("YYYY-MM-DD", inclusive) when a range is given, else every date.
 const thisWeekPath = (range) => (range ? `${THIS_WEEK_PATH}?${new URLSearchParams({ from: range.from, to: range.to })}` : THIS_WEEK_PATH);
+
+// The confirmation path, for the league weeks from..to ("YYYY-MM-DD", inclusive).
+const confirmationPath = (path, range) => `${path}?${new URLSearchParams({ from: range.from, to: range.to })}`;
 
 // A player with no overrides: the server answers this on a first read, and the fixtures start from it.
 const emptyThisWeek = () => ({ format: "draftbot.scheduler.this_week", version: 1, zone: null, days: [] });
@@ -48,8 +53,22 @@ function fixtureThisWeek() {
   let doc = emptyThisWeek();
   return {
     getThisWeek: async () => structuredClone(doc),
-    putThisWeek: async ({ also_usual, ...saved }) => { doc = structuredClone(saved); return structuredClone(doc); },
+    putThisWeek: async ({ also_usual, painted_weeks, ...saved }) => { doc = structuredClone(saved); return structuredClone(doc); },
     clearThisWeek: async () => { doc = emptyThisWeek(); return null; },
+  };
+}
+
+// The in-memory confirmation the fixture apis share: the switch and the rounds confirmed, whatever the range.
+function fixtureConfirmation() {
+  const state = { trusts_usual: true, confirmed_rounds: [] };
+  const doc = () => structuredClone(state);
+  return {
+    getConfirmation: async () => doc(),
+    setTrustsUsual: async (value) => { state.trusts_usual = value; return doc(); },
+    confirmRound: async (monday) => {
+      if (!state.confirmed_rounds.includes(monday)) state.confirmed_rounds = [...state.confirmed_rounds, monday].sort();
+      return doc();
+    },
   };
 }
 
@@ -101,6 +120,9 @@ export function createApi(token, fetchFn = fetch) {
       if (!res.ok) throw await failure(res);
       return null;
     },
+    getConfirmation: (range) => json("GET", confirmationPath(CONFIRMATION_PATH, range)),
+    setTrustsUsual: (value, range) => json("PUT", confirmationPath(CONFIRMATION_PATH, range), { trusts_usual: value }),
+    confirmRound: (monday, range) => json("POST", confirmationPath(`${CONFIRMATION_PATH}/rounds`, range), { round: monday }),
     get: (path) => json("GET", path),
     post: (path, body) => json("POST", path, body),
   };
@@ -124,6 +146,7 @@ export function createFixtureApi(name, fetchFn = fetch) {
     getUsual: () => read(`fixtures/${name}.json`),
     putUsual: async (doc) => doc,
     ...fixtureThisWeek(),
+    ...fixtureConfirmation(),
     get: (path) => read(`fixtures/${path.replace(/^\/+/, "")}.json`),
     post: refuse,
   };
@@ -233,6 +256,7 @@ function teamsFixtureApi(read, { file, usualFile, name }) {
     getUsual: async () => { await load(); return structuredClone(await week); },
     putUsual: async (doc) => doc,
     ...fixtureThisWeek(),
+    ...fixtureConfirmation(),
     get: async (path) => {
       if (path !== "/api/teams") throw new Error(`no fixture for ${path}`);
       return structuredClone(await load());
@@ -327,6 +351,7 @@ function teamDraftFixtureApi(read, { user: viewer, usualFile }) {
     me: async () => { await load(); return { user: user(), guild: "fixture", view: "team_draft", exp: null }; },
     getUsual: async () => { await load(); return structuredClone(week); },
     putUsual,
+    ...fixtureConfirmation(),
     getThisWeek: thisWeek.getThisWeek,
     putThisWeek: async (doc) => {
       await load();
