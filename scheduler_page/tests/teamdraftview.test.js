@@ -6,6 +6,7 @@ import { mountTeamDraft } from "../js/teamdraftview.js";
 import { gridFrame } from "../js/grid.js";
 import { windowColumns } from "../js/grid.js";
 import { addDays, deadlineOnOrAfter, weekWindow } from "../js/rounds.js";
+import { encodeCells } from "../js/week.js";
 
 const doc = JSON.parse(readFileSync(new URL("../fixtures/team-draft.json", import.meta.url)));
 // Before the fixture window opens, so every cell can still be booked.
@@ -37,8 +38,12 @@ after(() => {
 });
 
 // get(path) is the state each read returns; an action answers with the state get gives for the same query, booked.
+const confirmation = (trusts = true) => ({ format: "draftbot.scheduler.confirmation", version: 1, trusts_usual: trusts, confirmed_rounds: [] });
 const fakeApi = (calls, get) => ({
   getUsual: async () => ({}),
+  getConfirmation: async (range) => { calls.push(["confirmation", range]); return confirmation(); },
+  setTrustsUsual: async (value) => confirmation(value),
+  confirmRound: async () => confirmation(),
   get: async (path) => { calls.push(["get", path]); return get(path); },
   post: async (path, body) => {
     calls.push(["post", path, body]);
@@ -628,4 +633,136 @@ test("a refresh refused as bad input for the shown query falls back to the defau
     assert.deepEqual(calls.filter((c) => c[0] === "get").slice(-2), [["get", "/api/team-draft?round=2"], ["get", "/api/team-draft"]]);
     assert.ok(byText(root, "Round 3 · Sun Nov 15 – Sun Nov 22"));
   } finally { globalThis.document.visibilityState = "hidden"; console.warn = warn; view.dispose(); }
+});
+
+// Round 3 with three people in Los Angeles: Ann (Team A, her usual week counts), Bo (Team A, switch off, nothing
+// confirmed) and Cy (Team B, switch off, Round 3 confirmed). Only Bo is free at cell 48 (Mon 16 Nov 00:00 PT); Ann
+// and Cy are both free at cell 100 (Tue 17 Nov 02:00 PT).
+const LA = "America/Los_Angeles";
+const person = (user, name, usual, extra) => ({ user, name, zone: LA, cells: encodeCells(new Set(usual)), overrides: [], ...extra });
+const r3c = { ...r3, sides: [
+  { label: "Team A", people: [
+    person("1", "Ann", [52], { trusts_usual: true, confirmed_rounds: [] }),
+    person("2", "Bo", [0], { trusts_usual: false, confirmed_rounds: [] }),
+  ] },
+  { label: "Team B", people: [person("3", "Cy", [52], { trusts_usual: false, confirmed_rounds: ["2026-11-16"] })] },
+] };
+const trusting = { ...r3c, sides: r3c.sides.map((s) => ({ ...s, people: s.people.map((p) => ({ ...p, trusts_usual: true })) })) };
+const legendText = (root) => textsOf(allOf(root, (n) => n.className === "legend")[0]).join(" ");
+const unsureMarks = (root) => allOf(root, (n) => n.className === "unsure");
+const liOf = (root, name) => root.find((n) => n.children.some((c) => c.attrs?.["aria-pressed"] && c.children.includes(name)));
+
+test("nobody's switch off: no marks, no legend line, counts as before", async () => {
+  const { root, view } = await mount(fakeApi([], () => trusting));
+  try {
+    assert.equal(unsureMarks(root).length, 0);
+    assert.doesNotMatch(legendText(root), /2\+1 =/);
+    assert.equal(cellOf(root, 100).textContent, "1–1");
+    assert.equal(cellOf(root, 48).textContent, "1–0");
+  } finally { view.dispose(); }
+});
+
+test("a probable person counts as +1 and shades nothing", async () => {
+  const { root, view } = await mount(fakeApi([], () => r3c));
+  try {
+    assert.match(cellOf(root, 48).className, /\bs0\b/);
+    assert.equal(cellOf(root, 48).textContent, "0+1–0");
+    assert.match(cellOf(root, 48).attrs["aria-label"], /: 0\+1–0 free$/);
+    // Cy's round is confirmed, so cell 100 counts both as before.
+    assert.equal(cellOf(root, 100).textContent, "1–1");
+  } finally { view.dispose(); }
+});
+
+test("the readout marks probable names", async () => {
+  const { root, view } = await mount(fakeApi([], () => r3c));
+  try {
+    cellOf(root, 48).click();
+    assert.match(readoutOf(root).textContent, /Team A — Bo \(probably\) · Team B — nobody \(Ann, Cy not free\)$/);
+  } finally { view.dispose(); }
+});
+
+test("an unconfirmed person's chip carries a ?", async () => {
+  const { root, view } = await mount(fakeApi([], () => r3c));
+  try {
+    const marks = unsureMarks(root);
+    assert.equal(marks.length, 1);
+    const mark = liOf(root, "Bo").children.find((c) => c.className === "unsure");
+    assert.equal(mark, marks[0]);
+    assert.deepEqual([mark.textContent, mark.attrs.role, mark.attrs["aria-label"], mark.attrs.title],
+      ["?", "img", "not confirmed for this round", "not confirmed for this round"]);
+    for (const name of ["Ann", "Cy"]) assert.ok(!liOf(root, name).children.some((c) => c.className === "unsure"));
+  } finally { view.dispose(); }
+});
+
+test("the legend explains +1 when anyone's switch is off", async () => {
+  const { root, view } = await mount(fakeApi([], () => r3c));
+  try {
+    assert.ok(allOf(root, (n) => n.className === "maybekey" && n.textContent === "2+1 = 2 confirmed, 1 probably free").length === 1);
+  } finally { view.dispose(); }
+});
+
+test("My availability shows the switch for the viewed round", async () => {
+  const calls = [];
+  const week = { format: "draftbot.scheduler.this_week", version: 1, zone: LA, days: [] };
+  const api = { ...fakeApi(calls, () => r3c), getUsual: async () => ({ zone: LA, cells: encodeCells(new Set()) }),
+    getThisWeek: async () => week, putThisWeek: async (doc) => doc };
+  const { root, view } = await mount(api);
+  try {
+    byText(root, "My availability").click();
+    await tick();
+    assert.deepEqual(calls.filter((c) => c[0] === "confirmation").map((c) => c[1]), [{ from: "2026-11-16", to: "2026-11-16" }]);
+    assert.ok(textsOf(mineBox(root)).includes("Show my usual as confirmed"));
+    const grid = mineBox(root).find((n) => n.attrs.role === "grid");
+    const target = mineBox(root).find((n) => n.attrs["data-i"] === "100");
+    for (const fn of grid.listeners.keydown) fn({ target, key: " ", preventDefault() {} });
+    byText(root, "Everyone").click();
+    await tick();
+    assert.equal(calls.filter((c) => c[0] === "confirmation").length, 2);
+  } finally { view.dispose(); }
+});
+
+test("confirming in the panel redraws the matchup, dropping the viewer's ?", async () => {
+  const calls = [];
+  let bo = r3c;
+  const week = { format: "draftbot.scheduler.this_week", version: 1, zone: LA, days: [] };
+  const api = { ...fakeApi(calls, () => bo), getUsual: async () => ({ zone: LA, cells: encodeCells(new Set()) }),
+    getThisWeek: async () => week, putThisWeek: async (doc) => doc,
+    getConfirmation: async () => confirmation(false),
+    confirmRound: async () => {
+      bo = { ...r3c, sides: [{ ...r3c.sides[0], people: [r3c.sides[0].people[0], { ...r3c.sides[0].people[1], confirmed_rounds: ["2026-11-16"] }] }, r3c.sides[1]] };
+      return { ...confirmation(false), confirmed_rounds: ["2026-11-16"] };
+    } };
+  const { root, view } = await mount(api);
+  try {
+    assert.equal(unsureMarks(root).length, 1);
+    byText(root, "My availability").click();
+    await tick();
+    for (const fn of byText(root, "Looks right, confirm").listeners.click) fn({});
+    await tick();
+    assert.equal(unsureMarks(root).length, 0);
+  } finally { view.dispose(); }
+});
+
+test("a confirm panel that fails to load leaves the editor working", async () => {
+  const calls = [];
+  const week = { format: "draftbot.scheduler.this_week", version: 1, zone: LA, days: [] };
+  const api = { ...fakeApi(calls, () => r3c), getUsual: async () => ({ zone: LA, cells: encodeCells(new Set()) }),
+    getThisWeek: async () => week, putThisWeek: async (doc) => doc, getConfirmation: async () => { throw new Error("offline"); } };
+  const error = console.error;
+  console.error = () => {};
+  const { root, view } = await mount(api);
+  try {
+    byText(root, "My availability").click();
+    await tick();
+    assert.ok(mineBox(root).find((n) => n.attrs.role === "grid"));
+  } finally { console.error = error; view.dispose(); }
+});
+
+test("hiding a probable person drops their +1", async () => {
+  const { root, view } = await mount(fakeApi([], () => r3c));
+  try {
+    chip(root, "Bo").click();
+    assert.equal(cellOf(root, 48).textContent, "");
+    assert.match(cellOf(root, 48).className, /\bs0\b/);
+  } finally { view.dispose(); }
 });

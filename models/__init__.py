@@ -39,7 +39,8 @@ from .mtgo_account import MtgoAccount
 from .mtgo_job import MtgoJob
 from .wallet_tx import WalletTx
 from .escrow_hold import EscrowHold
-from .scheduler import PlayerAvailability, PlayerDayOverride, SchedulerLink
+from .scheduler import (PlayerAvailability, PlayerDayOverride, PlayerRoundConfirmation,
+                        PlayerSchedulerSetting, SchedulerLink)
 from .team_finder import LfgAction, LfgRequest, LfgTeam, LfgTeamMember
 from .team_draft import TeamDraft, TeamDraftAction
 
@@ -97,6 +98,8 @@ __all__ = [
     'ACTIVE_STATES',
     'PlayerAvailability',
     'PlayerDayOverride',
+    'PlayerSchedulerSetting',
+    'PlayerRoundConfirmation',
     'SchedulerLink',
     'LfgTeam',
     'LfgTeamMember',

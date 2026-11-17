@@ -1,5 +1,5 @@
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -8,9 +8,15 @@ from services.round_weeks import (
     BadWeek,
     Calendar,
     Week,
+    confirmable_weeks,
+    confirmed_window_cells,
     current_round,
     deadline_on_or_after,
     horizon,
+    league_monday,
+    league_weeks_between,
+    league_weeks_of_cells,
+    parse_monday,
     pick_page,
     round_week,
     week_doc,
@@ -90,3 +96,58 @@ def test_week_doc():
     assert week_doc(pick_page(LOTUS, {}, NOW, 3)) == {
         "number": 3, "first_day": "2026-11-15", "last_day": "2026-11-22",
         "prev": {"round": 2}, "next": {"round": 4}}
+
+
+CONFIRMED = json.loads(
+    (Path(__file__).parent.parent / "scheduler_page" / "fixtures" / "confirmed.json").read_text()
+)
+HALF_HOUR = timedelta(minutes=30)
+
+
+def test_confirmed_fixture_mondays() -> None:
+    for c in CONFIRMED["mondays"]:
+        assert league_monday(utc(c["at_utc"])).isoformat() == c["monday"], c["name"]
+
+
+def test_confirmed_fixture_between() -> None:
+    for c in CONFIRMED["between"]:
+        start = utc(c["start_utc"])
+        got = league_weeks_between(start, start + c["cells"] * HALF_HOUR)
+        assert [d.isoformat() for d in got] == c["weeks"], c["name"]
+
+
+def test_confirmed_fixture_painted() -> None:
+    for c in CONFIRMED["painted"]:
+        got = league_weeks_of_cells(c["cells"], utc(c["start_utc"]))
+        assert [d.isoformat() for d in got] == c["weeks"], c["name"]
+
+
+def test_confirmable_weeks() -> None:
+    now = utc("2026-10-22T12:00")
+    ny = "America/New_York"
+    assert confirmable_weeks(
+        [date(2026, 10, 19), date(2026, 10, 26)], date(2026, 10, 22), date(2026, 10, 26), ny, now
+    ) == {date(2026, 10, 19), date(2026, 10, 26)}
+    # ended week: dropped
+    assert confirmable_weeks([date(2026, 10, 12)], date(2026, 10, 22), date(2026, 10, 26), ny, now) == frozenset()
+    # NY Oct 26 ends 21:00 PDT, so the week of Nov 2 does not overlap
+    with pytest.raises(ValueError):
+        confirmable_weeks([date(2026, 11, 2)], date(2026, 10, 22), date(2026, 10, 26), ny, now)
+
+
+def test_confirmed_fixture_cells() -> None:
+    for c in CONFIRMED["cells"]:
+        got = confirmed_window_cells(
+            frozenset(c["free"]),
+            c["trusts_usual"],
+            frozenset(date.fromisoformat(d) for d in c["confirmed_rounds"]),
+            utc(c["start_utc"]),
+        )
+        assert sorted(got) == c["expected"], c["name"]
+
+
+def test_parse_monday() -> None:
+    assert parse_monday("2026-11-16") == date(2026, 11, 16)
+    for bad in ("2026-11-17", "16/11/2026", "2026-02-30", ""):
+        with pytest.raises(ValueError):
+            parse_monday(bad)

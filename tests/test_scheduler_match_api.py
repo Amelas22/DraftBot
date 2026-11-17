@@ -15,6 +15,7 @@ from conftest import seed_tournament_match, test_db  # noqa: F401
 from database.db_session import db_session
 from helpers.matchup import Roster
 from match_control_view import match_side_rosters
+from models.scheduler import PlayerRoundConfirmation
 from models.team_draft import TeamDraftAction
 from models.tournament import Tournament, TournamentMatch, TournamentRound
 from services.availability import DayOverride, UsualWeek, day_cells_to_bytes, replace_day_overrides, save_usual_week
@@ -100,6 +101,10 @@ async def test_state_lists_both_sides_and_the_booking(client):
     assert body["rules"] == {"min_per_side": 2, "draft_cells": 2}
     assert body["booking"] == {"start_utc": START, "by_name": "Bo", "version": 3}
     assert body["me"] == {"user": "101"}
+    assert all(
+        p["trusts_usual"] is True and p["confirmed_rounds"] == []
+        for side in body["sides"] for p in side["people"]
+    )
 
 
 @pytest.mark.asyncio
@@ -339,3 +344,20 @@ async def test_a_playoff_match_has_no_round_and_a_rolling_window(client):
         rnd.stage = "playoff"
     body = await (await client.get("/api/tournament-match", headers=await _auth(match_id))).json()
     assert body["round"] is None and body["window"]["shape"] == "rolling" and body["window"]["cells"] == 336
+
+
+@pytest.mark.asyncio
+async def test_a_playoff_match_lists_both_weeks_its_rolling_window_touches(client):
+    match_id = await seed()
+    await _calendar()
+    async with db_session() as s:
+        row = await s.get(TournamentMatch, match_id)
+        rnd = await s.get(TournamentRound, row.round_id)
+        rnd.stage = "playoff"
+        for monday in (date(2026, 10, 19), date(2026, 10, 26), date(2026, 11, 2)):
+            s.add(PlayerRoundConfirmation(
+                user_id="101", round_monday=monday, source="button", stored_utc=datetime(2026, 10, 26, 12)))
+    body = await (await client.get("/api/tournament-match", headers=await _auth(match_id))).json()
+    assert body["window"]["start_utc"] == "2026-10-26T12:00:00Z" and body["window"]["cells"] == 336
+    ann = body["sides"][0]["people"][0]
+    assert ann["user"] == "101" and ann["confirmed_rounds"] == ["2026-10-26", "2026-11-02"]

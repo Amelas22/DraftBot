@@ -452,3 +452,42 @@ async def test_clear_with_dates_keeps_other_dates(test_db) -> None:
     await clear_day_overrides("1", NOW, (date(2026, 10, 23), date(2026, 10, 23)))
     got = await load_day_overrides("1", NOW)
     assert [d.local_date for d in got] == [date(2026, 10, 21), TODAY]
+
+
+def test_this_week_reads_painted_weeks() -> None:
+    week = parse_this_week(_tw(painted_weeks=["2026-10-26", "2026-10-19"]), TW_NOW, TW_UNTIL)
+    assert week.painted_weeks == (date(2026, 10, 19), date(2026, 10, 26))
+
+
+def test_this_week_without_painted_weeks_is_empty() -> None:
+    assert parse_this_week(_tw(), TW_NOW, TW_UNTIL).painted_weeks == ()
+
+
+def test_this_week_span_covers_every_date_sent_including_past() -> None:
+    week = parse_this_week(_tw(days=_days("2026-10-21", "2026-10-24")), TW_NOW, TW_UNTIL)
+    assert week.span == (date(2026, 10, 21), date(2026, 10, 24))
+    assert parse_this_week(_tw(days=[]), TW_NOW, TW_UNTIL).span is None
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [["2026-10-20"], ["x"], "2026-10-19", [19], ["2026-10-19", "2026-10-26", "2026-11-02", "2026-11-09"]],
+)
+def test_painted_weeks_must_be_mondays(bad: object) -> None:
+    with pytest.raises(InvalidWeek):
+        parse_this_week(_tw(painted_weeks=bad), TW_NOW, TW_UNTIL)
+
+
+@pytest.mark.asyncio
+async def test_replace_writes_confirmations_in_the_same_save(test_db) -> None:
+    from sqlalchemy import select
+
+    from database.db_session import db_session
+    from models.scheduler import PlayerRoundConfirmation
+
+    await replace_day_overrides(
+        "u", [DayOverride("UTC", date(2026, 10, 22), frozenset({1}))], False, NOW, frozenset({date(2026, 10, 19)})
+    )
+    async with db_session() as session:
+        rows = (await session.execute(select(PlayerRoundConfirmation))).scalars().all()
+    assert [(r.user_id, r.round_monday, r.source) for r in rows] == [("u", date(2026, 10, 19), "override")]

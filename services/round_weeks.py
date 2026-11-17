@@ -5,7 +5,7 @@ view runs from 00:00 PT on Round N-1's deadline Sunday to 24:00 PT on Round
 N's deadline Sunday.
 """
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -153,3 +153,75 @@ def week_doc(page: WeekPage) -> dict[str, object]:
         "prev": page.prev,
         "next": page.next,
     }
+
+
+def league_monday(moment: datetime) -> date:
+    """The Monday of the Pacific Mon-Sun week containing the aware instant."""
+    day = moment.astimezone(_TZ).date()
+    return day - timedelta(days=day.weekday())
+
+
+def league_weeks_between(start_utc: datetime, end_utc: datetime) -> tuple[date, ...]:
+    """Ascending Mondays of every league week overlapping [start_utc, end_utc)."""
+    first = league_monday(start_utc)
+    last = league_monday(end_utc - timedelta(microseconds=1))
+    count = (last - first).days // 7 + 1
+    return tuple(first + timedelta(days=7 * i) for i in range(max(count, 0)))
+
+
+def league_weeks_of_cells(cells: Iterable[int], start_utc: datetime) -> tuple[date, ...]:
+    """Ascending, unique league Mondays of the half-hours ``start_utc + 30 min * j``."""
+    step = timedelta(minutes=CELL_MINUTES)
+    return tuple(sorted({league_monday(start_utc + step * j) for j in cells}))
+
+
+def league_week_bounds(monday: date) -> tuple[datetime, datetime]:
+    """A league week's span: Monday 00:00 PT to the next Monday 00:00 PT, in UTC."""
+    return _midnight_utc(monday), _midnight_utc(monday + timedelta(days=7))
+
+
+def confirmable_weeks(
+    painted: Iterable[date],
+    first_day: date,
+    last_day: date,
+    zone: str,
+    now_utc: datetime,
+) -> frozenset[date]:
+    """The painted league weeks a save may confirm.
+
+    Weeks that have already ended (next Monday 00:00 PT <= now) are dropped
+    first, before the overlap check, so a stale week is ignored rather than
+    rejected. Any remaining week that does not overlap the days
+    [00:00 first_day, 24:00 last_day) in ``zone`` raises ``ValueError``.
+    """
+    live = {w for w in painted if league_week_bounds(w)[1] > now_utc}
+    zone_info = ZoneInfo(zone)
+    span_start = datetime(first_day.year, first_day.month, first_day.day, tzinfo=zone_info)
+    after = last_day + timedelta(days=1)
+    span_end = datetime(after.year, after.month, after.day, tzinfo=zone_info)
+    overlapping = set(league_weeks_between(span_start.astimezone(timezone.utc), span_end.astimezone(timezone.utc)))
+    stray = live - overlapping
+    if stray:
+        raise ValueError(f"week {min(stray).isoformat()} is outside the saved days")
+    return frozenset(live)
+
+
+def parse_monday(text: str) -> date:
+    """An ISO date that is a Monday, else ``ValueError``."""
+    day = date.fromisoformat(text)
+    if day.weekday() != 0:
+        raise ValueError(f"{text} is not a Monday")
+    return day
+
+
+def confirmed_window_cells(
+    free: frozenset[int],
+    trusts_usual: bool,
+    confirmed: frozenset[date],
+    start_utc: datetime,
+) -> frozenset[int]:
+    """The free cells that count as confirmed: all when the person trusts their usual week, else those in a confirmed league week."""
+    if trusts_usual:
+        return free
+    step = timedelta(minutes=CELL_MINUTES)
+    return frozenset(j for j in free if league_monday(start_utc + step * j) in confirmed)
