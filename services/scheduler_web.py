@@ -41,7 +41,7 @@ from services.scheduler_http import (
     utc_now,
 )
 from services.round_confirmation import confirm_round, confirmation_doc, set_trusts_usual
-from services.round_weeks import parse_monday, week_ending
+from services.round_weeks import confirmable_weeks, parse_monday, week_ending
 from services.scheduler_calendar import this_week_horizon
 from services.scheduler_links import resolve_token
 from services.scheduler_match_api import routes as match_routes
@@ -208,7 +208,15 @@ async def put_this_week(request: web.Request) -> web.Response:
         week = parse_this_week(raw, now, until)
     except InvalidWeek:
         return error(400, "bad_input")
-    stored = await replace_day_overrides(who.user_id, week.days, week.also_usual, now)
+    confirm: frozenset[date] = frozenset()
+    if week.painted_weeks:
+        if week.span is None:
+            return error(400, "bad_input")
+        try:
+            confirm = confirmable_weeks(week.painted_weeks, week.span[0], week.span[1], week.zone, now)
+        except ValueError:
+            return error(400, "bad_input")
+    stored = await replace_day_overrides(who.user_id, week.days, week.also_usual, now, confirm)
     return web.json_response(this_week_doc(stored))
 
 

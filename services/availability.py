@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.db_session import db_session
 from models.scheduler import PlayerAvailability, PlayerDayOverride
+from services.round_confirmation import add_confirmations
 
 CELLS: int = 336
 CELL_MINUTES: int = 30
@@ -30,6 +31,7 @@ _FORMAT = "draftbot.scheduler.usual_week"
 _VERSION = 1
 _THIS_WEEK_FORMAT = "draftbot.scheduler.this_week"
 MAX_THIS_WEEK_DAYS = 10
+MAX_PAINTED_WEEKS = 3
 
 
 class InvalidWeek(ValueError):
@@ -190,6 +192,8 @@ class ThisWeek:
     zone: str
     days: tuple[DayOverride, ...]
     also_usual: bool
+    painted_weeks: tuple[date, ...] = ()
+    span: tuple[date, date] | None = None  # first and last date in the body as sent, past ones included
 
 
 def parse_this_week(raw: bytes, now_utc: datetime, until_utc: datetime) -> ThisWeek:
@@ -220,6 +224,7 @@ def parse_this_week(raw: bytes, now_utc: datetime, until_utc: datetime) -> ThisW
     entries = doc.get("days")
     if not isinstance(entries, list) or len(entries) > MAX_THIS_WEEK_DAYS:
         raise InvalidWeek("days missing or too many")
+    painted = _painted_weeks(doc.get("painted_weeks", []))
     today = now_utc.astimezone(ZoneInfo(zone)).date()
     seen: set[date] = set()
     days: list[DayOverride] = []
@@ -242,7 +247,26 @@ def parse_this_week(raw: bytes, now_utc: datetime, until_utc: datetime) -> ThisW
         if local < today:
             continue
         days.append(DayOverride(zone, local, day_cells_from_bytes(data)))
-    return ThisWeek(zone, tuple(days), also_usual)
+    span = (min(seen), max(seen)) if seen else None
+    return ThisWeek(zone, tuple(days), also_usual, painted, span)
+
+
+def _painted_weeks(value: object) -> tuple[date, ...]:
+    """The league Mondays named in a save's ``painted_weeks``, sorted and unique."""
+    if not isinstance(value, list) or len(value) > MAX_PAINTED_WEEKS:
+        raise InvalidWeek("bad painted week")
+    weeks: set[date] = set()
+    for text in value:
+        try:
+            if not isinstance(text, str) or len(text) != 10:
+                raise ValueError(text)
+            week = date.fromisoformat(text)
+        except ValueError as exc:
+            raise InvalidWeek("bad painted week") from exc
+        if week.weekday() != 0:
+            raise InvalidWeek("bad painted week")
+        weeks.add(week)
+    return tuple(sorted(weeks))
 
 
 def this_week_doc(days: Sequence[DayOverride]) -> dict[str, object]:
@@ -433,14 +457,20 @@ async def load_day_overrides(
 
 
 async def replace_day_overrides(
-    user_id: str, days: Sequence[DayOverride], also_usual: bool, now_utc: datetime
+    user_id: str,
+    days: Sequence[DayOverride],
+    also_usual: bool,
+    now_utc: datetime,
+    confirm: frozenset[date] = frozenset(),
 ) -> list[DayOverride]:
     """Store ``days`` as the player's overrides, replacing only the rows on those dates.
 
     A day matching the usual week is not stored. With ``also_usual`` and no
     saved usual week, the days first become the usual week (in the first day's zone).
+    The league weeks in ``confirm`` are confirmed in the same transaction.
     """
     async with db_session() as session:
+        await add_confirmations(session, user_id, confirm, now_utc, "override")
         await session.execute(
             delete(PlayerDayOverride).where(
                 PlayerDayOverride.user_id == user_id,

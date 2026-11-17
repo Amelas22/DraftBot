@@ -51,3 +51,21 @@ async def test_confirming_twice_keeps_one_row_and_doc_is_ascending(test_db):
     await confirm_round("u", date(2026, 11, 16), NOW)
     doc = await confirmation_doc("u", date(2026, 11, 1), date(2026, 12, 1))
     assert doc["confirmed_rounds"] == ["2026-11-16", "2026-11-23"]
+
+
+@pytest.mark.asyncio
+async def test_calling_add_confirmations_twice_in_one_transaction_is_fine(test_db):
+    async with db_session() as s:
+        await add_confirmations(s, "u", [date(2026, 11, 16)], NOW, "override")
+        await add_confirmations(s, "u", [date(2026, 11, 16), date(2026, 11, 23)], NOW, "button")
+    doc = await confirmation_doc("u", date(2026, 11, 1), date(2026, 12, 1))
+    assert doc["confirmed_rounds"] == ["2026-11-16", "2026-11-23"]
+
+
+@pytest.mark.asyncio
+async def test_set_trusts_usual_upserts(test_db):
+    await set_trusts_usual("u", False)
+    await set_trusts_usual("u", True)
+    await set_trusts_usual("u", False)
+    async with db_session() as s:
+        assert (await trusts_usual_of(s, ["u"]))["u"] is False

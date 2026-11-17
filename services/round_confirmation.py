@@ -6,6 +6,7 @@ from collections.abc import Iterable, Sequence
 from datetime import date, datetime
 
 from sqlalchemy import select
+from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.db_session import db_session
@@ -57,33 +58,30 @@ async def add_confirmations(
     source: str,
 ) -> None:
     """Confirm each Monday's week, keeping any confirmation already there. The caller owns the transaction."""
-    wanted = set(mondays)
+    wanted = sorted(set(mondays))
     if not wanted:
         return
-    have = await session.execute(
-        select(PlayerRoundConfirmation.round_monday).where(
-            PlayerRoundConfirmation.user_id == user_id,
-            PlayerRoundConfirmation.round_monday.in_(wanted),
-        )
-    )
-    wanted.difference_update(row[0] for row in have)
     stored = now_utc.replace(tzinfo=None)
-    for monday in sorted(wanted):
-        session.add(
-            PlayerRoundConfirmation(
-                user_id=user_id, round_monday=monday, source=source, stored_utc=stored
-            )
+    await session.execute(
+        insert(PlayerRoundConfirmation)
+        .values(
+            [
+                {"user_id": user_id, "round_monday": monday, "source": source, "stored_utc": stored}
+                for monday in wanted
+            ]
         )
+        .on_conflict_do_nothing(index_elements=["user_id", "round_monday"])
+    )
 
 
 async def set_trusts_usual(user_id: str, value: bool) -> None:
     """Store the switch; confirmations are never touched."""
     async with db_session() as session:
-        row = await session.get(PlayerSchedulerSetting, user_id)
-        if row is None:
-            session.add(PlayerSchedulerSetting(user_id=user_id, trusts_usual=value))
-        else:
-            row.trusts_usual = value
+        await session.execute(
+            insert(PlayerSchedulerSetting)
+            .values(user_id=user_id, trusts_usual=value)
+            .on_conflict_do_update(index_elements=["user_id"], set_={"trusts_usual": value})
+        )
 
 
 async def confirm_round(user_id: str, monday: date, now_utc: datetime) -> None:
