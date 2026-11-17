@@ -67,7 +67,7 @@ export function deadlineOnOrAfter(now) {
 }
 
 const dayFormat = new Intl.DateTimeFormat("en-US", { timeZone: "UTC", weekday: "short", month: "short", day: "numeric" });
-const dayName = (date) => dayFormat.format(noonOf(date)).replace(",", "");
+export const dayName = (date) => dayFormat.format(noonOf(date)).replace(",", "");
 
 // "Round 3 · Sun Nov 15 – Sun Nov 22", or just the dates when unnumbered.
 export function roundLabel(round) {
