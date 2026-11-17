@@ -225,6 +225,7 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
   const chip = (name, on) => el("button", { type: "button", class: `toggle${on ? "" : " off"}`, "aria-pressed": String(on) },
     el("span", { class: "tick", "aria-hidden": "true", text: "✓ " }), name);
   const renderSides = () => {
+    const weeks = statusWeeks(state);
     sidesBox.replaceChildren(el("p", { class: "togglehint", text: TOGGLE_HINT }), ...state.sides.map((side) => {
       const sideOn = side.people.some((p) => !off.has(p.user));
       const head = chip(side.label, sideOn);
@@ -236,7 +237,7 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
           const b = chip(p.name, on);
           b.addEventListener("click", () => toggle(togglePerson(off, p.user)));
           const li = el("li", {}, b);
-          if (isUnconfirmed(p, statusWeeks(state))) {
+          if (isUnconfirmed(p, weeks)) {
             li.append(el("span", { class: "unsure", role: "img", "aria-label": UNSURE_LABEL, title: UNSURE_LABEL, text: "?" }));
           }
           if (!hasAvailability(p)) li.append(el("span", { class: "noweek", text: ` (${NO_WEEK})` }));

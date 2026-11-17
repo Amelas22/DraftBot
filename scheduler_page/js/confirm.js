@@ -43,10 +43,11 @@ export async function mountConfirmPanel(root, api, { weeks, number, now, onChang
     el("p", { class: "meta", text: SWITCH_HINT }),
     rows, note);
 
+  let buttons = [];
   function draw() {
     box.checked = doc.trusts_usual !== false;
-    if (box.checked) { rows.findButtons = () => []; rows.replaceChildren(); return; }
-    const buttons = [];
+    buttons = [];
+    if (box.checked) { rows.replaceChildren(); return; }
     const kids = statusRows(doc, weeks, number, now).map((r) => {
       const row = el("div", { class: "confirmrow" }, el("span", { text: r.text }));
       if (r.canConfirm) {
@@ -57,7 +58,6 @@ export async function mountConfirmPanel(root, api, { weeks, number, now, onChang
       }
       return row;
     });
-    rows.findButtons = () => buttons;
     rows.replaceChildren(...kids, el("p", { class: "meta", text: CONFIRM_NOTE }));
   }
 
@@ -66,7 +66,7 @@ export async function mountConfirmPanel(root, api, { weeks, number, now, onChang
   const setBusy = (on) => {
     busy = on;
     box.disabled = on;
-    for (const b of rows.findButtons?.() ?? []) b.disabled = on;
+    for (const b of buttons) b.disabled = on;
   };
   async function run(call, { announce, failure = SAVE_FAILED, refocus = false } = {}) {
     if (busy) return;
@@ -75,8 +75,7 @@ export async function mountConfirmPanel(root, api, { weeks, number, now, onChang
     try { doc = checkDoc(await call(), CONFIRMATION_FORMAT); ok = true; } catch (e) { note.textContent = e instanceof LinkExpired ? expiredMessage() : failure; }
     draw();
     setBusy(false);
-    if (ok && announce) note.textContent = announce();
-    else if (ok && !announce) note.textContent = "";
+    if (ok) note.textContent = announce?.() ?? "";
     if (refocus) box.focus?.();
     if (ok) onChange?.();
   }

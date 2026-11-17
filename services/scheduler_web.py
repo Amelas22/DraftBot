@@ -41,7 +41,7 @@ from services.scheduler_http import (
     utc_now,
 )
 from services.round_confirmation import confirm_round, confirmation_doc, set_trusts_usual
-from services.round_weeks import confirmable_weeks, parse_monday, week_ending
+from services.round_weeks import confirmable_weeks, league_week_bounds, parse_monday
 from services.scheduler_calendar import this_week_horizon
 from services.scheduler_links import resolve_token
 from services.scheduler_match_api import routes as match_routes
@@ -293,10 +293,7 @@ async def post_confirmation_round(request: web.Request) -> web.Response:
         return error(400, "bad_input")
     who = identity(request)
     now = request.app[NOW]()
-    # The league week runs Mon 00:00 PT to the next Mon 00:00 PT; week_ending
-    # spans Sun-to-Sun, so its end for monday+6 and its start for monday+7 are those instants.
-    ends = week_ending(monday + timedelta(days=6)).end_utc
-    starts = week_ending(monday + timedelta(days=7)).start_utc
+    starts, ends = league_week_bounds(monday)
     async with db_session() as session:
         horizon = await this_week_horizon(session, who.guild_id, now)
     if ends <= now or starts >= horizon:

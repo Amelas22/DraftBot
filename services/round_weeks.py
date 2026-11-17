@@ -175,6 +175,11 @@ def league_weeks_of_cells(cells: Iterable[int], start_utc: datetime) -> tuple[da
     return tuple(sorted({league_monday(start_utc + step * j) for j in cells}))
 
 
+def league_week_bounds(monday: date) -> tuple[datetime, datetime]:
+    """A league week's span: Monday 00:00 PT to the next Monday 00:00 PT, in UTC."""
+    return _midnight_utc(monday), _midnight_utc(monday + timedelta(days=7))
+
+
 def confirmable_weeks(
     painted: Iterable[date],
     first_day: date,
@@ -189,7 +194,7 @@ def confirmable_weeks(
     rejected. Any remaining week that does not overlap the days
     [00:00 first_day, 24:00 last_day) in ``zone`` raises ``ValueError``.
     """
-    live = {w for w in painted if _midnight_utc(w + timedelta(days=7)) > now_utc}
+    live = {w for w in painted if league_week_bounds(w)[1] > now_utc}
     zone_info = ZoneInfo(zone)
     span_start = datetime(first_day.year, first_day.month, first_day.day, tzinfo=zone_info)
     after = last_day + timedelta(days=1)
