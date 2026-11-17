@@ -14,7 +14,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from functools import cache
 from zoneinfo import ZoneInfo, available_timezones
 
-from sqlalchemy import delete, select
+from sqlalchemy import Select, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.db_session import db_session
@@ -406,6 +406,16 @@ async def day_overrides(
     return out
 
 
+def _overrides_of(user_id: str, dates: tuple[date, date] | None) -> Select[tuple[PlayerDayOverride]]:
+    """A player's override rows, within the inclusive ``dates`` when given."""
+    query = select(PlayerDayOverride).where(PlayerDayOverride.user_id == user_id)
+    if dates is None:
+        return query
+    return query.where(
+        PlayerDayOverride.local_date >= dates[0], PlayerDayOverride.local_date <= dates[1]
+    )
+
+
 async def load_day_overrides(
     user_id: str, now_utc: datetime, dates: tuple[date, date] | None = None
 ) -> list[DayOverride]:
@@ -415,12 +425,7 @@ async def load_day_overrides(
     without, only the live ones.
     """
     async with db_session() as session:
-        query = select(PlayerDayOverride).where(PlayerDayOverride.user_id == user_id)
-        if dates is not None:
-            query = query.where(
-                PlayerDayOverride.local_date >= dates[0],
-                PlayerDayOverride.local_date <= dates[1],
-            )
+        query = _overrides_of(user_id, dates)
         rows = (
             await session.execute(query.order_by(PlayerDayOverride.local_date))
         ).scalars()
@@ -486,12 +491,7 @@ async def clear_day_overrides(
 ) -> None:
     """Drop a player's overrides dated today or later in their own zone, within ``dates`` when given."""
     async with db_session() as session:
-        query = select(PlayerDayOverride).where(PlayerDayOverride.user_id == user_id)
-        if dates is not None:
-            query = query.where(
-                PlayerDayOverride.local_date >= dates[0],
-                PlayerDayOverride.local_date <= dates[1],
-            )
+        query = _overrides_of(user_id, dates)
         for row in (await session.execute(query)).scalars():
             if row.local_date >= now_utc.astimezone(ZoneInfo(str(row.zone))).date():
                 await session.delete(row)

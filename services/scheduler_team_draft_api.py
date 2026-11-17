@@ -8,7 +8,7 @@ import json
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 from aiohttp import web
@@ -89,12 +89,11 @@ async def build_state(
     schedule: Schedule,
 ) -> dict[str, object]:
     """The ``draftbot.scheduler.team_draft`` v1 body for one matchup, whatever owns it."""
-    end = schedule.start_utc + timedelta(minutes=CELL_MINUTES * schedule.cells)
     # Rosters are read outside any session: resolving them may reach Discord.
     async with db_session() as session:
         users = sorted({user for roster in rosters for user, _name in roster.people})
         weeks = await usual_weeks(session, users)
-        overrides = await day_overrides(session, users, schedule.start_utc, end)
+        overrides = await day_overrides(session, users, schedule.start_utc, schedule.end_utc)
     return {
         "format": FORMAT,
         "version": _VERSION,

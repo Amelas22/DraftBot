@@ -2,14 +2,14 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Literal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.tournament import STAGE_SWISS, Tournament, TournamentMatch, TournamentRound
-from services.availability import floor_half_hour
+from services.availability import CELL_MINUTES, floor_half_hour
 from services.booking import WINDOW_CELLS, BookingSpan, rolling_span
 from services.round_weeks import (
     Calendar,
@@ -25,18 +25,25 @@ from services.round_weeks import (
 class Schedule:
     start_utc: datetime
     cells: int
-    shape: Literal["round", "rolling"]
     page: WeekPage | None
     span: BookingSpan
+
+    @property
+    def shape(self) -> Literal["round", "rolling"]:
+        return "rolling" if self.page is None else "round"
+
+    @property
+    def end_utc(self) -> datetime:
+        return self.start_utc + timedelta(minutes=CELL_MINUTES * self.cells)
 
 
 def rolling_schedule(now: datetime) -> Schedule:
     span = rolling_span(now)
-    return Schedule(span.start_utc, WINDOW_CELLS, "rolling", None, span)
+    return Schedule(span.start_utc, WINDOW_CELLS, None, span)
 
 
 def _page_schedule(page: WeekPage, span: BookingSpan) -> Schedule:
-    return Schedule(page.week.start_utc, page.week.cells, "round", page, span)
+    return Schedule(page.week.start_utc, page.week.cells, page, span)
 
 
 def _calendar(tournament: Tournament) -> Calendar | None:
