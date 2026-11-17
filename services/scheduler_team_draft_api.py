@@ -39,7 +39,8 @@ from services.scheduler_http import (
     read_body,
     view_refused,
 )
-from services.round_weeks import BadWeek, week_doc
+from services.round_confirmation import confirmed_rounds, trusts_usual_of
+from services.round_weeks import BadWeek, league_weeks_between, week_doc
 from services.scheduler_calendar import Schedule, team_draft_schedule
 from services.scheduler_links import LinkIdentity
 from services.team_draft import DRAFT_CELLS, MIN_PER_SIDE
@@ -94,6 +95,9 @@ async def build_state(
         users = sorted({user for roster in rosters for user, _name in roster.people})
         weeks = await usual_weeks(session, users)
         overrides = await day_overrides(session, users, schedule.start_utc, schedule.end_utc)
+        trusts = await trusts_usual_of(session, users)
+        in_view = league_weeks_between(schedule.start_utc, schedule.end_utc)
+        confirmed = await confirmed_rounds(session, users, min(in_view), max(in_view))
     return {
         "format": FORMAT,
         "version": _VERSION,
@@ -116,6 +120,8 @@ async def build_state(
                         "name": name,
                         "zone": w.zone if (w := weeks.get(user)) else None,
                         "cells": cells_b64(weeks.get(user)),
+                        "trusts_usual": trusts[user],
+                        "confirmed_rounds": sorted(d.isoformat() for d in confirmed.get(user, ())),
                         "overrides": [
                             {
                                 "date": o.local_date.isoformat(),

@@ -13,6 +13,7 @@ from sqlalchemy import update
 from conftest import seed_tournament_match
 from database.db_session import db_session
 from helpers.matchup import Roster
+from models.scheduler import PlayerRoundConfirmation, PlayerSchedulerSetting
 from models.team_draft import TeamDraft
 from models.tournament import Tournament
 from services.availability import DayOverride, UsualWeek, day_cells_to_bytes, replace_day_overrides, save_usual_week
@@ -112,15 +113,35 @@ async def test_state_lists_both_sides_people_and_the_booking(client):
         "rules": {"min_per_side": 2, "draft_cells": 2},
         "sides": [
             {"label": "Team Garruk", "people": [
-                {"user": "101", "name": "Ann", "zone": None, "cells": None, "overrides": []}]},
+                {"user": "101", "name": "Ann", "zone": None, "cells": None, "overrides": [],
+                 "trusts_usual": True, "confirmed_rounds": []}]},
             {"label": "Ash, Bo", "people": [
                 {"user": "201", "name": "Ash", "zone": "Europe/London",
-                 "cells": "wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "overrides": []},
-                {"user": "202", "name": "Bo", "zone": None, "cells": None, "overrides": []}]},
+                 "cells": "wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "overrides": [],
+                 "trusts_usual": True, "confirmed_rounds": []},
+                {"user": "202", "name": "Bo", "zone": None, "cells": None, "overrides": [],
+                 "trusts_usual": True, "confirmed_rounds": []}]},
         ],
         "booking": {"start_utc": START, "by_name": "Bo", "version": 3},
         "me": {"user": "111"},
     }
+
+
+@pytest.mark.asyncio
+async def test_people_carry_their_switch_and_the_confirmations_in_view(client):
+    team_draft_id = await seed()
+    async with db_session() as session:
+        session.add(PlayerSchedulerSetting(user_id="101", trusts_usual=False))
+        for monday in (date(2026, 10, 19), date(2026, 10, 26), date(2026, 11, 2)):
+            session.add(PlayerRoundConfirmation(
+                user_id="101", round_monday=monday, source="button", stored_utc=datetime(2026, 10, 26, 12)))
+
+    body = await (await client.get("/api/team-draft", headers=await _auth(team_draft_id))).json()
+
+    ann = body["sides"][0]["people"][0]
+    assert (ann["trusts_usual"], ann["confirmed_rounds"]) == (False, ["2026-10-19", "2026-10-26"])
+    for person in body["sides"][1]["people"]:
+        assert (person["trusts_usual"], person["confirmed_rounds"]) == (True, [])
 
 
 @pytest.mark.asyncio
