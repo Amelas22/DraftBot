@@ -1,7 +1,8 @@
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
 import { weekStatusLabel, statusRows, mountConfirmPanel } from "../js/confirm.js";
-import { CONFIRMATION_FORMAT } from "../js/api.js";
+import { CONFIRMATION_FORMAT, LinkExpired } from "../js/api.js";
+import { expiredMessage } from "../js/messages.js";
 
 test("weekStatusLabel", () => {
   assert.equal(weekStatusLabel("2026-11-16", 3), "Round 3");
@@ -95,5 +96,80 @@ test("a failed switch restores the checkbox and says so", async () => {
   checkbox(root).checked = false;
   await fire(checkbox(root), "change");
   assert.equal(checkbox(root).checked, true);
+  assert.ok(texts(root).includes("Couldn't save that. Check your connection and try again."));
+});
+
+test("a double click confirms once", async () => {
+  const root = new Node();
+  const api = fakeApi(false);
+  await mountConfirmPanel(root, api, opts);
+  const b = button(root);
+  await Promise.all([fire(b, "click"), fire(b, "click")]);
+  assert.equal(api.calls.filter((c) => c[0] === "confirm").length, 1);
+});
+
+test("rapid switch toggles make one call while one is pending", async () => {
+  const root = new Node();
+  const api = fakeApi(true);
+  await mountConfirmPanel(root, api, opts);
+  checkbox(root).checked = false;
+  await Promise.all([fire(checkbox(root), "change"), fire(checkbox(root), "change")]);
+  assert.equal(api.calls.length, 1);
+});
+
+test("the controls are disabled while a call is pending", async () => {
+  const root = new Node();
+  const api = fakeApi(false);
+  let release;
+  api.confirmRound = () => new Promise((r) => { release = r; });
+  await mountConfirmPanel(root, api, opts);
+  const b = button(root);
+  const pending = fire(b, "click");
+  assert.equal(checkbox(root).disabled, true);
+  assert.equal(b.disabled, true);
+  release({ format: CONFIRMATION_FORMAT, version: 1, trusts_usual: false, confirmed_rounds: ["2026-11-16"] });
+  await pending;
+  assert.equal(checkbox(root).disabled, false);
+});
+
+test("the note is a polite live region and announces a confirm", async () => {
+  const root = new Node();
+  await mountConfirmPanel(root, fakeApi(false), opts);
+  await fire(button(root), "click");
+  const note = root.find((n) => n.attrs.role === "status");
+  assert.equal(note.attrs["aria-live"], "polite");
+  assert.equal(note.textContent, "Round 3: Confirmed ✓");
+});
+
+test("a failed confirm shows the failure and keeps the row", async () => {
+  const root = new Node();
+  const api = fakeApi(false);
+  api.confirmRound = async () => { throw new Error("down"); };
+  await mountConfirmPanel(root, api, opts);
+  await fire(button(root), "click");
+  assert.ok(texts(root).includes("Couldn't save that. Check your connection and try again."));
+  assert.ok(texts(root).includes("Round 3: Not confirmed"));
+  assert.ok(button(root));
+});
+
+test("an expired link says so", async () => {
+  const root = new Node();
+  const api = fakeApi(false);
+  api.confirmRound = async () => { throw new LinkExpired(); };
+  await mountConfirmPanel(root, api, opts);
+  await fire(button(root), "click");
+  assert.ok(texts(root).includes(expiredMessage()));
+});
+
+test("a failed or good reload leaves a visible failure note alone", async () => {
+  const root = new Node();
+  const api = fakeApi(false);
+  api.confirmRound = async () => { throw new Error("down"); };
+  const panel = await mountConfirmPanel(root, api, opts);
+  await fire(button(root), "click");
+  await panel.reload();
+  assert.ok(texts(root).includes("Couldn't save that. Check your connection and try again."));
+  api.getConfirmation = async () => { throw new Error("down"); };
+  await panel.reload();
   assert.ok(texts(root).includes("Couldn't save that. Check your connection and try again."));
 });

@@ -35,39 +35,61 @@ export async function mountConfirmPanel(root, api, { weeks, number, now }) {
   let doc = checkDoc(await api.getConfirmation(range), CONFIRMATION_FORMAT);
 
   const box = el("input", { type: "checkbox", id: "confirm-switch" });
-  const note = el("p", { class: "status", role: "status" });
+  const note = el("p", { class: "status", role: "status", "aria-live": "polite" });
   const rows = el("div", { class: "confirmrows" });
   const panel = el("section", { class: "confirm" },
     el("label", { class: "confirmswitch", for: "confirm-switch" }, box, el("span", { text: SWITCH_LABEL })),
     el("p", { class: "meta", text: SWITCH_HINT }),
     rows, note);
 
-  const failed = (e) => { note.textContent = e instanceof LinkExpired ? expiredMessage() : SAVE_FAILED; };
-
   function draw() {
     box.checked = doc.trusts_usual !== false;
-    if (box.checked) { rows.replaceChildren(); return; }
+    if (box.checked) { rows.findButtons = () => []; rows.replaceChildren(); return; }
+    const buttons = [];
     const kids = statusRows(doc, weeks, number, now).map((r) => {
       const row = el("div", { class: "confirmrow" }, el("span", { text: r.text }));
       if (r.canConfirm) {
         const button = el("button", { type: "button", class: "primary", text: CONFIRM_BUTTON });
         button.addEventListener("click", () => confirm(r.monday));
+        buttons.push(button);
         row.append(button);
       }
       return row;
     });
+    rows.findButtons = () => buttons;
     rows.replaceChildren(...kids, el("p", { class: "meta", text: CONFIRM_NOTE }));
   }
 
-  async function run(call) {
-    note.textContent = "";
-    try { doc = checkDoc(await call(), CONFIRMATION_FORMAT); } catch (e) { failed(e); }
+  // One call at a time: the controls are disabled while it is pending, and a second request is ignored.
+  let busy = false;
+  const setBusy = (on) => {
+    busy = on;
+    box.disabled = on;
+    for (const b of rows.findButtons?.() ?? []) b.disabled = on;
+  };
+  async function run(call, { announce, failure = SAVE_FAILED, refocus = false } = {}) {
+    if (busy) return;
+    setBusy(true);
+    let ok = false;
+    try { doc = checkDoc(await call(), CONFIRMATION_FORMAT); ok = true; } catch (e) { note.textContent = e instanceof LinkExpired ? expiredMessage() : failure; }
     draw();
+    setBusy(false);
+    if (ok && announce) note.textContent = announce();
+    else if (ok && !announce) note.textContent = "";
+    if (refocus) box.focus?.();
   }
-  const confirm = (monday) => run(() => api.confirmRound(monday, range));
-  box.addEventListener("change", () => run(() => api.setTrustsUsual(box.checked, range)));
+  const rowText = (monday) => statusRows(doc, weeks, number, now).find((r) => r.monday === monday).text;
+  const confirm = (monday) => run(() => api.confirmRound(monday, range), { announce: () => rowText(monday), refocus: true });
+  box.addEventListener("change", () => run(() => api.setTrustsUsual(box.checked, range), {
+    announce: () => `${SWITCH_LABEL}: ${doc.trusts_usual !== false ? "on" : "off"}`,
+  }));
 
   draw();
   root.replaceChildren(panel);
-  return { reload: () => run(() => api.getConfirmation(range)) };
+  // A failed read leaves whatever the note says; a good one doesn't clear a visible failure.
+  const reload = async () => {
+    if (busy) return;
+    try { doc = checkDoc(await api.getConfirmation(range), CONFIRMATION_FORMAT); draw(); } catch (e) { if (e instanceof LinkExpired) note.textContent = expiredMessage(); }
+  };
+  return { reload };
 }
