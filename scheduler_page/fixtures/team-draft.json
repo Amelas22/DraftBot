@@ -31,21 +31,27 @@
           "name": "Ben",
           "zone": "America/New_York",
           "cells": "AAAAAAAAAAAAAAD8AAAAAAD8AAAAAAD8AAAAAAD8AAAAAAD8AAAAAAD8",
-          "overrides": []
+          "overrides": [],
+          "trusts_usual": true,
+          "confirmed_rounds": []
         },
         {
           "user": "900000000000000011",
           "name": "Rook",
           "zone": "America/New_York",
           "cells": "AAAAAAP8AAAAAAP8AAAAAAP8AAAAAAP8AAAAAAP8AAAAAAP8AAAAAAP8",
-          "overrides": []
+          "overrides": [],
+          "trusts_usual": true,
+          "confirmed_rounds": []
         },
         {
           "user": "900000000000000012",
           "name": "Wren",
           "zone": "America/Chicago",
           "cells": "AAAAAAAAAAAAAA/wAAAAAA/wAAAAAA/wAAAAAA/wAAAAAA/wAAAAAA/w",
-          "overrides": []
+          "overrides": [],
+          "trusts_usual": true,
+          "confirmed_rounds": []
         }
       ]
     },
@@ -57,21 +63,27 @@
           "name": "Ash",
           "zone": "America/New_York",
           "cells": "AAAAAAAAAAAAAAD/AAAAAAD/AAAAAAD/AAAAAAD/AAAAAAD/AAAAAAD/",
-          "overrides": []
+          "overrides": [],
+          "trusts_usual": true,
+          "confirmed_rounds": []
         },
         {
           "user": "900000000000000022",
           "name": "Pike",
           "zone": "America/New_York",
           "cells": "AAAAAAAAAAAAAAA8AAAAAAA8AAAAAAA8AAAAAAAAAAAAAAA8AAAAAAA8",
-          "overrides": []
+          "overrides": [],
+          "trusts_usual": true,
+          "confirmed_rounds": []
         },
         {
           "user": "900000000000000023",
           "name": "Fern",
           "zone": null,
           "cells": null,
-          "overrides": []
+          "overrides": [],
+          "trusts_usual": true,
+          "confirmed_rounds": []
         },
         {
           "user": "900000000000000024",
@@ -84,7 +96,9 @@
               "zone": "America/New_York",
               "cells": "AAAAAAPA"
             }
-          ]
+          ],
+          "trusts_usual": true,
+          "confirmed_rounds": []
         }
       ]
     }

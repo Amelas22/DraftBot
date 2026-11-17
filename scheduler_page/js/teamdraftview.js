@@ -3,7 +3,8 @@
 // the viewer, whose Everyone | My availability swaps the heatmap for their own this week or usual week. Pressing a
 // side or a player leaves them out of the grid until pressed again. Every decision lives in teamdraft.js; this file
 // only draws and wires. A round's matchup shows one round (or unnumbered week) at a time, with arrows to the ones
-// around it; every read and action names the round being viewed.
+// around it; every read and action names the round being viewed. The shade counts confirmed people only; a person whose
+// usual week isn't confirmed for the round adds "+N" to the counts, "(probably)" to the names and "?" to their chip.
 import { LinkExpired, checkDoc } from "./api.js";
 import { CELL_MS, addCells, isoSeconds, localDateOf } from "./week.js";
 import { mountHeatmap, formatCell, layoutWindow, legendKey, weekKeys, zoneName } from "./grid.js";
@@ -11,13 +12,14 @@ import { appBar } from "./appbar.js";
 import { shownZonePicker } from "./shownzone.js";
 import { mountUsual } from "./usual.js";
 import { mountThisWeek } from "./thisweek.js";
+import { mountConfirmPanel } from "./confirm.js";
 import { el } from "./dom.js";
 import { expiredMessage } from "./messages.js";
 import { roundLabel, roundQuery } from "./rounds.js";
 import { actionErrorText, createSync, hasAvailability, shadeLevel } from "./teams.js";
 import {
-  FORMAT, bookable, bookingLine, cellState, countText, freeBySide, freeRuns, refusalText, shiftSelection, sideCounts, toggleSide,
-  togglePerson, whoIsFree, whoText, withoutPeople,
+  FORMAT, MAYBE_LEGEND, UNSURE_LABEL, bookable, bookingLine, cellCountText, cellState, freeBySide, freeRuns, isUnconfirmed,
+  refusalText, shiftSelection, sideCounts, statusWeeks, sureBySide, toggleSide, togglePerson, whoIsFree, whoText, withoutPeople,
 } from "./teamdraft.js";
 
 const TEAM_DRAFT_PATHS = { get: "/api/team-draft", actions: "/api/team-draft/actions" };
@@ -110,6 +112,8 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
   let startUtc = new Date(state.window.start_utc);
   const sync = createSync();
   let freeSides = [];
+  // freeSides narrowed to the cells each person's availability is confirmed for.
+  let sureSides = [];
   let runs = [];
   let selected = null;
   // The cell last clicked, whose names the readout shows when the pointer is not on the grid.
@@ -154,7 +158,7 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
   const shown = () => withoutPeople(state, off);
   const everyone = () => state.sides.flatMap((s) => s.people);
   const total = () => shown().sides.reduce((n, s) => n + s.people.length, 0);
-  const freeCount = (j) => sideCounts(freeSides, j).reduce((a, b) => a + b, 0);
+  const freeCount = (j) => sideCounts(sureSides, j).reduce((a, b) => a + b, 0);
   const cells = () => state.window.cells;
   const bookedCell = () => {
     if (!state.booking.start_utc) return null;
@@ -165,11 +169,11 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
   const draftCells = () => state.rules.draft_cells;
 
   const label = (j) => {
-    const notes = [`${countText(sideCounts(freeSides, j))} free`];
+    const notes = [`${cellCountText(freeSides, sureSides, j)} free`];
     if (j === bookedCell()) notes.push("booked");
     return `${formatCell(startUtc, zone, j)}: ${notes.join(", ")}`;
   };
-  const whoLabel = (j) => `${formatCell(startUtc, zone, j)}: ${whoText(whoIsFree(shown(), freeSides, j))}`;
+  const whoLabel = (j) => `${formatCell(startUtc, zone, j)}: ${whoText(whoIsFree(shown(), freeSides, j, sureSides))}`;
   // Written only when it changes, so the polite live region does not re-announce an unchanged readout.
   const setReadout = (text) => { if (readout.textContent !== text) readout.textContent = text; };
   const restingReadout = () => (clicked === null ? HOVER_HINT : whoLabel(clicked));
@@ -189,7 +193,7 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
     ? `${roundLabel(state.round)}, half-hour cells, times in ${zoneName(zone)}` : undefined);
   const makeHeat = (openDate) => mountHeatmap(heatBox, {
     startUtc, zone, openDate, cells: cells(), shape: state.window.shape, gridLabel: gridLabel(), cellClass, cellLabel: label,
-    cellText: (j) => (runs[j]?.first ? countText(sideCounts(freeSides, j)) : ""),
+    cellText: (j) => (runs[j]?.first ? cellCountText(freeSides, sureSides, j) : ""),
     onPick: (j) => {
       selected = open() && bookable(j, state, now(), startUtc) ? j : null;
       clicked = j;
@@ -232,6 +236,9 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
           const b = chip(p.name, on);
           b.addEventListener("click", () => toggle(togglePerson(off, p.user)));
           const li = el("li", {}, b);
+          if (isUnconfirmed(p, statusWeeks(state))) {
+            li.append(el("span", { class: "unsure", role: "img", "aria-label": UNSURE_LABEL, title: UNSURE_LABEL, text: "?" }));
+          }
           if (!hasAvailability(p)) li.append(el("span", { class: "noweek", text: ` (${NO_WEEK})` }));
           return li;
         })));
@@ -260,19 +267,27 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
     everyoneBox.hidden = true;
     mineBox.hidden = false;
     pane.setAttribute("aria-label", "Your availability");
-    // This week | Usual week heads the pane; under it a fresh box per editor, so one still loading when the week
-    // changes draws into a box no longer shown.
+    // This week | Usual week heads the pane, then the confirmation panel for the round in view; under them a fresh box
+    // per editor (and panel), so one still loading when the week changes draws into a box no longer shown.
+    const panelBox = el("div");
     const box = el("div");
     mineBox.replaceChildren(segmented("Which week", [
       [unitNow() === "round" ? "This round" : "This week", w === "thisWeek", () => toMine("thisWeek")], ["Usual week", w === "usual", () => toMine("usual")],
-    ]), box);
+    ]), panelBox, box);
+    const failed = (into) => (e) => {
+      if (e instanceof LinkExpired) notice(expiredMessage());
+      else { console.error(e); into.replaceChildren(el("p", { class: "status", text: actionErrorText(e) })); }
+      return null;
+    };
+    // The panel loads on its own: one that fails leaves the editor below it working.
+    const panel = mountConfirmPanel(panelBox, api, { weeks: statusWeeks(state), number: state.round?.number ?? null, now: now() })
+      .catch(failed(panelBox));
+    // A this-week save may confirm the round, so the panel reads its rows again.
+    const onSaved = () => panel.then((p) => p?.reload());
     editor = (w === "usual" ? mountUsual : mountThisWeek)(box, api, {
       now, usualDoc: usualNow, startUtc, cells: cells(), shape: state.window.shape, onKeptAsUsual: () => toMine("usual"),
-    }).catch((e) => {
-      if (e instanceof LinkExpired) notice(expiredMessage());
-      else { console.error(e); box.replaceChildren(el("p", { class: "status", text: actionErrorText(e) })); }
-      return null;
-    });
+      ...(w === "thisWeek" ? { onSaved } : {}),
+    }).catch(failed(box));
   };
   const toEveryone = async () => {
     await leave();
@@ -288,6 +303,8 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
   };
 
   const renderLegend = () => {
+    // "2+1 = …" only when someone shown might count as probable.
+    const maybe = shown().sides.some((s) => s.people.some((p) => p.trusts_usual === false));
     const swatches = [];
     for (let n = 0; n <= total(); n++) swatches.push(el("i", { class: `s${shadeLevel(n, Math.max(1, total()))}` }));
     const at = now();
@@ -295,7 +312,8 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
     for (let j = 0; j < cells() && !nobook; j++) nobook = cellState(j, state, at, startUtc) === "nobook";
     legend.replaceChildren(el("span", { text: "nobody" }), ...swatches, el("span", { text: `all ${total()} free` }),
       legendKey("run", "same people throughout"), legendKey("booked", "booked"), ...weekKeys(state.window.shape),
-      legendKey("past", "already passed"), ...(nobook ? [legendKey("nobook", "can't book here")] : []));
+      legendKey("past", "already passed"), ...(nobook ? [legendKey("nobook", "can't book here")] : []),
+      ...(maybe ? [el("span", { class: "maybekey", text: MAYBE_LEGEND })] : []));
   };
 
   // The round row: its label, and an arrow to each round around it that exists. Hidden on a rolling window.
@@ -348,8 +366,9 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
     threadLink.hidden = !state.matchup.thread_url;
     if (state.matchup.thread_url) threadLink.href = state.matchup.thread_url;
     freeSides = freeBySide(shown(), startUtc);
+    sureSides = sureBySide(shown(), freeSides, startUtc);
     const columnStarts = new Set(layoutWindow(startUtc, zone, cells(), state.window.shape).map((d) => d.cells[0].j));
-    runs = freeRuns(freeSides, columnStarts, cells());
+    runs = freeRuns(freeSides, columnStarts, cells(), sureSides);
     ledeEl.textContent = ledeText();
     renderCard();
     renderSides();

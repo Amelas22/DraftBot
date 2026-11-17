@@ -205,6 +205,11 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 .side ul { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
 .side li { display: inline-flex; align-items: center; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
 .noweek { color: var(--muted); font-size: 13px; }
+/* A player whose usual week isn't confirmed for the round: a small "?" badge after their chip. */
+.unsure {
+  display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%;
+  background: var(--warnbg); color: var(--warn-text); box-shadow: inset 0 0 0 2px var(--warn); font-size: 13px; font-weight: 800; cursor: help;
+}
 .side .toggle {
   min-height: 32px; padding: 3px 12px; border: 2px solid var(--accent); border-radius: 999px;
   background: var(--chip); color: var(--fg); font: inherit; font-weight: 700; cursor: pointer;
@@ -233,6 +238,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 .legend .keyitem { display: inline-flex; align-items: center; gap: 3px; padding: 0; white-space: nowrap; }
 .legend .key.run { border-radius: 4px; box-shadow: inset 0 0 0 2px var(--fg); }
 .legend .key.booked { outline: 3px solid var(--warn); outline-offset: -3px; }
+.legend .maybekey { margin-left: 8px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .pane .actions { margin: 0; flex-wrap: wrap; }
 @media (max-width: 479px) { .sides { grid-template-columns: 1fr; } }
 

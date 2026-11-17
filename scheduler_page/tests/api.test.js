@@ -293,6 +293,16 @@ test("the team-draft fixture opens on the week whose Sunday is this one, with ar
   assert.deepEqual(s.bookable, { start_utc: s.window.start_utc, end_utc: isoSeconds(new Date(start + s.window.cells * 1800000)) });
 });
 
+test("the team-draft fixture's viewer row carries the switch and the weeks they confirmed", async () => {
+  const api = createFixtureApi("team-draft", diskFetch());
+  const row = async () => (await api.get("/api/team-draft")).sides.flatMap((s) => s.people).find((p) => p.user === "900000000000000002");
+  assert.deepEqual([(await row()).trusts_usual, (await row()).confirmed_rounds], [true, []]);
+  const range = { from: "2026-11-16", to: "2026-11-16" };
+  await api.setTrustsUsual(false, range);
+  await api.confirmRound("2026-11-16", range);
+  assert.deepEqual([(await row()).trusts_usual, (await row()).confirmed_rounds], [false, ["2026-11-16"]]);
+});
+
 test("the team-draft fixture serves the week it is asked for", async () => {
   const s = await createFixtureApi("team-draft", diskFetch()).get("/api/team-draft?week=2026-11-08");
   assert.deepEqual([s.window.start_utc, s.window.cells, s.window.shape, s.round.first_day, s.round.prev], ["2026-11-08T08:00:00Z", 384, "round", "2026-11-08", { week: "2026-11-01" }]);

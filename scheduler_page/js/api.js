@@ -314,6 +314,7 @@ function teamDraftFixtureApi(read, { user: viewer, usualFile }) {
   const answer = (code, path) => structuredClone({ ok: code === null, code, state: stateFor(path) });
   const viewerRows = () => state.sides.flatMap((s) => s.people).filter((p) => p.user === user());
   const thisWeek = fixtureThisWeek();
+  const confirmation = fixtureConfirmation();
   const setOverrides = (overrides) => { for (const p of viewerRows()) p.overrides = structuredClone(overrides); };
   const putUsual = async (doc) => {
     await load();
@@ -351,7 +352,7 @@ function teamDraftFixtureApi(read, { user: viewer, usualFile }) {
     me: async () => { await load(); return { user: user(), guild: "fixture", view: "team_draft", exp: null }; },
     getUsual: async () => { await load(); return structuredClone(week); },
     putUsual,
-    ...fixtureConfirmation(),
+    ...confirmation,
     getThisWeek: thisWeek.getThisWeek,
     putThisWeek: async (doc) => {
       await load();
@@ -374,6 +375,9 @@ function teamDraftFixtureApi(read, { user: viewer, usualFile }) {
     get: async (path) => {
       if (pathOnly(path) !== "/api/team-draft") throw new Error(`no fixture for ${path}`);
       await load();
+      // The viewer's row carries their switch and confirmed weeks, as the server's does.
+      const { trusts_usual: trusts, confirmed_rounds: rounds } = await confirmation.getConfirmation();
+      for (const p of viewerRows()) Object.assign(p, { trusts_usual: trusts, confirmed_rounds: rounds });
       return structuredClone(stateFor(path));
     },
     post: async (path, body) => {
