@@ -416,3 +416,14 @@ test("Save as my usual week sends the weeks of a stroke that hasn't saved yet", 
   assert.deepEqual(calls.map((c) => c[0]), ["put", "usual", "clear"]);
   assert.deepEqual(calls[0][1].painted_weeks, ["2026-11-09"]);
 });
+
+test("Reset forgets the weeks of strokes that never saved", async () => {
+  const calls = [];
+  const root = await mount(fakeApi(calls), R3);
+  press(root, 0);
+  byText(root, "Reset to usual week").click();
+  await tick();
+  press(root, 100);
+  await root.editor.flush();
+  assert.deepEqual(calls.filter((c) => c[0] === "put").map((c) => c[1].painted_weeks), [["2026-11-16"]]);
+});

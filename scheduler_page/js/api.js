@@ -61,7 +61,7 @@ function fixtureThisWeek() {
 // The in-memory confirmation the fixture apis share: the switch and the rounds confirmed, whatever the range.
 function fixtureConfirmation() {
   const state = { trusts_usual: true, confirmed_rounds: [] };
-  const doc = () => structuredClone(state);
+  const doc = () => ({ format: CONFIRMATION_FORMAT, version: 1, ...structuredClone(state) });
   return {
     getConfirmation: async () => doc(),
     setTrustsUsual: async (value) => { state.trusts_usual = value; return doc(); },

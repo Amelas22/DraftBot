@@ -411,9 +411,9 @@ test("fixture confirmation remembers the switch and confirmed rounds", async () 
   const range = { from: "2026-11-16", to: "2026-11-16" };
   for (const name of ["usual-week", "teams", "team-draft"]) {
     const api = createFixtureApi(name, diskFetch());
-    assert.deepEqual(await api.getConfirmation(range), { trusts_usual: true, confirmed_rounds: [] });
+    assert.deepEqual(await api.getConfirmation(range), { format: "draftbot.scheduler.confirmation", version: 1, trusts_usual: true, confirmed_rounds: [] });
     await api.setTrustsUsual(false, range);
     await api.confirmRound("2026-11-16", range);
-    assert.deepEqual(await api.getConfirmation(range), { trusts_usual: false, confirmed_rounds: ["2026-11-16"] });
+    assert.deepEqual(await api.getConfirmation(range), { format: "draftbot.scheduler.confirmation", version: 1, trusts_usual: false, confirmed_rounds: ["2026-11-16"] });
   }
 });

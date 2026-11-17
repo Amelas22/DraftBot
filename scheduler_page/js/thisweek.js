@@ -197,6 +197,7 @@ export async function mountThisWeek(root, api, deps) {
       keep.disabled = true;
       paintBox.inert = true;
       // Flushed, not cancelled: a stroke still waiting to save is sent now, so the weeks it painted are confirmed.
+      // If that PUT fails, its weeks are dropped with the usual-week save's cancel below (accepted).
       await auto.flush();
       status.textContent = "Saving…";
       try {
@@ -221,6 +222,7 @@ export async function mountThisWeek(root, api, deps) {
     reset.disabled = true;
     // Drop what is waiting to save, and let a save already sent land before the reset clears it.
     auto.cancel();
+    painted.clear(); // strokes that never saved confirm nothing
     await auto.flush();
     status.textContent = "Resetting…";
     try {
