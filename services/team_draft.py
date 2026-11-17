@@ -14,7 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.team_draft import TeamDraft
 from services.availability import naive_utc
-from services.booking import BookingChange, change
+from services.booking import BookingChange, change, rolling_span
+from services.scheduler_calendar import team_draft_schedule
 
 MAX_PICKS = 5
 MAX_SIDE_PEOPLE = 12
@@ -211,7 +212,11 @@ async def book(
     now: datetime,
 ) -> BookingChange:
     """Book or move the matchup's time. The caller commits."""
-    return await change(session, TeamDraftStore(team_draft_id), user_id, name, start_utc, seen_version, now)
+    guild_id = (
+        await session.execute(select(TeamDraft.guild_id).where(TeamDraft.id == team_draft_id))
+    ).scalar_one_or_none()
+    span = rolling_span(now) if guild_id is None else (await team_draft_schedule(session, guild_id, {}, now)).span
+    return await change(session, TeamDraftStore(team_draft_id), user_id, name, start_utc, seen_version, now, span)
 
 
 async def clear(

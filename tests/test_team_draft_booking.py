@@ -1,10 +1,11 @@
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
 from conftest import test_db  # noqa: F401
 from database.db_session import db_session
 from models.team_draft import TeamDraft
+from models.tournament import Tournament
 import services.team_draft as svc
 from services.team_draft import Picks, book, claim_draft, clear, create_team_draft
 
@@ -102,9 +103,21 @@ async def test_past_when_before_now(test_db):  # noqa: F811
 
 
 @pytest.mark.asyncio
-async def test_out_of_window_from_seven_days_after_the_floored_half_hour(test_db):  # noqa: F811
+async def test_out_of_window_after_the_no_calendar_horizon(test_db):  # noqa: F811
     td_id = await _make()
-    edge = datetime(2026, 11, 2, 12, 0, tzinfo=UTC)
+    edge = datetime(2026, 11, 23, 8, 0, tzinfo=UTC)
+    assert (await _book(td_id, start=edge)).code == "out_of_window"
+    assert (await _book(td_id, start=edge - timedelta(minutes=30))).ok
+
+
+@pytest.mark.asyncio
+async def test_out_of_window_after_the_guilds_last_round(test_db):  # noqa: F811
+    async with db_session() as s:
+        s.add(Tournament(guild_id="900", name="T", total_rounds=3, status="active",
+                         round1_deadline=date(2026, 10, 18), created_at=datetime(2026, 10, 1)))
+        await s.commit()
+    td_id = await _make()
+    edge = datetime(2026, 11, 2, 8, 0, tzinfo=UTC)
     assert (await _book(td_id, start=edge)).code == "out_of_window"
     assert (await _book(td_id, start=edge - timedelta(minutes=30))).ok
 

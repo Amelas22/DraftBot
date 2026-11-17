@@ -105,7 +105,10 @@ async def test_state_lists_both_sides_people_and_the_booking(client):
             "thread_url": f"https://discord.com/channels/{GUILD}/900",
             "state": "open",
         },
-        "window": {"start_utc": "2026-10-26T12:00:00Z", "cell_minutes": 30, "cells": 336},
+        "window": {"start_utc": "2026-10-25T07:00:00Z", "cell_minutes": 30, "cells": 386, "shape": "round"},
+        "round": {"number": None, "first_day": "2026-10-25", "last_day": "2026-11-01",
+                  "prev": {"week": "2026-10-18"}, "next": {"week": "2026-11-01"}},
+        "bookable": {"start_utc": "2026-10-26T12:00:00Z", "end_utc": "2026-11-23T08:00:00Z"},
         "rules": {"min_per_side": 2, "draft_cells": 2},
         "sides": [
             {"label": "Team Garruk", "people": [
@@ -338,3 +341,69 @@ async def test_bad_bodies_are_bad_input(client, announce):
     announce.assert_not_awaited()
     async with db_session() as session:
         assert (await session.get(TeamDraft, team_draft_id)).booking_version == 0
+
+
+@pytest.mark.asyncio
+async def test_state_opens_on_the_week_containing_now(client):
+    team_draft_id = await seed()
+    body = await (await client.get("/api/team-draft", headers=await _auth(team_draft_id))).json()
+    assert body["window"] == {"start_utc": "2026-10-25T07:00:00Z", "cell_minutes": 30, "cells": 386, "shape": "round"}
+    assert body["round"] == {"number": None, "first_day": "2026-10-25", "last_day": "2026-11-01",
+                             "prev": {"week": "2026-10-18"}, "next": {"week": "2026-11-01"}}
+    assert body["bookable"] == {"start_utc": "2026-10-26T12:00:00Z", "end_utc": "2026-11-23T08:00:00Z"}
+
+
+@pytest.mark.asyncio
+async def test_week_parameter_selects_the_week(client):
+    team_draft_id = await seed()
+    resp = await client.get("/api/team-draft?week=2026-11-01", headers=await _auth(team_draft_id))
+    body = await resp.json()
+    assert body["window"]["start_utc"] == "2026-11-01T07:00:00Z"
+    assert body["window"]["cells"] == 386
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("query", ["week=2026-11-02", "week=2026-09-06", "round=1"])
+async def test_bad_week_parameters_are_bad_input(client, query):
+    team_draft_id = await seed()
+    resp = await client.get(f"/api/team-draft?{query}", headers=await _auth(team_draft_id))
+    assert resp.status == 400
+    assert (await resp.json()) == {"error": "bad_input"}
+
+
+@pytest.mark.asyncio
+async def test_overrides_follow_the_viewed_week(client):
+    team_draft_id = await seed()
+    await replace_day_overrides("202", [DayOverride("UTC", date(2026, 10, 20), frozenset({4}))], False, NOW)
+    headers = await _auth(team_draft_id)
+
+    default = await (await client.get("/api/team-draft", headers=headers)).json()
+    earlier = await (await client.get("/api/team-draft?week=2026-10-18", headers=headers)).json()
+
+    assert default["sides"][1]["people"][1]["overrides"] == []
+    assert [o["date"] for o in earlier["sides"][1]["people"][1]["overrides"]] == ["2026-10-20"]
+
+
+@pytest.mark.asyncio
+async def test_an_action_reply_comes_back_on_the_viewed_week(client):
+    team_draft_id = await seed()
+    body = {"action_id": str(uuid.uuid4()), "kind": "book", "start_utc": START, "seen_version": 0}
+    resp = await client.post("/api/team-draft/actions?week=2026-11-01", data=json.dumps(body),
+                             headers=await _auth(team_draft_id))
+    reply = await resp.json()
+    assert reply["ok"] is True
+    assert reply["state"]["round"]["first_day"] == "2026-11-01"
+
+
+@pytest.mark.asyncio
+async def test_a_bad_week_on_an_action_is_refused_before_anything_is_written(client, announce):
+    team_draft_id = await seed()
+    body = {"action_id": str(uuid.uuid4()), "kind": "book", "start_utc": START, "seen_version": 0}
+    resp = await client.post("/api/team-draft/actions?round=99", data=json.dumps(body),
+                             headers=await _auth(team_draft_id))
+    assert resp.status == 400
+    assert (await resp.json()) == {"error": "bad_input"}
+    async with db_session() as session:
+        row = await session.get(TeamDraft, team_draft_id)
+        assert (row.booked_start_utc, row.booking_version) == (None, 0)
+    announce.assert_not_awaited()

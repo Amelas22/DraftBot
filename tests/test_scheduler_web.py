@@ -1,7 +1,7 @@
 import asyncio
 import base64
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -311,19 +311,70 @@ async def test_put_then_get_this_week(client):
 
 
 @pytest.mark.asyncio
-async def test_put_this_week_accepts_yesterday_refuses_eight_days_out(client):
+async def test_put_this_week_drops_the_past_and_refuses_beyond_the_horizon(client):
     headers = await _auth()
     resp = await client.put("/api/this-week", data=json.dumps(_tw_doc("2026-10-21", "2026-10-29")), headers=headers)
     assert resp.status == 200
-    for bad in ("2026-10-30", "2026-10-20"):
-        resp = await client.put("/api/this-week", data=json.dumps(_tw_doc(bad)), headers=headers)
-        assert resp.status == 400
-        assert await resp.json() == {"error": "bad_input"}
-    resp = await client.put("/api/this-week", data=json.dumps(_tw_doc("2026-10-22", "2026-10-22")), headers=headers)
+    assert [d["date"] for d in (await resp.json())["days"]] == ["2026-10-29"]
+    resp = await client.put("/api/this-week", data=json.dumps(_tw_doc("2027-03-01")), headers=headers)
     assert resp.status == 400
+    assert await resp.json() == {"error": "bad_input"}
     resp = await client.put("/api/this-week", data=b" " * (MAX_FILE_BYTES + 1), headers=headers)
     assert resp.status == 413
     assert await resp.json() == {"error": "too_large"}
+
+
+@pytest.mark.asyncio
+async def test_put_this_week_follows_the_guilds_round_calendar(client):
+    from sqlalchemy import update
+    from conftest import seed_tournament_match
+    from database.db_session import db_session
+    from models.tournament import Tournament
+    from services.round_weeks import Calendar, round_week
+    deadline = date(2026, 10, 18)  # round 2 is running at NOW
+    async with db_session() as s:
+        await seed_tournament_match(s)
+        await s.execute(update(Tournament).values(
+            guild_id="222", status="active", round1_deadline=deadline, total_rounds=20))
+        await s.commit()
+    end = round_week(Calendar(deadline, 20), 20).end_utc
+    last, after = end.date(), end.date() + timedelta(days=1)  # UTC zone: start 00:00Z
+    assert after.isoformat() > last.isoformat() and datetime.combine(after, datetime.min.time(), timezone.utc) >= end
+    headers = await _auth()
+    ok = await client.put("/api/this-week", data=json.dumps(_tw_doc(last.isoformat())), headers=headers)
+    assert ok.status == 200
+    bad = await client.put("/api/this-week", data=json.dumps(_tw_doc(after.isoformat())), headers=headers)
+    assert bad.status == 400
+
+
+@pytest.mark.asyncio
+async def test_get_this_week_with_a_range_returns_past_days(client):
+    from services.availability import DayOverride, replace_day_overrides
+    await replace_day_overrides("111", [DayOverride("UTC", date(2026, 10, 1), frozenset({1}))], False, NOW)
+    headers = await _auth()
+    assert (await (await client.get("/api/this-week", headers=headers)).json())["days"] == []
+    resp = await client.get("/api/this-week?from=2026-10-01&to=2026-10-07", headers=headers)
+    assert [d["date"] for d in (await resp.json())["days"]] == ["2026-10-01"]
+
+
+@pytest.mark.asyncio
+async def test_this_week_range_parameters_are_validated(client):
+    headers = await _auth()
+    for query in ("from=x&to=2026-10-02", "from=2026-10-01", "to=2026-10-01", "from=2026-10-05&to=2026-10-01"):
+        for method in (client.get, client.delete):
+            resp = await method("/api/this-week?" + query, headers=headers)
+            assert resp.status == 400, query
+            assert await resp.json() == {"error": "bad_input"}
+
+
+@pytest.mark.asyncio
+async def test_delete_this_week_with_a_range_clears_only_those_dates(client):
+    headers = await _auth()
+    await client.put("/api/this-week", data=json.dumps(_tw_doc("2026-10-23", "2026-10-24")), headers=headers)
+    resp = await client.delete("/api/this-week?from=2026-10-24&to=2026-10-24", headers=headers)
+    assert resp.status == 204
+    days = (await (await client.get("/api/this-week", headers=headers)).json())["days"]
+    assert [d["date"] for d in days] == ["2026-10-23"]
 
 
 @pytest.mark.asyncio

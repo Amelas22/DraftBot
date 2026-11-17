@@ -10,7 +10,13 @@
   "window": {
     "start_utc": "2026-10-26T04:00:00Z",
     "cell_minutes": 30,
-    "cells": 336
+    "cells": 336,
+    "shape": "rolling"
+  },
+  "round": null,
+  "bookable": {
+    "start_utc": "2026-10-26T04:00:00Z",
+    "end_utc": "2026-11-02T04:00:00Z"
   },
   "rules": {
     "min_per_side": 2,

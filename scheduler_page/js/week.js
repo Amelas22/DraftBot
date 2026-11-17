@@ -82,20 +82,23 @@ export const weekdayOfDate = (date) => (noonOf(date).getUTCDay() + 6) % 7;
 // The half-hour of the local day (0..47) that a real instant falls in.
 export const dayCellOf = (date, zone) => usualCellOf(date, zone) % 48;
 
-// Window cell j is free iff the local time of startUtc + 30 min * j falls in a painted usual-week cell.
-export function windowCells(zone, usual, startUtc) {
+// Window cell j (of count) is free iff the local time of startUtc + 30 min * j falls in a painted usual-week cell.
+export function windowCells(zone, usual, startUtc, count = CELLS) {
   const out = new Set();
-  for (let j = 0; j < CELLS; j++) {
+  for (let j = 0; j < count; j++) {
     if (usual.has(usualCellOf(addCells(startUtc, j), zone))) out.add(j);
   }
   return out;
 }
 
 // The usual week with window cells painted in as instants: each window cell's usual-week cell (its local time in zone)
-// is set or cleared as `painted` has it; usual-week cells the window never reaches keep their value.
-export function usualWithWindow(usual, painted, zone, startUtc) {
+// is set or cleared as `painted` has it; usual-week cells the window never reaches keep their value. A window longer
+// than a week reaches some usual-week cells twice, and the later cell wins. With previous (the painting the window was
+// last drawn as) only the cells painted differently are written, so a change on one of two same-weekday days stands.
+export function usualWithWindow(usual, painted, zone, startUtc, count = CELLS, previous = null) {
   const out = new Set(usual);
-  for (let j = 0; j < CELLS; j++) {
+  for (let j = 0; j < count; j++) {
+    if (previous && previous.has(j) === painted.has(j)) continue;
     const u = usualCellOf(addCells(startUtc, j), zone);
     if (painted.has(j)) out.add(u);
     else out.delete(u);
@@ -104,11 +107,11 @@ export function usualWithWindow(usual, painted, zone, startUtc) {
 }
 
 // A dated override replaces the usual week for its local day; with no usual week, other days are busy.
-export function effectiveWindowCells(usual, overrides, startUtc) {
-  const base = usual ? windowCells(usual.zone, usual.cells, startUtc) : new Set();
+export function effectiveWindowCells(usual, overrides, startUtc, count = CELLS) {
+  const base = usual ? windowCells(usual.zone, usual.cells, startUtc, count) : new Set();
   if (overrides.length === 0) return base;
   const out = new Set();
-  for (let j = 0; j < CELLS; j++) {
+  for (let j = 0; j < count; j++) {
     const t = addCells(startUtc, j);
     const o = overrides.find((x) => localDateOf(t, x.zone) === x.date);
     if (o ? o.cells.has(dayCellOf(t, o.zone)) : base.has(j)) out.add(j);

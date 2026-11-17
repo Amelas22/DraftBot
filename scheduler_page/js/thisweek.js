@@ -1,6 +1,6 @@
 // The this-week editor on a matchup: the matchup's window (the same days and times as its heatmap), pre-filled from
-// the usual week and saved as dated overrides as the player paints. A pure model (prefill, shownCells, withPainted,
-// toThisWeekFile) plus a thin DOM view.
+// the usual week and saved as dated overrides as the player paints. Cells already past are shown but can't be
+// changed. A pure model (prefill, shownCells, withPainted, pastCells, toThisWeekFile) plus a thin DOM view.
 import {
   CELLS, DAY_CELLS, addCells, dayCellOf, decodeCells, decodeDayCells, encodeDayCells, localDateOf, usualWithWindow,
   weekdayOfDate,
@@ -13,6 +13,8 @@ import { autosaver, paintGrid, paintLede, saveFailedMessage, toFile, touchHint, 
 
 const FORMAT = "draftbot.scheduler.this_week";
 const RESET_FAILED = "Could not reset. Check your connection and press Reset again.";
+const ALL_PAST = "These days are over, so they can't be changed.";
+const ZONE_FAILED = "Could not change the time zone. Check your connection and try again.";
 
 // The grid's cells: column d shows the override saved for dates[d], else the usual week's cells for that weekday.
 // usual: { zone, cells: Set<0..335> } | null; overrides: [{ date, cells: Set<0..47> }].
@@ -34,22 +36,29 @@ function dayKey(dates, startUtc, zone, j) {
   return dates.indexOf(localDateOf(t, zone)) * DAY_CELLS + dayCellOf(t, zone);
 }
 
-// The window cells that whole days (prefill's keys) have on: what the grid shows.
-export function shownCells(dates, days, startUtc, zone) {
+// The window cells (of count) that whole days (prefill's keys) have on: what the grid shows.
+export function shownCells(dates, days, startUtc, zone, count = CELLS) {
   const out = new Set();
-  for (let j = 0; j < CELLS; j++) if (days.has(dayKey(dates, startUtc, zone, j))) out.add(j);
+  for (let j = 0; j < count; j++) if (days.has(dayKey(dates, startUtc, zone, j))) out.add(j);
   return out;
 }
 
 // Whole days with the window's cells set or cleared as painted has them. The hours of the first and last date outside
 // the window keep what they had, so saving a day never wipes the part of it the grid doesn't show.
-export function withPainted(dates, days, painted, startUtc, zone) {
+export function withPainted(dates, days, painted, startUtc, zone, count = CELLS) {
   const out = new Set(days);
-  for (let j = 0; j < CELLS; j++) {
+  for (let j = 0; j < count; j++) {
     const k = dayKey(dates, startUtc, zone, j);
     if (painted.has(j)) out.add(k);
     else out.delete(k);
   }
+  return out;
+}
+
+// The window cells (of count) that have started by now: the past, which the editor shows but never changes.
+export function pastCells(startUtc, count, now) {
+  const out = new Set();
+  for (let j = 0; j < count && addCells(startUtc, j) <= now; j++) out.add(j);
   return out;
 }
 
@@ -63,71 +72,113 @@ export function toThisWeekFile(zone, dates, cells) {
   return { format: FORMAT, version: 1, zone, days };
 }
 
-// deps: { startUtc: Date, usualDoc: usual-week doc | null, onSaved?: (doc) => void, onKeptAsUsual?: (doc) => void,
-//         zones?: string[], defaultZone?: string, saveDelay?: number }
-// Drawn under the matchup's card, so it has no app bar or heading of its own; its columns are the window that starts
-// at startUtc. With a usual week the times are in its zone. Without one the player picks a zone, and Save as my usual
-// week turns the painting into their usual week and drops this week's changes, then calls onKeptAsUsual(doc). It
-// saves saveDelay ms after the last change and hands each saved file to onSaved. Returns { flush } (see autosaver),
-// or nothing on an expired link.
+// deps: { startUtc: Date, cells?: number, shape?: string, now?: () => Date, usualDoc: usual-week doc | null,
+//         onSaved?: (doc) => void, onKeptAsUsual?: (doc) => void, zones?: string[], defaultZone?: string,
+//         saveDelay?: number }
+// Drawn under the matchup's card, so it has no app bar or heading of its own; its columns are the window of cells
+// half-hours (in shape) that starts at startUtc. It reads, saves and resets only the window's dates, and leaves cells
+// that have started by now() as they are; when every cell has, it says so and never saves. With a usual week the
+// times are in its zone. Without one the player picks a zone, and Save as my usual week turns the painting into their
+// usual week and drops this week's changes from today on, then calls onKeptAsUsual(doc). It saves saveDelay ms after
+// the last change and hands each saved file to onSaved. Returns { flush } (see autosaver), or nothing on an expired
+// link.
 export async function mountThisWeek(root, api, deps) {
-  const { startUtc, usualDoc } = deps;
+  const { startUtc, usualDoc, cells: count = CELLS, shape } = deps;
+  const now = deps.now || (() => new Date());
   const usual = usualDoc?.zone && usualDoc.cells ? { zone: usualDoc.zone, cells: decodeCells(usualDoc.cells) } : null;
+  const locked = pastCells(startUtc, count, now());
+  const allPast = locked.size === count;
+
+  // The window's columns and their dates in zone, the saved overrides for those dates, and the whole days behind them
+  // (see withPainted). The overrides are read for the dates in view, and read again when a new zone shows other dates.
+  let zone = usual?.zone || deps.defaultZone || Intl.DateTimeFormat().resolvedOptions().timeZone;
+  let columns;
+  let dates;
+  let days;
+  let overrides = [];
+  let read = null;
+  const lay = () => {
+    columns = windowColumns(startUtc, zone, count, shape);
+    dates = columns.map((c) => c.date);
+  };
+  // Reads the overrides for ds (a layout's dates) unless the last read covered them.
+  const readDates = async (ds) => {
+    if (read && read.from <= ds[0] && ds.at(-1) <= read.to) return null;
+    const range = { from: ds[0], to: ds.at(-1) };
+    const saved = checkDoc(await api.getThisWeek(range), FORMAT);
+    overrides = saved.days.map((d) => ({ date: d.date, cells: decodeDayCells(d.cells) }));
+    read = range;
+    return saved;
+  };
 
   root.replaceChildren(el("p", { class: "status", text: "Loading your week…" }));
-  let saved;
   try {
-    saved = checkDoc(await api.getThisWeek(), FORMAT);
+    lay();
+    const saved = await readDates(dates);
+    // Without a usual week the times are in the zone this week was last saved in, which may show other dates.
+    if (!usual && saved.zone && saved.zone !== zone) {
+      zone = saved.zone;
+      lay();
+      await readDates(dates);
+    }
   } catch (e) {
     if (e instanceof LinkExpired) { root.replaceChildren(el("p", { class: "notice", text: expiredMessage() })); return; }
     throw e;
   }
-  const overrides = saved.days.map((d) => ({ date: d.date, cells: decodeDayCells(d.cells) }));
-
-  let zone = usual?.zone || saved.zone || deps.defaultZone || Intl.DateTimeFormat().resolvedOptions().timeZone;
-  // The window's columns and their dates in zone, and the whole days behind them (see withPainted).
-  let columns;
-  let dates;
-  let days;
-  const layOut = () => {
-    columns = windowColumns(startUtc, zone);
-    dates = columns.map((c) => c.date);
-    days = prefill(dates, usual, overrides);
-  };
-  layOut();
+  days = prefill(dates, usual, overrides);
+  // The dates before today (in zone) are over: a save leaves them out, and a reset keeps their changes.
+  const today = () => localDateOf(now(), zone);
 
   const status = el("p", { class: "status", role: "status", "aria-live": "polite" });
-  // painter is set below, before any change can fire.
+  // painter is set below, before any change can fire. Every date not yet over is sent, so a date painted back to
+  // the usual week drops its old change.
   const write = async () => {
-    days = withPainted(dates, days, painter.cells(), startUtc, zone);
-    const doc = toThisWeekFile(zone, dates, days);
+    days = withPainted(dates, days, painter.cells(), startUtc, zone, count);
+    const file = toThisWeekFile(zone, dates, days);
+    const doc = { ...file, days: file.days.filter((d) => d.date >= today()) };
     await api.putThisWeek(doc);
     deps.onSaved?.(doc);
   };
   const auto = autosaver(write, (text) => { status.textContent = text; }, deps.saveDelay);
-  const touched = () => { status.textContent = ""; auto.touch(); };
+  const touched = allPast ? () => {} : () => { status.textContent = ""; auto.touch(); };
   let painter;
   const paintBox = el("div");
   const draw = (cells) => {
-    painter = paintGrid({ columns, gridLabel: "This week, half-hour cells", cells, onChange: touched });
+    painter = paintGrid({ columns, gridLabel: "This week, half-hour cells", cells, onChange: touched, locked });
     paintBox.replaceChildren(painter.tabs, touchHint(), painter.grid);
   };
-  draw(shownCells(dates, days, startUtc, zone));
+  draw(shownCells(dates, days, startUtc, zone, count));
 
-  // No usual week: a zone to paint in, and the button that keeps this week as the usual one.
+  // No usual week: a zone to paint in, and (unless it's all over) the button that keeps this week as the usual one.
   const setup = [];
   let keep = null;
   if (!usual) {
     const { select, row } = zoneSelect(zone, deps.zones);
     // The painting stays on the same moments; the window's dates and hours are drawn again in the new zone.
-    select.addEventListener("change", () => {
+    // The new zone takes over only once its dates are read, so a save never writes a date it hasn't read; until then
+    // (and after a failed read, which puts the old zone back) saves go on in the old zone.
+    select.addEventListener("change", async () => {
+      const next = select.value;
+      const nextColumns = windowColumns(startUtc, next, count, shape);
+      const nextDates = nextColumns.map((c) => c.date);
+      try {
+        await readDates(nextDates);
+      } catch (e) {
+        select.value = zone;
+        status.textContent = e instanceof LinkExpired ? expiredMessage() : ZONE_FAILED;
+        return;
+      }
       const painted = painter.cells();
-      zone = select.value;
-      layOut();
+      zone = next;
+      columns = nextColumns;
+      dates = nextDates;
+      days = prefill(dates, usual, overrides);
       draw(painted);
       touched();
     });
     setup.push(row);
+  }
+  if (!usual && !allPast) {
     keep = el("button", { type: "button", class: "primary", text: "Save as my usual week" });
     // The painted window becomes the usual week by weekday and time, as the Usual week editor maps it; this week's
     // changes then match it, so they are dropped rather than left to shadow later edits to the usual week.
@@ -139,8 +190,10 @@ export async function mountThisWeek(root, api, deps) {
       await auto.flush();
       status.textContent = "Saving…";
       try {
-        const doc = toFile(zone, usualWithWindow(new Set(), painter.cells(), zone, startUtc), new Date());
+        // Over a window longer than a week, the later of two same-weekday days wins.
+        const doc = toFile(zone, usualWithWindow(new Set(), painter.cells(), zone, startUtc, count), now());
         await api.putUsual(doc);
+        // Every change from today on, not just this window's: the server keeps the past.
         await api.clearThisWeek();
         // A save that failed in the flush above is still pending; it would put this week's changes back.
         auto.cancel();
@@ -161,9 +214,10 @@ export async function mountThisWeek(root, api, deps) {
     await auto.flush();
     status.textContent = "Resetting…";
     try {
-      await api.clearThisWeek();
-      days = prefill(dates, usual, []);
-      painter.setCells(shownCells(dates, days, startUtc, zone));
+      await api.clearThisWeek({ from: dates[0], to: dates.at(-1) });
+      overrides = overrides.filter((o) => o.date < today());
+      days = prefill(dates, usual, overrides);
+      painter.setCells(shownCells(dates, days, startUtc, zone, count));
       status.textContent = usual ? "This week is back to your usual week." : "This week is cleared.";
     } catch (e) {
       status.textContent = e instanceof LinkExpired ? expiredMessage() : RESET_FAILED;
@@ -173,12 +227,12 @@ export async function mountThisWeek(root, api, deps) {
   });
 
   root.replaceChildren(
-    paintLede(usual
+    allPast ? el("p", { class: "notice", text: ALL_PAST }) : paintLede(usual
       ? `This starts from your usual week. Paint or erase the half-hours that are different this week. Your usual week stays as it is. Times are in ${zoneName(zone)}, your usual week's zone.`
       : "A draft and its matches take a few hours. Drag or tap to paint this week. Times are local to the zone below. To keep them for every week, press Save as my usual week."),
     ...setup,
     paintBox,
-    el("div", { class: "actions" }, ...(keep ? [keep] : []), reset),
+    ...(allPast ? [] : [el("div", { class: "actions" }, ...(keep ? [keep] : []), reset)]),
     status,
   );
   return { flush: auto.flush };

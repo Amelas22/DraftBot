@@ -139,6 +139,14 @@ button.hcell { cursor: pointer; }
 .daytabs button.due:not([aria-selected="true"]) { background: var(--warnbg); color: var(--warn-text); box-shadow: inset 0 0 0 2px var(--warn); }
 .legend .key.wk0 { background: var(--chip); }
 .legend .key.wk1 { background: var(--wk1-empty-alt); }
+/* A cell already gone by (any shade, dimmed and hatched) and one that can be seen but not booked (a muted dashed
+   outline over its own shade, so availability still reads and it never looks like the past; both may apply to one cell). The paint grid's past cells are not interactive. */
+.hcell.past, .cell.past { opacity: .45; background-image: repeating-linear-gradient(135deg, transparent 0 3px, var(--line) 3px 4px); }
+.hcell.past { cursor: default; }
+.cell.past { pointer-events: none; cursor: default; }
+.hcell.nobook { outline: 1px dashed var(--muted); outline-offset: -1px; cursor: not-allowed; }
+.legend .key.past { opacity: .45; background-image: repeating-linear-gradient(135deg, transparent 0 3px, var(--line) 3px 4px); }
+.legend .key.nobook { background: var(--surface); outline: 1px dashed var(--muted); outline-offset: -1px; }
 .legend .key.due { background: var(--due-empty-alt); box-shadow: inset 0 -3px 0 var(--warn); }
 .legend .keyitem:has(.key.due) { color: var(--warn-text); font-weight: 700; }
 
@@ -183,6 +191,13 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 
 /* Team draft: the two sides, the booking line and the shared heatmap with runs of the same people boxed */
 .bookline { margin: 0 0 8px; font-weight: 800; }
+/* A round's matchup: the round shown, between arrows to the rounds around it. A missing arrow keeps its place, so the
+   label never shifts as the viewer steps through the rounds. */
+.roundnav { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; }
+.roundlabel { font-weight: 800; font-variant-numeric: tabular-nums; }
+.roundarrow { width: 36px; height: 36px; border: 2px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--fg); font-size: 20px; line-height: 1; cursor: pointer; }
+.roundarrow:hover { border-color: var(--accent); }
+.roundarrow[hidden] { display: inline-block !important; visibility: hidden; }
 .threadlink { display: inline-block; margin-bottom: 10px; color: var(--accent); font-weight: 700; }
 .sides { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
 .side { background: var(--surface); border-radius: 12px; padding: 12px; min-width: 0; }
