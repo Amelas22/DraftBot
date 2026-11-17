@@ -280,7 +280,9 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
       return null;
     };
     // The panel loads on its own: one that fails leaves the editor below it working.
-    const panel = mountConfirmPanel(panelBox, api, { weeks: statusWeeks(state), number: state.round?.number ?? null, now: now() })
+    const panel = mountConfirmPanel(panelBox, api, {
+      weeks: statusWeeks(state), number: state.round?.number ?? null, now: now(), onChange: () => refresh(),
+    })
       .catch(failed(panelBox));
     // A this-week save may confirm the round, so the panel reads its rows again.
     const onSaved = () => panel.then((p) => p?.reload());

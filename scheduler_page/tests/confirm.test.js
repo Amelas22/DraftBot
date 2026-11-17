@@ -65,6 +65,21 @@ test("switch on: no rows and no note", async () => {
   assert.equal(button(root), undefined);
   assert.ok(!texts(root).includes("Editing any day in a round confirms that round."));
   assert.ok(texts(root).includes("Show my usual as confirmed"));
+  // Its own class: "confirm" is the teams page's yes/no box.
+  assert.equal(root.children[0].className, "confirmpanel");
+});
+
+test("onChange runs after a saved change, not after a failed one", async () => {
+  const root = new Node();
+  const api = fakeApi(false);
+  let changed = 0;
+  await mountConfirmPanel(root, api, { ...opts, onChange: () => { changed += 1; } });
+  await fire(button(root), "click");
+  assert.equal(changed, 1);
+  api.fail = true;
+  checkbox(root).checked = true;
+  await fire(checkbox(root), "change");
+  assert.equal(changed, 1);
 });
 
 test("unchecking calls setTrustsUsual(false) and shows the round's row", async () => {

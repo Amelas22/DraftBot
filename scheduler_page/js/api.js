@@ -369,6 +369,8 @@ function teamDraftFixtureApi(read, { user: viewer, usualFile }) {
           || [...mine].some((h) => !usual.has(base + h));
       };
       setOverrides(doc.days.filter(differs).map((d) => ({ date: d.date, zone: doc.zone, cells: d.cells })));
+      // As the server does: the save confirms the league weeks painted in it.
+      for (const w of doc.painted_weeks ?? []) await confirmation.confirmRound(w);
       return thisWeek.putThisWeek(doc);
     },
     clearThisWeek: async () => { await load(); setOverrides([]); return thisWeek.clearThisWeek(); },

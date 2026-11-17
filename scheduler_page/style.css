@@ -260,8 +260,8 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 .minehost > .seg button { padding: 8px 16px; min-height: 44px; }
 
 /* Confirmation panel */
-.confirm { background: var(--surface); border-radius: 12px; padding: 12px; margin-top: 14px; display: grid; gap: 8px; }
-.confirm p { margin: 0; }
+.confirmpanel { background: var(--surface); border-radius: 12px; padding: 12px; margin-top: 14px; display: grid; gap: 8px; }
+.confirmpanel p { margin: 0; }
 .confirmswitch { display: flex; align-items: center; gap: 10px; font-weight: 700; cursor: pointer; }
 .confirmswitch input { width: 20px; height: 20px; accent-color: var(--accent); }
 .confirmrows { display: grid; gap: 8px; }

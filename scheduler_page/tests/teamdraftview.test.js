@@ -721,6 +721,28 @@ test("My availability shows the switch for the viewed round", async () => {
   } finally { view.dispose(); }
 });
 
+test("confirming in the panel redraws the matchup, dropping the viewer's ?", async () => {
+  const calls = [];
+  let bo = r3c;
+  const week = { format: "draftbot.scheduler.this_week", version: 1, zone: LA, days: [] };
+  const api = { ...fakeApi(calls, () => bo), getUsual: async () => ({ zone: LA, cells: encodeCells(new Set()) }),
+    getThisWeek: async () => week, putThisWeek: async (doc) => doc,
+    getConfirmation: async () => confirmation(false),
+    confirmRound: async () => {
+      bo = { ...r3c, sides: [{ ...r3c.sides[0], people: [r3c.sides[0].people[0], { ...r3c.sides[0].people[1], confirmed_rounds: ["2026-11-16"] }] }, r3c.sides[1]] };
+      return { ...confirmation(false), confirmed_rounds: ["2026-11-16"] };
+    } };
+  const { root, view } = await mount(api);
+  try {
+    assert.equal(unsureMarks(root).length, 1);
+    byText(root, "My availability").click();
+    await tick();
+    for (const fn of byText(root, "Looks right, confirm").listeners.click) fn({});
+    await tick();
+    assert.equal(unsureMarks(root).length, 0);
+  } finally { view.dispose(); }
+});
+
 test("a confirm panel that fails to load leaves the editor working", async () => {
   const calls = [];
   const week = { format: "draftbot.scheduler.this_week", version: 1, zone: LA, days: [] };

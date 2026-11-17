@@ -30,14 +30,15 @@ export function statusRows(doc, weeks, number, now) {
   });
 }
 
-export async function mountConfirmPanel(root, api, { weeks, number, now }) {
+// onChange runs after the switch or a confirmation is saved, so the page around the panel can redraw.
+export async function mountConfirmPanel(root, api, { weeks, number, now, onChange }) {
   const range = { from: weeks[0], to: weeks.at(-1) };
   let doc = checkDoc(await api.getConfirmation(range), CONFIRMATION_FORMAT);
 
   const box = el("input", { type: "checkbox", id: "confirm-switch" });
   const note = el("p", { class: "status", role: "status", "aria-live": "polite" });
   const rows = el("div", { class: "confirmrows" });
-  const panel = el("section", { class: "confirm" },
+  const panel = el("section", { class: "confirmpanel" },
     el("label", { class: "confirmswitch", for: "confirm-switch" }, box, el("span", { text: SWITCH_LABEL })),
     el("p", { class: "meta", text: SWITCH_HINT }),
     rows, note);
@@ -77,6 +78,7 @@ export async function mountConfirmPanel(root, api, { weeks, number, now }) {
     if (ok && announce) note.textContent = announce();
     else if (ok && !announce) note.textContent = "";
     if (refocus) box.focus?.();
+    if (ok) onChange?.();
   }
   const rowText = (monday) => statusRows(doc, weeks, number, now).find((r) => r.monday === monday).text;
   const confirm = (monday) => run(() => api.confirmRound(monday, range), { announce: () => rowText(monday), refocus: true });

@@ -303,6 +303,13 @@ test("the team-draft fixture's viewer row carries the switch and the weeks they 
   assert.deepEqual([(await row()).trusts_usual, (await row()).confirmed_rounds], [false, ["2026-11-16"]]);
 });
 
+test("the team-draft fixture's this-week save confirms the weeks it painted", async () => {
+  const api = createFixtureApi("team-draft", diskFetch());
+  await api.setTrustsUsual(false, { from: "2026-11-16", to: "2026-11-16" });
+  await api.putThisWeek({ format: "draftbot.scheduler.this_week", version: 1, zone: "America/New_York", days: [], painted_weeks: ["2026-11-16"] });
+  assert.deepEqual((await api.getConfirmation({ from: "2026-11-16", to: "2026-11-16" })).confirmed_rounds, ["2026-11-16"]);
+});
+
 test("the team-draft fixture serves the week it is asked for", async () => {
   const s = await createFixtureApi("team-draft", diskFetch()).get("/api/team-draft?week=2026-11-08");
   assert.deepEqual([s.window.start_utc, s.window.cells, s.window.shape, s.round.first_day, s.round.prev], ["2026-11-08T08:00:00Z", 384, "round", "2026-11-08", { week: "2026-11-01" }]);
