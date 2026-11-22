@@ -128,25 +128,26 @@ async def _when_free(dispatch: "Callable[[Any], Awaitable[tuple[str, Any]]]",
     # away still followed a wait.
     waited = False
 
-    async def queue(loan_id: Any) -> "tuple[str, bool]":
+    async def queue(loan_id: Any) -> "tuple[str, Any]":
         nonlocal waited
         async with _DISPATCH_LOCK:
             while True:
                 if time.monotonic() >= deadline:
                     logger.info("library: {} gave up waiting for a free serve", borrower_id)
-                    return ("still_busy", True)
+                    waited = True
+                    return ("still_busy", None)
                 busy = await library_busy_reason()
                 if not busy:
                     break
                 waited = True
                 if time.monotonic() >= deadline:
                     logger.info("library: {} gave up waiting for a free serve", borrower_id)
-                    return ("still_busy", waited)
+                    return ("still_busy", None)
                 await asyncio.sleep(poll_s)
-            status, _ = await dispatch(loan_id)
-            return (status, waited)
+            return await dispatch(loan_id)
 
-    return await _settled_around(borrower_id, queue)
+    status, _ = await _settled_around(borrower_id, queue)
+    return (status, waited)
 
 
 async def _settled_around(borrower_id: Any,
@@ -160,21 +161,20 @@ async def _settled_around(borrower_id: Any,
     found a trade in flight: a borrower queued behind the busy serve may be
     waiting on their OWN earlier trade, which can end while they wait.
 
-    The retry is pinned to that loan: `attempt(loan_id)` dispatches only while
-    it is still the borrower's active loan, so a deck assigned in between is
+    The retry is pinned to the loan the dispatch saw in flight: `attempt`
+    returns _dispatch's (status, loan), and `attempt(loan_id)` acts only while
+    that is still the borrower's active loan, so a deck assigned in between is
     never traded on the strength of the old one's answer.
     """
     await current_loan(borrower_id)
-    result = await attempt(None)
-    if result[0] != "already_in_flight":
-        return result
-    pending = await active_loan(borrower_id)
+    status, seen = await attempt(None)
+    if status != "already_in_flight" or seen is None:
+        return (status, seen)
     loan = await current_loan(borrower_id)
-    if (pending is None or loan is None or loan.id != pending.id
-            or loan.state in _SETTLED):
-        return result               # still open, or no longer the same loan
-    retried = await attempt(loan.id)
-    return result if retried[0] == "other_loan" else retried
+    if loan is None or loan.id != seen.id or loan.state in _SETTLED:
+        return (status, seen)       # still open, or no longer the same loan
+    retried = await attempt(seen.id)
+    return (status, seen) if retried[0] == "other_loan" else retried
 
 
 async def borrow_when_free(guild_id: Any, borrower_id: Any, poll_s: float = 10,

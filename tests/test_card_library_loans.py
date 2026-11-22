@@ -157,6 +157,37 @@ async def test_a_retry_pinned_to_one_loan_never_trades_another(test_db, client):
     assert client.lent == []
 
 
+async def test_a_deck_assigned_while_the_old_trade_settles_is_not_retried(test_db, client,
+                                                                         monkeypatch):
+    # The return that was in flight completes, and a new deck is assigned
+    # before the retry looks: the retry must not send that deck back.
+    await _seed(state="return_pending", job_id="job-1")
+    client.jobs["job-1"] = {"state": "running"}
+    client.job_id = "job-2"
+    real_dispatch, real_current = svc._dispatch, svc.current_loan
+    calls = []
+
+    async def then_it_lands(*a, **kw):
+        result = await real_dispatch(*a, **kw)
+        client.jobs["job-1"] = {"state": "done", "receive": DECK}
+        return result
+
+    async def and_a_new_deck_arrives(borrower_id):
+        loan = await real_current(borrower_id)
+        calls.append(loan)
+        if len(calls) == 2 and loan is None:
+            await _seed(state="borrowed")
+            return await svc.active_loan(borrower_id)
+        return loan
+    monkeypatch.setattr(svc, "_dispatch", then_it_lands)
+    monkeypatch.setattr(svc, "current_loan", and_a_new_deck_arrives)
+
+    status, _ = await svc.start_return(GUILD, BORROWER)
+
+    assert status == "already_in_flight", "the first answer stands"
+    assert client.collected == [], "the new deck was not sent back"
+
+
 async def test_a_trade_the_serve_still_has_open_is_still_refused(test_db, client):
     loan_id = await _seed(state="out_pending", job_id="job-1")
     client.jobs["job-1"] = {"state": "running"}
