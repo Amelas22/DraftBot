@@ -125,6 +125,26 @@ async def test_a_dead_trade_is_settled_outside_the_dispatch_lock(test_db, client
     assert locked == [False]
 
 
+async def test_a_trade_that_ends_while_the_retry_waits_does_not_refuse_it(test_db, client,
+                                                                         monkeypatch):
+    # Queued behind the busy serve, the borrower waits on their OWN open trade.
+    loan_id = await _seed(state="out_pending", job_id="job-1")
+    client.jobs["job-1"] = {"state": "running"}
+    client.job_id = "job-2"
+    real = svc._dispatch
+
+    async def then_it_fails(*a, **kw):
+        result = await real(*a, **kw)
+        client.jobs["job-1"] = {"state": "failed", "detail": "UserCanceledTrade"}
+        return result
+    monkeypatch.setattr(svc, "_dispatch", then_it_fails)
+
+    status, _ = await svc.start_borrow(GUILD, BORROWER)
+
+    assert status == "dispatched"
+    assert (await _state(loan_id))[:2] == ("out_pending", "job-2")
+
+
 async def test_a_trade_the_serve_still_has_open_is_still_refused(test_db, client):
     loan_id = await _seed(state="out_pending", job_id="job-1")
     client.jobs["job-1"] = {"state": "running"}

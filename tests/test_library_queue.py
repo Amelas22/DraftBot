@@ -21,8 +21,10 @@ pytestmark = pytest.mark.asyncio
 
 
 @pytest.fixture(autouse=True)
-def _fresh_lock():
+def _fresh_lock(monkeypatch):
     svc._DISPATCH_LOCK = asyncio.Lock()
+    # No database here: settling the borrower's loan first has its own tests.
+    monkeypatch.setattr(svc, "current_loan", AsyncMock(return_value=None))
     yield
 
 
