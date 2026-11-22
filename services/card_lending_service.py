@@ -863,6 +863,31 @@ async def active_loan(borrower_id: Any) -> "Optional[CardLoan]":
                 CardLoan.state.in_(ACTIVE_STATES)))
 
 
+async def current_loan(borrower_id: Any) -> "Optional[CardLoan]":
+    """active_loan, after asking the serve about a trade the loan still shows open.
+
+    A loan stays `*_pending` until somebody settles its trade, and once the
+    command that opened it stops watching, that is the watchdog -- up to ten
+    minutes later. A borrower whose trade failed in that window was told, on
+    every retry, to go and accept a trade that no longer existed. Asking the
+    serve here lets a retry find the loan where the trade actually left it. A
+    trade that really is still open stays in flight, exactly as before.
+    """
+    loan = await active_loan(borrower_id)
+    if loan is None or loan.state not in _SETTLED:
+        return loan
+    try:
+        await _settle_loan(get_lending_client(), loan, {})
+    except Exception:
+        # Same rule as the watchdog: a loan that cannot be settled stays in
+        # flight for a human, and the caller answers from the state it has.
+        logger.opt(exception=True).error(
+            "library: could not settle loan {} for {} -- left in flight",
+            loan.id, loan.borrower_id)
+        return loan
+    return await active_loan(borrower_id)
+
+
 async def _dispatch(guild_id: Any, borrower_id: Any, *, from_state: str, to_state: str,
                     send: "Callable[[Any, str, Any], Awaitable[Any]]",
                     job_type: str,
@@ -873,7 +898,7 @@ async def _dispatch(guild_id: Any, borrower_id: Any, *, from_state: str, to_stat
     `send(client, handle, cards)` performs the trade. The loan is only moved to
     `to_state` once the serve has accepted the job and given us its id.
     """
-    loan = await active_loan(borrower_id)
+    loan = await current_loan(borrower_id)
     if loan is None:
         return ("no_loan", None)
     if loan.state != from_state:

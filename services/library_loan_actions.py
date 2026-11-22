@@ -28,6 +28,7 @@ from library_views.take_what_is_there import TakeWhatIsThereView
 from services.card_lending_service import (
     active_loan,
     borrow_when_free,
+    current_loan,
     card_lines,
     decline_offer,
     hold_shortfall,
@@ -428,7 +429,7 @@ async def match_for_borrow(guild_id: int, user_id: int, session_id: str,
     asked for is behind everything already reserved -- which is where
     assign_on_request's fresh claim will put it.
     """
-    loan = await active_loan(user_id)
+    loan = await current_loan(user_id)
     refused = _not_this_drafts_offer(loan, session_id)
     if refused:
         return refused
@@ -524,7 +525,7 @@ async def borrow_some(caller: LibraryCaller, session_id: str,
     if library_id is None:
         await caller.send(NOT_SET_UP)
         return
-    loan = await active_loan(caller.user_id)
+    loan = await current_loan(caller.user_id)
     refused = _not_this_drafts_offer(loan, session_id)
     if refused:
         await caller.send(refused)
