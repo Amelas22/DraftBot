@@ -90,21 +90,39 @@ async def test_asking_twice_does_not_offer_the_deck_twice(test_db, client):
     assert client.lent == [], "a second trade would hand out a second copy"
 
 
-async def test_a_retry_after_a_failed_trade_is_not_told_it_is_still_open(test_db, client):
-    """The serve reported the trade failed, but nothing has settled it yet: the
-    command stopped watching and the watchdog has not come round. The retry
-    asks the serve itself rather than telling the borrower, for up to ten
-    minutes, to accept a trade that no longer exists."""
-    loan_id = await _seed(state="out_pending", job_id="job-1")
-    client.jobs["job-1"] = {"state": "failed", "detail": "the trade closed as 'UserCanceledTrade'"}
+@pytest.mark.parametrize("pending, start, sent, expected", [
+    ("out_pending", svc.start_borrow, "lent", [(HANDLE, DECK)]),
+    ("return_pending", svc.start_return, "collected", [(HANDLE, None)]),
+])
+async def test_a_retry_after_a_failed_trade_opens_it_again(test_db, client, pending,
+                                                          start, sent, expected):
+    # The serve says the trade failed, and nothing has settled it yet.
+    loan_id = await _seed(state=pending, job_id="job-1")
+    client.jobs["job-1"] = {"state": "failed", "detail": "UserCanceledTrade"}
     client.job_id = "job-2"
 
-    status, _ = await svc.start_borrow(GUILD, BORROWER)
+    status, _ = await start(GUILD, BORROWER)
 
-    assert status == "dispatched"
-    assert client.lent == [(HANDLE, DECK)], "the retry opens the trade again"
-    state, job_id, _, _ = await _state(loan_id)
-    assert (state, job_id) == ("out_pending", "job-2")
+    assert status == "dispatched", "not 'already_in_flight' for a trade that is gone"
+    assert getattr(client, sent) == expected
+    assert (await _state(loan_id))[:2] == (pending, "job-2")
+
+
+async def test_a_dead_trade_is_settled_outside_the_dispatch_lock(test_db, client, monkeypatch):
+    # A refund that pays a debt DMs both parties; nothing queued may wait on it.
+    await _seed(state="out_pending", job_id="job-1")
+    client.jobs["job-1"] = {"state": "failed", "detail": "UserCanceledTrade"}
+    locked = []
+    real = svc._settle_or_leave
+
+    async def watch(*a):
+        locked.append(svc.dispatch_lock().locked())
+        await real(*a)
+    monkeypatch.setattr(svc, "_settle_or_leave", watch)
+
+    await svc.start_borrow(GUILD, BORROWER)
+
+    assert locked == [False]
 
 
 async def test_a_trade_the_serve_still_has_open_is_still_refused(test_db, client):
@@ -116,18 +134,6 @@ async def test_a_trade_the_serve_still_has_open_is_still_refused(test_db, client
     assert status == "already_in_flight"
     assert client.lent == []
     assert await _state(loan_id) == ("out_pending", "job-1", None, None)
-
-
-async def test_a_retried_return_after_a_failed_one_goes_out(test_db, client):
-    loan_id = await _seed(state="return_pending", job_id="job-1")
-    client.jobs["job-1"] = {"state": "failed", "detail": "the trade closed as 'UserCanceledTrade'"}
-    client.job_id = "job-2"
-
-    status, _ = await svc.start_return(GUILD, BORROWER)
-
-    assert status == "dispatched"
-    assert client.collected == [(HANDLE, None)]
-    assert (await _state(loan_id))[:2] == ("return_pending", "job-2")
 
 
 async def test_you_cannot_borrow_what_you_already_hold(test_db, client):

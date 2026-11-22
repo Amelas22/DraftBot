@@ -28,8 +28,8 @@ from library_views.take_what_is_there import TakeWhatIsThereView
 from services.card_lending_service import (
     active_loan,
     borrow_when_free,
-    current_loan,
     card_lines,
+    current_loan,
     decline_offer,
     hold_shortfall,
     lendable_now,

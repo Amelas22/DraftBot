@@ -23,7 +23,7 @@ from sqlalchemy.exc import IntegrityError
 from database.db_session import AsyncSessionLocal
 from models.draft_session import DraftSession
 from services.card_lending_service import (
-    REQUEST_GRACE, active_loan, assign_deck, retract_offer, sub_loan_for)
+    REQUEST_GRACE, active_loan, assign_deck, current_loan, retract_offer, sub_loan_for)
 from services.card_library_inventory import library_available
 from services.draft_deck_assignment import (
     _cube_of, _pool_of, _session_meta, loan_source, too_large)
@@ -121,7 +121,7 @@ async def _absent_holds(ctx: SubContext) -> "tuple[Optional[str], Optional[int]]
     """Refusal if the absent player has this draft's deck out, and the id of
     their own uncollected offer from this draft, if any -- that offer is
     retracted when the sub's is made, so it does not count against the shelf."""
-    own = await active_loan(ctx.absent_id)
+    own = await current_loan(ctx.absent_id)
     if own is None or own.source != loan_source(ctx.session_id):
         return None, None
     if own.state in OUT_STATES:

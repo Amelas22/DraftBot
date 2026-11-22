@@ -124,6 +124,10 @@ async def _when_free(dispatch: "Callable[[], Awaitable[tuple[str, Any]]]",
     # next" then gets no "your turn", after a hold has been taken and a real
     # trade opened that nobody told them to accept.
     deadline = time.monotonic() + timeout_s
+    # Before the lock, not in the dispatch: settling a failed borrow refunds
+    # its hold, and a refund that pays a debt DMs both parties -- a slow
+    # Discord call there would hold up every trade queued behind this one.
+    await current_loan(borrower_id)
     async with _DISPATCH_LOCK:
         waited = False
         while True:
@@ -864,28 +868,18 @@ async def active_loan(borrower_id: Any) -> "Optional[CardLoan]":
 
 
 async def current_loan(borrower_id: Any) -> "Optional[CardLoan]":
-    """active_loan, after asking the serve about a trade the loan still shows open.
+    """active_loan, after settling a `*_pending` trade the serve says has ended.
 
-    A loan stays `*_pending` until somebody settles its trade, and once the
-    command that opened it stops watching, that is the watchdog -- up to ten
-    minutes later. A borrower whose trade failed in that window was told, on
-    every retry, to go and accept a trade that no longer existed. Asking the
-    serve here lets a retry find the loan where the trade actually left it. A
-    trade that really is still open stays in flight, exactly as before.
+    Once a command stops watching its trade, only the watchdog settles it, up
+    to ten minutes later. Anything that decides from the loan's state reads it
+    here, so a dead trade is not reported as one still waiting to be accepted.
     """
     loan = await active_loan(borrower_id)
     if loan is None or loan.state not in _SETTLED:
         return loan
-    try:
-        await _settle_loan(get_lending_client(), loan, {})
-    except Exception:
-        # Same rule as the watchdog: a loan that cannot be settled stays in
-        # flight for a human, and the caller answers from the state it has.
-        logger.opt(exception=True).error(
-            "library: could not settle loan {} for {} -- left in flight",
-            loan.id, loan.borrower_id)
-        return loan
-    return await active_loan(borrower_id)
+    settled: "dict[Any, dict[str, Any]]" = {}
+    await _settle_or_leave(get_lending_client(), loan, settled)
+    return await active_loan(borrower_id) if loan.id in settled else loan
 
 
 async def _dispatch(guild_id: Any, borrower_id: Any, *, from_state: str, to_state: str,
@@ -898,7 +892,7 @@ async def _dispatch(guild_id: Any, borrower_id: Any, *, from_state: str, to_stat
     `send(client, handle, cards)` performs the trade. The loan is only moved to
     `to_state` once the serve has accepted the job and given us its id.
     """
-    loan = await current_loan(borrower_id)
+    loan = await active_loan(borrower_id)
     if loan is None:
         return ("no_loan", None)
     if loan.state != from_state:
@@ -1107,6 +1101,7 @@ async def start_borrow(guild_id: Any, borrower_id: Any,
                        offering: "Optional[list[dict[str, Any]]]" = None
                        ) -> "tuple[str, Optional[CardLoan]]":
     """Ask the serve to hand this borrower their deck, or the agreed subset."""
+    await current_loan(borrower_id)      # outside the lock; see _when_free
     async with _DISPATCH_LOCK:
         return await _dispatch(
             guild_id, borrower_id, from_state="assigned", to_state="out_pending",
@@ -1115,6 +1110,7 @@ async def start_borrow(guild_id: Any, borrower_id: Any,
 
 async def start_return(guild_id: Any, borrower_id: Any) -> "tuple[str, Optional[CardLoan]]":
     """Ask the serve to take the deck back."""
+    await current_loan(borrower_id)      # outside the lock; see _when_free
     async with _DISPATCH_LOCK:
         status, loan = await _dispatch(
             guild_id, borrower_id, from_state="borrowed", to_state="return_pending",
@@ -1530,18 +1526,24 @@ async def settle_in_flight(guild_id: Any = None) -> "dict[Any, dict[str, Any]]":
 
     client = get_lending_client()
     for loan in pending:
-        try:
-            await _settle_loan(client, loan, settled_detail)
-        except Exception:
-            # One loan, not the scan. Booking a claim can now REFUSE -- a job
-            # whose library stamp is missing or disagrees with its loan has
-            # nowhere correct to put the cards -- and letting that escape would
-            # leave every later loan unsettled on this pass and on every pass
-            # after it. The loan stays in flight for a human instead.
-            logger.opt(exception=True).error(
-                "library: could not settle loan {} for {} -- left in flight",
-                loan.id, loan.borrower_id)
+        await _settle_or_leave(client, loan, settled_detail)
     return settled_detail
+
+
+async def _settle_or_leave(client: Any, loan: Any,
+                           settled_detail: "dict[Any, dict[str, Any]]") -> None:
+    """_settle_loan, leaving a loan that cannot be settled in flight."""
+    try:
+        await _settle_loan(client, loan, settled_detail)
+    except Exception:
+        # One loan, not the scan. Booking a claim can now REFUSE -- a job
+        # whose library stamp is missing or disagrees with its loan has
+        # nowhere correct to put the cards -- and letting that escape would
+        # leave every later loan unsettled on this pass and on every pass
+        # after it. The loan stays in flight for a human instead.
+        logger.opt(exception=True).error(
+            "library: could not settle loan {} for {} -- left in flight",
+            loan.id, loan.borrower_id)
 
 
 async def _settle_loan(client: Any, loan: Any,

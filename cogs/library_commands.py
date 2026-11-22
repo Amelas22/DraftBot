@@ -49,7 +49,7 @@ from services.card_deposit_service import (
 )
 from services.card_deposit_service import poll_until_settled as poll_deposit
 from services.card_library_inventory import cube_as_the_library_sees_it
-from services.card_lending_service import active_loan, card_lines
+from services.card_lending_service import card_lines, current_loan
 from services.library_loan_actions import (
     SETUP_MESSAGES, deck_lines, loan_said, within_a_message,
 )
@@ -278,7 +278,7 @@ class LibraryCommands(commands.Cog):
         # ctx.guild_id is None.
         if not await defer_if_usable(ctx):
             return
-        loan = await active_loan(ctx.author.id)
+        loan = await current_loan(ctx.author.id)
         if loan is None:
             await ctx.followup.send(loan_said("no_loan", ""), ephemeral=True)
             return
