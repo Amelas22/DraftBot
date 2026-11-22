@@ -145,6 +145,18 @@ async def test_a_trade_that_ends_while_the_retry_waits_does_not_refuse_it(test_d
     assert (await _state(loan_id))[:2] == ("out_pending", "job-2")
 
 
+async def test_a_retry_pinned_to_one_loan_never_trades_another(test_db, client):
+    # The old loan settled and a new deck was assigned before the retry ran.
+    await _seed(state="assigned")
+
+    status, _ = await svc._dispatch(GUILD, BORROWER, from_state="assigned",
+                                    to_state="out_pending", send=svc._send_lend,
+                                    job_type="borrow", loan_id=-1)
+
+    assert status == "other_loan"
+    assert client.lent == []
+
+
 async def test_a_trade_the_serve_still_has_open_is_still_refused(test_db, client):
     loan_id = await _seed(state="out_pending", job_id="job-1")
     client.jobs["job-1"] = {"state": "running"}

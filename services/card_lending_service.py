@@ -101,7 +101,7 @@ async def lending_custodian_up() -> Optional[bool]:
     return None if state is None else state == "ok"
 
 
-async def _when_free(dispatch: "Callable[[], Awaitable[tuple[str, Any]]]",
+async def _when_free(dispatch: "Callable[[Any], Awaitable[tuple[str, Any]]]",
                      borrower_id: Any, poll_s: float,
                      timeout_s: float) -> "tuple[str, bool]":
     """Run one trade as soon as the library is free, holding the caller's place.
@@ -124,10 +124,13 @@ async def _when_free(dispatch: "Callable[[], Awaitable[tuple[str, Any]]]",
     # next" then gets no "your turn", after a hold has been taken and a real
     # trade opened that nobody told them to accept.
     deadline = time.monotonic() + timeout_s
+    # Across both attempts _settled_around may make: a retry that runs straight
+    # away still followed a wait.
+    waited = False
 
-    async def queue() -> "tuple[str, bool]":
+    async def queue(loan_id: Any) -> "tuple[str, bool]":
+        nonlocal waited
         async with _DISPATCH_LOCK:
-            waited = False
             while True:
                 if time.monotonic() >= deadline:
                     logger.info("library: {} gave up waiting for a free serve", borrower_id)
@@ -140,14 +143,14 @@ async def _when_free(dispatch: "Callable[[], Awaitable[tuple[str, Any]]]",
                     logger.info("library: {} gave up waiting for a free serve", borrower_id)
                     return ("still_busy", waited)
                 await asyncio.sleep(poll_s)
-            status, _ = await dispatch()
+            status, _ = await dispatch(loan_id)
             return (status, waited)
 
     return await _settled_around(borrower_id, queue)
 
 
 async def _settled_around(borrower_id: Any,
-                          attempt: "Callable[[], Awaitable[tuple[str, Any]]]"
+                          attempt: "Callable[[Any], Awaitable[tuple[str, Any]]]"
                           ) -> "tuple[str, Any]":
     """Run a locked dispatch with the borrower's loan settled first.
 
@@ -156,15 +159,22 @@ async def _settled_around(borrower_id: Any,
     hold up every trade queued behind this one. Then once more if the dispatch
     found a trade in flight: a borrower queued behind the busy serve may be
     waiting on their OWN earlier trade, which can end while they wait.
+
+    The retry is pinned to that loan: `attempt(loan_id)` dispatches only while
+    it is still the borrower's active loan, so a deck assigned in between is
+    never traded on the strength of the old one's answer.
     """
     await current_loan(borrower_id)
-    result = await attempt()
+    result = await attempt(None)
     if result[0] != "already_in_flight":
         return result
+    pending = await active_loan(borrower_id)
     loan = await current_loan(borrower_id)
-    if loan is not None and loan.state in _SETTLED:
-        return result               # it really is still open
-    return await attempt()
+    if (pending is None or loan is None or loan.id != pending.id
+            or loan.state in _SETTLED):
+        return result               # still open, or no longer the same loan
+    retried = await attempt(loan.id)
+    return result if retried[0] == "other_loan" else retried
 
 
 async def borrow_when_free(guild_id: Any, borrower_id: Any, poll_s: float = 10,
@@ -177,18 +187,18 @@ async def borrow_when_free(guild_id: Any, borrower_id: Any, poll_s: float = 10,
     deck. It travels as an argument rather than on the loan so that giving up
     on the queue leaves nothing behind to be picked up by the next borrow.
     """
-    return await _when_free(lambda: _dispatch(
+    return await _when_free(lambda loan_id: _dispatch(
         guild_id, borrower_id, from_state="assigned", to_state="out_pending",
-        send=_send_lend, job_type="borrow", offering=offering),
+        send=_send_lend, job_type="borrow", offering=offering, loan_id=loan_id),
                             borrower_id, poll_s, timeout_s)
 
 
 async def return_when_free(guild_id: Any, borrower_id: Any, poll_s: float = 10,
                            timeout_s: float = QUEUE_TIMEOUT_S) -> "tuple[str, bool]":
     """Take this borrower's deck back as soon as the library is free."""
-    return await _when_free(lambda: _dispatch(
+    return await _when_free(lambda loan_id: _dispatch(
         guild_id, borrower_id, from_state="borrowed", to_state="return_pending",
-        send=_send_collect, job_type="return"),
+        send=_send_collect, job_type="return", loan_id=loan_id),
                             borrower_id, poll_s, timeout_s)
 
 
@@ -906,14 +916,19 @@ async def current_loan(borrower_id: Any) -> "Optional[CardLoan]":
 async def _dispatch(guild_id: Any, borrower_id: Any, *, from_state: str, to_state: str,
                     send: "Callable[[Any, str, Any], Awaitable[Any]]",
                     job_type: str,
-                    offering: "Optional[list[dict[str, Any]]]" = None
+                    offering: "Optional[list[dict[str, Any]]]" = None,
+                    loan_id: Any = None
                     ) -> "tuple[str, Optional[CardLoan]]":
     """Shared body of borrow and return: check, ask the serve, park the loan.
 
     `send(client, handle, cards)` performs the trade. The loan is only moved to
     `to_state` once the serve has accepted the job and given us its id.
+    `loan_id`, when given, is the only loan this may act on: anything else
+    answers "other_loan" and moves nothing.
     """
     loan = await active_loan(borrower_id)
+    if loan_id is not None and (loan is None or loan.id != loan_id):
+        return ("other_loan", loan)
     if loan is None:
         return ("no_loan", None)
     if loan.state != from_state:
@@ -1122,21 +1137,21 @@ async def start_borrow(guild_id: Any, borrower_id: Any,
                        offering: "Optional[list[dict[str, Any]]]" = None
                        ) -> "tuple[str, Optional[CardLoan]]":
     """Ask the serve to hand this borrower their deck, or the agreed subset."""
-    async def attempt() -> "tuple[str, Optional[CardLoan]]":
+    async def attempt(loan_id: Any) -> "tuple[str, Optional[CardLoan]]":
         async with _DISPATCH_LOCK:
             return await _dispatch(
                 guild_id, borrower_id, from_state="assigned", to_state="out_pending",
-                send=_send_lend, job_type="borrow", offering=offering)
+                send=_send_lend, job_type="borrow", offering=offering, loan_id=loan_id)
     return await _settled_around(borrower_id, attempt)
 
 
 async def start_return(guild_id: Any, borrower_id: Any) -> "tuple[str, Optional[CardLoan]]":
     """Ask the serve to take the deck back."""
-    async def attempt() -> "tuple[str, Optional[CardLoan]]":
+    async def attempt(loan_id: Any) -> "tuple[str, Optional[CardLoan]]":
         async with _DISPATCH_LOCK:
             return await _dispatch(
                 guild_id, borrower_id, from_state="borrowed", to_state="return_pending",
-                send=_send_collect, job_type="return")
+                send=_send_collect, job_type="return", loan_id=loan_id)
     status, loan = await _settled_around(borrower_id, attempt)
     # "already_assigned" reads oddly for a return; the caller never took it out.
     return (("not_borrowed" if status == "already_assigned" else status), loan)
