@@ -775,6 +775,10 @@ test("the card says probably when the viewer's usual week isn't confirmed for th
   // Confirmed for that round, or the switch on: the usual words.
   assert.equal(everyoneText({ ...me, confirmed_rounds: ["2026-11-23"] }, "round", ["2026-11-23"]).title, "You're counted from your usual week");
   assert.equal(everyoneText({ ...me, trusts_usual: null }, "round", ["2026-11-23"]).title, "You're counted from your usual week");
-  // A rolling page with an unconfirmed week in view says "week".
-  assert.equal(everyoneText(me, "week", ["2026-11-23", "2026-11-30"]).title, "You're counted as probably free this week");
+  // A rolling page says "week"; with only some of its league weeks unconfirmed it says some days are probable.
+  const rolling = ["2026-11-23", "2026-11-30"];
+  assert.equal(everyoneText(me, "week", rolling).title, "You're counted as probably free this week");
+  const partly = everyoneText({ ...me, confirmed_rounds: ["2026-11-23"] }, "week", rolling);
+  assert.equal(partly.title, "Some of your days count as probably free");
+  assert.equal(partly.sub, "Your usual week shows as probably in the weeks you haven't confirmed. Confirm them in My availability.");
 });

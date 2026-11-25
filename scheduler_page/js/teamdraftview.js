@@ -36,13 +36,18 @@ const mineText = (unit) => ({
 
 // The viewer's card on Everyone: how the grid counts them. me is their place on a side, or undefined; weeks are the
 // league weeks in view (statusWeeks), in which a usual week the viewer hasn't confirmed counts only as probable.
-export function everyoneText(me, unit = "week", weeks = []) {
+export function everyoneText(me, unit, weeks) {
   if (!me) return { tone: "", title: "Your availability", sub: "You aren't on either side of this matchup." };
   if (!hasAvailability(me)) {
     return { tone: "warn", title: "The grid can't count you yet",
       sub: "You haven't entered when you're free, so every half-hour shows you as not free." };
   }
   if (isUnconfirmed(me, weeks)) {
+    // A rolling page can show two league weeks; with one of them confirmed, only part of the grid is probable.
+    if (weeks.some((w) => me.confirmed_rounds?.includes(w))) {
+      return { tone: "", title: "Some of your days count as probably free",
+        sub: "Your usual week shows as probably in the weeks you haven't confirmed. Confirm them in My availability." };
+    }
     return { tone: "", title: `You're counted as probably free this ${unit}`,
       sub: `Your usual week shows as probably until you confirm this ${unit} in My availability.` };
   }

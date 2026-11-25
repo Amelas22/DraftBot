@@ -36,12 +36,14 @@ export async function mountConfirmPanel(root, api, { weeks, number, now, onChang
   let doc = checkDoc(await api.getConfirmation(range), CONFIRMATION_FORMAT);
 
   const box = el("input", { type: "checkbox", id: "confirm-switch" });
+  // Failures show in the note. A good result is already on screen in the row or the switch, so it is only read out.
   const note = el("p", { class: "status", role: "status", "aria-live": "polite" });
+  const said = el("p", { class: "sronly", role: "status", "aria-live": "polite" });
   const rows = el("div", { class: "confirmrows" });
   const panel = el("section", { class: "confirmpanel" },
     el("label", { class: "confirmswitch", for: "confirm-switch" }, box, el("span", { text: SWITCH_LABEL })),
     el("p", { class: "meta", text: SWITCH_HINT }),
-    rows, note);
+    rows, note, said);
 
   let buttons = [];
   function draw() {
@@ -72,12 +74,10 @@ export async function mountConfirmPanel(root, api, { weeks, number, now, onChang
     if (busy) return;
     setBusy(true);
     let ok = false;
-    try { doc = checkDoc(await call(), CONFIRMATION_FORMAT); ok = true; } catch (e) { note.textContent = e instanceof LinkExpired ? expiredMessage() : failure; }
+    try { doc = checkDoc(await call(), CONFIRMATION_FORMAT); ok = true; } catch (e) { note.textContent = e instanceof LinkExpired ? expiredMessage() : failure; said.textContent = ""; }
     draw();
     setBusy(false);
-    // A good result is already on screen in the row or the switch, so it is only announced; a failure stays visible.
-    note.className = ok ? "status sronly" : "status";
-    if (ok) note.textContent = announce?.() ?? "";
+    if (ok) { note.textContent = ""; said.textContent = announce?.() ?? ""; }
     if (refocus) box.focus?.();
     if (ok) onChange?.();
   }
@@ -92,7 +92,7 @@ export async function mountConfirmPanel(root, api, { weeks, number, now, onChang
   // A failed read leaves whatever the note says; a good one doesn't clear a visible failure.
   const reload = async () => {
     if (busy) return;
-    try { doc = checkDoc(await api.getConfirmation(range), CONFIRMATION_FORMAT); draw(); } catch (e) { if (e instanceof LinkExpired) { note.className = "status"; note.textContent = expiredMessage(); } }
+    try { doc = checkDoc(await api.getConfirmation(range), CONFIRMATION_FORMAT); draw(); } catch (e) { if (e instanceof LinkExpired) note.textContent = expiredMessage(); }
   };
   return { reload };
 }
