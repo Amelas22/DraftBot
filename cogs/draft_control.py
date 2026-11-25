@@ -6,7 +6,7 @@ from models.draft_session import DraftSession
 from helpers.stale_drafts import is_finished_draft
 from models.match import MatchResult
 from helpers.permissions import is_bot_manager
-from services.draft_pool_service import ENTRIES_STILL_HELD, PoolNotSettled, release_draft_pool
+from services.draft_pool_service import ENTRIES_STILL_HELD, PoolNotSettled, pool_balance, release_draft_pool
 from helpers.stale_drafts import is_finished_draft
 from discord.ui import View, Button
 from datetime import datetime, timedelta
@@ -26,6 +26,10 @@ ACTIVE_ABANDON_VOTES = {}
 
 # Hours until an abandoned draft's channels are cleaned up by the deletion task.
 ABANDON_CLEANUP_HOURS = 2
+
+# Appended to /scrap's result on a draft with entries in its pool.
+SCRAP_KEEPS_ENTRIES = ("\n💰 Entries stay in the prize pool for the restarted draft. "
+                       "If you're not restarting it, use `/abandon` to return them.")
 
 
 async def run_participant_vote(ctx, *, channel, view, registry, key, announcement,
@@ -767,22 +771,25 @@ class DraftControlCog(commands.Cog):
                     )
                     return
                 manager.drafting = False
-                # The money follows Draftmancer, for the same reason the local
-                # state does. If the emit above had failed we would have told
-                # players the draft is still running -- refunding them at that
-                # point hands back the entries for a draft they are still in.
+                # The pool is left alone. A scrap stops the Draftmancer session,
+                # not the draft: the table usually restarts it in this same
+                # session with /ready, teams unchanged, and plays it to a result
+                # that settle_pool pays from this pool. Refunding here emptied
+                # it, so the restarted draft completed paying nobody. Entries
+                # come back only when the draft really ends early: /abandon,
+                # cancelling the queue, or the queue expiring.
+                staked = False
                 try:
-                    await release_draft_pool(str(draft_session.guild_id),
-                                             draft_session.session_id, "scrapped")
-                except PoolNotSettled:
-                    logger.opt(exception=True).error(
-                        f"scrapped {draft_session.session_id} but could not release its pool")
-                    await final_message.edit(content=f"🛑 **Draft canceled!**\n{ENTRIES_STILL_HELD}")
-                    return
+                    staked = await pool_balance(str(draft_session.guild_id),
+                                                draft_session.session_id) > 0
+                except Exception:
+                    logger.opt(exception=True).warning(
+                        f"scrapped {draft_session.session_id}: could not read its pool")
                 await final_message.edit(content=
                                         "🛑 **Draft canceled!** \n" \
                                         "Use `/ready` to begin a ready check for a new draft.\n" \
                                         "Use `/mutiny` to remove the bot and take control of the session."
+                                        + (SCRAP_KEEPS_ENTRIES if staked else "")
                 )
 
             async def _not_cancelled():
