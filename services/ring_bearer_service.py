@@ -9,6 +9,9 @@ Manages the ring bearer role - a single-holder role that can be claimed by:
 Only one player per guild can hold the ring bearer role at a time.
 """
 
+import asyncio
+from collections import defaultdict
+
 import discord
 from datetime import datetime
 from loguru import logger
@@ -24,17 +27,51 @@ from services.leaderboard_service import (
 from helpers.display_names import get_display_name
 
 
-async def update_ring_bearer_for_guild(bot, guild_id: str, session_id: Optional[str] = None, streak_extensions: Optional[dict] = None):
-    """
-    Called after leaderboard updates to check if ring bearer should transfer.
+# Which streak_extensions flag says a leaderboard category's streak moved.
+STREAK_EXTENSION_FLAGS = {
+    "longest_win_streak": "win_streak_increased",
+    "perfect_streak": "perfect_streak_increased",
+    "draft_win_streak": "draft_win_streak_increased",
+}
 
-    Only transfers if a #1 leader extended their streak in the draft that just completed.
+
+# One check at a time per guild. Each check reads the holder and then
+# transfers away from them; two reports landing together would otherwise both
+# read the same holder, each strip the role from that holder only, and leave
+# both winners with it. The bot is one process, so an in-process lock is enough.
+# Not reentrant: transfer_ring_bearer, which these checks call, must not take it.
+_guild_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+
+async def update_ring_bearer_for_guild(bot, guild_id: str, session_id: Optional[str] = None,
+                                       streak_extensions: Optional[dict] = None):
+    async with _guild_locks[guild_id]:
+        await _update_ring_bearer_for_guild(bot, guild_id, session_id, streak_extensions)
+
+
+async def check_match_defeat_transfer(bot, guild_id: str, winner_id: str, loser_id: str, session_id: str):
+    async with _guild_locks[guild_id]:
+        await _check_match_defeat_transfer(bot, guild_id, winner_id, loser_id, session_id)
+
+
+async def _update_ring_bearer_for_guild(bot, guild_id: str, session_id: Optional[str],
+                                        streak_extensions: Optional[dict]):
+    """
+    Check whether the ring bearer should transfer.
+
+    Runs after every match report (match streaks) and every draft end (draft
+    win streaks). With streak_extensions, only a #1 leader who extended that
+    streak in the triggering event takes it, so each streak is claimed the
+    moment it reaches #1 -- a streak that peaks and breaks inside one draft
+    still counts. An empty dict means nothing was extended: no transfer.
+    streak_extensions=None is a manual refresh: the first #1 leader takes it.
 
     Args:
         bot: Discord bot instance
         guild_id: Guild ID string
         session_id: Draft session ID (for logging). If None, this is a manual refresh.
-        streak_extensions: Dict of {player_id: {streak_type_increased: bool}}
+        streak_extensions: Dict of {player_id: {streak_type_increased: bool}}, or
+            None for a manual refresh
     """
     try:
         config = get_config(guild_id)
@@ -79,31 +116,17 @@ async def update_ring_bearer_for_guild(bot, guild_id: str, session_id: Optional[
                     logger.info(f"[RING BEARER] No #1 active leaders in {category}")
                     continue
 
-                # Extract streak key for checking extensions
-                if category == "longest_win_streak":
-                    streak_key = "win_streak_increased"
-                elif category == "perfect_streak":
-                    streak_key = "perfect_streak_increased"
-                elif category == "draft_win_streak":
-                    streak_key = "draft_win_streak_increased"
-                else:
+                streak_key = STREAK_EXTENSION_FLAGS.get(category)
+                if streak_key is None:
                     continue
 
                 # Check if ANY of the tied leaders extended their streak
-                if streak_extensions and session_id:
+                if streak_extensions is not None:
                     # Normal draft - check if any #1 leader extended in this draft
                     for leader_data in tied_leaders:
                         leader_id = leader_data["player_id"]
 
-                        # Extract streak length for logging
-                        if category == "longest_win_streak":
-                            streak_length = leader_data.get("longest_win_streak", 0)
-                        elif category == "perfect_streak":
-                            streak_length = leader_data.get("perfect_streak", 0)
-                        elif category == "draft_win_streak":
-                            streak_length = leader_data.get("draft_win_streak", 0)
-                        else:
-                            streak_length = 0
+                        streak_length = leader_data.get(category, 0)
 
                         logger.info(f"[RING BEARER] Checking tied leader {leader_id} (streak={streak_length})")
 
@@ -112,6 +135,9 @@ async def update_ring_bearer_for_guild(bot, guild_id: str, session_id: Optional[
 
                         logger.info(f"[RING BEARER] Leader {leader_id} extended {category}: {extended}")
 
+                        if extended and leader_id == current_bearer_id:
+                            logger.info(f"[RING BEARER] {leader_id} already holds the jewel; no transfer")
+                            return
                         if extended:
                             logger.info(f"[RING BEARER] TRANSFER: {leader_id} gets ring via {category}")
                             await transfer_ring_bearer(
@@ -148,7 +174,7 @@ async def update_ring_bearer_for_guild(bot, guild_id: str, session_id: Optional[
         logger.error(f"Error updating ring bearer for guild {guild_id}: {e}")
 
 
-async def check_match_defeat_transfer(bot, guild_id: str, winner_id: str, loser_id: str, session_id: str):
+async def _check_match_defeat_transfer(bot, guild_id: str, winner_id: str, loser_id: str, session_id: str):
     """
     Called after match results are processed.
     Check if loser was ring bearer - if so, transfer to winner.
