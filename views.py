@@ -2225,15 +2225,6 @@ class MatchResultSelect(Select):
                             action, streak_extensions = await apply_result_report(match_result, previous_winner_id)
 
                             if action == "apply":
-                                # Store streak extension info for ring bearer check later
-                                from utils import store_match_streak_extensions
-                                store_match_streak_extensions(
-                                    self.session_id,
-                                    match_result.player1_id,
-                                    match_result.player2_id,
-                                    streak_extensions
-                                )
-
                                 # Check for ring bearer transfer if there was a winner
                                 if winner_id:
                                     loser_id = match_result.player2_id if winner_id == match_result.player1_id else match_result.player1_id
@@ -2244,6 +2235,16 @@ class MatchResultSelect(Select):
                                         winner_id=winner_id,
                                         loser_id=loser_id,
                                         session_id=self.session_id
+                                    )
+
+                                    # After the defeat check, so a winner who just took the
+                                    # jewel in combat isn't re-announced for a streak.
+                                    from services.ring_bearer_service import update_ring_bearer_for_guild
+                                    await update_ring_bearer_for_guild(
+                                        self.bot,
+                                        str(draft_session.guild_id),
+                                        session_id=self.session_id,
+                                        streak_extensions=streak_extensions,
                                     )
             
             if draft_session:

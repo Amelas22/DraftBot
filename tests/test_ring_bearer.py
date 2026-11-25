@@ -819,3 +819,107 @@ async def test_role_sync_member_not_found_logs_warning(mock_member):
 
         # Old bearer role should still be removed
         old_bearer.remove_roles.assert_called_once()
+
+
+# ==================== WHEN A STREAK CLAIMS THE JEWEL ====================
+#
+# The check runs after every match report (with that match's streak flags)
+# and every draft end (with draft win streak flags). A streak claims the jewel
+# the moment it reaches #1, so one that peaks and breaks inside a single draft
+# still counts -- it used to be checked only at draft end, by which time it
+# had already ended.
+
+async def run_streak_check(test_db, mock_bot, mock_config, leaders_by_category,
+                           streak_extensions, bearer="holder"):
+    """Run the check with each category's own #1 list; return the transfer mock."""
+    guild_id = "123456"
+    mock_bot.get_guild.return_value = MagicMock(spec_set=discord.Guild)
+
+    async def leaders(guild_id, category, timeframe, session):
+        return leaders_by_category.get(category, [])
+
+    async with test_db() as session:
+        await create_ring_bearer_state(guild_id, bearer, "draft_win_streak", session)
+        with patch('services.ring_bearer_service.get_config', return_value=mock_config), \
+             patch('services.ring_bearer_service.db_session', return_value=session), \
+             patch('services.ring_bearer_service.get_leaderboard_leaders_tied_for_first',
+                   side_effect=leaders), \
+             patch('services.ring_bearer_service.transfer_ring_bearer') as mock_transfer:
+            await update_ring_bearer_for_guild(mock_bot, guild_id, "session-1", streak_extensions)
+    return mock_transfer
+
+
+def match_flags(player_id, perfect=False, win=False):
+    return {player_id: {"perfect_streak_increased": perfect, "win_streak_increased": win}}
+
+
+@pytest.mark.asyncio
+async def test_match_report_hands_jewel_to_new_perfect_streak_leader(test_db, mock_bot, mock_config):
+    """A 2-0 that takes #1 claims the jewel at once, before a later loss in
+    the same draft can end the streak."""
+    transfer = await run_streak_check(
+        test_db, mock_bot, mock_config,
+        {"perfect_streak": [create_leaderboard_result("p1", 6, category="perfect_streak")]},
+        match_flags("p1", perfect=True, win=True),
+    )
+
+    transfer.assert_called_once()
+    assert transfer.call_args[1]["new_bearer_id"] == "p1"
+    assert transfer.call_args[1]["acquired_via"] == "perfect_streak"
+    assert transfer.call_args[1]["previous_bearer_id"] == "holder"
+
+
+@pytest.mark.asyncio
+async def test_match_report_hands_jewel_to_new_win_streak_leader(test_db, mock_bot, mock_config):
+    transfer = await run_streak_check(
+        test_db, mock_bot, mock_config,
+        {"longest_win_streak": [create_leaderboard_result("p1", 12)]},
+        match_flags("p1", win=True),
+    )
+
+    transfer.assert_called_once()
+    assert transfer.call_args[1]["acquired_via"] == "longest_win_streak"
+
+
+@pytest.mark.asyncio
+async def test_holder_extending_own_streak_is_not_reannounced(test_db, mock_bot, mock_config):
+    """With a check after every match, a holder on a run would otherwise get a
+    fresh transfer announcement each time they win."""
+    transfer = await run_streak_check(
+        test_db, mock_bot, mock_config,
+        {"perfect_streak": [create_leaderboard_result("holder", 7, category="perfect_streak")]},
+        match_flags("holder", perfect=True, win=True),
+    )
+
+    transfer.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_draft_end_moves_only_draft_win_streaks(test_db, mock_bot, mock_config):
+    """A draft end carries only draft win streak flags: a match-streak #1 is
+    not re-claimed there, the extending draft-streak #1 is."""
+    transfer = await run_streak_check(
+        test_db, mock_bot, mock_config,
+        {
+            "perfect_streak": [create_leaderboard_result("p1", 6, category="perfect_streak")],
+            "draft_win_streak": [create_leaderboard_result("p2", 4, category="draft_win_streak")],
+        },
+        {"p1": {"draft_win_streak_increased": False}, "p2": {"draft_win_streak_increased": True}},
+    )
+
+    transfer.assert_called_once()
+    assert transfer.call_args[1]["new_bearer_id"] == "p2"
+    assert transfer.call_args[1]["acquired_via"] == "draft_win_streak"
+
+
+@pytest.mark.asyncio
+async def test_event_that_extends_nothing_is_not_a_manual_refresh(test_db, mock_bot, mock_config):
+    """An empty flags dict means nothing moved. Only None (the admin refresh)
+    hands the jewel to whoever is #1."""
+    transfer = await run_streak_check(
+        test_db, mock_bot, mock_config,
+        {"perfect_streak": [create_leaderboard_result("p1", 6, category="perfect_streak")]},
+        {},
+    )
+
+    transfer.assert_not_called()

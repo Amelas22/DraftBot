@@ -43,9 +43,6 @@ from helpers.money_gate import add_wallet_howto
 from leaderboard_config import AUTO_UPDATE_CATEGORIES, effective_timeframe, pinned_timeframe
 from services.crown_roles import update_crown_roles_for_guild
 
-# Module-level dict to track match streak extensions for ring bearer checks
-# {session_id: {player_id: {win_streak_increased: bool, perfect_streak_increased: bool}}}
-MATCH_STREAK_EXTENSIONS = {}
 from helpers.display_names import format_seating_order, get_display_name, get_display_name_by_id
 from helpers.skill import (
     PRIOR_MU,
@@ -68,27 +65,6 @@ locks = {}
 
 
 from helpers.pin_helpers import safe_pin, safe_unpin  # noqa: F401  (re-exported for callers)
-
-
-def store_match_streak_extensions(session_id: str, player1_id: str, player2_id: str, extensions: dict):
-    """
-    Store match streak extension info for later retrieval during draft completion.
-
-    This is needed because match results are reported individually before the draft ends,
-    but ring bearer checks happen after all matches are completed.
-
-    Args:
-        session_id: Draft session ID
-        player1_id: Player 1's Discord ID
-        player2_id: Player 2's Discord ID
-        extensions: Dict from update_player_stats_and_elo() with streak increase flags
-    """
-    if session_id not in MATCH_STREAK_EXTENSIONS:
-        MATCH_STREAK_EXTENSIONS[session_id] = {}
-
-    MATCH_STREAK_EXTENSIONS[session_id][player1_id] = extensions[player1_id]
-    MATCH_STREAK_EXTENSIONS[session_id][player2_id] = extensions[player2_id]
-    logger.debug(f"[RING BEARER] Stored match streak extensions for session {session_id}: {extensions}")
 
 
 def split_content_for_embed(content, include_header=False, max_length=1000):
@@ -1399,21 +1375,9 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                     except Exception as e:
                         logger.error(f"Error updating draft win streaks for session {draft_session_id}: {e}")
 
-                    # Retrieve match streak extensions that were stored during match reporting
-                    match_streak_extensions = MATCH_STREAK_EXTENSIONS.get(draft_session_id, {})
-
-                    # Combine all streak extension info
-                    all_streak_extensions = {}
-                    for player_id in set(list(match_streak_extensions.keys()) + list(draft_streak_extensions.keys())):
-                        all_streak_extensions[player_id] = {
-                            "win_streak_increased": match_streak_extensions.get(player_id, {}).get("win_streak_increased", False),
-                            "perfect_streak_increased": match_streak_extensions.get(player_id, {}).get("perfect_streak_increased", False),
-                            "draft_win_streak_increased": draft_streak_extensions.get(player_id, {}).get("draft_win_streak_increased", False)
-                        }
-
-                    # Clean up stored match streak data
-                    MATCH_STREAK_EXTENSIONS.pop(draft_session_id, None)
-                    logger.debug(f"[RING BEARER] Combined streak extensions for session {draft_session_id}: {all_streak_extensions}")
+                    # Match streaks were already settled as each match was
+                    # reported; only draft win streaks move at draft end.
+                    logger.debug(f"[RING BEARER] Draft streak extensions for session {draft_session_id}: {draft_streak_extensions}")
 
                     # Update leaderboards in background, passing streak extension info
                     # (leaderboard updates can take 20+ seconds due to rate limiting)
@@ -1421,7 +1385,7 @@ async def check_and_post_victory_or_draw(bot, draft_session_id):
                         bot,
                         draft_session.guild_id,
                         session_id=draft_session_id,
-                        streak_extensions=all_streak_extensions
+                        streak_extensions=draft_streak_extensions
                     ))
 
                     # Update debt summary in background (if one exists for this guild)
