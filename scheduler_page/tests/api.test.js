@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createApi, createFixtureApi, apiFromHash, checkDoc, LinkExpired, NeedsUpdate, NotEnabled, NEEDS_UPDATE } from "../js/api.js";
-import { decodeCells, encodeDayCells, localDateOf } from "../js/week.js";
+import { decodeCells, encodeDayCells, isoSeconds, localDateOf } from "../js/week.js";
+import { addDays, deadlineOnOrAfter, weekWindow } from "../js/rounds.js";
 
 const TOKEN = "abcdefghijklmnopqrstuv"; // 22 chars, like a real link token
 const reply = (status, body) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
@@ -281,34 +282,63 @@ test("the team-draft-new fixture is Fern, who has no week until she saves one, t
   assert.deepEqual([fern.zone, fern.cells], ["Europe/London", "AAAA"]);
 });
 
-test("the team-draft fixture's window starts at the current half hour, so cells can be booked", async () => {
+test("the team-draft fixture opens on the week whose Sunday is this one, with arrows to the weeks around it", async () => {
   const api = createFixtureApi("team-draft", diskFetch());
-  const { window } = await api.get("/api/team-draft");
-  const start = Date.parse(window.start_utc);
-  assert.equal(start % 1800000, 0);
-  assert.ok(Math.abs(start - Date.now()) <= 1800000);
+  const s = await api.get("/api/team-draft");
+  const first = addDays(deadlineOnOrAfter(new Date()), -7);
+  assert.deepEqual([s.window.start_utc, s.window.shape, s.round.number, s.round.first_day, s.round.last_day, s.round.prev, s.round.next],
+    [isoSeconds(weekWindow(addDays(first, 7)).startUtc), "round", null, first, addDays(first, 7), { week: addDays(first, -7) }, { week: addDays(first, 7) }]);
+  const start = Date.parse(s.window.start_utc);
+  assert.ok(start <= Date.now() && Date.now() < start + s.window.cells * 1800000);
+  assert.deepEqual(s.bookable, { start_utc: s.window.start_utc, end_utc: isoSeconds(new Date(start + s.window.cells * 1800000)) });
+});
+
+test("the team-draft fixture's viewer row carries the switch and the weeks they confirmed", async () => {
+  const api = createFixtureApi("team-draft", diskFetch());
+  const row = async () => (await api.get("/api/team-draft")).sides.flatMap((s) => s.people).find((p) => p.user === "900000000000000002");
+  assert.deepEqual([(await row()).trusts_usual, (await row()).confirmed_rounds], [true, []]);
+  const range = { from: "2026-11-16", to: "2026-11-16" };
+  await api.setTrustsUsual(false, range);
+  await api.confirmRound("2026-11-16", range);
+  assert.deepEqual([(await row()).trusts_usual, (await row()).confirmed_rounds], [false, ["2026-11-16"]]);
+});
+
+test("the team-draft fixture's this-week save confirms the weeks it painted", async () => {
+  const api = createFixtureApi("team-draft", diskFetch());
+  await api.setTrustsUsual(false, { from: "2026-11-16", to: "2026-11-16" });
+  await api.putThisWeek({ format: "draftbot.scheduler.this_week", version: 1, zone: "America/New_York", days: [], painted_weeks: ["2026-11-16"] });
+  assert.deepEqual((await api.getConfirmation({ from: "2026-11-16", to: "2026-11-16" })).confirmed_rounds, ["2026-11-16"]);
+});
+
+test("the team-draft fixture serves the week it is asked for", async () => {
+  const s = await createFixtureApi("team-draft", diskFetch()).get("/api/team-draft?week=2026-11-08");
+  assert.deepEqual([s.window.start_utc, s.window.cells, s.window.shape, s.round.first_day, s.round.prev], ["2026-11-08T08:00:00Z", 384, "round", "2026-11-08", { week: "2026-11-01" }]);
 });
 
 test("the team-draft fixture books, moves and clears in memory, bumping the version", async () => {
   const fake = diskFetch();
   const api = createFixtureApi("team-draft", fake);
-  const { window } = await api.get("/api/team-draft");
+  // The week after next, so every cell is still ahead.
+  const week = addDays(deadlineOnOrAfter(new Date()), 7);
+  const q = `?week=${week}`;
+  const { window } = await api.get(`/api/team-draft${q}`);
   const at = (j) => new Date(Date.parse(window.start_utc) + j * 1800000).toISOString().replace(/\.\d{3}Z$/, "Z");
+  const act = (body) => api.post(`${TD}${q}`, { action_id: uuid(), ...body });
   const before = fake.calls.length;
 
-  let r = await td(api, { kind: "book", start_utc: at(100), seen_version: 0 });
+  let r = await act({ kind: "book", start_utc: at(100), seen_version: 0 });
   assert.deepEqual([r.ok, r.code, r.state.booking.start_utc, r.state.booking.version, r.state.booking.by_name], [true, null, at(100), 1, "Ben"]);
-  r = await td(api, { kind: "book", start_utc: at(101), seen_version: 0 });
+  r = await act({ kind: "book", start_utc: at(101), seen_version: 0 });
   assert.deepEqual([r.ok, r.code, r.state.booking.start_utc, r.state.booking.version], [false, "changed", at(100), 1]);
-  r = await td(api, { kind: "book", start_utc: at(101), seen_version: 1 });
-  assert.deepEqual([r.ok, r.state.booking.start_utc, r.state.booking.version], [true, at(101), 2]);
-  r = await td(api, { kind: "book", start_utc: at(-1), seen_version: 2 });
+  r = await act({ kind: "book", start_utc: at(101), seen_version: 1 });
+  assert.deepEqual([r.ok, r.state.booking.start_utc, r.state.booking.version, r.state.window.start_utc], [true, at(101), 2, window.start_utc]);
+  r = await act({ kind: "book", start_utc: "2020-01-01T00:00:00Z", seen_version: 2 });
   assert.deepEqual([r.ok, r.code], [false, "past"]);
-  r = await td(api, { kind: "book", start_utc: at(336), seen_version: 2 });
+  r = await act({ kind: "book", start_utc: at(window.cells), seen_version: 2 });
   assert.deepEqual([r.ok, r.code], [false, "out_of_window"]);
-  r = await td(api, { kind: "clear", seen_version: 2 });
+  r = await act({ kind: "clear", seen_version: 2 });
   assert.deepEqual([r.ok, r.state.booking.start_utc, r.state.booking.version], [true, null, 3]);
-  r = await td(api, { kind: "clear", seen_version: 3 });
+  r = await act({ kind: "clear", seen_version: 3 });
   assert.deepEqual([r.ok, r.code], [false, "not_booked"]);
   assert.equal((await api.get("/api/team-draft")).booking.version, 3);
   assert.equal(fake.calls.length, before);
@@ -339,7 +369,7 @@ test("every fixture api keeps an in-memory this-week doc", async () => {
     const empty = { format: "draftbot.scheduler.this_week", version: 1, zone: null, days: [] };
     assert.deepEqual(await api.getThisWeek(), empty);
     const doc = { ...empty, zone: "UTC", days: [{ date: "2026-10-22", cells: "AAAAAAAA" }] };
-    assert.deepEqual(await api.putThisWeek({ ...doc, also_usual: false }), doc);
+    assert.deepEqual(await api.putThisWeek({ ...doc, also_usual: false, painted_weeks: ["2026-10-19"] }), doc);
     assert.deepEqual(await api.getThisWeek(), doc);
     assert.equal(await api.clearThisWeek(), null);
     assert.deepEqual(await api.getThisWeek(), empty);
@@ -364,4 +394,43 @@ test("the team-draft fixture stores only the days that differ from the usual wee
   await api.putThisWeek({ zone: usual.zone, also_usual: false, days: [{ date: "2026-10-26", cells: same }, { date: "2026-10-27", cells: encodeDayCells([1]) }] });
   const ben = (await api.get("/api/team-draft")).sides.flatMap((s) => s.people).find((p) => p.user === "900000000000000002");
   assert.deepEqual(ben.overrides.map((o) => o.date), ["2026-10-27"]);
+});
+
+test("getThisWeek and clearThisWeek pass a range as from/to", async () => {
+  const fake = recorder(200, { format: "draftbot.scheduler.this_week", version: 1, zone: null, days: [] });
+  const api = createApi(TOKEN, fake);
+  const range = { from: "2026-11-15", to: "2026-11-23" };
+  await api.getThisWeek(range);
+  await api.clearThisWeek(range);
+  await api.getThisWeek();
+  await api.clearThisWeek();
+  assert.deepEqual(fake.calls.map(([u, o]) => [o.method, u]), [
+    ["GET", "/api/this-week?from=2026-11-15&to=2026-11-23"], ["DELETE", "/api/this-week?from=2026-11-15&to=2026-11-23"],
+    ["GET", "/api/this-week"], ["DELETE", "/api/this-week"],
+  ]);
+});
+
+test("confirmation calls carry the range", async () => {
+  const fake = recorder(200, { trusts_usual: true, confirmed_rounds: [] });
+  const api = createApi(TOKEN, fake);
+  const range = { from: "2026-11-16", to: "2026-11-16" };
+  await api.getConfirmation(range);
+  await api.setTrustsUsual(false, range);
+  await api.confirmRound("2026-11-16", range);
+  assert.deepEqual(fake.calls.map(([u, o]) => [o.method, u, o.body]), [
+    ["GET", "/api/confirmation?from=2026-11-16&to=2026-11-16", undefined],
+    ["PUT", "/api/confirmation?from=2026-11-16&to=2026-11-16", '{"trusts_usual":false}'],
+    ["POST", "/api/confirmation/rounds?from=2026-11-16&to=2026-11-16", '{"round":"2026-11-16"}'],
+  ]);
+});
+
+test("fixture confirmation remembers the switch and confirmed rounds", async () => {
+  const range = { from: "2026-11-16", to: "2026-11-16" };
+  for (const name of ["usual-week", "teams", "team-draft"]) {
+    const api = createFixtureApi(name, diskFetch());
+    assert.deepEqual(await api.getConfirmation(range), { format: "draftbot.scheduler.confirmation", version: 1, trusts_usual: true, confirmed_rounds: [] });
+    await api.setTrustsUsual(false, range);
+    await api.confirmRound("2026-11-16", range);
+    assert.deepEqual(await api.getConfirmation(range), { format: "draftbot.scheduler.confirmation", version: 1, trusts_usual: false, confirmed_rounds: ["2026-11-16"] });
+  }
 });

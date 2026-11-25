@@ -2,24 +2,45 @@
 // cell can be booked, and what the booking and a refusal say. No DOM; the view draws it.
 import { CELLS, CELL_MS, addCells } from "./week.js";
 import { memberFree } from "./teams.js";
+import { addDays, confirmedCells, leagueWeeksBetween } from "./rounds.js";
 
 export const FORMAT = "draftbot.scheduler.team_draft";
 
 // Per side, per person (in the document's order): the window cells they are free in.
-export const freeBySide = (state, startUtc) => state.sides.map((side) => side.people.map((p) => memberFree(p, startUtc)));
+export const freeBySide = (state, startUtc) =>
+  state.sides.map((side) => side.people.map((p) => memberFree(p, startUtc, state.window.cells)));
 
 // How many are free in cell j on each side, from freeBySide's sets, first side first.
 export const sideCounts = (freeSides, j) => freeSides.map((side) => side.reduce((n, free) => n + (free.has(j) ? 1 : 0), 0));
 
-// A cell's counts as the page shows them, side by side: "3–2".
-export const countText = (counts) => counts.join("–");
+// Per side, per person: the cells they are free in that count as confirmed (all of them for someone who trusts their
+// usual week; a subset of the freeBySide set otherwise).
+export const sureBySide = (state, freeSides, startUtc) => state.sides.map((side, s) =>
+  side.people.map((p, i) => confirmedCells(freeSides[s][i], p.trusts_usual, p.confirmed_rounds ?? [], startUtc)));
+
+export const PROBABLY = " (probably)";
+export const MAYBE_LEGEND = "2+1 = 2 confirmed, 1 probably free";
+export const UNSURE_LABEL = "not confirmed for this round";
+
+// A cell's counts as the page shows them, side by side: "3–2"; a side with probables reads "2+1".
+export const countText = (counts, maybes = []) =>
+  counts.map((n, s) => (maybes[s] ? `${n}+${maybes[s]}` : `${n}`)).join("–");
+
+// Cell j's count text: confirmed counts, and per side how many more are free but not confirmed.
+export function cellCountText(freeSides, sureSides, j) {
+  const sure = sideCounts(sureSides, j);
+  return countText(sure, sideCounts(freeSides, j).map((n, s) => n - sure[s]));
+}
 
 // Who is free in cell j, per side in roster order: [{ label, free, notFree }], from freeBySide's sets and the same
-// (already filtered) state they were made from.
-export const whoIsFree = (state, freeSides, j) => state.sides.map((side, s) => {
+// (already filtered) state they were made from. A free name that is not in `sureSides` reads "Bo (probably)".
+export const whoIsFree = (state, freeSides, j, sureSides = freeSides) => state.sides.map((side, s) => {
   const free = [];
   const notFree = [];
-  side.people.forEach((p, i) => (freeSides[s][i].has(j) ? free : notFree).push(p.name));
+  side.people.forEach((p, i) => {
+    if (!freeSides[s][i].has(j)) notFree.push(p.name);
+    else free.push(sureSides[s][i].has(j) ? p.name : p.name + PROBABLY);
+  });
   return { label: side.label, free, notFree };
 });
 
@@ -39,14 +60,29 @@ export const withoutPeople = (state, off) => ({
 
 // Runs: stretches of cells where exactly the same people are free, on both sides, with at least one of them. Per window
 // cell, null when nobody is free, else { first, last }: whether the cell opens or closes its run. A run never crosses
-// into a new day column (columnStarts: the cells that begin one), since the grid draws each day separately.
-export function freeRuns(freeSides, columnStarts) {
+// into a new day column (columnStarts: the cells that begin one), since the grid draws each day separately. `count` is
+// the window length in cells.
+// A person is free-and-sure ("2"), free but probable ("1") or not free ("0"), so a run splits where the count text would
+// change.
+export function freeRuns(freeSides, columnStarts, count = CELLS, sureSides = freeSides) {
   const people = freeSides.flat();
-  const who = (j) => people.map((free) => (free.has(j) ? "1" : "0")).join("");
-  const keys = Array.from({ length: CELLS }, (_, j) => who(j));
+  const sures = sureSides.flat();
+  const who = (j) => people.map((free, i) => (!free.has(j) ? "0" : sures[i].has(j) ? "2" : "1")).join("");
+  const keys = Array.from({ length: count }, (_, j) => who(j));
   const joined = (j) => j > 0 && !columnStarts.has(j) && keys[j - 1] === keys[j];
-  return keys.map((k, j) => (k.includes("1") ? { first: !joined(j), last: j === CELLS - 1 || !joined(j + 1) } : null));
+  return keys.map((k, j) => (/[12]/.test(k) ? { first: !joined(j), last: j === count - 1 || !joined(j + 1) } : null));
 }
+
+// The league weeks (Mondays) a view's confirmations are about: the viewed round's, else every week the window touches.
+export function statusWeeks(state) {
+  if (state.round) return [addDays(state.round.last_day, -6)];
+  const start = new Date(state.window.start_utc);
+  return leagueWeeksBetween(start, addCells(start, state.window.cells));
+}
+
+// Whether a person's usual week is shown as only probable in any of `weeks`.
+export const isUnconfirmed = (person, weeks) =>
+  person.trusts_usual === false && weeks.some((w) => !person.confirmed_rounds?.includes(w));
 
 // Pressing a side: switch all of it off, or all of it back on when it is already all off. Returns a new set.
 export function toggleSide(off, side) {
@@ -64,19 +100,30 @@ export function togglePerson(off, user) {
   return next;
 }
 
-// Cell j may be booked when it is in the window, not yet started, and the matchup is still open.
+// Cell j may be booked when it is in the window, not yet started, inside the dates open for booking, and the matchup
+// is still open.
 export function bookable(j, state, now, startUtc) {
   if (state.matchup.state !== "open") return false;
-  if (!Number.isInteger(j) || j < 0 || j >= CELLS) return false;
-  return addCells(startUtc, j).getTime() > now.getTime();
+  if (!Number.isInteger(j) || j < 0 || j >= state.window.cells) return false;
+  const start = addCells(startUtc, j).getTime();
+  return start > now.getTime()
+    && start >= new Date(state.bookable.start_utc).getTime() && start < new Date(state.bookable.end_utc).getTime();
+}
+
+// How the grid marks cell j: "past" once it has started, "nobook" when it is still ahead but outside the dates open
+// for booking on an open matchup, else "".
+export function cellState(j, state, now, startUtc) {
+  if (addCells(startUtc, j).getTime() <= now.getTime()) return "past";
+  if (state.matchup.state === "open" && !bookable(j, state, now, startUtc)) return "nobook";
+  return "";
 }
 
 // The window cell index that names the same moment as `selected` once the window starts at `newStartUtc` instead of
-// `oldStartUtc`; null when nothing was picked or the moment is no longer in the window.
-export function shiftSelection(selected, oldStartUtc, newStartUtc) {
+// `oldStartUtc`; null when nothing was picked or the moment is no longer in the window (`count` cells long).
+export function shiftSelection(selected, oldStartUtc, newStartUtc, count = CELLS) {
   if (selected === null) return null;
   const j = selected - (newStartUtc.getTime() - oldStartUtc.getTime()) / CELL_MS;
-  return Number.isInteger(j) && j >= 0 && j < CELLS ? j : null;
+  return Number.isInteger(j) && j >= 0 && j < count ? j : null;
 }
 
 // "Booked for Fri 30 Oct, 8:00 PM by Bo" in the viewer's zone, or "No time booked yet".
@@ -95,7 +142,7 @@ export function bookingLine(state, zone) {
 const REFUSALS = {
   changed: "Someone changed the booking first. Here is the latest.",
   past: "That time has already passed.",
-  out_of_window: "That time is outside the next 7 days.",
+  out_of_window: "That time is outside the dates open for booking.",
   started: "This draft has already started.",
   gone: "This matchup no longer exists.",
   bad_input: "Something about that request wasn't valid. Reload and try again.",

@@ -10,15 +10,16 @@ import binascii
 import json
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from functools import cache
 from zoneinfo import ZoneInfo, available_timezones
 
-from sqlalchemy import delete, select
+from sqlalchemy import Select, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.db_session import db_session
 from models.scheduler import PlayerAvailability, PlayerDayOverride
+from services.round_confirmation import add_confirmations
 
 CELLS: int = 336
 CELL_MINUTES: int = 30
@@ -29,7 +30,8 @@ _DAY_BYTES = DAY_CELLS // 8
 _FORMAT = "draftbot.scheduler.usual_week"
 _VERSION = 1
 _THIS_WEEK_FORMAT = "draftbot.scheduler.this_week"
-MAX_THIS_WEEK_DAYS = 9
+MAX_THIS_WEEK_DAYS = 10
+MAX_PAINTED_WEEKS = 3
 
 
 class InvalidWeek(ValueError):
@@ -97,12 +99,12 @@ def decode_cells(b64: str) -> frozenset[int]:
 
 
 def window_cells(
-    zone: str, usual: frozenset[int], start_utc: datetime
+    zone: str, usual: frozenset[int], start_utc: datetime, count: int = CELLS
 ) -> frozenset[int]:
-    """Window cell j is free iff the local time of start + 30 min * j is painted."""
+    """Window cell j (of count) is free iff the local time of start + 30 min * j is painted."""
     tz = ZoneInfo(zone)
     out: set[int] = set()
-    for j in range(CELLS):
+    for j in range(count):
         local = (start_utc + timedelta(minutes=CELL_MINUTES * j)).astimezone(tz)
         cell = local.weekday() * 48 + (local.hour * 60 + local.minute) // CELL_MINUTES
         if cell in usual:
@@ -124,15 +126,18 @@ def day_cells_from_bytes(data: bytes) -> frozenset[int]:
 
 
 def effective_window_cells(
-    usual: UsualWeek | None, overrides: Sequence[DayOverride], start_utc: datetime
+    usual: UsualWeek | None,
+    overrides: Sequence[DayOverride],
+    start_utc: datetime,
+    count: int = CELLS,
 ) -> frozenset[int]:
     """Window cells a person is free: a dated override wins over the usual week for its local day."""
-    base = window_cells(usual.zone, usual.cells, start_utc) if usual else frozenset()
+    base = window_cells(usual.zone, usual.cells, start_utc, count) if usual else frozenset()
     if not overrides:
         return base
     zones = {o.zone: ZoneInfo(o.zone) for o in overrides}
     out: set[int] = set()
-    for j in range(CELLS):
+    for j in range(count):
         moment = start_utc + timedelta(minutes=CELL_MINUTES * j)
         for o in overrides:
             local = moment.astimezone(zones[o.zone])
@@ -187,10 +192,16 @@ class ThisWeek:
     zone: str
     days: tuple[DayOverride, ...]
     also_usual: bool
+    painted_weeks: tuple[date, ...] = ()
+    span: tuple[date, date] | None = None  # first and last date in the body as sent, past ones included
 
 
-def parse_this_week(raw: bytes, now_utc: datetime) -> ThisWeek:
-    """Validate a ``draftbot.scheduler.this_week`` v1 body; dates must fall in today-1 .. today+7 in its zone."""
+def parse_this_week(raw: bytes, now_utc: datetime, until_utc: datetime) -> ThisWeek:
+    """Validate a ``draftbot.scheduler.this_week`` v1 body.
+
+    A day starting (00:00 in the body's zone) at or after ``until_utc`` is
+    refused; a day before today in that zone is dropped.
+    """
     if len(raw) > MAX_FILE_BYTES:
         raise InvalidWeek("file too large")
     try:
@@ -213,6 +224,7 @@ def parse_this_week(raw: bytes, now_utc: datetime) -> ThisWeek:
     entries = doc.get("days")
     if not isinstance(entries, list) or len(entries) > MAX_THIS_WEEK_DAYS:
         raise InvalidWeek("days missing or too many")
+    painted = _painted_weeks(doc.get("painted_weeks", []))
     today = now_utc.astimezone(ZoneInfo(zone)).date()
     seen: set[date] = set()
     days: list[DayOverride] = []
@@ -227,13 +239,34 @@ def parse_this_week(raw: bytes, now_utc: datetime) -> ThisWeek:
             data = base64.b64decode(cells, validate=True)
         except (binascii.Error, ValueError) as exc:
             raise InvalidWeek("bad date or cells") from exc
-        if not today - timedelta(days=1) <= local <= today + timedelta(days=7):
+        if datetime.combine(local, time(), tzinfo=ZoneInfo(zone)) >= until_utc:
             raise InvalidWeek("date out of range")
         if local in seen:
             raise InvalidWeek("date repeated")
         seen.add(local)
+        if local < today:
+            continue
         days.append(DayOverride(zone, local, day_cells_from_bytes(data)))
-    return ThisWeek(zone, tuple(days), also_usual)
+    span = (min(seen), max(seen)) if seen else None
+    return ThisWeek(zone, tuple(days), also_usual, painted, span)
+
+
+def _painted_weeks(value: object) -> tuple[date, ...]:
+    """The league Mondays named in a save's ``painted_weeks``, sorted and unique."""
+    if not isinstance(value, list) or len(value) > MAX_PAINTED_WEEKS:
+        raise InvalidWeek("bad painted week")
+    weeks: set[date] = set()
+    for text in value:
+        try:
+            if not isinstance(text, str) or len(text) != 10:
+                raise ValueError(text)
+            week = date.fromisoformat(text)
+        except ValueError as exc:
+            raise InvalidWeek("bad painted week") from exc
+        if week.weekday() != 0:
+            raise InvalidWeek("bad painted week")
+        weeks.add(week)
+    return tuple(sorted(weeks))
 
 
 def this_week_doc(days: Sequence[DayOverride]) -> dict[str, object]:
@@ -370,42 +403,79 @@ def _is_live(row: PlayerDayOverride, now_utc: datetime) -> bool:
 
 
 async def day_overrides(
-    session: AsyncSession, users: list[str], now_utc: datetime
+    session: AsyncSession, users: list[str], start_utc: datetime, end_utc: datetime
 ) -> dict[str, list[DayOverride]]:
-    """The live dated overrides of ``users``, sorted by date; anyone without one is left out."""
+    """Dated overrides of ``users`` near ``[start_utc, end_utc)``, sorted by date.
+
+    Rows within a day either side of the window's UTC dates are returned, past
+    ones included, so an earlier round shows what was entered. Anyone without
+    one is left out.
+    """
     if not users:
         return {}
     rows = (
         await session.execute(
             select(PlayerDayOverride)
-            .where(PlayerDayOverride.user_id.in_(users))
+            .where(
+                PlayerDayOverride.user_id.in_(users),
+                PlayerDayOverride.local_date >= start_utc.date() - timedelta(days=1),
+                PlayerDayOverride.local_date <= end_utc.date() + timedelta(days=1),
+            )
             .order_by(PlayerDayOverride.local_date)
         )
     ).scalars()
     out: dict[str, list[DayOverride]] = {}
     for r in rows:
-        if _is_live(r, now_utc):
-            out.setdefault(str(r.user_id), []).append(_override(r))
+        out.setdefault(str(r.user_id), []).append(_override(r))
     return out
 
 
-async def load_day_overrides(user_id: str, now_utc: datetime) -> list[DayOverride]:
-    """A player's live dated overrides, sorted by date."""
+def _overrides_of(user_id: str, dates: tuple[date, date] | None) -> Select[tuple[PlayerDayOverride]]:
+    """A player's override rows, within the inclusive ``dates`` when given."""
+    query = select(PlayerDayOverride).where(PlayerDayOverride.user_id == user_id)
+    if dates is None:
+        return query
+    return query.where(
+        PlayerDayOverride.local_date >= dates[0], PlayerDayOverride.local_date <= dates[1]
+    )
+
+
+async def load_day_overrides(
+    user_id: str, now_utc: datetime, dates: tuple[date, date] | None = None
+) -> list[DayOverride]:
+    """A player's dated overrides, sorted by date.
+
+    With ``dates``, every row in that inclusive range, past ones included;
+    without, only the live ones.
+    """
     async with db_session() as session:
-        return (await day_overrides(session, [user_id], now_utc)).get(user_id, [])
+        query = _overrides_of(user_id, dates)
+        rows = (
+            await session.execute(query.order_by(PlayerDayOverride.local_date))
+        ).scalars()
+        return [_override(r) for r in rows if dates is not None or _is_live(r, now_utc)]
 
 
 async def replace_day_overrides(
-    user_id: str, days: Sequence[DayOverride], also_usual: bool, now_utc: datetime
+    user_id: str,
+    days: Sequence[DayOverride],
+    also_usual: bool,
+    now_utc: datetime,
+    confirm: frozenset[date] = frozenset(),
 ) -> list[DayOverride]:
-    """Make ``days`` the player's overrides, dropping every earlier row.
+    """Store ``days`` as the player's overrides, replacing only the rows on those dates.
 
     A day matching the usual week is not stored. With ``also_usual`` and no
     saved usual week, the days first become the usual week (in the first day's zone).
+    The league weeks in ``confirm`` are confirmed in the same transaction.
     """
     async with db_session() as session:
+        await add_confirmations(session, user_id, confirm, now_utc, "override")
         await session.execute(
-            delete(PlayerDayOverride).where(PlayerDayOverride.user_id == user_id)
+            delete(PlayerDayOverride).where(
+                PlayerDayOverride.user_id == user_id,
+                PlayerDayOverride.local_date.in_([d.local_date for d in days]),
+            )
         )
         week_row = await session.get(PlayerAvailability, user_id)
         usual = (
@@ -446,9 +516,12 @@ async def replace_day_overrides(
         return stored
 
 
-async def clear_day_overrides(user_id: str) -> None:
-    """Drop all of a player's dated overrides."""
+async def clear_day_overrides(
+    user_id: str, now_utc: datetime, dates: tuple[date, date] | None = None
+) -> None:
+    """Drop a player's overrides dated today or later in their own zone, within ``dates`` when given."""
     async with db_session() as session:
-        await session.execute(
-            delete(PlayerDayOverride).where(PlayerDayOverride.user_id == user_id)
-        )
+        query = _overrides_of(user_id, dates)
+        for row in (await session.execute(query)).scalars():
+            if row.local_date >= now_utc.astimezone(ZoneInfo(str(row.zone))).date():
+                await session.delete(row)

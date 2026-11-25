@@ -6,16 +6,23 @@ import { dirname, join } from "node:path";
 import {
   decodeCells, encodeCells, windowCells, usualCellOf, CELLS,
   decodeDayCells, encodeDayCells, effectiveWindowCells,
-  weekdayOfDate, usualWithWindow,
+  weekdayOfDate, usualWithWindow, addCells, isoSeconds,
 } from "../js/week.js";
 
 const fx = (name) =>
   JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures", name), "utf8"));
 
+// A case with window_cell_count is checked by instants only: the bitmap holds 336 cells.
+function assertWindow(got, c) {
+  const start = new Date(c.window_start_utc);
+  const free = [...got].sort((a, b) => a - b).map((j) => isoSeconds(addCells(start, j)));
+  assert.deepEqual(free, c.expected_free_utc, c.name);
+  if (c.window_cell_count === undefined) assert.equal(encodeCells(got), c.expected_window_cells, c.name);
+}
+
 test("conversion fixture cases match", () => {
   for (const c of fx("conversion.json").cases) {
-    const got = encodeCells(windowCells(c.zone, decodeCells(c.usual_cells), new Date(c.window_start_utc)));
-    assert.equal(got, c.expected_window_cells, c.name);
+    assertWindow(windowCells(c.zone, decodeCells(c.usual_cells), new Date(c.window_start_utc), c.window_cell_count ?? CELLS), c);
   }
 });
 
@@ -23,8 +30,7 @@ test("override fixture cases match", () => {
   for (const c of fx("override.json").cases) {
     const usual = c.usual && { zone: c.usual.zone, cells: decodeCells(c.usual.cells) };
     const overrides = c.overrides.map((o) => ({ zone: o.zone, date: o.date, cells: decodeDayCells(o.cells) }));
-    const got = encodeCells(effectiveWindowCells(usual, overrides, new Date(c.window_start_utc)));
-    assert.equal(got, c.expected_window_cells, c.name);
+    assertWindow(effectiveWindowCells(usual, overrides, new Date(c.window_start_utc), c.window_cell_count ?? CELLS), c);
   }
 });
 
@@ -89,4 +95,15 @@ test("usualWithWindow writes window cells back to their usual-week cells and kee
   // Painting the whole window and then nothing round-trips through windowCells.
   assert.deepEqual(windowCells(NY, usualWithWindow(new Set(), new Set([0, 5, 300]), NY, start), start), new Set([0, 5, 300]));
   assert.ok(!out.has(100));
+});
+
+test("usualWithWindow with previous writes only what changed, so a stroke on one Sunday survives the other", () => {
+  const start = new Date("2026-11-15T08:00:00Z"); // Sun 15 Nov, midnight in Los Angeles
+  const LA = "America/Los_Angeles";
+  const got = usualWithWindow(new Set(), new Set([0]), LA, start, 384, new Set());
+  assert.deepEqual(got, new Set([6 * 48])); // Sunday 00:00, and nothing else touched
+  // Without previous the trailing Sunday (window cell 336, unpainted) writes the same usual cell back to busy.
+  assert.ok(!usualWithWindow(new Set(), new Set([0]), LA, start, 384).has(6 * 48));
+  // The window's last cell, past the usual week's 336, is written too: Sunday 11:30 PM.
+  assert.deepEqual(usualWithWindow(new Set(), new Set([383]), LA, start, 384, new Set()), new Set([6 * 48 + 47]));
 });

@@ -727,3 +727,11 @@ async def test_settings_shows_lines_with_only_overrides(test_db, monkeypatch):
         False, datetime.now(timezone.utc))
     s = await load_settings("p1", "g")
     assert s.usual_week is not None and len(s.usual_week) == 1
+
+
+async def test_settings_week_ignores_old_overrides(test_db):
+    from datetime import date
+    from services.availability import DayOverride, replace_day_overrides
+    await replace_day_overrides(
+        "p1", [DayOverride("UTC", date(2020, 1, 1), frozenset({3}))], False, datetime.now(timezone.utc))
+    assert await player_settings._usual_week("p1") is None

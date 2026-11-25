@@ -6,7 +6,7 @@ fails is logged and never fails the booking.
 """
 import json
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -24,12 +24,11 @@ from services.availability import (
     cells_b64,
     day_cells_b64,
     day_overrides,
-    floor_half_hour,
     iso_z,
     naive_utc,
     usual_weeks,
 )
-from services.booking import WINDOW_CELLS, BookingChange
+from services.booking import BookingChange
 from services.scheduler_http import (
     ANNOUNCE,
     DISPLAY_NAME,
@@ -40,6 +39,9 @@ from services.scheduler_http import (
     read_body,
     view_refused,
 )
+from services.round_confirmation import confirmed_rounds, trusts_usual_of
+from services.round_weeks import BadWeek, league_weeks_between, week_doc
+from services.scheduler_calendar import Schedule, team_draft_schedule
 from services.scheduler_links import LinkIdentity
 from services.team_draft import DRAFT_CELLS, MIN_PER_SIDE
 
@@ -85,23 +87,29 @@ async def build_state(
     matchup: dict[str, object],
     booking: dict[str, object],
     rosters: tuple[Roster, Roster],
+    schedule: Schedule,
 ) -> dict[str, object]:
     """The ``draftbot.scheduler.team_draft`` v1 body for one matchup, whatever owns it."""
-    now: datetime = request.app[NOW]()
     # Rosters are read outside any session: resolving them may reach Discord.
     async with db_session() as session:
         users = sorted({user for roster in rosters for user, _name in roster.people})
         weeks = await usual_weeks(session, users)
-        overrides = await day_overrides(session, users, now)
+        overrides = await day_overrides(session, users, schedule.start_utc, schedule.end_utc)
+        trusts = await trusts_usual_of(session, users)
+        in_view = league_weeks_between(schedule.start_utc, schedule.end_utc)
+        confirmed = await confirmed_rounds(session, users, min(in_view), max(in_view))
     return {
         "format": FORMAT,
         "version": _VERSION,
         "matchup": matchup,
         "window": {
-            "start_utc": iso_z(floor_half_hour(now)),
+            "start_utc": iso_z(schedule.start_utc),
             "cell_minutes": CELL_MINUTES,
-            "cells": WINDOW_CELLS,
+            "cells": schedule.cells,
+            "shape": schedule.shape,
         },
+        "round": None if schedule.page is None else week_doc(schedule.page),
+        "bookable": {"start_utc": iso_z(schedule.span.start_utc), "end_utc": iso_z(schedule.span.end_utc)},
         "rules": {"min_per_side": MIN_PER_SIDE, "draft_cells": DRAFT_CELLS},
         "sides": [
             {
@@ -112,6 +120,8 @@ async def build_state(
                         "name": name,
                         "zone": w.zone if (w := weeks.get(user)) else None,
                         "cells": cells_b64(weeks.get(user)),
+                        "trusts_usual": trusts[user],
+                        "confirmed_rounds": sorted(d.isoformat() for d in confirmed.get(user, ())),
                         "overrides": [
                             {
                                 "date": o.local_date.isoformat(),
@@ -138,6 +148,7 @@ async def _state(request: web.Request, team_draft_id: int) -> dict[str, object] 
         row = await _matchup(session, team_draft_id, who.guild_id)
         if row is None:
             return None
+        schedule = await team_draft_schedule(session, who.guild_id, request.query, request.app[NOW]())
         thread_url = (
             f"https://discord.com/channels/{who.guild_id}/{row.thread_id}" if row.thread_id else None
         )
@@ -152,7 +163,7 @@ async def _state(request: web.Request, team_draft_id: int) -> dict[str, object] 
     # Resolved from the guild's cache on every load, so someone who joins a
     # side's role later shows up; read outside the session above.
     rosters = await request.app[SIDE_PEOPLE](who.guild_id, team_draft_id)
-    return await build_state(request, who, matchup, booking, rosters)
+    return await build_state(request, who, matchup, booking, rosters, schedule)
 
 
 async def serve_state(request: web.Request, link: "LinkSubject") -> web.Response:
@@ -160,7 +171,10 @@ async def serve_state(request: web.Request, link: "LinkSubject") -> web.Response
     if (refused := view_refused(request, link.view)) is not None:
         return refused
     subject = subject_id(identity(request))
-    state = None if subject is None else await link.state(request, subject)
+    try:
+        state = None if subject is None else await link.state(request, subject)
+    except BadWeek:
+        return error(400, "bad_input")
     if state is None:
         return error(404, "gone")
     return web.json_response(state)
@@ -212,11 +226,15 @@ class LinkSubject:
     book: Callable[[AsyncSession, int, str, str, datetime, int, datetime], Awaitable[BookingChange]]
     clear: Callable[[AsyncSession, int, str, str, int, datetime], Awaitable[BookingChange]]
     state: Callable[[web.Request, int], Awaitable[dict[str, object] | None]]
+    schedule: Callable[[AsyncSession, str, int, Mapping[str, str], datetime], Awaitable[Schedule]]  # raises BadWeek
     announce: web.AppKey[Callable[[int, BookingChange], Awaitable[None]]]
 
 
 async def _reply(request: web.Request, link: LinkSubject, subject: int, ok: bool, code: str | None) -> web.Response:
-    state = await link.state(request, subject)
+    try:
+        state = await link.state(request, subject)
+    except BadWeek:
+        return error(400, "bad_input")
     if state is None:
         return error(404, "gone")
     return web.json_response({"ok": ok, "code": code, "state": state})
@@ -241,6 +259,10 @@ async def serve_action(request: web.Request, link: LinkSubject) -> web.Response:
     async with db_session() as session:
         if not await link.exists(session, who.guild_id, subject):
             return error(404, "gone")
+        try:  # a bad ?round / ?week is refused before anything is written
+            await link.schedule(session, who.guild_id, subject, request.query, request.app[NOW]())
+        except BadWeek:
+            return error(400, "bad_input")
     now: datetime = request.app[NOW]()
     name = await request.app[DISPLAY_NAME](who.guild_id, who.user_id)
 
@@ -283,6 +305,12 @@ async def _team_draft_exists(session: AsyncSession, guild_id: str, team_draft_id
     return await _matchup(session, team_draft_id, guild_id) is not None
 
 
+async def _team_draft_schedule(
+    session: AsyncSession, guild_id: str, _team_draft_id: int, query: Mapping[str, str], now: datetime
+) -> Schedule:
+    return await team_draft_schedule(session, guild_id, query, now)
+
+
 TEAM_DRAFT = LinkSubject(
     view=VIEW,
     key="team_draft_id",
@@ -291,6 +319,7 @@ TEAM_DRAFT = LinkSubject(
     book=team_draft.book,
     clear=team_draft.clear,
     state=_state,
+    schedule=_team_draft_schedule,
     announce=ANNOUNCE,
 )
 

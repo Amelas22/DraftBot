@@ -1,6 +1,6 @@
 """Scheduler tables. Timestamps here are naive UTC (hence the ``_utc`` suffix);
 the rest of drafts.db stores naive New York time."""
-from sqlalchemy import Column, Date, DateTime, Integer, LargeBinary, String
+from sqlalchemy import Boolean, Column, Date, DateTime, Integer, LargeBinary, String
 
 from database.models_base import Base
 
@@ -43,3 +43,24 @@ class SchedulerLink(Base):
     expires_utc = Column(DateTime, nullable=False, index=True)
     removed_utc = Column(DateTime, nullable=True)
     subject = Column(String(64), nullable=True)  # what the link opens, e.g. a team draft id
+
+
+class PlayerSchedulerSetting(Base):
+    """A player's scheduler switches. NULL means on; every future column here must be
+    nullable with no default, because creating the row for one setting must not decide the others."""
+
+    __tablename__ = 'player_scheduler_setting'
+
+    user_id = Column(String(64), primary_key=True)
+    trusts_usual = Column(Boolean, nullable=True)
+
+
+class PlayerRoundConfirmation(Base):
+    """A player confirmed their availability for one league week (keyed by its Pacific Monday)."""
+
+    __tablename__ = 'player_round_confirmation'
+
+    user_id = Column(String(64), primary_key=True)
+    round_monday = Column(Date, primary_key=True)
+    source = Column(String(16), nullable=False)  # "override" | "button" | "backfill"
+    stored_utc = Column(DateTime, nullable=False)

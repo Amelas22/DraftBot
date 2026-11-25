@@ -1,5 +1,5 @@
 // The usual-week editor: a pure model (applyStroke, toFile, loadWeek) plus a thin DOM view (mountUsual).
-import { decodeCells, encodeCells, isoSeconds, usualWithWindow, windowCells } from "./week.js";
+import { CELLS, decodeCells, encodeCells, isoSeconds, usualWithWindow, windowCells } from "./week.js";
 import { LinkExpired, checkDoc } from "./api.js";
 import { expiredMessage, NOT_ENABLED } from "./messages.js";
 import { el } from "./dom.js";
@@ -11,15 +11,15 @@ const PER_DAY = 48;
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 // Fill the rectangle between two cells of a paint grid (the same columns range x the same rows range), by key.
-// geo (from gridGeometry) is the grid's layout; the default is the usual Mon-Sun week.
-export function applyStroke(cells, from, to, paint, geo = WEEK_GEOMETRY) {
+// geo (from gridGeometry) is the grid's layout; the default is the usual Mon-Sun week. Locked keys keep their state.
+export function applyStroke(cells, from, to, paint, geo = WEEK_GEOMETRY, locked = new Set()) {
   const out = new Set(cells);
   const [x0, y0] = geo.pos.get(from);
   const [x1, y1] = geo.pos.get(to);
   for (let x = Math.min(x0, x1); x <= Math.max(x0, x1); x++) {
     for (let y = Math.min(y0, y1); y <= Math.max(y0, y1); y++) {
       const k = geo.keyAt(x, y);
-      if (k === undefined) continue;
+      if (k === undefined || locked.has(k)) continue;
       if (paint) out.add(k);
       else out.delete(k);
     }
@@ -139,15 +139,22 @@ export function weekEditing(root, api, { now, backLabel, dispose, show }) {
 }
 
 // The paintable grid both week editors draw, in gridFrame's frame, laid out by columns (see weekColumns).
-// onChange runs after every stroke or key toggle. It opens on the first day's tab with the given cells (keys) painted.
-export function paintGrid({ columns, gridLabel, cells: initial, onChange }) {
+// onChange(keys) runs after every stroke or key toggle with the keys it covered, locked ones left out (none for a
+// cancelled stroke). It opens on the first day's tab with the given cells (keys) painted.
+// Locked keys (cells already in the past) are shown as they are and can't be changed: marked past and aria-disabled,
+// a stroke can't start on one or change one, and Space/Enter does nothing on one.
+export function paintGrid({ columns, gridLabel, cells: initial, onChange, locked = new Set() }) {
   let cells = initial;
   const geo = gridGeometry(columns);
   const nodes = new Map();
   const { tabs, grid, setDay } = gridFrame(columns, {
     class: "grid", role: "grid", "aria-label": gridLabel, "aria-multiselectable": "true",
   }, ({ key, label }, row) => {
-    const b = el("button", { type: "button", class: `cell ${row}`, "data-i": String(key), role: "gridcell", tabindex: "-1", "aria-label": label });
+    const past = locked.has(key);
+    const b = el("button", {
+      type: "button", class: `cell ${row}${past ? " past" : ""}`, "data-i": String(key), role: "gridcell", tabindex: "-1", "aria-label": label,
+      ...(past ? { "aria-disabled": "true" } : {}),
+    });
     nodes.set(key, b);
     return b;
   });
@@ -168,20 +175,21 @@ export function paintGrid({ columns, gridLabel, cells: initial, onChange }) {
     const c = t && t.closest && t.closest(".cell");
     return c ? Number(c.dataset.i) : null;
   };
-  const stroke = (base, from, to, paint) => applyStroke(base, from, to, paint, geo);
+  const stroke = (base, from, to, paint) => applyStroke(base, from, to, paint, geo, locked);
 
   let drag = null; // { anchor, paint, base, current }
   const endStroke = (commit) => {
     if (!drag) return;
+    const covered = commit ? stroke(new Set(), drag.anchor, drag.current, true) : new Set();
     if (commit) cells = stroke(drag.base, drag.anchor, drag.current, drag.paint);
     drag = null;
     paintView(cells);
-    onChange();
+    onChange(covered);
   };
   grid.addEventListener("pointerdown", (e) => {
     if (e.button !== 0 && e.pointerType === "mouse") return;
     const i = cellAt(e);
-    if (i === null) return;
+    if (i === null || locked.has(i)) return;
     drag = { anchor: i, current: i, paint: !cells.has(i), base: new Set(cells) };
     if (e.pointerType === "mouse") e.preventDefault();
     grid.setPointerCapture?.(e.pointerId);
@@ -212,9 +220,10 @@ export function paintGrid({ columns, gridLabel, cells: initial, onChange }) {
       c.tabIndex = -1; nodes.get(j).tabIndex = 0; nodes.get(j).focus();
     } else if (e.key === " " || e.key === "Enter") {
       e.preventDefault();
+      if (locked.has(i)) return;
       cells = stroke(cells, i, i, !cells.has(i));
       paintView(cells);
-      onChange();
+      onChange(stroke(new Set(), i, i, true));
     }
   });
 
@@ -222,7 +231,8 @@ export function paintGrid({ columns, gridLabel, cells: initial, onChange }) {
   return {
     tabs, grid,
     cells: () => cells,
-    setCells: (next) => { cells = next; paintView(cells); },
+    // A stroke in progress then lands on the new cells.
+    setCells: (next) => { cells = next; if (drag) drag.base = new Set(next); paintView(cells); },
   };
 }
 
@@ -249,11 +259,13 @@ export const paintLede = (text) => el("p", { class: "lede" },
 export const touchHint = () => el("p", { class: "touchhint", text: "Drag on the grid to paint. Drag the times on the left to scroll." });
 
 // deps: { now?: () => Date, zones?: string[], defaultZone?: string, intro?: string, onSaved?: (doc) => void,
-//         onBack?: () => void, backLabel?: string, startUtc?: Date, saveDelay?: number }
+//         onBack?: () => void, backLabel?: string, startUtc?: Date, cells?: number, shape?: string, saveDelay?: number }
 // With onBack the editor also offers a back button (backLabel, else Back to teams), leaving without saving.
 // With startUtc it sits on a matchup page under the matchup's heading: no app bar or heading of its own, the grid
-// laid out as that matchup's window (windowColumns) instead of Mon-Sun, and no Save button, since it saves as the
-// player paints (saveDelay ms after the last change). Returns { flush } (see autosaver).
+// laid out as that matchup's window (windowColumns over cells half-hours, in shape) instead of Mon-Sun, and no Save
+// button, since it saves as the player paints (saveDelay ms after the last change). Returns { flush } (see autosaver).
+// A window longer than a week shows a weekday twice (a round's two Sundays): a change to one is saved and both are
+// drawn again from the saved week, so they always agree.
 // With onSaved the editor is a step in another flow: a save says "Saved." and hands the saved file on.
 export async function mountUsual(root, api, deps = {}) {
   const onSaved = deps.onSaved;
@@ -279,15 +291,30 @@ export async function mountUsual(root, api, deps = {}) {
   const back = backLabel ? el("button", { type: "button", class: "secondary", text: backLabel }) : null;
   if (back) back.addEventListener("click", () => deps.onBack());
   // On a matchup the grid paints window cells as instants; week is the usual week behind them, which keeps any cell
-  // the window never reaches. Off a matchup the grid's keys are the usual week's own cells.
-  const startUtc = deps.startUtc;
+  // the window never reaches, and shown is the painting the grid was last drawn with from it: only the cells painted
+  // differently since are written back. Off a matchup the grid's keys are the usual week's own cells.
+  const { startUtc, cells: count = CELLS, shape } = deps;
   let week = loaded.cells;
-  const weekOf = () => (startUtc ? usualWithWindow(week, painter.cells(), zone, startUtc) : painter.cells());
+  let shown = null;
+  const weekOf = (painted) => (startUtc ? usualWithWindow(week, painted, zone, startUtc, count, shown) : painted);
   const write = async () => {
-    week = weekOf();
+    const painted = painter.cells();
+    week = weekOf(painted);
     const doc = toFile(zone, week, now());
     await api.putUsual(doc);
     if (onSaved) onSaved(doc);
+    if (startUtc) {
+      // Drawn again from the saved week, keeping any change made while it saved (the next save writes that).
+      const current = painter.cells();
+      shown = windowCells(zone, week, startUtc, count);
+      const next = new Set(shown);
+      for (let j = 0; j < count; j++) {
+        if (current.has(j) === painted.has(j)) continue;
+        if (current.has(j)) next.add(j);
+        else next.delete(j);
+      }
+      painter.setCells(next);
+    }
   };
   const auto = startUtc ? autosaver(write, (text) => { status.textContent = text; }, deps.saveDelay) : null;
   const touched = () => { status.textContent = ""; auto?.touch(); };
@@ -295,9 +322,10 @@ export async function mountUsual(root, api, deps = {}) {
   let painter;
   const paintBox = el("div");
   const draw = () => {
+    if (startUtc) shown = windowCells(zone, week, startUtc, count);
     painter = paintGrid({
-      columns: startUtc ? windowColumns(startUtc, zone) : weekColumns(), gridLabel: "Usual week, half-hour cells",
-      cells: startUtc ? windowCells(zone, week, startUtc) : week, onChange: touched,
+      columns: startUtc ? windowColumns(startUtc, zone, count, shape) : weekColumns(), gridLabel: "Usual week, half-hour cells",
+      cells: startUtc ? shown : week, onChange: touched,
     });
     paintBox.replaceChildren(painter.tabs, touchHint(), painter.grid);
   };
@@ -305,12 +333,12 @@ export async function mountUsual(root, api, deps = {}) {
 
   // A new zone keeps the painted wall times; on a matchup that moves them within the window, so it is drawn again.
   select.addEventListener("change", () => {
-    week = weekOf();
+    week = weekOf(painter.cells());
     zone = select.value;
     if (startUtc) draw();
     touched();
   });
-  clear.addEventListener("click", () => { week = new Set(); painter.setCells(new Set()); touched(); });
+  clear.addEventListener("click", () => { week = new Set(); shown = new Set(); painter.setCells(new Set()); touched(); });
   save.addEventListener("click", async () => {
     if (api.fixture && !onSaved) { status.textContent = "Saved (fixture mode: nothing was sent)."; return; }
     save.disabled = true;

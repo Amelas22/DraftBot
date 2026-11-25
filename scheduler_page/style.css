@@ -26,6 +26,8 @@ h1 { font-size: 26px; font-weight: 800; line-height: 1.15; margin: 18px 0 6px; t
 .lede { color: var(--muted); margin: 0 0 14px; max-width: 65ch; }
 .notice { border: 1px solid var(--warn); background: var(--warnbg); border-radius: 12px; padding: 12px 14px; margin-top: 18px; }
 .status { min-height: 20px; font-size: 13px; color: var(--muted); }
+/* Read out by screen readers, not shown: for a live region whose news is already on screen. */
+.sronly { position: absolute; width: 1px; height: 1px; min-height: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 button { font: inherit; }
 :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 
@@ -139,6 +141,14 @@ button.hcell { cursor: pointer; }
 .daytabs button.due:not([aria-selected="true"]) { background: var(--warnbg); color: var(--warn-text); box-shadow: inset 0 0 0 2px var(--warn); }
 .legend .key.wk0 { background: var(--chip); }
 .legend .key.wk1 { background: var(--wk1-empty-alt); }
+/* A cell already gone by (any shade, dimmed and hatched) and one that can be seen but not booked (a muted dashed
+   outline over its own shade, so availability still reads and it never looks like the past; both may apply to one cell). The paint grid's past cells are not interactive. */
+.hcell.past, .cell.past { opacity: .45; background-image: repeating-linear-gradient(135deg, transparent 0 3px, var(--line) 3px 4px); }
+.hcell.past { cursor: default; }
+.cell.past { pointer-events: none; cursor: default; }
+.hcell.nobook { outline: 1px dashed var(--muted); outline-offset: -1px; cursor: not-allowed; }
+.legend .key.past { opacity: .45; background-image: repeating-linear-gradient(135deg, transparent 0 3px, var(--line) 3px 4px); }
+.legend .key.nobook { background: var(--surface); outline: 1px dashed var(--muted); outline-offset: -1px; }
 .legend .key.due { background: var(--due-empty-alt); box-shadow: inset 0 -3px 0 var(--warn); }
 .legend .keyitem:has(.key.due) { color: var(--warn-text); font-weight: 700; }
 
@@ -183,6 +193,13 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 
 /* Team draft: the two sides, the booking line and the shared heatmap with runs of the same people boxed */
 .bookline { margin: 0 0 8px; font-weight: 800; }
+/* A round's matchup: the round shown, between arrows to the rounds around it. A missing arrow keeps its place, so the
+   label never shifts as the viewer steps through the rounds. */
+.roundnav { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; }
+.roundlabel { font-weight: 800; font-variant-numeric: tabular-nums; }
+.roundarrow { width: 36px; height: 36px; border: 2px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--fg); font-size: 20px; line-height: 1; cursor: pointer; }
+.roundarrow:hover { border-color: var(--accent); }
+.roundarrow[hidden] { display: inline-block !important; visibility: hidden; }
 .threadlink { display: inline-block; margin-bottom: 10px; color: var(--accent); font-weight: 700; }
 .sides { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
 .side { background: var(--surface); border-radius: 12px; padding: 12px; min-width: 0; }
@@ -190,6 +207,11 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 .side ul { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
 .side li { display: inline-flex; align-items: center; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
 .noweek { color: var(--muted); font-size: 13px; }
+/* A player whose usual week isn't confirmed for the round: a small "?" badge after their chip. */
+.unsure {
+  display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%;
+  background: var(--warnbg); color: var(--warn-text); box-shadow: inset 0 0 0 2px var(--warn); font-size: 13px; font-weight: 800; cursor: help;
+}
 .side .toggle {
   min-height: 32px; padding: 3px 12px; border: 2px solid var(--accent); border-radius: 999px;
   background: var(--chip); color: var(--fg); font: inherit; font-weight: 700; cursor: pointer;
@@ -218,6 +240,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 .legend .keyitem { display: inline-flex; align-items: center; gap: 3px; padding: 0; white-space: nowrap; }
 .legend .key.run { border-radius: 4px; box-shadow: inset 0 0 0 2px var(--fg); }
 .legend .key.booked { outline: 3px solid var(--warn); outline-offset: -3px; }
+.legend .maybekey { margin-left: 8px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .pane .actions { margin: 0; flex-wrap: wrap; }
 @media (max-width: 479px) { .sides { grid-template-columns: 1fr; } }
 
@@ -237,3 +260,12 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 .minehost { display: grid; gap: 10px; }
 .minehost > .seg { justify-self: start; font-size: 15px; }
 .minehost > .seg button { padding: 8px 16px; min-height: 44px; }
+
+/* Confirmation panel */
+.confirmpanel { background: var(--surface); border-radius: 12px; padding: 12px; margin-top: 14px; display: grid; gap: 8px; }
+.confirmpanel p { margin: 0; }
+.confirmswitch { display: flex; align-items: center; gap: 10px; font-weight: 700; cursor: pointer; }
+.confirmswitch input { width: 20px; height: 20px; accent-color: var(--accent); }
+.confirmrows { display: grid; gap: 8px; }
+.confirmrow { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; border: 2px solid var(--line); border-radius: 10px; }
+.confirmrow button { min-height: 44px; padding: 0 16px; border-radius: 9px; font-weight: 800; cursor: pointer; }

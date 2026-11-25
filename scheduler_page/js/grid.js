@@ -26,19 +26,21 @@ export const LEAGUE_ZONE = "America/Los_Angeles";
 // Each cell also carries its league week, by the league's clock wherever the viewer is: kind is "due" on the league's
 // Sunday (the last day to get that round's matches finished), else "wk0" until the first cutoff (the last cell before
 // results are due) and "wk1" after it.
-// Pure in (startUtc, zone), and a page lays its window out again on every redraw, so the last layout is kept.
+// A "round" window runs Sunday to Sunday over one round, so it has no next week: its cells are "due" on a league
+// Sunday and "wk0" otherwise. A "rolling" window (the default) tints as described above.
+// Pure in (startUtc, zone, count, shape), and a page lays its window out again on every redraw, so the last layout is kept.
 let lastLayout = null;
-export function layoutWindow(startUtc, zone) {
-  const key = `${startUtc.getTime()} ${zone}`;
-  if (lastLayout?.key !== key) lastLayout = { key, days: layOutWindow(startUtc, zone) };
+export function layoutWindow(startUtc, zone, count = CELLS, shape = "rolling") {
+  const key = `${startUtc.getTime()} ${zone} ${count} ${shape}`;
+  if (lastLayout?.key !== key) lastLayout = { key, days: layOutWindow(startUtc, zone, count, shape) };
   return lastLayout.days;
 }
 
-function layOutWindow(startUtc, zone) {
+function layOutWindow(startUtc, zone, count, shape) {
   const days = [];
   let league = partsOf(startUtc, LEAGUE_ZONE).weekday;
   let nextWeek = false;
-  for (let j = 0; j < CELLS; j++) {
+  for (let j = 0; j < count; j++) {
     const at = addCells(startUtc, j);
     const p = partsOf(at, zone);
     const date = `${p.year}-${p.month}-${p.day}`;
@@ -49,7 +51,7 @@ function layOutWindow(startUtc, zone) {
     }
     const after = partsOf(addCells(startUtc, j + 1), LEAGUE_ZONE).weekday;
     const cutoff = league === "Sun" && after === "Mon";
-    day.cells.push({ j, minutes: Number(p.hour) * 60 + Number(p.minute), kind: league === "Sun" ? "due" : nextWeek ? "wk1" : "wk0", cutoff });
+    day.cells.push({ j, minutes: Number(p.hour) * 60 + Number(p.minute), kind: league === "Sun" ? "due" : nextWeek && shape !== "round" ? "wk1" : "wk0", cutoff });
     if (cutoff) nextWeek = true;
     league = after;
   }
@@ -79,7 +81,7 @@ export const formatCell = (startUtc, zone, j) => formatTime(addCells(startUtc, j
 // day starts part-way down (start, in half-hours after local midnight); date is the column's "YYYY-MM-DD". Each cell's
 // league kind and cutoff (see layoutWindow) come along for the grid to tint, and the column's kind is the one most of
 // its cells have, for its name and tab.
-export const windowColumns = (startUtc, zone) => layoutWindow(startUtc, zone).map((d) => ({
+export const windowColumns = (startUtc, zone, count = CELLS, shape = "rolling") => layoutWindow(startUtc, zone, count, shape).map((d) => ({
   label: d.label, date: d.date, kind: mostCommon(d.cells.map((c) => c.kind)), start: Math.floor(d.cells[0].minutes / CELL_MINUTES),
   cells: d.cells.map((c) => ({ key: c.j, label: formatCell(startUtc, zone, c.j), kind: c.kind, cutoff: c.cutoff })),
 }));
@@ -143,25 +145,26 @@ export const zoneName = (zone) => zone.replaceAll("_", " ");
 export const legendKey = (kind, text) => el("span", { class: "keyitem" }, el("i", { class: `key ${kind}` }), el("span", { text }));
 
 // The legend keys for a window grid's league tints (see gridFrame): the due key is the warning.
-export const weekKeys = () => [
+// A round window has no next round, so its legend has no key for one.
+export const weekKeys = (shape = "rolling") => [
   legendKey("wk0", "this round"),
   legendKey("due", "round ends: midnight PT Sunday (3 AM ET Mon)"),
-  legendKey("wk1", "next round"),
+  ...(shape === "round" ? [] : [legendKey("wk1", "next round")]),
 ];
 
-// opts: { startUtc, zone, cellClass(j) -> string, cellLabel(j) -> string, onPick?(j), onHover?(j | null, byMouse), openDate? }
+// opts: { startUtc, zone, cellClass(j) -> string, cellLabel(j) -> string, onPick?(j), onHover?(j | null, byMouse), openDate?, cells = CELLS, shape = "rolling", gridLabel? }
 // onPick makes cells buttons (tap or Enter); onHover(j, byMouse) follows the pointer and keyboard focus, and onHover(null)
 // fires when a mouse leaves (byMouse says whether a mouse is over the cell now, as opposed to a finger or the keyboard).
 // openDate is the day tab to open on (see gridFrame): a page drawing its heatmap again passes the old one's openDate(),
 // so a narrow screen stays on the day it was showing.
 export function mountHeatmap(container, opts) {
-  const { startUtc, zone, cellClass, cellLabel, cellText, onPick, onHover, openDate } = opts;
+  const { startUtc, zone, cellClass, cellLabel, cellText, onPick, onHover, openDate, cells: count = CELLS, shape = "rolling", gridLabel } = opts;
   // Each cell's element with its row classes and league words (see gridFrame), kept apart from cellClass and
   // cellLabel so a redraw never drops them.
   const cells = new Map();
-  const frame = gridFrame(windowColumns(startUtc, zone), {
+  const frame = gridFrame(windowColumns(startUtc, zone, count, shape), {
     class: cellText ? "grid heat counted" : "grid heat", role: "grid",
-    "aria-label": `Next 7 days, half-hour cells, times in ${zoneName(zone)}`,
+    "aria-label": gridLabel ?? `Next 7 days, half-hour cells, times in ${zoneName(zone)}`,
   }, ({ key: j }, row, words) => {
     const n = el(onPick ? "button" : "div", { class: `hcell ${row}`, role: "gridcell", "data-j": String(j) });
     if (onPick) { n.type = "button"; n.addEventListener("click", () => onPick(j)); }

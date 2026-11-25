@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from services.availability import floor_half_hour, naive_utc
-from services.booking import WINDOW_CELLS, change
+from services.booking import WINDOW_CELLS, BookingSpan, change, rolling_span
 
 NOW = datetime(2026, 11, 2, 12, 10, tzinfo=timezone.utc)
 GOOD = datetime(2026, 11, 3, 18, 0, tzinfo=timezone.utc)
@@ -34,8 +34,8 @@ class FakeStore:
         return True
 
 
-async def _book(store, start=GOOD, seen=0, now=NOW):
-    return await change(None, store, "u1", "Ann", start, seen, now)
+async def _book(store, start=GOOD, seen=0, now=NOW, span=None):
+    return await change(None, store, "u1", "Ann", start, seen, now, span or rolling_span(now))
 
 
 @pytest.mark.asyncio
@@ -139,3 +139,30 @@ async def test_success_bumps_version_and_is_aware_utc():
         4,
         dict(booked_start_utc=naive_utc(GOOD), booked_by="u1", booked_by_name="Ann"),
     )
+
+
+@pytest.mark.asyncio
+async def test_out_of_window_before_the_span_starts():
+    span = BookingSpan(GOOD + timedelta(hours=1), GOOD + timedelta(days=1))
+    assert (await _book(FakeStore(), span=span)).code == "out_of_window"
+
+
+@pytest.mark.asyncio
+async def test_out_of_window_at_the_span_end_and_allowed_just_before():
+    span = BookingSpan(NOW, GOOD)
+    assert (await _book(FakeStore(), start=GOOD, span=span)).code == "out_of_window"
+    assert (await _book(FakeStore(), start=GOOD - timedelta(minutes=30), span=span)).ok
+
+
+@pytest.mark.asyncio
+async def test_past_is_reported_before_out_of_window():
+    span = BookingSpan(NOW + timedelta(days=1), NOW + timedelta(days=2))
+    result = await _book(FakeStore(), start=floor_half_hour(NOW) - timedelta(hours=2), span=span)
+    assert result.code == "past"
+
+
+@pytest.mark.asyncio
+async def test_clear_ignores_the_span():
+    store = FakeStore(booked=naive_utc(GOOD))
+    result = await change(None, store, "u1", "Ann", None, 0, NOW)
+    assert result.ok

@@ -1,0 +1,26 @@
+{
+  "format": "draftbot.scheduler.test_confirmed", "version": 1,
+  "mondays": [
+    {"name": "monday-midnight-pacific", "at_utc": "2026-11-16T08:00:00Z", "monday": "2026-11-16"},
+    {"name": "last-minute-of-sunday", "at_utc": "2026-11-16T07:59:00Z", "monday": "2026-11-09"},
+    {"name": "trailing-sunday-of-round-3", "at_utc": "2026-11-23T07:59:00Z", "monday": "2026-11-16"},
+    {"name": "pdt-monday", "at_utc": "2026-10-26T07:00:00Z", "monday": "2026-10-26"}
+  ],
+  "between": [
+    {"name": "round-3-view", "start_utc": "2026-11-15T08:00:00Z", "cells": 384, "weeks": ["2026-11-09", "2026-11-16"]},
+    {"name": "rolling-playoff", "start_utc": "2026-11-20T17:00:00Z", "cells": 336, "weeks": ["2026-11-16", "2026-11-23"]}
+  ],
+  "painted": [
+    {"name": "new-york-monday-evening", "start_utc": "2026-11-22T08:00:00Z", "cells": [80, 81], "weeks": ["2026-11-23"]},
+    {"name": "leading-sunday", "start_utc": "2026-11-22T08:00:00Z", "cells": [0, 1], "weeks": ["2026-11-16"]},
+    {"name": "tokyo-last-column-of-round-3", "start_utc": "2026-11-15T08:00:00Z", "cells": [350, 351, 383], "weeks": ["2026-11-16"]},
+    {"name": "both-sundays", "start_utc": "2026-11-15T08:00:00Z", "cells": [0, 383], "weeks": ["2026-11-09", "2026-11-16"]}
+  ],
+  "cells": [
+    {"name": "trusts-usual", "start_utc": "2026-11-15T08:00:00Z", "trusts_usual": true, "confirmed_rounds": [], "free": [0, 47, 48, 383], "expected": [0, 47, 48, 383]},
+    {"name": "viewed-round-confirmed", "start_utc": "2026-11-15T08:00:00Z", "trusts_usual": false, "confirmed_rounds": ["2026-11-16"], "free": [0, 47, 48, 383], "expected": [48, 383]},
+    {"name": "only-leading-sunday-week", "start_utc": "2026-11-15T08:00:00Z", "trusts_usual": false, "confirmed_rounds": ["2026-11-09"], "free": [0, 47, 48, 383], "expected": [0, 47]},
+    {"name": "nothing-confirmed", "start_utc": "2026-11-15T08:00:00Z", "trusts_usual": false, "confirmed_rounds": [], "free": [0, 48], "expected": []},
+    {"name": "rolling-second-week", "start_utc": "2026-11-20T17:00:00Z", "trusts_usual": false, "confirmed_rounds": ["2026-11-23"], "free": [0, 335], "expected": [335]}
+  ]
+}

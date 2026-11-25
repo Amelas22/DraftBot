@@ -1,6 +1,6 @@
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mountThisWeek, prefill, shownCells, toThisWeekFile, withPainted } from "../js/thisweek.js";
+import { mountThisWeek, pastCells, prefill, shownCells, toThisWeekFile, withPainted } from "../js/thisweek.js";
 import { decodeCells, decodeDayCells, encodeCells, encodeDayCells } from "../js/week.js";
 
 const NY = "America/New_York";
@@ -47,6 +47,7 @@ test("toThisWeekFile carries every date and never asks the server to make a usua
   assert.equal(f.version, 1);
   assert.equal(f.zone, NY);
   assert.equal(f.also_usual, undefined);
+  assert.deepEqual(f.painted_weeks, []);
   assert.deepEqual(f.days.map((d) => d.date), WINDOW_DATES);
   assert.deepEqual(decodeDayCells(f.days[1].cells), new Set([20]));
   assert.deepEqual(decodeDayCells(f.days[7].cells), new Set([0]));
@@ -84,14 +85,15 @@ const USUAL = { format: "draftbot.scheduler.usual_week", version: 1, zone: NY, c
 const fakeApi = (calls, days = []) => ({
   getThisWeek: async () => ({ format: "draftbot.scheduler.this_week", version: 1, zone: days.length ? NY : null, days }),
   putThisWeek: async (doc) => { calls.push(["put", doc]); return doc; },
-  clearThisWeek: async () => { calls.push(["clear"]); return null; },
+  clearThisWeek: async (range) => { calls.push(range ? ["clear", range] : ["clear"]); return null; },
 });
-// The root, with the editor's { flush } as root.editor.
+// The root, with the editor's { flush } as root.editor. Unless deps say otherwise, it is just before the window opens.
 const mount = async (api, deps) => {
   const root = new Node();
-  root.editor = await mountThisWeek(root, api, { startUtc: START, ...deps });
+  root.editor = await mountThisWeek(root, api, { startUtc: START, now: () => new Date(START.getTime() - 1), ...deps });
   return root;
 };
+const WINDOW_RANGE = { from: "2026-11-02", to: "2026-11-09" };
 // Toggles cell i with the keyboard, as a player pressing Space on it.
 const press = (root, i) => {
   const grid = root.find((n) => n.attrs.role === "grid");
@@ -150,7 +152,8 @@ test("Save as my usual week saves the painted window by weekday and drops this w
   byText(root, "Save as my usual week").click();
   await tick();
   await tick();
-  assert.deepEqual(calls.map((c) => c[0]), ["usual", "clear"]);
+  // The strokes still waiting to save are sent first, so the weeks they painted are confirmed.
+  assert.deepEqual(calls.map((c) => c[0]), ["put", "usual", "clear"]);
   assert.equal(kept.zone, NY);
   assert.deepEqual(decodeCells(kept.cells), new Set([cell(0, 20), cell(0, 5)]));
 });
@@ -207,7 +210,7 @@ test("Reset to usual week drops the overrides and repaints from the usual week",
   const root = await mount(fakeApi(calls, [{ date: "2026-11-03", cells: encodeDayCells(new Set([7])) }]), { usualDoc: USUAL });
   byText(root, "Reset to usual week").click();
   await tick();
-  assert.deepEqual(calls, [["clear"]]);
+  assert.deepEqual(calls, [["clear", WINDOW_RANGE]]);
   const on = (i) => root.find((n) => n.attrs["data-i"] === String(i)).classes.has("on");
   assert.ok(on(jAt(1, 10)));
   assert.ok(!on(jAt(1, 3, 1)));
@@ -227,7 +230,7 @@ test("Reset drops a change still waiting to save", async () => {
   byText(root, "Reset to usual week").click();
   await tick();
   await root.editor.flush();
-  assert.deepEqual(calls, [["clear"]]);
+  assert.deepEqual(calls, [["clear", WINDOW_RANGE]]);
 });
 
 test("a failed Reset says to press Reset again", async () => {
@@ -236,4 +239,191 @@ test("a failed Reset says to press Reset again", async () => {
   byText(root, "Reset to usual week").click();
   await tick();
   assert.ok(byText(root, "Could not reset. Check your connection and press Reset again."));
+});
+
+const range = (a, b) => Array.from({ length: b - a }, (_, i) => a + i);
+const CELL = 1800000;
+
+test("pastCells is every cell that has started", () => {
+  assert.deepEqual(pastCells(START, 384, new Date(START.getTime() + 10 * CELL + 300000)), new Set(range(0, 11)));
+  assert.deepEqual(pastCells(START, 384, new Date(START.getTime() - 1)), new Set());
+});
+
+// Drags from window cell a to b, as a finger would.
+function drag(root, a, b) {
+  const grid = root.find((n) => n.attrs.role === "grid");
+  document.elementFromPoint = (x) => root.find((n) => n.attrs["data-i"] === String(x));
+  try {
+    for (const fn of grid.listeners.pointerdown) fn({ button: 0, pointerType: "touch", clientX: a, pointerId: 1 });
+    for (const fn of grid.listeners.pointermove) fn({ clientX: b });
+    for (const fn of grid.listeners.pointerup) fn({});
+  } finally {
+    delete document.elementFromPoint;
+  }
+}
+
+test("past cells are locked: marked, unpressable, and a stroke over them keeps their saved state", async () => {
+  const calls = [];
+  // Mon 2 has a saved override: free at 10 AM (window cell 0) only.
+  const api = fakeApi(calls, [{ date: "2026-11-02", cells: encodeDayCells(new Set([20])) }]);
+  const root = await mount(api, { usualDoc: USUAL, now: () => new Date(START.getTime() + 10 * CELL + 300000) });
+  const node = (j) => root.find((n) => n.attrs["data-i"] === String(j));
+  const past = (j) => node(j).className.split(" ").includes("past");
+  assert.ok(past(10));
+  assert.equal(node(10).attrs["aria-disabled"], "true");
+  assert.ok(!past(11));
+  press(root, 5);
+  assert.ok(!node(5).classes.has("on"));
+  await root.editor.flush();
+  assert.deepEqual(calls, []); // pressing a past cell is not a change
+  drag(root, 5, 20); // a stroke cannot start on a past cell
+  assert.ok(!node(15).classes.has("on"));
+  drag(root, 20, 0); // erase-or-paint is decided by cell 20 (off), so this paints, but only cells 11..20
+  await root.editor.flush();
+  const [kind, doc] = calls[0];
+  assert.equal(kind, "put");
+  assert.deepEqual(decodeDayCells(doc.days[0].cells), new Set([20, ...range(31, 41)]));
+});
+
+test("a save sends the dates that are not over yet, so a day back to usual drops its old change", async () => {
+  const calls = [];
+  // Tue 3 at noon in New York: Mon 2 is over.
+  const root = await mount(fakeApi(calls), { usualDoc: USUAL, now: () => new Date("2026-11-03T17:00:00Z") });
+  press(root, jAt(3, 20));
+  await root.editor.flush();
+  assert.deepEqual(calls[0][1].days.map((d) => d.date), WINDOW_DATES.slice(1));
+});
+
+const LA = "America/Los_Angeles";
+const ROUND = { startUtc: new Date("2026-11-15T08:00:00Z"), cells: 384, shape: "round" };
+const USUAL_LA = { ...USUAL, zone: LA };
+
+test("the editor reads and resets only the viewed dates", async () => {
+  const calls = [];
+  const reads = [];
+  const api = { ...fakeApi(calls), getThisWeek: async (r) => { reads.push(r); return { format: "draftbot.scheduler.this_week", version: 1, zone: null, days: [] }; } };
+  const root = await mount(api, { ...ROUND, usualDoc: USUAL_LA, now: () => new Date("2026-11-14T00:00:00Z") });
+  assert.deepEqual(reads, [{ from: "2026-11-15", to: "2026-11-22" }]);
+  byText(root, "Reset to usual week").click();
+  await tick();
+  assert.deepEqual(calls, [["clear", { from: "2026-11-15", to: "2026-11-22" }]]);
+});
+
+test("Reset keeps what the server keeps: the changes on days already over", async () => {
+  const calls = [];
+  // Mon 2 (over) and Wed 4 both have a change; it is Tue 3 at noon.
+  const api = fakeApi(calls, [
+    { date: "2026-11-02", cells: encodeDayCells(new Set([30])) }, { date: "2026-11-04", cells: encodeDayCells(new Set([30])) },
+  ]);
+  const root = await mount(api, { usualDoc: USUAL, now: () => new Date("2026-11-03T17:00:00Z") });
+  byText(root, "Reset to usual week").click();
+  await tick();
+  const on = (i) => root.find((n) => n.attrs["data-i"] === String(i)).classes.has("on");
+  assert.ok(on(jAt(0, 15)));
+  assert.ok(!on(jAt(2, 15)));
+});
+
+test("a window entirely in the past is shown, says so, and never saves", async () => {
+  const calls = [];
+  const root = await mount(fakeApi(calls), { ...ROUND, usualDoc: null, defaultZone: LA, zones: [LA], now: () => new Date("2026-11-24T00:00:00Z") });
+  assert.ok(byText(root, "These days are over, so they can't be changed."));
+  assert.equal(byText(root, "Reset to usual week"), undefined);
+  assert.equal(byText(root, "Save as my usual week"), undefined);
+  assert.ok(root.find((n) => n.attrs["data-i"] === "383").className.split(" ").includes("past"));
+  press(root, 100);
+  const select = root.find((n) => n.attrs.id === "zone");
+  if (select) for (const fn of select.listeners.change || []) await fn({});
+  await root.editor.flush();
+  assert.deepEqual(calls, []);
+});
+
+test("a zone change whose dates can't be read keeps the old zone and never saves a date it hasn't read", async () => {
+  const calls = [];
+  const reads = [];
+  const api = {
+    ...fakeApi(calls),
+    getThisWeek: async (r) => {
+      reads.push(r);
+      if (reads.length > 1) throw new TypeError("fetch failed");
+      return { format: "draftbot.scheduler.this_week", version: 1, zone: null, days: [] };
+    },
+  };
+  const root = await mount(api, { ...ROUND, usualDoc: null, defaultZone: LA, zones: [LA, NY], now: () => new Date("2026-11-14T00:00:00Z") });
+  press(root, 100);
+  const select = root.find((n) => n.attrs.id === "zone");
+  select.value = NY; // in New York the window reaches Mon 23, which was never read
+  for (const fn of select.listeners.change) await fn({});
+  assert.deepEqual(reads, [{ from: "2026-11-15", to: "2026-11-22" }, { from: "2026-11-15", to: "2026-11-23" }]);
+  assert.equal(select.value, LA);
+  assert.ok(byText(root, "Could not change the time zone. Check your connection and try again."));
+  await root.editor.flush();
+  assert.equal(calls.length, 1);
+  const [kind, doc] = calls[0];
+  assert.equal(kind, "put");
+  assert.equal(doc.zone, LA);
+  assert.deepEqual(doc.days.map((d) => d.date), range(15, 23).map((d) => `2026-11-${d}`));
+});
+
+test("toThisWeekFile carries painted weeks", () => {
+  assert.deepEqual(toThisWeekFile(NY, WINDOW_DATES, new Set(), ["2026-10-26"]).painted_weeks, ["2026-10-26"]);
+});
+
+// Round 3: the window opens Sun 15 Nov 00:00 PT and runs 384 half-hours; Sun 15 and Mon 16 00:00-ish belong to weeks
+// beginning Mon 9 and Mon 16.
+const R3 = { startUtc: new Date("2026-11-15T08:00:00Z"), cells: 384, shape: "round", usualDoc: null, defaultZone: "America/Los_Angeles", zones: ["America/Los_Angeles"] };
+
+test("a save sends the weeks painted since the last save", async () => {
+  const calls = [];
+  const root = await mount(fakeApi(calls), R3);
+  press(root, 0);
+  press(root, 1);
+  await root.editor.flush();
+  assert.deepEqual(calls[0][1].painted_weeks, ["2026-11-09"]);
+  press(root, 100);
+  await root.editor.flush();
+  assert.deepEqual(calls[1][1].painted_weeks, ["2026-11-16"]);
+});
+
+test("a failed save keeps its painted weeks for the next one", async () => {
+  const calls = [];
+  let fail = true;
+  const api = { ...fakeApi(calls), putThisWeek: async (doc) => { calls.push(["put", doc]); if (fail) { fail = false; throw new TypeError("fetch failed"); } return doc; } };
+  const root = await mount(api, R3);
+  press(root, 0);
+  await root.editor.flush();
+  press(root, 100);
+  await root.editor.flush();
+  assert.deepEqual(calls.at(-1)[1].painted_weeks, ["2026-11-09", "2026-11-16"]);
+});
+
+test("changing the zone paints nothing", async () => {
+  const calls = [];
+  const root = await mount(fakeApi(calls), { ...R3, zones: ["America/Los_Angeles", NY] });
+  const select = root.find((n) => n.attrs.id === "zone");
+  select.value = NY;
+  for (const fn of select.listeners.change) await fn({});
+  await root.editor.flush();
+  assert.deepEqual(calls.at(-1)[1].painted_weeks, []);
+});
+
+test("Save as my usual week sends the weeks of a stroke that hasn't saved yet", async () => {
+  const calls = [];
+  const api = { ...fakeApi(calls), putUsual: async (doc) => { calls.push(["usual", doc]); return doc; } };
+  const root = await mount(api, R3);
+  press(root, 0);
+  byText(root, "Save as my usual week").click();
+  for (let i = 0; i < 5; i++) await tick();
+  assert.deepEqual(calls.map((c) => c[0]), ["put", "usual", "clear"]);
+  assert.deepEqual(calls[0][1].painted_weeks, ["2026-11-09"]);
+});
+
+test("Reset forgets the weeks of strokes that never saved", async () => {
+  const calls = [];
+  const root = await mount(fakeApi(calls), R3);
+  press(root, 0);
+  byText(root, "Reset to usual week").click();
+  await tick();
+  press(root, 100);
+  await root.editor.flush();
+  assert.deepEqual(calls.filter((c) => c[0] === "put").map((c) => c[1].painted_weeks), [["2026-11-16"]]);
 });

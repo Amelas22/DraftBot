@@ -1,7 +1,7 @@
 import asyncio
 import base64
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -311,19 +311,70 @@ async def test_put_then_get_this_week(client):
 
 
 @pytest.mark.asyncio
-async def test_put_this_week_accepts_yesterday_refuses_eight_days_out(client):
+async def test_put_this_week_drops_the_past_and_refuses_beyond_the_horizon(client):
     headers = await _auth()
     resp = await client.put("/api/this-week", data=json.dumps(_tw_doc("2026-10-21", "2026-10-29")), headers=headers)
     assert resp.status == 200
-    for bad in ("2026-10-30", "2026-10-20"):
-        resp = await client.put("/api/this-week", data=json.dumps(_tw_doc(bad)), headers=headers)
-        assert resp.status == 400
-        assert await resp.json() == {"error": "bad_input"}
-    resp = await client.put("/api/this-week", data=json.dumps(_tw_doc("2026-10-22", "2026-10-22")), headers=headers)
+    assert [d["date"] for d in (await resp.json())["days"]] == ["2026-10-29"]
+    resp = await client.put("/api/this-week", data=json.dumps(_tw_doc("2027-03-01")), headers=headers)
     assert resp.status == 400
+    assert await resp.json() == {"error": "bad_input"}
     resp = await client.put("/api/this-week", data=b" " * (MAX_FILE_BYTES + 1), headers=headers)
     assert resp.status == 413
     assert await resp.json() == {"error": "too_large"}
+
+
+@pytest.mark.asyncio
+async def test_put_this_week_follows_the_guilds_round_calendar(client):
+    from sqlalchemy import update
+    from conftest import seed_tournament_match
+    from database.db_session import db_session
+    from models.tournament import Tournament
+    from services.round_weeks import Calendar, round_week
+    deadline = date(2026, 10, 18)  # round 2 is running at NOW
+    async with db_session() as s:
+        await seed_tournament_match(s)
+        await s.execute(update(Tournament).values(
+            guild_id="222", status="active", round1_deadline=deadline, total_rounds=20))
+        await s.commit()
+    end = round_week(Calendar(deadline, 20), 20).end_utc
+    last, after = end.date(), end.date() + timedelta(days=1)  # UTC zone: start 00:00Z
+    assert after.isoformat() > last.isoformat() and datetime.combine(after, datetime.min.time(), timezone.utc) >= end
+    headers = await _auth()
+    ok = await client.put("/api/this-week", data=json.dumps(_tw_doc(last.isoformat())), headers=headers)
+    assert ok.status == 200
+    bad = await client.put("/api/this-week", data=json.dumps(_tw_doc(after.isoformat())), headers=headers)
+    assert bad.status == 400
+
+
+@pytest.mark.asyncio
+async def test_get_this_week_with_a_range_returns_past_days(client):
+    from services.availability import DayOverride, replace_day_overrides
+    await replace_day_overrides("111", [DayOverride("UTC", date(2026, 10, 1), frozenset({1}))], False, NOW)
+    headers = await _auth()
+    assert (await (await client.get("/api/this-week", headers=headers)).json())["days"] == []
+    resp = await client.get("/api/this-week?from=2026-10-01&to=2026-10-07", headers=headers)
+    assert [d["date"] for d in (await resp.json())["days"]] == ["2026-10-01"]
+
+
+@pytest.mark.asyncio
+async def test_this_week_range_parameters_are_validated(client):
+    headers = await _auth()
+    for query in ("from=x&to=2026-10-02", "from=2026-10-01", "to=2026-10-01", "from=2026-10-05&to=2026-10-01"):
+        for method in (client.get, client.delete):
+            resp = await method("/api/this-week?" + query, headers=headers)
+            assert resp.status == 400, query
+            assert await resp.json() == {"error": "bad_input"}
+
+
+@pytest.mark.asyncio
+async def test_delete_this_week_with_a_range_clears_only_those_dates(client):
+    headers = await _auth()
+    await client.put("/api/this-week", data=json.dumps(_tw_doc("2026-10-23", "2026-10-24")), headers=headers)
+    resp = await client.delete("/api/this-week?from=2026-10-24&to=2026-10-24", headers=headers)
+    assert resp.status == 204
+    days = (await (await client.get("/api/this-week", headers=headers)).json())["days"]
+    assert [d["date"] for d in days] == ["2026-10-23"]
 
 
 @pytest.mark.asyncio
@@ -349,3 +400,145 @@ async def test_this_week_writes_are_rate_limited_like_usual_week(client):
     codes = [(await client.delete("/api/this-week", headers=headers)).status for _ in range(61)]
     assert codes[:60] == [204] * 60
     assert codes[60] == 429
+
+
+_CONF = "/api/confirmation"
+_RANGE = "?from=2026-10-19&to=2026-10-26"
+
+
+@pytest.mark.asyncio
+async def test_confirmation_starts_on_with_nothing_confirmed(client):
+    resp = await client.get(_CONF + _RANGE, headers=await _auth())
+    assert resp.status == 200
+    assert await resp.json() == {
+        "format": "draftbot.scheduler.confirmation",
+        "version": 1,
+        "trusts_usual": True,
+        "confirmed_rounds": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_switch_off_then_confirm_a_round(client):
+    headers = await _auth()
+    resp = await client.put(_CONF + _RANGE, data=json.dumps({"trusts_usual": False}), headers=headers)
+    assert resp.status == 200
+    assert (await resp.json())["trusts_usual"] is False
+    resp = await client.post(_CONF + "/rounds" + _RANGE, data=json.dumps({"round": "2026-10-26"}), headers=headers)
+    assert resp.status == 200
+    doc = await resp.json()
+    assert doc["confirmed_rounds"] == ["2026-10-26"] and doc["trusts_usual"] is False
+
+
+@pytest.mark.asyncio
+async def test_confirm_refuses_an_ended_week(client):
+    headers = await _auth()
+    url = _CONF + "/rounds" + _RANGE
+    resp = await client.post(url, data=json.dumps({"round": "2026-10-12"}), headers=headers)
+    assert resp.status == 400
+    resp = await client.post(url, data=json.dumps({"round": "2026-10-19"}), headers=headers)
+    assert resp.status == 200
+
+
+@pytest.mark.asyncio
+async def test_confirm_refuses_a_non_monday_or_beyond_the_horizon(client):
+    headers = await _auth()
+    url = _CONF + "/rounds" + _RANGE
+    for bad in ("2026-10-20", "2026-11-16"):
+        resp = await client.post(url, data=json.dumps({"round": bad}), headers=headers)
+        assert resp.status == 400
+    resp = await client.post(url, data=json.dumps({"round": "2026-11-09"}), headers=headers)
+    assert resp.status == 200
+
+
+@pytest.mark.asyncio
+async def test_confirmation_range_and_body_are_validated(client):
+    headers = await _auth()
+    cases = [
+        ("get", _CONF, None),
+        ("get", _CONF + "?from=2026-10-26&to=2026-10-19", None),
+        ("put", _CONF + _RANGE, {"trusts_usual": "no"}),
+        ("post", _CONF + "/rounds" + _RANGE, {"round": 5}),
+        ("post", _CONF + "/rounds", {"round": "2026-10-26"}),
+    ]
+    for method, url, body in cases:
+        kwargs = {"headers": headers}
+        if body is not None:
+            kwargs["data"] = json.dumps(body)
+        resp = await getattr(client, method)(url, **kwargs)
+        assert resp.status == 400, (method, url)
+        assert await resp.json() == {"error": "bad_input"}
+
+
+_NY_RANGE = "?from=2026-10-19&to=2026-10-26"
+
+
+async def _save_ny(client, painted, also_usual=False, dates=("2026-10-22", "2026-10-23", "2026-10-26"), headers=None):
+    doc = _tw_doc(*dates, also_usual=also_usual)
+    doc["zone"] = "America/New_York"
+    doc["painted_weeks"] = painted
+    return await client.put("/api/this-week", data=json.dumps(doc), headers=headers or await _auth())
+
+
+async def _confirmed(client, headers=None) -> list[str]:
+    resp = await client.get(_CONF + _NY_RANGE, headers=headers or await _auth())
+    return (await resp.json())["confirmed_rounds"]
+
+
+@pytest.mark.asyncio
+async def test_painting_a_day_confirms_its_week(client):
+    assert (await _save_ny(client, ["2026-10-26"])).status == 200
+    assert await _confirmed(client) == ["2026-10-26"]
+
+
+@pytest.mark.asyncio
+async def test_painted_weeks_are_confirmed_and_nothing_else(client):
+    assert (await _save_ny(client, ["2026-10-19"])).status == 200
+    assert await _confirmed(client) == ["2026-10-19"]
+
+
+@pytest.mark.asyncio
+async def test_unpainted_days_in_the_save_confirm_nothing(client):
+    assert (await _save_ny(client, [])).status == 200
+    assert await _confirmed(client) == []
+
+
+@pytest.mark.asyncio
+async def test_an_ended_painted_week_is_dropped_not_refused(client):
+    headers = await _auth()
+    resp = await _save_ny(client, ["2026-10-12"], headers=headers)
+    assert resp.status == 200
+    assert len((await resp.json())["days"]) == 3
+    assert await _confirmed(client, headers) == []
+
+
+@pytest.mark.asyncio
+async def test_a_painted_week_outside_the_days_is_refused(client):
+    headers = await _auth()
+    resp = await _save_ny(client, ["2026-11-02"], dates=("2026-10-22", "2026-10-26"), headers=headers)
+    assert resp.status == 400 and await resp.json() == {"error": "bad_input"}
+    assert (await (await client.get("/api/this-week", headers=headers)).json())["days"] == []
+
+
+@pytest.mark.asyncio
+async def test_painted_weeks_without_dates_are_refused(client):
+    resp = await _save_ny(client, ["2026-10-19"], dates=())
+    assert resp.status == 400
+
+
+@pytest.mark.asyncio
+async def test_also_usual_confirms_the_same_weeks(client):
+    assert (await _save_ny(client, ["2026-10-19"], also_usual=True)).status == 200
+    assert await _confirmed(client) == ["2026-10-19"]
+
+
+@pytest.mark.asyncio
+async def test_reset_and_usual_week_saves_leave_confirmations(client):
+    headers = await _auth()
+    await _save_ny(client, ["2026-10-19"], headers=headers)
+    assert (await client.delete("/api/this-week", headers=headers)).status == 204
+    assert (await client.put("/api/usual-week", data=json.dumps(_doc()), headers=headers)).status == 200
+    assert await _confirmed(client, headers) == ["2026-10-19"]
+    other = {"Authorization": "Bearer " + (await issue_link("333", "222", "usual", NOW)).split("#")[1]}
+    assert (await client.put("/api/usual-week", data=json.dumps(_doc()), headers=other)).status == 200
+    assert await _confirmed(client, other) == []
