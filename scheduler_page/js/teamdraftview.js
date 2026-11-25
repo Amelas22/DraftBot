@@ -34,12 +34,17 @@ const mineText = (unit) => ({
   usual: { title: "Changing your usual week", sub: "It repeats every week you haven't changed." },
 });
 
-// The viewer's card on Everyone: how the grid counts them. me is their place on a side, or undefined.
-export function everyoneText(me, unit = "week") {
+// The viewer's card on Everyone: how the grid counts them. me is their place on a side, or undefined; weeks are the
+// league weeks in view (statusWeeks), in which a usual week the viewer hasn't confirmed counts only as probable.
+export function everyoneText(me, unit = "week", weeks = []) {
   if (!me) return { tone: "", title: "Your availability", sub: "You aren't on either side of this matchup." };
   if (!hasAvailability(me)) {
     return { tone: "warn", title: "The grid can't count you yet",
       sub: "You haven't entered when you're free, so every half-hour shows you as not free." };
+  }
+  if (isUnconfirmed(me, weeks)) {
+    return { tone: "", title: `You're counted as probably free this ${unit}`,
+      sub: `Your usual week shows as probably until you confirm this ${unit} in My availability.` };
   }
   if (me.overrides?.length) return { tone: "", title: `You're counted from this ${unit}'s changes`, sub: `Your usual week, with the days you changed this ${unit}.` };
   return { tone: "", title: "You're counted from your usual week", sub: `Busy one night? Open My availability to change this ${unit} only.` };
@@ -248,7 +253,7 @@ async function showMatchup(root, api, paths, usualDoc, now, cleanups, notice, zo
 
   const me = () => everyone().find((p) => p.user === state.me?.user);
   const renderCard = () => {
-    cardBox.replaceChildren(statusCard({ everyoneWords: everyoneText(me(), unitNow()), unit: unitNow(), which, onEveryone: toEveryone, onMine: () => toMine(firstWeek()) }));
+    cardBox.replaceChildren(statusCard({ everyoneWords: everyoneText(me(), unitNow(), statusWeeks(state)), unit: unitNow(), which, onEveryone: toEveryone, onMine: () => toMine(firstWeek()) }));
   };
   // My availability opens on this week, or on the usual week for a viewer with nothing entered yet.
   const firstWeek = () => (me() && !hasAvailability(me()) ? "usual" : "thisWeek");

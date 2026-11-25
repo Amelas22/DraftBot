@@ -75,6 +75,8 @@ export async function mountConfirmPanel(root, api, { weeks, number, now, onChang
     try { doc = checkDoc(await call(), CONFIRMATION_FORMAT); ok = true; } catch (e) { note.textContent = e instanceof LinkExpired ? expiredMessage() : failure; }
     draw();
     setBusy(false);
+    // A good result is already on screen in the row or the switch, so it is only announced; a failure stays visible.
+    note.className = ok ? "status sronly" : "status";
     if (ok) note.textContent = announce?.() ?? "";
     if (refocus) box.focus?.();
     if (ok) onChange?.();
@@ -90,7 +92,7 @@ export async function mountConfirmPanel(root, api, { weeks, number, now, onChang
   // A failed read leaves whatever the note says; a good one doesn't clear a visible failure.
   const reload = async () => {
     if (busy) return;
-    try { doc = checkDoc(await api.getConfirmation(range), CONFIRMATION_FORMAT); draw(); } catch (e) { if (e instanceof LinkExpired) note.textContent = expiredMessage(); }
+    try { doc = checkDoc(await api.getConfirmation(range), CONFIRMATION_FORMAT); draw(); } catch (e) { if (e instanceof LinkExpired) { note.className = "status"; note.textContent = expiredMessage(); } }
   };
   return { reload };
 }

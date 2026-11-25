@@ -2,7 +2,7 @@ import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { LinkExpired, createFixtureApi } from "../js/api.js";
-import { mountTeamDraft } from "../js/teamdraftview.js";
+import { everyoneText, mountTeamDraft } from "../js/teamdraftview.js";
 import { gridFrame } from "../js/grid.js";
 import { windowColumns } from "../js/grid.js";
 import { addDays, deadlineOnOrAfter, weekWindow } from "../js/rounds.js";
@@ -765,4 +765,16 @@ test("hiding a probable person drops their +1", async () => {
     assert.equal(cellOf(root, 48).textContent, "");
     assert.match(cellOf(root, 48).className, /\bs0\b/);
   } finally { view.dispose(); }
+});
+
+test("the card says probably when the viewer's usual week isn't confirmed for the round in view", () => {
+  const me = { user: "1", zone: "America/New_York", cells: "AA==", overrides: [], trusts_usual: false, confirmed_rounds: [] };
+  const words = everyoneText(me, "round", ["2026-11-23"]);
+  assert.equal(words.title, "You're counted as probably free this round");
+  assert.equal(words.sub, "Your usual week shows as probably until you confirm this round in My availability.");
+  // Confirmed for that round, or the switch on: the usual words.
+  assert.equal(everyoneText({ ...me, confirmed_rounds: ["2026-11-23"] }, "round", ["2026-11-23"]).title, "You're counted from your usual week");
+  assert.equal(everyoneText({ ...me, trusts_usual: null }, "round", ["2026-11-23"]).title, "You're counted from your usual week");
+  // A rolling page with an unconfirmed week in view says "week".
+  assert.equal(everyoneText(me, "week", ["2026-11-23", "2026-11-30"]).title, "You're counted as probably free this week");
 });

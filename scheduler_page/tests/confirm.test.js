@@ -156,6 +156,38 @@ test("the note is a polite live region and announces a confirm", async () => {
   assert.equal(note.textContent, "Round 3: Confirmed ✓");
 });
 
+test("a confirm is only announced: the row already shows it, so the note is visually hidden", async () => {
+  const root = new Node();
+  await mountConfirmPanel(root, fakeApi(false), opts);
+  await fire(button(root), "click");
+  const note = root.find((n) => n.attrs.role === "status");
+  assert.ok(note.className.split(" ").includes("sronly"));
+});
+
+test("a failure note after a hidden announcement is visible again", async () => {
+  const root = new Node();
+  const api = fakeApi(false);
+  await mountConfirmPanel(root, api, opts);
+  api.setTrustsUsual = async () => { throw new Error("down"); };
+  await fire(button(root), "click");
+  await fire(checkbox(root), "change");
+  const note = root.find((n) => n.attrs.role === "status");
+  assert.equal(note.textContent, "Couldn't save that. Check your connection and try again.");
+  assert.ok(!note.className.split(" ").includes("sronly"));
+});
+
+test("an expired link on reload is visible even after a hidden announcement", async () => {
+  const root = new Node();
+  const api = fakeApi(false);
+  const panel = await mountConfirmPanel(root, api, opts);
+  await fire(button(root), "click");
+  api.getConfirmation = async () => { throw new LinkExpired(); };
+  await panel.reload();
+  const note = root.find((n) => n.attrs.role === "status");
+  assert.equal(note.textContent, expiredMessage());
+  assert.ok(!note.className.split(" ").includes("sronly"));
+});
+
 test("a failed confirm shows the failure and keeps the row", async () => {
   const root = new Node();
   const api = fakeApi(false);
