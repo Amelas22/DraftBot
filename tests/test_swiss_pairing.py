@@ -123,6 +123,52 @@ def test_the_lowest_of_a_bracket_pairs_down_onto_the_highest_below():
         assert crossing == [("C", "D")], f"seed {seed}: {pairs}"
 
 
+def _gaps(teams, pairs):
+    """How many score groups apart each pairing's two teams sit, in pair order."""
+    points = {t["id"]: t["points"] for t in teams}
+    order = sorted(set(points.values()), reverse=True)
+    return [abs(order.index(points[a]) - order.index(points[b])) for a, b in pairs]
+
+
+def test_odd_brackets_at_both_ends_float_one_step_at_a_time():
+    """Season 2, round 4: seven 3-0 teams, twenty-two each on 2-1 and 1-2, and
+    three 0-3 teams once the bye is out. Two brackets are odd, so two teams
+    must float -- and the engine paired a 3-0 team straight onto an 0-3 one,
+    because one crossing of three brackets counted as fewer floaters than
+    three crossings of one. The floats must chain: 9 onto 6, 6 onto 3, 3 onto 0.
+    """
+    teams = ([team(f"w{i}", 9) for i in range(7)] + [team(f"a{i}", 6) for i in range(22)]
+             + [team(f"b{i}", 3) for i in range(22)] + [team(f"z{i}", 0) for i in range(4)])
+
+    for seed in range(5):
+        pairs, bye = pair_round(teams, set(), rng(seed))
+        assert bye.startswith("z"), bye
+        widest = sorted(_gaps(teams, pairs), reverse=True)
+        assert widest[:4] == [1, 1, 1, 0], f"seed {seed}: {pairs}"
+
+
+def test_a_long_jump_loses_to_a_chain_of_short_ones_on_a_small_field():
+    """The same shape on ten teams: odd brackets at the top and bottom with
+    even ones between."""
+    teams = ([team(c, 9) for c in "ABC"] + [team(c, 6) for c in "DE"]
+             + [team(c, 3) for c in "FG"] + [team(c, 0) for c in "HIJ"])
+
+    pairs, _ = pair_round(teams, set(), rng())
+
+    assert sorted(_gaps(teams, pairs), reverse=True) == [1, 1, 1, 0, 0], pairs
+
+
+def test_short_floats_are_preferred_to_fewer_floats():
+    """The choice the fix makes on purpose: 9, 6, 6, 3 can float one team two
+    brackets (9 onto 3) or two teams one bracket each (9 onto 6, 6 onto 3).
+    Short wins over few."""
+    teams = [team("A", 9), team("B", 6), team("C", 6), team("D", 3)]
+
+    pairs, _ = pair_round(teams, set(), rng())
+
+    assert sorted(_gaps(teams, pairs), reverse=True) == [1, 1], pairs
+
+
 def test_a_normal_round_still_varies_inside_the_bracket():
     """Only the two boundary seats are pinned. Rank deciding every seat is a
     bigger change than the problem asked for, and it costs early rounds the
@@ -257,10 +303,10 @@ def _criteria(teams, history, pairs, power_pair):
     edge = sum(boundary(a, b) for a, b in pairs)
     if power_pair:
         return (legal, sum(len(teams) - abs(rank[a] - rank[b]) for a, b in pairs), edge)
-    return (legal,
-            sum(1 for a, b in pairs if points[a] == points[b]),
-            -sum(abs(order.index(points[a]) - order.index(points[b])) for a, b in pairs),
-            edge)
+    # Widest jumps first: fewer pairings crossing k brackets beats anything below.
+    gaps = _gaps(teams, pairs)
+    jumps = tuple(-gaps.count(k) for k in range(len(order) - 1, 0, -1))
+    return (legal, *jumps, edge)
 
 
 @pytest.mark.parametrize("power_pair", [False, True])
