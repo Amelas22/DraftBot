@@ -173,33 +173,6 @@ def test_a_queue_that_never_fills_gives_the_money_back():
     assert '"expired"' in src
 
 
-def test_a_scrapped_draft_gives_the_money_back():
-    """Scrapped means nobody played it, so nobody can be paid for it."""
-    import inspect
-
-    from cogs.draft_control import DraftControlCog
-
-    src = inspect.getsource(DraftControlCog)
-    assert '"scrapped"' in src, "a scrapped draft leaves its pool funded"
-
-
-def test_a_scrap_refunds_only_after_draftmancer_confirms():
-    """A failed stopDraft leaves the draft running, and the code says so. Money
-    must not have been handed back before that point: refunding a draft players
-    are still sitting in means the pool is empty when it later completes."""
-    import inspect
-
-    from cogs.draft_control import DraftControlCog
-
-    src = inspect.getsource(DraftControlCog)
-    emit_at = src.find("emit('stopDraft')")
-    release_at = src.find('"scrapped"')
-    assert emit_at != -1 and release_at != -1
-    assert emit_at < release_at, (
-        "the pool is released before stopDraft is confirmed, so a draft that "
-        "could not be reached is refunded while still being played")
-
-
 @pytest.mark.asyncio
 async def test_a_restart_does_not_hand_a_pool_draft_a_settle_debts_button(test_db):
     """The live victory path gates that button on a pre-conversion draft; the
