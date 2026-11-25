@@ -9,6 +9,9 @@ Manages the ring bearer role - a single-holder role that can be claimed by:
 Only one player per guild can hold the ring bearer role at a time.
 """
 
+import asyncio
+from collections import defaultdict
+
 import discord
 from datetime import datetime
 from loguru import logger
@@ -32,8 +35,27 @@ STREAK_EXTENSION_FLAGS = {
 }
 
 
+# One check at a time per guild. Each check reads the holder and then
+# transfers away from them; two reports landing together would otherwise both
+# read the same holder, each strip the role from that holder only, and leave
+# both winners with it. The bot is one process, so an in-process lock is enough.
+# Not reentrant: transfer_ring_bearer, which these checks call, must not take it.
+_guild_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+
 async def update_ring_bearer_for_guild(bot, guild_id: str, session_id: Optional[str] = None,
                                        streak_extensions: Optional[dict] = None):
+    async with _guild_locks[guild_id]:
+        await _update_ring_bearer_for_guild(bot, guild_id, session_id, streak_extensions)
+
+
+async def check_match_defeat_transfer(bot, guild_id: str, winner_id: str, loser_id: str, session_id: str):
+    async with _guild_locks[guild_id]:
+        await _check_match_defeat_transfer(bot, guild_id, winner_id, loser_id, session_id)
+
+
+async def _update_ring_bearer_for_guild(bot, guild_id: str, session_id: Optional[str],
+                                        streak_extensions: Optional[dict]):
     """
     Check whether the ring bearer should transfer.
 
@@ -152,7 +174,7 @@ async def update_ring_bearer_for_guild(bot, guild_id: str, session_id: Optional[
         logger.error(f"Error updating ring bearer for guild {guild_id}: {e}")
 
 
-async def check_match_defeat_transfer(bot, guild_id: str, winner_id: str, loser_id: str, session_id: str):
+async def _check_match_defeat_transfer(bot, guild_id: str, winner_id: str, loser_id: str, session_id: str):
     """
     Called after match results are processed.
     Check if loser was ring bearer - if so, transfer to winner.
