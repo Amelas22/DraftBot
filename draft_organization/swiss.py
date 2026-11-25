@@ -250,19 +250,26 @@ def pairing_weights(teams: "list[dict[str, Any]]",
     first:
 
       1. not a rematch
-      2. both teams in the same points bracket -- i.e. fewest floaters
-      3. if they must cross, cross the smallest gap
-      4. and cross at the boundary: the lowest team of the upper bracket onto
+      2. ordinary round: no crossing wider than it must be -- the widest gap
+         avoided first, so one long jump loses to any number of short ones.
+         Short is put before few: with 9, 6, 6, 3 it floats two teams one
+         bracket each rather than one team two brackets. This borrows the
+         largest-first comparison of FIDE's score differences, but over the
+         whole round rather than Dutch's bracket by bracket: where a rematch
+         blocks a lower bracket, it will break up a pair higher up sooner
+         than let anyone jump two brackets.
+      3. and cross at the boundary: the lowest team of the upper bracket onto
          the highest team of the lower one
-      5. final round only: pair rank-adjacent, so the teams still playing for
-         a cut place meet each other rather than teams with nothing to play for
-      6. ordinary round only: a random nudge, so the round keeps its variety
+      4. final round only, in place of 2: pair rank-adjacent, so the teams
+         still playing for a cut place meet each other rather than teams
+         with nothing to play for
+      5. ordinary round only: a random nudge, so the round keeps its variety
 
     A strict hierarchy of criteria is how FIDE specifies Swiss pairing, and
     the engines that pair most chess tournaments resolve it as a
     maximum-weight matching rather than by searching for something
-    acceptable. `pair_round` does the same with these numbers. Criterion 5 is
-    this league's own, not FIDE's.
+    acceptable. `pair_round` does the same with these numbers. Criterion 4,
+    and 2's whole-round scope, are this league's own, not FIDE's.
 
     A rematch is priced rather than forbidden, so a field that cannot avoid
     one gets the matching with the FEWEST rematches instead of no matching.
@@ -345,9 +352,15 @@ def pairing_weights(teams: "list[dict[str, Any]]",
                           (boundary, max_dist)]
             else:
                 # An ordinary round wants opponents on the same score, floats
-                # kept few and short, and a sensible landing when one is
-                # unavoidable -- then variety among everything still equal.
-                levels = [legal, (1 if gap == 0 else 0, 1), (max_gap - gap, max_gap),
+                # kept short, and a sensible landing when one is unavoidable --
+                # then variety among everything still equal.
+                #
+                # One level per gap size, widest first (criterion 2). Counting
+                # crossings first instead paired the top of the field onto the
+                # bottom whenever both ends had an odd bracket: one jump of
+                # three is fewer crossings than three jumps of one.
+                avoid_gaps = [(0 if gap == k else 1, 1) for k in range(max_gap, 0, -1)]
+                levels = [legal, *avoid_gaps,
                           (boundary, max_dist), (rng.randrange(n + 1), n)]
             weights[frozenset((a, b))] = _pack(levels, pairs_in_round)
     return weights
