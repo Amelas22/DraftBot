@@ -98,3 +98,49 @@ async def test_cleanup_never_abandons_a_draft_still_drafting(test_db):
 
     assert (await get_draft_session("s_scrap")).session_stage == "teams"
     assert await pool.pool_balance("g", "s_scrap") == 40
+
+
+@pytest.mark.asyncio
+async def test_cleanup_never_abandons_an_unfinished_tournament_draft(test_db):
+    """A league match's draft is kept alive by its own guard, which runs first."""
+    import utils
+    from unittest.mock import AsyncMock
+
+    await _scrapped_staked_draft()
+    with patch("services.tournament_service.extend_deletion_if_unfinished",
+               new=AsyncMock(return_value=True)):
+        await run_until_sleep(utils.cleanup_sessions_task(_bot()), 600)
+
+    assert (await get_draft_session("s_scrap")).session_stage == "teams"
+    assert await pool.pool_balance("g", "s_scrap") == 40
+
+
+@pytest.mark.asyncio
+async def test_a_draft_whose_rooms_arrive_after_it_was_picked_is_left_alone(test_db):
+    """Picked from the pass's read, then its rooms were committed: the abandon
+    re-checks the row it writes and does nothing."""
+    import utils
+
+    await _scrapped_staked_draft(rooms=datetime.now())
+    await utils.abandon_never_drafted(["s_scrap"])
+
+    assert (await get_draft_session("s_scrap")).session_stage == "teams"
+    assert await pool.pool_balance("g", "s_scrap") == 40
+
+
+@pytest.mark.asyncio
+async def test_rooms_are_never_built_for_an_abandoned_draft(test_db):
+    """The draft can still end in Draftmancer after cleanup abandoned it."""
+    from views import PersistentView
+
+    await seed_session("s_gone", guild="g", stype="staked", stage="abandoned",
+                       teams=(PLAYERS[:1], PLAYERS[1:]))
+    from unittest.mock import AsyncMock
+    pairings = AsyncMock()
+    with patch("views.calculate_pairings", new=pairings):
+        built = await PersistentView.create_rooms_pairings(MagicMock(), MagicMock(), "s_gone")
+
+    assert built is False
+    pairings.assert_not_awaited()
+    draft = await get_draft_session("s_gone")
+    assert draft.session_stage == "abandoned" and draft.rooms_created_at is None

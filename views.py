@@ -1555,6 +1555,18 @@ class PersistentView(discord.ui.View):
                                 "Rooms and pairings have already been created for this draft.", ephemeral=True)
                         return False
 
+                    # An abandoned draft has been voided and its entries returned,
+                    # so building its rooms would have it played for nothing.
+                    # Cleanup abandons a draft that never got its rooms, and the
+                    # draft can still end in Draftmancer afterwards.
+                    if session.session_stage == "abandoned":
+                        logger.info("Not creating rooms for abandoned session_id={}", session_id)
+                        if interaction:
+                            await interaction.followup.send(
+                                "This draft has been abandoned, so no rooms will be created.",
+                                ephemeral=True)
+                        return False
+
                     # A previous run already got as far as creating the shared
                     # chat, which happens AFTER the once-only work below. Making
                     # retries possible also made that work re-runnable, and

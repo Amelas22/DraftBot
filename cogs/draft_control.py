@@ -107,7 +107,7 @@ def _shared_draft_channel(ctx, draft_session):
     return ctx.guild.get_channel(int(chat_id))
 
 
-async def abandon_draft_session(session_id, session_factory=None):
+async def abandon_draft_session(session_id, session_factory=None, *, only_if=None):
     """Void all match results for a draft and mark it abandoned.
 
     Sets every MatchResult back to unplayed (no winner, zero game wins,
@@ -122,6 +122,10 @@ async def abandon_draft_session(session_id, session_factory=None):
     window, and a finished draft losing every result is not recoverable by asking
     people what the scores were. So the guard is re-run here, inside the same
     transaction as the writes, where nothing can land between the two.
+
+    `only_if`, given a predicate, is re-checked on the row inside that same
+    transaction, and the draft is left alone (False) if it no longer holds --
+    for a caller that decided to abandon from a read taken earlier.
     """
     if session_factory is None:
         from session import AsyncSessionLocal
@@ -136,6 +140,9 @@ async def abandon_draft_session(session_id, session_factory=None):
                 logger.info(
                     f"Refusing to abandon {session_id}: it finished while the "
                     f"decision to abandon it was pending")
+                return False
+            if only_if is not None and not only_if(current):
+                logger.info(f"Not abandoning {session_id}: it changed since it was picked")
                 return False
             # Read inside the transaction; the pool release below runs after it
             # closes, and the row object is not safe to touch by then.

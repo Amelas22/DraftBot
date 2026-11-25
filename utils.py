@@ -1908,15 +1908,22 @@ async def abandon_never_drafted(session_ids):
     its entries is logged and stays as it is: abandon_draft_session has already
     marked it abandoned, and an admin returns what is still held.
     """
-    # Local: draft_control and draft_setup_manager both import this module.
+    # Local: draft_control, draft_setup_manager and views all import this module.
     from cogs.draft_control import abandon_draft_session
     from services.draft_setup_manager import DraftSetupManager
+    from views import rooms_creation_lock
 
     for session_id in session_ids:
         if DraftSetupManager.is_drafting(session_id):
             continue
         try:
-            if await abandon_draft_session(session_id):
+            # Under the rooms lock, and re-checked on the row being written: the
+            # draft may have finished drafting and be having its rooms built
+            # right now, and rooms_created_at is only stamped when that ends.
+            async with rooms_creation_lock(session_id):
+                abandoned = await abandon_draft_session(
+                    session_id, only_if=abandons_at_deletion)
+            if abandoned:
                 logger.info(f"abandoned {session_id}: it never got past drafting")
         except PoolNotSettled:
             logger.opt(exception=True).error(
