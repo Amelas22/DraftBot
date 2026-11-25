@@ -53,3 +53,19 @@ def rooms_reaped(session, now: datetime | None = None) -> bool:
     """
     deadline = getattr(session, "deletion_time", None)
     return deadline is not None and deadline < (now or datetime.now())
+
+
+def abandons_at_deletion(session) -> bool:
+    """Whether cleanup abandons this draft once its `deletion_time` passes.
+
+    A draft whose rooms were never created never got past drafting: it was
+    scrapped and not restarted, or it stalled. Cleanup is about to delete its
+    draft post, and with it the Cancel Draft button, and /abandon cannot find a
+    draft that has no rooms. So cleanup abandons it the way /abandon would,
+    which returns its entries; otherwise they would sit in its pool for good.
+
+    A queue (no stage yet) is never one: the queue-expiry reaper releases those.
+    """
+    return (is_stale_draft(session)
+            and getattr(session, "rooms_created_at", None) is None
+            and session.session_stage not in (None, "abandoned"))

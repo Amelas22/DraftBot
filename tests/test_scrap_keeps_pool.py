@@ -3,8 +3,9 @@
 A table that scraps usually restarts in the same session with /ready, teams
 unchanged, and plays the draft to a result that settle_pool pays from the pool.
 Refunding the entries at the scrap emptied that pool, so the restarted draft
-completed paying nobody. Only the paths that really end a draft early -- /abandon,
-cancelling the queue, the queue expiring -- return entries.
+completed paying nobody. Only the paths that really end a draft early return
+entries: Cancel Draft, /abandon, the queue expiring, and cleanup abandoning a
+draft that never got past drafting.
 """
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -55,7 +56,7 @@ async def test_a_scrap_leaves_the_entries_in_the_pool(draft_control_cog):
 
     release.assert_not_awaited()
     assert "Draft canceled" in final
-    assert "/abandon" in final, f"never told a staked table how to get entries back: {final!r}"
+    assert "Cancel Draft" in final, f"never told a staked table how to get entries back: {final!r}"
 
 
 @pytest.mark.asyncio

@@ -23,6 +23,7 @@ from helpers.team_names import RED, labels_for
 from services.draft_pool_service import (format_entries, format_outcomes,
                                          pool_balance, release_draft_pool,
                                          settle_draw, settle_pool, PoolNotSettled)
+from helpers.stale_drafts import abandons_at_deletion
 from services.draft_analysis import DraftAnalysis
 from services.league_roles import live_member_ids
 from services.donation_service import payouts_footer, payouts_title, stakes_field_name
@@ -1899,9 +1900,33 @@ async def calculate_three_zero_drafters(session, draft_session_id, guild):
             return ", ".join(three_zero_names)
 
 
+async def abandon_never_drafted(session_ids):
+    """Abandon each draft, exactly as /abandon does, unless it is still drafting.
+
+    These drafts reached their deletion time without their rooms ever being
+    created (helpers.stale_drafts.abandons_at_deletion). One that cannot return
+    its entries is logged and stays as it is: abandon_draft_session has already
+    marked it abandoned, and an admin returns what is still held.
+    """
+    # Local: draft_control and draft_setup_manager both import this module.
+    from cogs.draft_control import abandon_draft_session
+    from services.draft_setup_manager import DraftSetupManager
+
+    for session_id in session_ids:
+        if DraftSetupManager.is_drafting(session_id):
+            continue
+        try:
+            if await abandon_draft_session(session_id):
+                logger.info(f"abandoned {session_id}: it never got past drafting")
+        except PoolNotSettled:
+            logger.opt(exception=True).error(
+                f"abandoned {session_id} at cleanup but could not return its entries")
+
+
 async def cleanup_sessions_task(bot):
     while True:
         cancelled_queues = []
+        never_drafted = []
         # A failed pass is logged and the next runs on schedule: a loop that dies
         # here is only revived at the next gateway reconnect.
         try:
@@ -1987,6 +2012,8 @@ async def cleanup_sessions_task(bot):
                             )
                             continue
                         reaped_guilds.add(str(session.guild_id))
+                        if abandons_at_deletion(session):
+                            never_drafted.append(session.session_id)
                         # Check if channel_ids is not None and is iterable before attempting to iterate
                         if session.channel_ids:
                             for channel_id in session.channel_ids:
@@ -2043,6 +2070,9 @@ async def cleanup_sessions_task(bot):
             from services.draft_setup_manager import DraftSetupManager
             await asyncio.gather(*(DraftSetupManager.cancel_for_session(session_id)
                                    for session_id in cancelled_queues))
+
+            # After the commit: abandoning writes in its own transactions.
+            await abandon_never_drafted(never_drafted)
         except Exception as e:
             logger.exception(f"cleanup_sessions_task pass failed: {e}")
         # Sleep for a certain amount of time before running again

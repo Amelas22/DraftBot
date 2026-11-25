@@ -28,8 +28,11 @@ ACTIVE_ABANDON_VOTES = {}
 ABANDON_CLEANUP_HOURS = 2
 
 # Appended to /scrap's result on a draft with entries in its pool.
+# /abandon cannot help here: it finds a draft by its rooms, and a scrapped draft
+# has none yet. Cleanup abandons it at its deletion time if nobody does.
 SCRAP_KEEPS_ENTRIES = ("\n💰 Entries stay in the prize pool for the restarted draft. "
-                       "If you're not restarting it, use `/abandon` to return them.")
+                       "If you're not restarting it, press **Cancel Draft** on the "
+                       "draft post to return them.")
 
 
 async def run_participant_vote(ctx, *, channel, view, registry, key, announcement,
@@ -776,8 +779,9 @@ class DraftControlCog(commands.Cog):
                 # session with /ready, teams unchanged, and plays it to a result
                 # that settle_pool pays from this pool. Refunding here emptied
                 # it, so the restarted draft completed paying nobody. Entries
-                # come back only when the draft really ends early: /abandon,
-                # cancelling the queue, or the queue expiring.
+                # come back only when the draft really ends early: Cancel Draft,
+                # /abandon, the queue expiring, or cleanup abandoning a draft
+                # that never got past drafting.
                 staked = False
                 try:
                     staked = await pool_balance(str(draft_session.guild_id),

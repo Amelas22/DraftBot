@@ -193,7 +193,7 @@ class PoolNotSettled(RuntimeError):
 
 
 # What to tell players when a release fails after their draft has already
-# ended (abandoned, scrapped, cancelled). Nothing was lost -- a failed release
+# ended (abandoned, cancelled, expired). Nothing was lost -- a failed release
 # leaves the pool untouched -- but nothing will return the money on its own.
 ENTRIES_STILL_HELD = ("⚠️ The entries couldn't be returned automatically. They're "
                       "still held safely in the pool -- an admin needs to return them.")
