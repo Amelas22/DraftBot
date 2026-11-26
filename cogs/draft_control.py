@@ -52,6 +52,10 @@ UNREACHABLE = ("⚠️ Couldn't reach the drafting server. Nothing has changed �
                "please try again in a moment.")
 
 
+# reopen_draft's "changed": another reopen moved the draft first.
+ALREADY_MOVED = "Already moved — see the draft channel for the current links."
+
+
 FALLBACK_NO_BOT = ("This draft runs on draftmancer.com without DraftBot in the room, so "
                    "DraftBot can't do that there — run it from Draftmancer itself.")
 
@@ -448,9 +452,11 @@ class AbandonConfirmView(View):
 class FailoverConfirmView(View):
     """Ephemeral confirmation before /failover moves a draft whose server can't be reached."""
 
-    def __init__(self, session_id, requested_by, bot, timeout=60.0):
+    def __init__(self, session_id, draft_id, requested_by, bot, timeout=60.0):
         super().__init__(timeout=timeout)
         self.session_id = session_id
+        # The room the prompt was shown for: a click after the draft has left it changes nothing.
+        self.draft_id = draft_id
         self.requested_by = requested_by
         self.bot = bot
 
@@ -460,7 +466,7 @@ class FailoverConfirmView(View):
         # buttons also stop a second click from reaching reopen_draft.
         _disable_all(self)
         await interaction.response.edit_message(content="Moving the draft…", view=self)
-        text = await _failover_reply(self.bot, self.session_id, self.requested_by)
+        text = await _failover_reply(self.bot, self.session_id, self.draft_id, self.requested_by)
         await interaction.edit_original_response(content=text, view=self)
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
@@ -482,16 +488,17 @@ FAILOVER_REPLIES = {
     "unreachable": "⚠️ Couldn't open a room on draftmancer.com right now. Try again in a moment.",
     "cube-import": "The cube couldn't be imported for a new room. Try again shortly.",
     "refused": "Couldn't move the draft right now. Try again in a moment.",
-    "changed": "The draft changed while it was being moved. Try `/failover` again.",
+    "changed": ALREADY_MOVED,
     "gone": "This draft no longer exists.",
 }
 
 
-async def _failover_reply(bot, session_id, requested_by) -> str:
+async def _failover_reply(bot, session_id, draft_id, requested_by) -> str:
     """Reopen the draft on a DraftBot-run room and say, plainly, what happened."""
     try:
         result = await hosted_draft.reopen_draft(
-            bot, session_id, "manager", reason="failover", requested_by=requested_by)
+            bot, session_id, "manager", expected_draft_id=draft_id, reason="failover",
+            requested_by=requested_by)
     except Exception:
         logger.exception(f"/failover could not reopen draft {session_id}")
         return ("⚠️ Something went wrong moving the draft. Check the draft channel for "
@@ -1151,7 +1158,8 @@ class DraftControlCog(commands.Cog):
                 return
             stage = await hosted_draft.hosted_stage(draft_session.draft_id)
             if stage is None:
-                view = FailoverConfirmView(draft_session.session_id, ctx.author.mention, self.bot)
+                view = FailoverConfirmView(draft_session.session_id, draft_session.draft_id,
+                                           ctx.author.mention, self.bot)
                 await ctx.followup.send(
                     "⚠️ The drafting server can't be reached, so DraftBot can't tell how far "
                     "the draft got. Move it to a DraftBot-run room on draftmancer.com? "
@@ -1159,7 +1167,8 @@ class DraftControlCog(commands.Cog):
                     view=view, ephemeral=True)
                 return
             await ctx.followup.send(
-                await _failover_reply(self.bot, draft_session.session_id, ctx.author.mention),
+                await _failover_reply(self.bot, draft_session.session_id,
+                                      draft_session.draft_id, ctx.author.mention),
                 ephemeral=True)
         except Exception as e:
             logger.exception(f"Error in failover command: {e}")
@@ -1562,6 +1571,7 @@ class DraftControlCog(commands.Cog):
         try:
             result = await hosted_draft.reopen_draft(
                 self.bot, draft_session.session_id, route,
+                expected_draft_id=draft_session.draft_id,
                 reason="redo", requested_by=str(ctx.author.id))
         except Exception:
             logger.exception(f"/ready could not reopen draft {draft_session.session_id}")
@@ -1579,7 +1589,7 @@ class DraftControlCog(commands.Cog):
                          "An admin can resolve it with `/replace_seat`.",
             "cube-import": "The cube couldn't be imported for a new room. Try again shortly, "
                            "or use `/failover` / `/draft_route` to change where it runs.",
-            "changed": "The draft changed while opening the room. Try `/ready` again.",
+            "changed": ALREADY_MOVED,
             "gone": "This draft no longer exists.",
         }
         text = replies.get(result)

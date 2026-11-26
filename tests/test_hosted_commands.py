@@ -444,6 +444,7 @@ async def test_ready_on_a_stopped_hosted_draft_reopens_on_the_guild_route(hosted
     reopen.assert_awaited_once()
     assert reopen.await_args.args[1:] == (SID, "manager")
     assert reopen.await_args.kwargs["reason"] == "redo"
+    assert reopen.await_args.kwargs["expected_draft_id"] == DRAFT_ID
     check.assert_not_awaited()
     assert "new room" in replies(ctx).lower()
 
@@ -478,6 +479,14 @@ async def test_ready_reopen_that_fails_points_at_failover_and_draft_route(hosted
     ctx, _, _ = await _ready_with(cog, "stopped", True, result="unreachable")
 
     assert "/failover" in replies(ctx) and "/draft_route" in replies(ctx)
+
+
+@pytest.mark.asyncio
+async def test_ready_reopen_that_lost_to_another_move_says_it_already_moved(hosted, cog, no_manager):
+    ctx, _, _ = await _ready_with(cog, "stopped", True, result="changed")
+
+    assert "Already moved" in replies(ctx)
+    assert "draft channel" in replies(ctx)
 
 
 @pytest.mark.asyncio
@@ -527,6 +536,7 @@ async def test_failover_moves_a_reachable_hosted_draft_at_once(hosted, cog):
     assert reopen.await_args.args[1:] == (SID, "manager")
     assert reopen.await_args.kwargs["reason"] == "failover"
     assert reopen.await_args.kwargs["requested_by"] == "<@111>"
+    assert reopen.await_args.kwargs["expected_draft_id"] == DRAFT_ID
     assert "moved" in replies(ctx).lower()
 
 
@@ -560,6 +570,7 @@ async def test_failover_with_the_server_down_asks_first(hosted, cog):
     assert reopen_now.await_args.args[1:] == (SID, "manager")
     assert reopen_now.await_args.kwargs["reason"] == "failover"
     assert reopen_now.await_args.kwargs["requested_by"] == "<@111>"
+    assert reopen_now.await_args.kwargs["expected_draft_id"] == DRAFT_ID
 
 
 @pytest.mark.asyncio
@@ -601,7 +612,7 @@ async def test_failover_on_a_draft_already_on_draftmancer_says_so(hosted, cog):
     ("ended", "already finished"),
     ("no-teams", "Teams haven't been formed"),
     ("bot-seats", "played by a bot"),
-    ("changed", "changed"),
+    ("changed", "Already moved"),
 ])
 async def test_failover_replies_for_each_refusal(hosted, cog, result, words):
     ctx, _ = await _failover(cog, result=result)

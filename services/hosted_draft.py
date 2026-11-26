@@ -986,30 +986,37 @@ _REOPEN_HEADLINES: dict[ReopenReason, str] = {
 
 
 async def reopen_draft(bot: discord.Client, session_id: str, route: ReopenRoute, *,
-                       reason: ReopenReason, requested_by: str | None) -> ReopenResult:
+                       expected_draft_id: str, reason: ReopenReason,
+                       requested_by: str | None) -> ReopenResult:
     """Move a draft with teams to a new Draftmancer room on `route`.
 
     For /failover ("failover", route "manager") and a hosted /ready that starts
     over ("redo"). The draft keeps its teams, sign-ups, stage and staked pool;
-    only the room, its draft id and every player's link change. A hosted room
+    only the room, its draft id and every player's link change. The old room
     is closed first when the server can be asked; one it cannot reach is left
     behind ("moved-unstopped"), and its late push finds no draft, since the
     draft id changes. A draft whose log exists, or that the server says has
     ended, is not moved: its result is on the way. A new hosted session is
     created before anything else changes, so a failed create leaves the draft
     where it was. The row moves only if nobody moved it meanwhile ("changed").
+
+    `expected_draft_id` is the hosted room the caller looked at. A draft that
+    has left it -- another reopen got the lock first, or a confirm prompt
+    outlived the move -- or that no longer runs on the hosted server is
+    "changed", before anything is asked or opened.
     """
     async with _draft_lock(session_id):
         row = await DraftSession.get_by_session_id(session_id)
         if row is None:
             return "gone"
+        if row.draft_id != expected_draft_id or row.draftmancer_route != ROUTE:
+            return "changed"
         if not row.session_stage:
             return "no-teams"
         if row.logs_captured_at is not None:
             return "ended"
         old_id: str = row.draft_id
-        was_hosted = row.draftmancer_route == ROUTE
-        stage = await hosted_stage(old_id) if was_hosted else None
+        stage = await hosted_stage(old_id)
         if stage == "ended":
             return "ended"
         if row.hosted_bot_seats:
@@ -1028,7 +1035,7 @@ async def reopen_draft(bot: discord.Client, session_id: str, route: ReopenRoute,
                 await _stop_quietly(client, new_id)
 
         stopped = True
-        if was_hosted and stage not in ("stopped", "lost"):
+        if stage not in ("stopped", "lost"):
             try:
                 await client.stop(old_id)
             except HostedUnavailable as e:
@@ -1044,9 +1051,8 @@ async def reopen_draft(bot: discord.Client, session_id: str, route: ReopenRoute,
                     return "refused"
         # Taken before _forget drops it: a running ready check's messages are closed below.
         tracked = _TRACKED.pop(session_id, None)
-        if was_hosted:
-            _forget(session_id)
-            _UNPULLABLE.add(session_id)
+        _forget(session_id)
+        _UNPULLABLE.add(session_id)
 
         link = (get_draftmancer_session_url(new_id) if route == "hosted"
                 else public_draftmancer_session_url(new_id))

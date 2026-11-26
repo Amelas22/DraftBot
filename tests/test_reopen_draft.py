@@ -7,6 +7,7 @@ the row swaps to a new draft id only if nobody else moved it meanwhile, and
 every player is handed a new link. Teams, sign-ups and the staked pool are
 never touched.
 """
+import asyncio
 from datetime import datetime
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -56,9 +57,14 @@ def admin_dms(monkeypatch):
         yield sent
 
 
-async def _failover(bot) -> str:
-    return await hosted_draft.reopen_draft(bot, SID, "manager", reason="failover",
-                                           requested_by="Mod Molly")
+async def _failover(bot, expected: str = DRAFT_ID) -> str:
+    return await hosted_draft.reopen_draft(bot, SID, "manager", expected_draft_id=expected,
+                                           reason="failover", requested_by="Mod Molly")
+
+
+async def _redo(bot, requested_by: str | None = None) -> str:
+    return await hosted_draft.reopen_draft(bot, SID, "hosted", expected_draft_id=DRAFT_ID,
+                                           reason="redo", requested_by=requested_by)
 
 
 @pytest.mark.asyncio
@@ -205,7 +211,7 @@ async def test_redo_on_the_hosted_route_opens_a_new_hosted_session(hosted, bot, 
     hosted_draft._DONE.add(SID)
     hosted_draft._UNPULLABLE.add(SID)
 
-    result = await hosted_draft.reopen_draft(bot, SID, "hosted", reason="redo", requested_by="Alice")
+    result = await _redo(bot, "Alice")
 
     assert result == "moved"
     row = await _row()
@@ -235,7 +241,7 @@ async def test_redo_whose_create_fails_leaves_the_row_alone(hosted, bot, spawn, 
     await _seed_teams()
     hosted.fail("create", HostedUnavailable("down"))
 
-    result = await hosted_draft.reopen_draft(bot, SID, "hosted", reason="redo", requested_by=None)
+    result = await _redo(bot)
 
     assert result == "unreachable"
     row = await _row()
@@ -253,13 +259,75 @@ async def test_a_lost_swap_stops_the_new_room(hosted, bot, channel, spawn, admin
 
     hosted.create = create  # type: ignore[method-assign]
 
-    result = await hosted_draft.reopen_draft(bot, SID, "hosted", reason="redo", requested_by=None)
+    result = await _redo(bot)
 
     assert result == "changed"
     [new_id] = created
     assert ("stop", new_id) in hosted.calls
     assert (await _row()).draft_id == "SOMEONE"
     assert channel.sent("no longer work") == []
+
+
+@pytest.mark.asyncio
+async def test_two_concurrent_failovers_open_one_room(hosted, bot, channel, spawn, admin_dms):
+    """Two players confirm /failover at once: the second finds the draft already moved."""
+    await _seed_teams()
+    hosted.stage = "drafting"
+
+    results = await asyncio.gather(_failover(bot), _failover(bot))
+
+    assert sorted(results) == ["changed", "moved"]
+    spawn.assert_awaited_once_with(SID, bot)
+    assert len(channel.sent("no longer work")) == 1
+    assert hosted.calls.count(("stop", DRAFT_ID)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_stale_failover_after_a_completed_move_changes_nothing(hosted, bot, channel, spawn,
+                                                                     admin_dms):
+    """A confirm prompt still open from before the move: the room it was shown for is gone."""
+    await _seed_teams()
+    hosted.stage = "drafting"
+    assert await _failover(bot) == "moved"
+    moved = await _row()
+    hosted.calls.clear()
+
+    assert await _failover(bot) == "changed"
+
+    row = await _row()
+    assert (row.draft_id, row.draft_link, row.draftmancer_route) == (
+        moved.draft_id, moved.draft_link, None)
+    assert hosted.calls == []
+    spawn.assert_awaited_once()
+    assert len(channel.sent("no longer work")) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_redo_after_a_failover_changes_nothing(hosted, bot, channel, spawn, admin_dms):
+    """/ready read the hosted row; a /failover moved the draft before /ready got the lock."""
+    await _seed_teams()
+    hosted.stage = "stopped"
+    assert await _failover(bot) == "moved"
+    hosted.calls.clear()
+
+    assert await _redo(bot) == "changed"
+
+    row = await _row()
+    assert row.draftmancer_route is None
+    assert hosted.calls == []
+    assert len(channel.sent("no longer work")) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_row_no_longer_hosted_is_not_reopened(hosted, bot, spawn, admin_dms):
+    """Same room, but the draft already runs off the hosted server (a fallback or a manager)."""
+    await _seed_teams(route=None)
+
+    assert await _failover(bot) == "changed"
+
+    assert hosted.calls == []
+    spawn.assert_not_awaited()
+    assert (await _row()).draft_id == DRAFT_ID
 
 
 @pytest.mark.asyncio
