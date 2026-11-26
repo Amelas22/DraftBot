@@ -100,6 +100,62 @@ async def test_cleanup_never_abandons_a_draft_still_drafting(test_db):
     assert await pool.pool_balance("g", "s_scrap") == 40
 
 
+async def _route(sid, route, **values):
+    from sqlalchemy import update
+    from models.draft_session import DraftSession
+    from session import AsyncSessionLocal
+    async with AsyncSessionLocal() as s:
+        await s.execute(update(DraftSession).where(DraftSession.session_id == sid)
+                        .values(draftmancer_route=route, draft_id="HOST1", **values))
+        await s.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["drafting", None])
+async def test_cleanup_never_abandons_a_hosted_draft_the_server_may_be_drafting(test_db, stage):
+    """A hosted draft has no manager; the server is asked, and one that can't
+    answer may be mid-draft."""
+    import utils
+    from unittest.mock import AsyncMock
+
+    await _scrapped_staked_draft()
+    await _route("s_scrap", "hosted")
+    with patch("services.hosted_draft.hosted_stage", AsyncMock(return_value=stage)):
+        await run_until_sleep(utils.cleanup_sessions_task(_bot()), 600)
+
+    assert (await get_draft_session("s_scrap")).session_stage == "teams"
+    assert await pool.pool_balance("g", "s_scrap") == 40
+
+
+@pytest.mark.asyncio
+async def test_cleanup_abandons_a_hosted_draft_that_never_started(test_db):
+    import utils
+    from unittest.mock import AsyncMock
+
+    await _scrapped_staked_draft()
+    await _route("s_scrap", "hosted")
+    with patch("services.hosted_draft.hosted_stage", AsyncMock(return_value="gathering")), \
+         patch("services.hosted_draft.stop_if_hosted", AsyncMock()):
+        await run_until_sleep(utils.cleanup_sessions_task(_bot()), 600)
+
+    assert (await get_draft_session("s_scrap")).session_stage == "abandoned"
+    assert await pool.pool_balance("g", "s_scrap") == 0
+
+
+@pytest.mark.asyncio
+async def test_cleanup_never_abandons_a_fallback_draft_without_its_log(test_db):
+    """draftmancer.com can't be asked; only a captured log proves drafting ended,
+    so an admin settles a fallback draft that never sent one."""
+    import utils
+
+    await _scrapped_staked_draft()
+    await _route("s_scrap", "fallback")
+    await run_until_sleep(utils.cleanup_sessions_task(_bot()), 600)
+
+    assert (await get_draft_session("s_scrap")).session_stage == "teams"
+    assert await pool.pool_balance("g", "s_scrap") == 40
+
+
 @pytest.mark.asyncio
 async def test_cleanup_never_abandons_an_unfinished_tournament_draft(test_db):
     """A league match's draft is kept alive by its own guard, which runs first."""

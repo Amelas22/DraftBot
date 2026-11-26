@@ -1917,13 +1917,14 @@ async def abandon_never_drafted(session_ids):
     its entries is logged and stays as it is: abandon_draft_session has already
     marked it abandoned, and an admin returns what is still held.
     """
-    # Local: draft_control, draft_setup_manager and views all import this module.
-    from cogs.draft_control import abandon_draft_session
-    from services.draft_setup_manager import DraftSetupManager
+    # Local: draft_control and views both import this module.
+    from cogs.draft_control import abandon_draft_session, still_drafting
     from views import rooms_creation_lock
 
     for session_id in session_ids:
-        if DraftSetupManager.is_drafting(session_id):
+        draft_session = await get_draft_session(session_id)
+        # None (a hosted server that can't say) may be mid-draft too.
+        if draft_session is None or await still_drafting(draft_session) is not False:
             continue
         try:
             # Under the rooms lock, and re-checked on the row being written: the

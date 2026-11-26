@@ -618,3 +618,37 @@ async def test_abandon_goes_ahead_on_a_hosted_draft_not_drafting(hosted, cog, st
     await _abandon_hosted(cog, ctx)
 
     assert "Abandon this draft?" in replies(ctx)
+
+
+async def _abandon_fallback(cog: DraftControlCog, ctx: MagicMock, *, captured) -> None:
+    from conftest import make_draft_stub
+
+    draft = make_draft_stub("teams", draftmancer_route="fallback", draft_id=DRAFT_ID,
+                            logs_captured_at=captured)
+    with patch("cogs.draft_control.DraftSession.get_by_any_channel_id",
+               new=AsyncMock(return_value=draft)), \
+         patch("cogs.draft_control.is_bot_manager", new=AsyncMock(return_value=True)), \
+         patch.object(DraftSetupManager, "is_drafting",
+                      MagicMock(side_effect=AssertionError("asked a manager"))):
+        await cog._do_abandon(ctx)
+
+
+@pytest.mark.asyncio
+async def test_abandon_refuses_a_fallback_draft_whose_log_has_not_arrived(cog):
+    """draftmancer.com can't be asked whether players are still picking; only
+    the captured log proves the draft ended."""
+    ctx = make_ctx()
+
+    await _abandon_fallback(cog, ctx, captured=None)
+
+    assert "Abandon this draft?" not in replies(ctx)
+    assert "draftmancer.com" in replies(ctx)
+
+
+@pytest.mark.asyncio
+async def test_abandon_goes_ahead_on_a_fallback_draft_with_its_log_in(cog):
+    ctx = make_ctx()
+
+    await _abandon_fallback(cog, ctx, captured=datetime(2026, 11, 25, 20, 0))
+
+    assert "Abandon this draft?" in replies(ctx)

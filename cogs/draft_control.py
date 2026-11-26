@@ -67,6 +67,26 @@ def _is_participant(ctx, draft_session):
     return str(ctx.author.id) in (draft_session.sign_ups or {})
 
 
+FALLBACK_LOG_NOT_IN = (
+    "This draft runs on draftmancer.com, so DraftBot can't see whether it is still "
+    "being drafted. `/abandon` works here once the draft's log reaches DraftBot — "
+    "after the draft ends and the room shares its log.")
+
+
+async def still_drafting(draft_session) -> bool | None:
+    """Whether players may still be picking; None when the hosted server can't say.
+
+    A legacy draft's manager knows. A hosted draft has none, so its server is
+    asked. A fallback draft runs on draftmancer.com, which can't be asked at all:
+    only its captured log proves drafting ended."""
+    if _is_hosted(draft_session):
+        stage = await hosted_draft.hosted_stage(draft_session.draft_id)
+        return None if stage is None else stage == "drafting"
+    if _is_fallback(draft_session):
+        return draft_session.logs_captured_at is None
+    return DraftSetupManager.is_drafting(draft_session.session_id)
+
+
 async def run_participant_vote(ctx, *, channel, view, registry, key, announcement,
                                ack, on_pass, on_fail):
     """Run one participant vote end to end: claim the slot, post it, wait, act.
@@ -920,18 +940,16 @@ class DraftControlCog(commands.Cog):
                 return
 
             # Still being drafted: that is /scrap's job. Voiding the record now
-            # would strand a session people are mid-pick in. A hosted draft has
-            # no manager to ask, so the server is asked -- and one it cannot
-            # reach may be mid-draft, so that refuses too.
-            if _is_hosted(draft_session):
-                stage = await hosted_draft.hosted_stage(draft_session.draft_id)
-                if stage is None:
-                    await ctx.followup.send(UNREACHABLE, ephemeral=True)
-                    return
-                still_drafting = stage == "drafting"
-            else:
-                still_drafting = DraftSetupManager.is_drafting(draft_session.session_id)
-            if still_drafting:
+            # would strand a session people are mid-pick in. A hosted server it
+            # cannot reach may be mid-draft, so that refuses too.
+            drafting = await still_drafting(draft_session)
+            if drafting is None:
+                await ctx.followup.send(UNREACHABLE, ephemeral=True)
+                return
+            if drafting and _is_fallback(draft_session):
+                await ctx.followup.send(FALLBACK_LOG_NOT_IN, ephemeral=True)
+                return
+            if drafting:
                 await ctx.followup.send(
                     "This draft is still running in Draftmancer. Use `/pause` then "
                     "`/scrap` **in the channel the draft was posted in**; `/abandon` "
