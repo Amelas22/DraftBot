@@ -220,8 +220,29 @@ async def test_scrap_stops_the_hosted_session(hosted, cog, no_manager, monkeypat
     await cog._do_scrap(ctx)
 
     assert hosted.call_names() == ["pause", "stop"]
-    release.assert_awaited_once_with("1", SID, "scrapped")
-    assert "Draft canceled" in str(ctx.channel.send.return_value.edit.await_args)
+    release.assert_not_awaited()
+    message = str(ctx.channel.send.return_value.edit.await_args)
+    assert "Draft canceled" in message and "/ready" in message
+    assert draft_control.SCRAP_KEEPS_ENTRIES not in message
+
+
+@pytest.mark.asyncio
+async def test_scrap_of_a_staked_hosted_draft_says_the_entries_stay(
+        hosted, cog, no_manager, monkeypatch):
+    await _seed()
+    hosted.stage = "drafting"
+    await DraftControlCog.pause_command.callback(cog, make_ctx())
+    monkeypatch.setattr(draft_control, "run_participant_vote", passing_vote)
+    release = AsyncMock()
+    monkeypatch.setattr(draft_control, "release_draft_pool", release)
+    monkeypatch.setattr(draft_control, "pool_balance", AsyncMock(return_value=50))
+    ctx = make_ctx()
+
+    await cog._do_scrap(ctx)
+
+    release.assert_not_awaited()
+    sent = ctx.channel.send.return_value.edit.await_args.kwargs["content"]
+    assert draft_control.SCRAP_KEEPS_ENTRIES in sent
 
 
 @pytest.mark.asyncio

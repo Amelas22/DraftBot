@@ -1515,17 +1515,18 @@ class DraftControlCog(commands.Cog):
                     "⚠️ **Could not reach the drafting server to cancel the draft.** "
                     "The vote passed, but the draft is still running there. Try `/scrap` again.")
                 return
+            # The pool stays, as on the manager route: /ready opens a new room
+            # for the same draft, teams and entries unchanged.
+            staked = False
             try:
-                await release_draft_pool(str(draft_session.guild_id),
-                                         draft_session.session_id, "scrapped")
-            except PoolNotSettled:
-                logger.opt(exception=True).error(
-                    f"scrapped {draft_session.session_id} but could not release its pool")
-                await final_message.edit(content=f"🛑 **Draft canceled!**\n{ENTRIES_STILL_HELD}")
-                return
+                staked = await pool_balance(str(draft_session.guild_id),
+                                            draft_session.session_id) > 0
+            except Exception:
+                logger.opt(exception=True).warning(
+                    f"scrapped {draft_session.session_id}: could not read its pool")
             await final_message.edit(content=
-                "🛑 **Draft canceled!** The Draftmancer session is closed.\n"
-                "Use `/abandon` to void this draft.")
+                "🛑 **Draft canceled!** Use `/ready` to open a new room and start again."
+                + (SCRAP_KEEPS_ENTRIES if staked else ""))
 
         async def _not_cancelled():
             await ctx.channel.send("🛑 **Vote to cancel draft did not pass.**\n Use `/unpause` to continue the draft.")
