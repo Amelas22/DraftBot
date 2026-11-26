@@ -490,6 +490,29 @@ async def test_ready_reopen_that_lost_to_another_move_says_it_already_moved(host
 
 
 @pytest.mark.asyncio
+async def test_ready_reopen_announces_who_opened_the_new_room(hosted, cog, channel, no_manager):
+    """The real reopen: the channel's announcement names the player, not their numeric id."""
+    await _seed()
+    hosted.stage = "stopped"
+    ctx = make_ctx()
+    with patch.object(draft_control.config, "hosted_route_for", return_value=True):
+        await DraftControlCog.ready_command.callback(cog, ctx)
+
+    [notice] = channel.sent("no longer work")
+    assert "**<@111> opened a new Draftmancer room for this draft**" in notice.content
+    assert (await _row()).draft_id != DRAFT_ID
+
+
+@pytest.mark.asyncio
+async def test_ready_reopen_with_a_bot_seat_says_to_ask_an_admin(hosted, cog, no_manager):
+    ctx, _, _ = await _ready_with(cog, "stopped", True, result="bot-seats")
+
+    assert "Ask an admin" in replies(ctx)
+    assert "/abandon" in replies(ctx)
+    assert "/replace_seat" not in replies(ctx)
+
+
+@pytest.mark.asyncio
 async def test_ready_reopen_that_raises_gets_a_plain_failure_reply(hosted, cog, no_manager):
     await _seed()
     ctx = make_ctx()

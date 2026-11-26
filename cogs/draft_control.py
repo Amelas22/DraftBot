@@ -1572,7 +1572,7 @@ class DraftControlCog(commands.Cog):
             result = await hosted_draft.reopen_draft(
                 self.bot, draft_session.session_id, route,
                 expected_draft_id=draft_session.draft_id,
-                reason="redo", requested_by=str(ctx.author.id))
+                reason="redo", requested_by=ctx.author.mention)
         except Exception:
             logger.exception(f"/ready could not reopen draft {draft_session.session_id}")
             await ctx.followup.send(
@@ -1586,7 +1586,7 @@ class DraftControlCog(commands.Cog):
             "ended": "This draft has already finished.",
             "no-teams": "Teams haven't been formed yet.",
             "bot-seats": "A bot holds a seat, so this draft can't open in a new room. "
-                         "An admin can resolve it with `/replace_seat`.",
+                         "Ask an admin — `/abandon` voids the draft.",
             "cube-import": "The cube couldn't be imported for a new room. Try again shortly, "
                            "or use `/failover` / `/draft_route` to change where it runs.",
             "changed": ALREADY_MOVED,
