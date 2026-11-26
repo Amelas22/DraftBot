@@ -124,6 +124,16 @@ def _reply(ctx) -> str:
     return ctx.followup.send.call_args.args[0]
 
 
+def test_draft_route_command_is_guild_only_with_labelled_choices():
+    command = DraftControlCog.draft_route_command
+    assert command.contexts == {discord.InteractionContextType.guild}
+    [option] = [o for o in command.options if o.name == "route"]
+    assert {(c.name, c.value) for c in option.choices} == {
+        ("DraftBot's own Draftmancer server (hosted)", "hosted"),
+        ("draftmancer.com, run by DraftBot", "draftmancer"),
+    }
+
+
 @pytest.mark.asyncio
 async def test_draft_route_command_is_admin_only(hosting_on):
     ctx = _ctx()
@@ -140,11 +150,17 @@ async def test_draft_route_command_sets_and_reports(hosting_on, monkeypatch):
         ctx = _ctx()
         await cog._do_draft_route(ctx, "draftmancer")
         assert config.draftmancer_route_setting(G) == "draftmancer"
-        assert "draftmancer" in _reply(ctx) and "keep their route" in _reply(ctx)
+        assert "draftmancer.com, run by DraftBot" in _reply(ctx)
+        assert "keep their route" in _reply(ctx)
 
         ctx = _ctx()
         await cog._do_draft_route(ctx, None)
-        assert "draftmancer" in _reply(ctx) and "keep their route" not in _reply(ctx)
+        assert "draftmancer.com, run by DraftBot" in _reply(ctx)
+        assert "keep their route" not in _reply(ctx)
+
+        ctx = _ctx()
+        await cog._do_draft_route(ctx, "hosted")
+        assert "DraftBot's own Draftmancer server (hosted)" in _reply(ctx)
 
         monkeypatch.delenv("DRAFTMANCER_API_URL")
         ctx = _ctx()

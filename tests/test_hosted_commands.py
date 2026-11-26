@@ -184,6 +184,22 @@ async def test_unpause_leaves_a_pause_for_an_empty_seat_to_the_poller(hosted, bo
 
 
 @pytest.mark.asyncio
+async def test_unpause_on_a_scrapped_draft_points_at_ready(hosted, cog, channel, no_manager):
+    """A /scrap stopped the room while a player's pause stood: /ready starts it again."""
+    await _seed()
+    await hosted_draft._store(SID, hosted_paused_by=hosted_draft.HUMAN_PAUSE)
+    hosted.stage = "stopped"
+    ctx = make_ctx()
+
+    await DraftControlCog.unpause_command.callback(cog, ctx)
+
+    assert "/ready" in replies(ctx)
+    assert "already ended" not in replies(ctx)
+    assert hosted.calls == []
+    assert posted(ctx) == ""
+
+
+@pytest.mark.asyncio
 async def test_a_pause_for_an_empty_seat_survives_a_restart_without_a_second_notice(
         hosted, bot, channel):
     await _seed()
@@ -594,6 +610,43 @@ async def test_failover_with_the_server_down_asks_first(hosted, cog):
     assert reopen_now.await_args.kwargs["reason"] == "failover"
     assert reopen_now.await_args.kwargs["requested_by"] == "<@111>"
     assert reopen_now.await_args.kwargs["expected_draft_id"] == DRAFT_ID
+
+
+@pytest.mark.asyncio
+async def test_failover_prompt_disables_its_buttons_when_it_times_out(hosted, cog):
+    ctx, _ = await _failover(cog, stage=None)
+    view = ctx.followup.send.await_args.kwargs["view"]
+    view.message = MagicMock(edit=AsyncMock())
+
+    await view.on_timeout()
+
+    assert all(child.disabled for child in view.children)
+    edited = view.message.edit.await_args.kwargs
+    assert edited["view"] is view and "/failover" in edited["content"]
+
+
+@pytest.mark.asyncio
+async def test_failover_prompt_timeout_tolerates_an_uneditable_message(hosted, cog):
+    ctx, _ = await _failover(cog, stage=None)
+    view = ctx.followup.send.await_args.kwargs["view"]
+    view.message = MagicMock(edit=AsyncMock(side_effect=RuntimeError("expired token")))
+
+    await view.on_timeout()
+
+    assert all(child.disabled for child in view.children)
+
+
+@pytest.mark.asyncio
+async def test_a_settled_failover_prompt_does_not_time_out_over_its_answer(hosted, cog):
+    ctx, _ = await _failover(cog, stage=None)
+    view = ctx.followup.send.await_args.kwargs["view"]
+    interaction = MagicMock()
+    interaction.response.edit_message = AsyncMock()
+    interaction.edit_original_response = AsyncMock()
+    with patch.object(draft_control.hosted_draft, "reopen_draft", AsyncMock(return_value="moved")):
+        await view.children[0].callback(interaction)
+
+    assert view.is_finished()
 
 
 @pytest.mark.asyncio

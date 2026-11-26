@@ -52,6 +52,12 @@ UNREACHABLE = ("⚠️ Couldn't reach the drafting server. Nothing has changed �
                "please try again in a moment.")
 
 
+# /draft_route's choices, as an admin reads them.
+ROUTE_LABELS = {
+    "hosted": "DraftBot's own Draftmancer server (hosted)",
+    "draftmancer": "draftmancer.com, run by DraftBot",
+}
+
 # reopen_draft's "changed": another reopen moved the draft first.
 ALREADY_MOVED = "Already moved — see the draft channel for the current links."
 
@@ -465,6 +471,7 @@ class FailoverConfirmView(View):
         # Answer within Discord's 3 s window before the slow reopen; the disabled
         # buttons also stop a second click from reaching reopen_draft.
         _disable_all(self)
+        self.stop()
         await interaction.response.edit_message(content="Moving the draft…", view=self)
         text = await _failover_reply(self.bot, self.session_id, self.draft_id, self.requested_by)
         await interaction.edit_original_response(content=text, view=self)
@@ -472,7 +479,20 @@ class FailoverConfirmView(View):
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, button: discord.ui.Button, interaction: discord.Interaction):
         _disable_all(self)
+        self.stop()
         await interaction.response.edit_message(content="Failover cancelled.", view=self)
+
+    async def on_timeout(self):
+        """An unanswered prompt stops looking clickable; its webhook token may have expired."""
+        _disable_all(self)
+        if self.message is None:
+            return
+        try:
+            await self.message.edit(
+                content="This prompt has expired. Run `/failover` again if the draft still "
+                        "needs to move.", view=self)
+        except Exception as e:
+            logger.info(f"Could not close the expired /failover prompt for {self.session_id}: {e}")
 
 
 FAILOVER_REPLIES = {
@@ -1108,12 +1128,13 @@ class DraftControlCog(commands.Cog):
             await ctx.followup.send(f"An error occurred: {str(e)}", ephemeral=True)
 
     @discord.slash_command(
-        name='draft_route',
+        name='draft_route', contexts={discord.InteractionContextType.guild},
         description="Admin: open this server's new drafts on our Draftmancer or on draftmancer.com")
     async def draft_route_command(
         self, ctx,
-        route: discord.Option(str, "Where new drafts open", choices=["hosted", "draftmancer"],  # type: ignore[valid-type]
-                              required=False)):
+        route: discord.Option(str, "Where new drafts open", choices=[  # type: ignore[valid-type]
+            discord.OptionChoice(name=label, value=value) for value, label in ROUTE_LABELS.items()],
+            required=False)):
         await ctx.defer(ephemeral=True)
         await self._do_draft_route(ctx, route)
 
@@ -1126,7 +1147,7 @@ class DraftControlCog(commands.Cog):
         if route is not None:
             config.update_setting(guild_id, config.DRAFTMANCER_ROUTE_SETTING, route)
         current = config.draftmancer_route_setting(guild_id)
-        lines = [f"New drafts here open on: {current}."]
+        lines = [f"New drafts here open on: {ROUTE_LABELS.get(current, current)}."]
         if route is not None:
             lines.append("Drafts already running keep their route.")
         if not config.hosted_draftmancer_enabled():
@@ -1527,6 +1548,11 @@ class DraftControlCog(commands.Cog):
             await ctx.followup.send("Draft paused.", ephemeral=True)
 
     async def _hosted_unpause(self, ctx, draft_session):
+        if await hosted_draft.hosted_stage(draft_session.draft_id) == "stopped":
+            await ctx.followup.send(
+                "This draft was scrapped, so there's nothing to resume. Use `/ready` to start "
+                "it again in a new room.", ephemeral=True)
+            return
         if draft_session.hosted_paused_by == hosted_draft.BOT_PAUSE:
             await ctx.followup.send(
                 "The draft is paused because a seat is empty, and it resumes on its own "
