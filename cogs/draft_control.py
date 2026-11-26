@@ -1451,6 +1451,53 @@ class DraftControlCog(commands.Cog):
         await self._unpause_ready_check(ctx, draft_session, resume)
 
     async def _hosted_ready(self, ctx, draft_session):
+        stage = await hosted_draft.hosted_stage(draft_session.draft_id)
+        if stage is None:
+            await ctx.followup.send(
+                f"{UNREACHABLE} If the drafting server stays down, `/failover` moves the "
+                "draft to a bot-run room on draftmancer.com.", ephemeral=True)
+            return
+        if stage == "ended":
+            await ctx.followup.send("The draft has already started.", ephemeral=True)
+            return
+        if stage in ("stopped", "lost"):
+            await self._reopen_from_ready(ctx, draft_session)
+            return
+        await self._hosted_ready_check(ctx, draft_session)
+
+    async def _reopen_from_ready(self, ctx, draft_session):
+        route = "hosted" if config.hosted_route_for(draft_session.guild_id) else "manager"
+        try:
+            result = await hosted_draft.reopen_draft(
+                self.bot, draft_session.session_id, route,
+                reason="redo", requested_by=str(ctx.author.id))
+        except Exception:
+            logger.exception(f"/ready could not reopen draft {draft_session.session_id}")
+            await ctx.followup.send(
+                "⚠️ Something went wrong opening a new room. Check the draft channel for "
+                "new links, then try `/ready` again.", ephemeral=True)
+            return
+        replies = {
+            "moved": "A new room is open — the new links are in the draft channel.",
+            "moved-unstopped": "A new room is open — the new links are in the draft channel. "
+                               "The old room couldn't be closed and may still be listed.",
+            "ended": "This draft has already finished.",
+            "no-teams": "Teams haven't been formed yet.",
+            "bot-seats": "A bot holds a seat, so this draft can't open in a new room. "
+                         "An admin can resolve it with `/replace_seat`.",
+            "cube-import": "The cube couldn't be imported for a new room. Try again shortly, "
+                           "or use `/failover` / `/draft_route` to change where it runs.",
+            "changed": "The draft changed while opening the room. Try `/ready` again.",
+            "gone": "This draft no longer exists.",
+        }
+        text = replies.get(result)
+        if text is None:
+            text = ("⚠️ Couldn't open a new room right now. Try again in a moment, use "
+                    "`/failover` to move to a bot-run room on draftmancer.com, or ask an "
+                    "admin to change the route with `/draft_route`.")
+        await ctx.followup.send(text, ephemeral=True)
+
+    async def _hosted_ready_check(self, ctx, draft_session):
         outcome, missing = await hosted_draft.request_ready_check(self.bot, draft_session.session_id)
         replies = {
             "started": "Ready check initiated!",

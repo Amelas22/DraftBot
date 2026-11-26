@@ -423,6 +423,75 @@ async def test_ready_after_the_draft_started_says_so(hosted, bot, cog, no_manage
     assert "already started" in replies(ctx)
 
 
+async def _ready_with(cog, stage, route_hosted, result="moved"):
+    """Run /ready with the room's stage and the guild's route stubbed."""
+    await _seed()
+    ctx = make_ctx()
+    with patch.object(draft_control.hosted_draft, "hosted_stage", AsyncMock(return_value=stage)), \
+         patch.object(draft_control.config, "hosted_route_for", return_value=route_hosted), \
+         patch.object(draft_control.hosted_draft, "reopen_draft",
+                      AsyncMock(return_value=result)) as reopen, \
+         patch.object(draft_control.hosted_draft, "request_ready_check",
+                      AsyncMock(return_value=("started", []))) as check:
+        await DraftControlCog.ready_command.callback(cog, ctx)
+    return ctx, reopen, check
+
+
+@pytest.mark.asyncio
+async def test_ready_on_a_stopped_hosted_draft_reopens_on_the_guild_route(hosted, cog, no_manager):
+    ctx, reopen, check = await _ready_with(cog, "stopped", False)
+
+    reopen.assert_awaited_once()
+    assert reopen.await_args.args[1:] == (SID, "manager")
+    assert reopen.await_args.kwargs["reason"] == "redo"
+    check.assert_not_awaited()
+    assert "new room" in replies(ctx).lower()
+
+
+@pytest.mark.asyncio
+async def test_ready_on_a_lost_hosted_draft_reopens_hosted_when_the_guild_is_hosted(
+        hosted, cog, no_manager):
+    ctx, reopen, _ = await _ready_with(cog, "lost", True)
+
+    assert reopen.await_args.args[1:] == (SID, "hosted")
+
+
+@pytest.mark.asyncio
+async def test_ready_on_a_live_hosted_draft_runs_the_ready_check_as_before(hosted, cog, no_manager):
+    ctx, reopen, check = await _ready_with(cog, "gathering", True)
+
+    check.assert_awaited_once()
+    reopen.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ready_when_the_server_is_unreachable_points_at_failover(hosted, cog, no_manager):
+    ctx, reopen, check = await _ready_with(cog, None, True)
+
+    reopen.assert_not_awaited()
+    check.assert_not_awaited()
+    assert "/failover" in replies(ctx)
+
+
+@pytest.mark.asyncio
+async def test_ready_reopen_that_fails_points_at_failover_and_draft_route(hosted, cog, no_manager):
+    ctx, _, _ = await _ready_with(cog, "stopped", True, result="unreachable")
+
+    assert "/failover" in replies(ctx) and "/draft_route" in replies(ctx)
+
+
+@pytest.mark.asyncio
+async def test_ready_reopen_that_raises_gets_a_plain_failure_reply(hosted, cog, no_manager):
+    await _seed()
+    ctx = make_ctx()
+    with patch.object(draft_control.hosted_draft, "hosted_stage", AsyncMock(return_value="stopped")), \
+         patch.object(draft_control.hosted_draft, "reopen_draft",
+                      AsyncMock(side_effect=RuntimeError("db"))):
+        await DraftControlCog.ready_command.callback(cog, ctx)
+
+    assert "went wrong" in replies(ctx)
+
+
 # --- Update Cube ----------------------------------------------------------------------
 
 @pytest.mark.asyncio
