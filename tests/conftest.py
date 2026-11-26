@@ -1007,6 +1007,17 @@ async def session(match_control_db):
 
 
 @pytest.fixture(autouse=True)
+def _no_hosted_draftmancer(monkeypatch):
+    """No test reaches a real Draftmancer through the developer's settings.
+
+    With DRAFTMANCER_API_URL set (as it is wherever the hosted route is on), every
+    draft a test creates would open a real session on that server. Tests that
+    want the hosted route set it themselves (hosted_fakes' `hosted` fixture)."""
+    for name in ("DRAFTMANCER_API_URL", "DRAFTMANCER_API_TOKEN", "DRAFTMANCER_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def custodian_up(monkeypatch):
     """The library's MTGO custodian answers, unless a test says otherwise.
 
