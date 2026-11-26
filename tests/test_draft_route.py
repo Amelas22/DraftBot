@@ -49,6 +49,21 @@ def test_no_env_pair_means_draftmancer_whatever_the_guild_says():
     assert config.hosted_route_for(G) is False
 
 
+def test_guilds_without_a_config_file_do_not_share_settings(hosting_on, monkeypatch):
+    """Two guilds built from the default config: one's /draft_route leaves the other alone."""
+    monkeypatch.setattr(config.bot_config, "configs", {})
+    fresh_a, fresh_b = "333", "444"
+    config.get_config(fresh_a)
+    config.get_config(fresh_b)
+
+    config.update_setting(fresh_a, config.DRAFTMANCER_ROUTE_SETTING, "draftmancer")
+
+    assert config.hosted_route_for(fresh_a) is False
+    assert config.hosted_route_for(fresh_b) is True
+    assert config.DRAFTMANCER_ROUTE_SETTING.split(".")[1] not in (
+        config.bot_config.default_config.get("features", {}))
+
+
 def test_unknown_setting_reads_as_hosted(hosting_on):
     config.update_setting(G, config.DRAFTMANCER_ROUTE_SETTING, "bogus")
     assert config.draftmancer_route_setting(G) == "hosted"

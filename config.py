@@ -1,4 +1,5 @@
 # config.py
+import copy
 import json
 import os
 from pathlib import Path
@@ -315,11 +316,13 @@ class Config:
     def get_guild_config(self, guild_id):
         guild_id = str(guild_id)
         if guild_id not in self.configs:
-            # Use special config for your guild, default for others
+            # Use special config for your guild, default for others. A deep
+            # copy: a guild's settings must not reach into the template's
+            # nested dicts, and so into every other guild built from it.
             if guild_id == SPECIAL_GUILD_ID:
-                self.configs[guild_id] = self.special_guild_config.copy()
+                self.configs[guild_id] = copy.deepcopy(self.special_guild_config)
             else:
-                self.configs[guild_id] = self.default_config.copy()
+                self.configs[guild_id] = copy.deepcopy(self.default_config)
             self.save_config(guild_id)
         return self.configs[guild_id]
     
