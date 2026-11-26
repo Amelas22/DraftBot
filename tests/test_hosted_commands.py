@@ -492,6 +492,112 @@ async def test_ready_reopen_that_raises_gets_a_plain_failure_reply(hosted, cog, 
     assert "went wrong" in replies(ctx)
 
 
+# --- /failover ------------------------------------------------------------------------
+
+CONFIRM_SENTENCE = "Only if your draft hasn't finished — a finished draft's result would be lost."
+
+
+async def _failover(cog, *, stage="drafting", result="moved", author_id=111, manager=False,
+                    route="hosted"):
+    await _seed(route=route)
+    ctx = make_ctx(author_id)
+    with patch.object(draft_control.hosted_draft, "hosted_stage", AsyncMock(return_value=stage)), \
+         patch.object(draft_control.hosted_draft, "reopen_draft",
+                      AsyncMock(return_value=result)) as reopen, \
+         patch("cogs.draft_control.is_bot_manager", new=AsyncMock(return_value=False)), \
+         patch.object(DraftSetupManager, "get_active_manager",
+                      MagicMock(return_value=MagicMock() if manager else None)):
+        await DraftControlCog.failover_command.callback(cog, ctx)
+    return ctx, reopen
+
+
+@pytest.mark.asyncio
+async def test_failover_is_for_players_or_admins(hosted, cog):
+    ctx, reopen = await _failover(cog, author_id=999)
+
+    reopen.assert_not_awaited()
+    assert "players or an admin" in replies(ctx)
+
+
+@pytest.mark.asyncio
+async def test_failover_moves_a_reachable_hosted_draft_at_once(hosted, cog):
+    ctx, reopen = await _failover(cog)
+
+    reopen.assert_awaited_once()
+    assert reopen.await_args.args[1:] == (SID, "manager")
+    assert reopen.await_args.kwargs["reason"] == "failover"
+    assert reopen.await_args.kwargs["requested_by"] == "<@111>"
+    assert "moved" in replies(ctx).lower()
+
+
+@pytest.mark.asyncio
+async def test_failover_with_the_server_down_asks_first(hosted, cog):
+    ctx, reopen = await _failover(cog, stage=None)
+
+    reopen.assert_not_awaited()
+    sent = ctx.followup.send.await_args
+    view = sent.kwargs["view"]
+    assert isinstance(view, draft_control.FailoverConfirmView)
+    assert CONFIRM_SENTENCE in sent.args[0]
+
+    interaction = MagicMock()
+    interaction.response.edit_message = AsyncMock()
+    with patch.object(draft_control.hosted_draft, "reopen_draft",
+                      AsyncMock(return_value="moved")) as reopen_now:
+        await view.children[0].callback(interaction)
+    reopen_now.assert_awaited_once()
+    assert reopen_now.await_args.args[1:] == (SID, "manager")
+    assert reopen_now.await_args.kwargs["reason"] == "failover"
+    assert reopen_now.await_args.kwargs["requested_by"] == "<@111>"
+
+
+@pytest.mark.asyncio
+async def test_failover_confirm_that_raises_gets_a_plain_failure_reply(hosted, cog):
+    ctx, _ = await _failover(cog, stage=None)
+    view = ctx.followup.send.await_args.kwargs["view"]
+    interaction = MagicMock()
+    interaction.response.edit_message = AsyncMock()
+    with patch.object(draft_control.hosted_draft, "reopen_draft",
+                      AsyncMock(side_effect=RuntimeError("db"))):
+        await view.children[0].callback(interaction)
+
+    assert "went wrong" in interaction.response.edit_message.await_args.kwargs["content"]
+
+
+@pytest.mark.asyncio
+async def test_failover_that_raises_gets_a_plain_failure_reply(hosted, cog):
+    await _seed()
+    ctx = make_ctx()
+    with patch.object(draft_control.hosted_draft, "hosted_stage", AsyncMock(return_value="drafting")), \
+         patch.object(draft_control.hosted_draft, "reopen_draft",
+                      AsyncMock(side_effect=RuntimeError("db"))):
+        await DraftControlCog.failover_command.callback(cog, ctx)
+
+    assert "went wrong" in replies(ctx)
+
+
+@pytest.mark.asyncio
+async def test_failover_on_a_draft_already_on_draftmancer_says_so(hosted, cog):
+    ctx, reopen = await _failover(cog, route=None, manager=True)
+
+    reopen.assert_not_awaited()
+    assert "already on draftmancer.com" in replies(ctx)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("result,words", [
+    ("ended", "already finished"),
+    ("no-teams", "Teams haven't been formed"),
+    ("bot-seats", "played by a bot"),
+    ("changed", "changed"),
+])
+async def test_failover_replies_for_each_refusal(hosted, cog, result, words):
+    ctx, _ = await _failover(cog, result=result)
+
+    assert words in replies(ctx)
+    assert "/replace_seat" not in replies(ctx)
+
+
 # --- Update Cube ----------------------------------------------------------------------
 
 @pytest.mark.asyncio

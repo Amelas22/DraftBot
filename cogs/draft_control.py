@@ -445,6 +445,57 @@ class AbandonConfirmView(View):
         await interaction.response.edit_message(content="Abandon cancelled.", view=self)
 
 
+class FailoverConfirmView(View):
+    """Ephemeral confirmation before /failover moves a draft whose server can't be reached."""
+
+    def __init__(self, session_id, requested_by, bot, timeout=60.0):
+        super().__init__(timeout=timeout)
+        self.session_id = session_id
+        self.requested_by = requested_by
+        self.bot = bot
+
+    @discord.ui.button(label="Yes, move the draft", style=discord.ButtonStyle.danger)
+    async def confirm(self, button: discord.ui.Button, interaction: discord.Interaction):
+        _disable_all(self)
+        text = await _failover_reply(self.bot, self.session_id, self.requested_by)
+        await interaction.response.edit_message(content=text, view=self)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, button: discord.ui.Button, interaction: discord.Interaction):
+        _disable_all(self)
+        await interaction.response.edit_message(content="Failover cancelled.", view=self)
+
+
+FAILOVER_REPLIES = {
+    "moved": "The draft has moved to a DraftBot-run room on draftmancer.com. "
+             "Everyone's new link is in the draft channel.",
+    "moved-unstopped": "The draft has moved to a DraftBot-run room on draftmancer.com; the "
+                       "new links are in the draft channel. The old room couldn't be closed "
+                       "and may come back when the server does.",
+    "ended": "This draft has already finished, so there's nothing to move.",
+    "no-teams": "Teams haven't been formed yet, so there's nothing to move.",
+    "bot-seats": "A seat in this draft is played by a bot, so it can't be moved "
+                 "automatically. Ask an admin.",
+    "unreachable": "⚠️ Couldn't open a room on draftmancer.com right now. Try again in a moment.",
+    "cube-import": "The cube couldn't be imported for a new room. Try again shortly.",
+    "refused": "Couldn't move the draft right now. Try again in a moment.",
+    "changed": "The draft changed while it was being moved. Try `/failover` again.",
+    "gone": "This draft no longer exists.",
+}
+
+
+async def _failover_reply(bot, session_id, requested_by) -> str:
+    """Reopen the draft on a DraftBot-run room and say, plainly, what happened."""
+    try:
+        result = await hosted_draft.reopen_draft(
+            bot, session_id, "manager", reason="failover", requested_by=requested_by)
+    except Exception:
+        logger.exception(f"/failover could not reopen draft {session_id}")
+        return ("⚠️ Something went wrong moving the draft. Check the draft channel for "
+                "new links, then try `/failover` again.")
+    return FAILOVER_REPLIES.get(result, FAILOVER_REPLIES["refused"])
+
+
 class LogReleaseVoteView(BaseVoteView):
     """Majority vote to release the draft logs early."""
     embed_title = "Draft Logs Release Vote"
@@ -1072,6 +1123,44 @@ class DraftControlCog(commands.Cog):
             lines.append("This has no effect until hosting is configured; "
                          "every draft runs on draftmancer.com meanwhile.")
         await ctx.followup.send(" ".join(lines), ephemeral=True)
+
+    @discord.slash_command(name='failover', description='Move this draft to a DraftBot-run room on draftmancer.com')
+    async def failover_command(self, ctx):
+        """Move a hosted draft to a DraftBot-run room when the hosted server is failing.
+
+        Unlike /mutiny, DraftBot comes along: teams, entries and results carry over."""
+        await ctx.defer(ephemeral=True)
+
+        try:
+            result = await self._get_manager_for_channel(ctx, hosted_ok=True)
+            if not result:
+                return
+            manager, draft_session = result
+            if manager is not None or not _is_hosted(draft_session):
+                await ctx.followup.send(
+                    "This draft is already on draftmancer.com, so there's nothing to fail over.",
+                    ephemeral=True)
+                return
+            if not _is_participant(ctx, draft_session) and not await is_bot_manager(ctx):
+                await ctx.followup.send(
+                    "Only the draft's players or an admin can move it to draftmancer.com.",
+                    ephemeral=True)
+                return
+            stage = await hosted_draft.hosted_stage(draft_session.draft_id)
+            if stage is None:
+                view = FailoverConfirmView(draft_session.session_id, ctx.author.mention, self.bot)
+                await ctx.followup.send(
+                    "⚠️ The drafting server can't be reached, so DraftBot can't tell how far "
+                    "the draft got. Move it to a DraftBot-run room on draftmancer.com? "
+                    "Only if your draft hasn't finished — a finished draft's result would be lost.",
+                    view=view, ephemeral=True)
+                return
+            await ctx.followup.send(
+                await _failover_reply(self.bot, draft_session.session_id, ctx.author.mention),
+                ephemeral=True)
+        except Exception as e:
+            logger.exception(f"Error in failover command: {e}")
+            await ctx.followup.send("⚠️ Something went wrong. Please try again.", ephemeral=True)
 
     @discord.slash_command(name='mutiny', description='Run the draft yourselves on draftmancer.com, without DraftBot')
     async def mutiny_command(self, ctx):

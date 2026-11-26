@@ -1377,7 +1377,8 @@ ALERT_ENV = "SERVE_ALERT_DISCORD_ID"
 OUTAGE_NOTICE = (
     "⚠️ **The drafting server isn't answering.** DraftBot keeps retrying, and the "
     "draft carries on from where it was once it's back. If it stays down, any player "
-    "in this draft can move it to draftmancer.com with `/mutiny`."
+    "in this draft can move it to a DraftBot-run room on draftmancer.com with `/failover`, "
+    "or run it themselves with `/mutiny`."
 )
 RECOVERED_NOTICE = "✅ The drafting server is answering again."
 
@@ -1484,9 +1485,9 @@ async def _report_outage(bot: discord.Client, rows: list[Any]) -> None:
         h.admins_told = await _tell_admins(bot, (
             f"⚠️ **The hosted Draftmancer hasn't answered for {minutes} minutes** "
             f"({draftmancer_api_url()}). Drafts on it wait where they were, and new "
-            f"drafts open on draftmancer.com instead. If it stays down, `/mutiny` in a "
+            f"drafts open on draftmancer.com instead. If it stays down, `/failover` in a "
             f"draft's channel -- by any of its players or an admin -- moves that draft "
-            f"to draftmancer.com."))
+            f"to a DraftBot-run room on draftmancer.com (`/mutiny` hands it to the players)."))
     # Gathering queues too: their players are waiting on the server as well.
     for row in rows:
         if row.session_id in h.channels_told or not row.draft_channel_id:

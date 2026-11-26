@@ -16,7 +16,8 @@ from loguru import logger
 
 READY_CHECK_INSTRUCTIONS = (
     "If the seating order is wrong, or if someone missed the ready check, please run `/ready` again — this will reset the seating order and start a new ready check. "
-    "You can also use `/mutiny` to run the draft yourselves, without DraftBot, if needed."
+    "If the drafting server is failing, `/failover` moves the draft to a DraftBot-run room on draftmancer.com; "
+    "`/mutiny` runs the draft yourselves, without DraftBot."
 )
 
 READY_CHECK_TIMEOUT_SECONDS = 90
@@ -116,7 +117,7 @@ def format_status_message(status: Mapping[str, Any]) -> str:
     message_parts.append(f"• Ready check will time out after {READY_CHECK_TIMEOUT_SECONDS} seconds.")
     message_parts.append("• If everyone marks ready, the draft will begin.")
     message_parts.append("• Use `/ready` to start a new ready check if needed.")
-    message_parts.append("• Use `/mutiny` to run the draft yourselves, without DraftBot, if required.")
+    message_parts.append("• Use `/failover` to move the draft to a DraftBot-run room on draftmancer.com, or `/mutiny` to run it yourselves, without DraftBot, if required.")
 
     return "\n".join(message_parts)
 
