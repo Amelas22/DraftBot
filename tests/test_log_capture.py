@@ -1,4 +1,5 @@
-"""Unit tests for DraftSetupManager.capture_draft_log (Slice 1)."""
+"""Capturing and publishing a draft log through the manager, which hands both to
+services.draft_end; the upload itself is tested in test_draft_end."""
 import asyncio
 from datetime import datetime
 from types import SimpleNamespace
@@ -294,16 +295,6 @@ async def test_keep_connection_alive_reclaims_ownership_after_initial_connect():
          patch("services.draft_setup_manager.asyncio.sleep", AsyncMock()):
         await m.keep_connection_alive()
     m._reclaim_ownership_as_spectator.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_save_to_spaces_returns_object_key():
-    from services.draft_end import upload_draft_log
-    fake_result = MagicMock(success=True, object_path="team/TestCube-123-DBABC.json")
-    fake_helper = MagicMock(); fake_helper.upload_json = AsyncMock(return_value=fake_result)
-    with patch("services.draft_end.DigitalOceanHelper", return_value=fake_helper):
-        key = await upload_draft_log("team", "TestCube", {"time": 123, "sessionID": "DBABC"})
-    assert key == "team/TestCube-123-DBABC.json"
 
 
 # --- A draft stopped and restarted produces a SECOND log --------------------

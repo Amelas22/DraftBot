@@ -1,12 +1,7 @@
 import asyncio
-import socketio
 from loguru import logger
 from functools import wraps
 import random
-import aiohttp
-import json
-import os
-import pytz
 import discord
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
@@ -31,7 +26,6 @@ from cube_views.pack_options import DEFAULT_PACKS_PER_PLAYER, DEFAULT_CARDS_PER_
 
 # Ready-check and status wording, shared with the hosted route.
 from services.draft_messages import (
-    READY_CHECK_INSTRUCTIONS,  # noqa: F401 -- re-exported
     READY_CHECK_PASSED,
     READY_CHECK_TIMEOUT_SECONDS,
     format_status_message,

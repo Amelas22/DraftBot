@@ -1442,7 +1442,7 @@ class DraftControlCog(commands.Cog):
         if stage is None:
             await ctx.followup.send(UNREACHABLE, ephemeral=True)
             return
-        if stage in ("ended", "stopped", "lost"):
+        if stage in hosted_draft.FINISHED_STAGES:
             gone = {"lost": "This draft is no longer on the drafting server",
                     "stopped": "This draft has already been stopped on the drafting server",
                     }.get(stage, "This draft has finished drafting")

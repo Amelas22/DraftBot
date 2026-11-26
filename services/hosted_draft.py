@@ -85,6 +85,8 @@ from services.hosted_draftmancer import (
 
 ROUTE = "hosted"
 FALLBACK_ROUTE = "fallback"
+# Server stages after which the draft is over: ended, stopped, or long gone (404).
+FINISHED_STAGES = ("ended", "stopped", "lost")
 POLL_INTERVAL_SECONDS = 5
 # Drafts opened longer ago than this are not polled: by then a hosted draft has
 # ended (or been scrapped, abandoned or cancelled), and asking the server about
@@ -740,7 +742,7 @@ async def hosted_draft_is_over(draft_id: str) -> bool:
     """True only when the server says the draft is finished -- ended, stopped,
     or long gone ("lost"). Gathering or drafting may be a redraft in the same
     room, and an unreachable server proves nothing, so both answer False."""
-    return await hosted_stage(draft_id) in ("ended", "stopped", "lost")
+    return await hosted_stage(draft_id) in FINISHED_STAGES
 
 
 async def pause_for_player(session_id: str) -> PauseResult:

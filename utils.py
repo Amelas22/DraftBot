@@ -1018,17 +1018,17 @@ async def release_decided_draft_log(draft_session_id):
     now = datetime.now()
     if draft_session.unlock_at <= now:
         return
+    from services import hosted_draft
     from services.draft_setup_manager import DraftSetupManager  # imports utils back
+    hosted = draft_session.draftmancer_route == hosted_draft.ROUTE
     if draft_session.tournament_match_id is not None:
-        if DraftSetupManager.is_drafting(draft_session_id):
+        if not hosted and DraftSetupManager.is_drafting(draft_session_id):
             return                           # a redraft; see the docstring
         if not await a_match_was_played(draft_session_id):
             return
-        if draft_session.draftmancer_route == "hosted":
-            # No manager to ask about a redraft: the server knows instead.
-            from services.hosted_draft import hosted_draft_is_over
-            if not await hosted_draft_is_over(draft_session.draft_id):
-                return
+        # A hosted draft has no manager to say it is a redraft: its server does.
+        if hosted and not await hosted_draft.hosted_draft_is_over(draft_session.draft_id):
+            return
         why = "is a tournament match with a result in"
     else:
         team_a_wins, team_b_wins = await calculate_team_wins(draft_session_id)
@@ -1047,12 +1047,9 @@ async def release_decided_draft_log(draft_session_id):
     # Unlock Draftmancer too, and now: the manager holding the socket shuts
     # itself down within seconds of unlock_at passing, before the reconciler's
     # next tick could ask it to. A hosted draft has no manager: ask the server.
-    if draft_session.draftmancer_route == "hosted":
-        from services.hosted_draft import unlock_hosted_log
-        await unlock_hosted_log(draft_session_id, draft_session.draft_id)
-        return
-    manager = DraftSetupManager.get_active_manager(draft_session_id)
-    if manager is not None:
+    if hosted:
+        await hosted_draft.unlock_hosted_log(draft_session_id, draft_session.draft_id)
+    elif (manager := DraftSetupManager.get_active_manager(draft_session_id)) is not None:
         await manager.release_draftmancer_log()
 
 
