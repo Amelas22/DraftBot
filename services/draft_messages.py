@@ -16,21 +16,25 @@ from loguru import logger
 
 READY_CHECK_INSTRUCTIONS = (
     "If the seating order is wrong, or if someone missed the ready check, please run `/ready` again — this will reset the seating order and start a new ready check. "
-    "If the drafting server is failing, `/failover` moves the draft to a DraftBot-run room on draftmancer.com; "
-    "`/mutiny` runs the draft yourselves, without DraftBot."
+    "You can also use `/mutiny` to run the draft yourselves, without DraftBot, if needed."
 )
+# A hosted draft can also move to a DraftBot-run room; a draft already there can't.
+HOSTED_READY_CHECK_INSTRUCTIONS = READY_CHECK_INSTRUCTIONS.replace(
+    "You can also use `/mutiny` to run the draft yourselves, without DraftBot, if needed.",
+    "If the drafting server is failing, `/failover` moves the draft to a DraftBot-run room "
+    "on draftmancer.com; `/mutiny` runs the draft yourselves, without DraftBot.")
 
 READY_CHECK_TIMEOUT_SECONDS = 90
 READY_CHECK_PASSED = "🎉 All drafters ready! Draft starting in 5 seconds..."
 START_DELAY_SECONDS = 5
 
 
-def ready_check_text(ready: int, total: int, *, first: bool = False) -> str:
+def ready_check_text(ready: int, total: int, *, first: bool = False, hosted: bool = False) -> str:
     """The ready-check count; `first` is the message as it is first posted."""
     bells = "🔔🔔 " if first else ""
     return (
         f"{bells}Seating order set. Draftmancer Readycheck in progress: {ready}/{total} ready.\n"
-        f"{READY_CHECK_INSTRUCTIONS}"
+        f"{HOSTED_READY_CHECK_INSTRUCTIONS if hosted else READY_CHECK_INSTRUCTIONS}"
     )
 
 
@@ -38,13 +42,13 @@ def ready_check_deadline_text(timeout_epoch: int) -> str:
     return f"Readycheck will timeout <t:{timeout_epoch}:R>"
 
 
-def ready_check_timed_out_text(seconds: int, missing: list[str]) -> str:
+def ready_check_timed_out_text(seconds: int, missing: list[str], *, hosted: bool = False) -> str:
     missing_text = f"\nWaiting for: **{', '.join(missing)}**" if missing else ""
     return (
         f"⚠️ **Ready check failed!** Timed out after {seconds} seconds.{missing_text}\n"
         f"A new ready check starts once everyone has answered ready in Draftmancer, "
         f"or run `/ready`.\n"
-        f"{READY_CHECK_INSTRUCTIONS}"
+        f"{HOSTED_READY_CHECK_INSTRUCTIONS if hosted else READY_CHECK_INSTRUCTIONS}"
     )
 
 
@@ -87,7 +91,7 @@ def session_status(present: Iterable[str], missing: Iterable[str],
     }
 
 
-def format_status_message(status: Mapping[str, Any]) -> str:
+def format_status_message(status: Mapping[str, Any], *, hosted: bool = False) -> str:
     """The "Draft Session Status" message: who is in Draftmancer, who is awaited."""
     message_parts = [
         f"**Draft Session Status** (Updated: {status['updated_at']})"
@@ -117,7 +121,10 @@ def format_status_message(status: Mapping[str, Any]) -> str:
     message_parts.append(f"• Ready check will time out after {READY_CHECK_TIMEOUT_SECONDS} seconds.")
     message_parts.append("• If everyone marks ready, the draft will begin.")
     message_parts.append("• Use `/ready` to start a new ready check if needed.")
-    message_parts.append("• Use `/failover` to move the draft to a DraftBot-run room on draftmancer.com, or `/mutiny` to run it yourselves, without DraftBot, if required.")
+    if hosted:
+        message_parts.append("• Use `/failover` to move the draft to a DraftBot-run room on draftmancer.com, or `/mutiny` to run it yourselves, without DraftBot, if required.")
+    else:
+        message_parts.append("• Use `/mutiny` to run the draft yourselves, without DraftBot, if required.")
 
     return "\n".join(message_parts)
 

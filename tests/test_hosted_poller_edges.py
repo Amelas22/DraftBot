@@ -229,3 +229,17 @@ def test_a_timed_out_check_promises_only_what_happens():
 def test_the_outage_notice_does_not_reserve_mutiny_for_admins():
     assert "an admin can" not in hosted_draft.OUTAGE_NOTICE
     assert "/mutiny" in hosted_draft.OUTAGE_NOTICE
+
+
+def test_failover_is_offered_only_in_the_hosted_texts():
+    status = draft_messages.session_status(["A"], [])
+    manager = [draft_messages.ready_check_text(0, 4, first=True),
+               draft_messages.ready_check_timed_out_text(90, ["Dan"]),
+               draft_messages.format_status_message(status)]
+    hosted = [draft_messages.ready_check_text(0, 4, first=True, hosted=True),
+              draft_messages.ready_check_timed_out_text(90, ["Dan"], hosted=True),
+              draft_messages.format_status_message(status, hosted=True)]
+    for text in manager:
+        assert "/failover" not in text and "/mutiny" in text
+    for text in hosted:
+        assert text.index("/failover") < text.index("/mutiny")

@@ -481,7 +481,7 @@ async def _report_status(row: Any, status: HostedStatus, st: _Tracked, channel: 
     missing = tuple(sorted(s.name for s in status.seats if not s.connected))
     if (present, missing) == st.status_key:
         return
-    text = format_status_message(session_status(present, missing))
+    text = format_status_message(session_status(present, missing), hosted=True)
     message = await update_or_send_message(channel, st.status_message_id or row.status_message_id,
                                            content=text)
     if message is None:
@@ -537,10 +537,10 @@ async def _running_ready_check(row: Any, seats: list[HostedSeat], away: list[str
         return
     if ready != rc.shown:
         rc.shown = ready
-        await update_or_send_message(channel, rc.message_id, content=ready_check_text(ready, len(seats)))
+        await update_or_send_message(channel, rc.message_id, content=ready_check_text(ready, len(seats), hosted=True))
     if _now() >= rc.deadline:
         waiting = [s.name for s in seats if s.ready != "ready"]
-        await _end_ready_check(channel, st, ready_check_timed_out_text(READY_CHECK_TIMEOUT_SECONDS, waiting))
+        await _end_ready_check(channel, st, ready_check_timed_out_text(READY_CHECK_TIMEOUT_SECONDS, waiting, hosted=True))
         st.retry = "all-ready"
 
 
@@ -548,7 +548,7 @@ async def _open_ready_check(bot: discord.Client, row: Any, total: int, st: _Trac
                             channel: Any) -> None:
     await hosted_client().ready_check(row.draft_id)
     deadline = _now() + READY_CHECK_TIMEOUT_SECONDS
-    message = await channel.send(ready_check_text(0, total, first=True))
+    message = await channel.send(ready_check_text(0, total, first=True, hosted=True))
     deadline_message = await channel.send(ready_check_deadline_text(int(deadline)))
     st.ready_check = _ReadyCheck(str(message.id), str(deadline_message.id), deadline)
     await _store(row.session_id, ready_check_message_id=str(message.id))
