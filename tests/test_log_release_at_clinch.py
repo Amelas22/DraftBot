@@ -252,3 +252,54 @@ async def test_an_unreachable_hosted_server_does_not_fail_the_clinch(test_db):
 
     client.release_log.assert_awaited_once()
     assert await _unlock_at() <= datetime.now()
+
+
+async def _a_hosted_tournament_draft():
+    await _a_captured_draft(a_wins=1, b_wins=0, unplayed=8, tournament_match_id=7)
+    async with AsyncSessionLocal() as s:
+        await s.execute(update(DraftSession).where(DraftSession.session_id == SID)
+                        .values(draftmancer_route="hosted", draft_id="HOST1"))
+        await s.commit()
+
+
+def _a_hosted_server(stage):
+    """The hosted server answering status with `stage`: None is unreachable,
+    "lost" is a 404 (the server no longer knows the session)."""
+    from services.hosted_draftmancer import HostedRefused, HostedUnavailable
+    if stage is None:
+        status = AsyncMock(side_effect=HostedUnavailable("down"))
+    elif stage == "lost":
+        status = AsyncMock(side_effect=HostedRefused(404, None))
+    else:
+        status = AsyncMock(return_value=MagicMock(stage=stage))
+    return MagicMock(status=status, release_log=AsyncMock())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["gathering", "drafting", None])
+async def test_a_hosted_tournament_draft_still_running_releases_nothing(test_db, stage):
+    """A hosted draft has no manager to say it is being redrafted, so the server
+    is asked. A draft it does not call finished -- or a server that can't
+    answer -- keeps its log locked: the next report or the timer releases it."""
+    await _a_hosted_tournament_draft()
+    locked_until = await _unlock_at()
+    client = _a_hosted_server(stage)
+
+    with patch("services.hosted_draft.hosted_client", return_value=client):
+        await release_decided_draft_log(SID)
+
+    assert await _unlock_at() == locked_until
+    client.release_log.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["ended", "stopped", "lost"])
+async def test_a_finished_hosted_tournament_draft_releases_at_the_first_result(test_db, stage):
+    await _a_hosted_tournament_draft()
+    client = _a_hosted_server(stage)
+
+    with patch("services.hosted_draft.hosted_client", return_value=client):
+        await release_decided_draft_log(SID)
+
+    assert await _unlock_at() <= datetime.now()
+    client.release_log.assert_awaited_once_with("HOST1")

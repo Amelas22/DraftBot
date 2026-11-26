@@ -736,6 +736,13 @@ async def hosted_stage(draft_id: str) -> str | None:
         return None
 
 
+async def hosted_draft_is_over(draft_id: str) -> bool:
+    """True only when the server says the draft is finished -- ended, stopped,
+    or long gone ("lost"). Gathering or drafting may be a redraft in the same
+    room, and an unreachable server proves nothing, so both answer False."""
+    return await hosted_stage(draft_id) in ("ended", "stopped", "lost")
+
+
 async def pause_for_player(session_id: str) -> PauseResult:
     """A player's /pause. It holds until /unpause; the poller never lifts it."""
     async with _draft_lock(session_id):

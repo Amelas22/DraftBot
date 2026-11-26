@@ -1024,6 +1024,11 @@ async def release_decided_draft_log(draft_session_id):
             return                           # a redraft; see the docstring
         if not await a_match_was_played(draft_session_id):
             return
+        if draft_session.draftmancer_route == "hosted":
+            # No manager to ask about a redraft: the server knows instead.
+            from services.hosted_draft import hosted_draft_is_over
+            if not await hosted_draft_is_over(draft_session.draft_id):
+                return
         why = "is a tournament match with a result in"
     else:
         team_a_wins, team_b_wins = await calculate_team_wins(draft_session_id)
