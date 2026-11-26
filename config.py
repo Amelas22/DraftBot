@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import logging
+from typing import Literal
 
 # Your specific guild ID
 SPECIAL_GUILD_ID = "336345350535118849"
@@ -46,6 +47,24 @@ def hosted_draftmancer_enabled() -> bool:
     the websocket manager.
     """
     return bool(draftmancer_api_url() and draftmancer_api_token())
+
+
+DRAFTMANCER_ROUTE_SETTING = "features.draftmancer_route"
+
+
+def draftmancer_route_setting(guild_id) -> Literal["hosted", "draftmancer"]:
+    """A guild's chosen route for NEW drafts; missing or unknown means hosted."""
+    value = get_config(guild_id).get("features", {}).get("draftmancer_route")
+    return "draftmancer" if value == "draftmancer" else "hosted"
+
+
+def hosted_route_for(guild_id) -> bool:
+    """Whether a new draft in this guild opens on the self-hosted Draftmancer.
+
+    Hosting must be configured at all, and the guild must not have chosen
+    draftmancer.com. Running drafts keep the route stored on their row.
+    """
+    return hosted_draftmancer_enabled() and draftmancer_route_setting(guild_id) != "draftmancer"
 
 # Bots granted read+send in every draft channel (incl. private team
 # channels). Matched against bot-managed integration roles only — the role a

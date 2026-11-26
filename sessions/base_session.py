@@ -8,7 +8,7 @@ from views import PersistentView
 import discord
 from services.draft_setup_manager import DraftSetupManager
 from services.hosted_draft import FALLBACK_ROUTE, open_draft_room
-from config import hosted_draftmancer_enabled, public_draftmancer_session_url
+from config import hosted_route_for, public_draftmancer_session_url
 import asyncio
 from loguru import logger
 from config import get_session_deletion_hours
@@ -47,7 +47,7 @@ class BaseSession:
                 # Step 1: Set up the draft session. A manager draft runs on the
                 # public draftmancer.com whatever DRAFTMANCER_BASE_URL says --
                 # that is our own server once hosting is on.
-                hosted = hosted_draftmancer_enabled()
+                hosted = hosted_route_for(self.session_details.guild_id)
                 if not hosted:
                     self.session_details.draft_link = public_draftmancer_session_url(
                         self.session_details.draft_id)

@@ -5,6 +5,7 @@ from loguru import logger
 from models.draft_session import DraftSession
 from helpers.stale_drafts import is_finished_draft
 from models.match import MatchResult
+import config
 from helpers.permissions import has_bot_manager_role, is_bot_manager
 from services.draft_pool_service import ENTRIES_STILL_HELD, PoolNotSettled, pool_balance, release_draft_pool
 from helpers.stale_drafts import is_finished_draft
@@ -1044,6 +1045,33 @@ class DraftControlCog(commands.Cog):
         except Exception as e:
             logger.exception(f"Error in abandon command: {e}")
             await ctx.followup.send(f"An error occurred: {str(e)}", ephemeral=True)
+
+    @discord.slash_command(
+        name='draft_route',
+        description="Admin: open this server's new drafts on our Draftmancer or on draftmancer.com")
+    async def draft_route_command(
+        self, ctx,
+        route: discord.Option(str, "Where new drafts open", choices=["hosted", "draftmancer"],  # type: ignore[valid-type]
+                              required=False)):
+        await ctx.defer(ephemeral=True)
+        await self._do_draft_route(ctx, route)
+
+    async def _do_draft_route(self, ctx, route: str | None):
+        """Show or set this guild's route for new drafts."""
+        if not await is_bot_manager(ctx):
+            await ctx.followup.send("Only bot managers can change the draft route.", ephemeral=True)
+            return
+        guild_id = ctx.guild.id
+        if route is not None:
+            config.update_setting(guild_id, config.DRAFTMANCER_ROUTE_SETTING, route)
+        current = config.draftmancer_route_setting(guild_id)
+        lines = [f"New drafts here open on: {current}."]
+        if route is not None:
+            lines.append("Drafts already running keep their route.")
+        if not config.hosted_draftmancer_enabled():
+            lines.append("This has no effect until hosting is configured; "
+                         "every draft runs on draftmancer.com meanwhile.")
+        await ctx.followup.send(" ".join(lines), ephemeral=True)
 
     @discord.slash_command(name='mutiny', description='Run the draft yourselves on draftmancer.com, without DraftBot')
     async def mutiny_command(self, ctx):
