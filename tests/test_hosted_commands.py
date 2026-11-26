@@ -540,11 +540,22 @@ async def test_failover_with_the_server_down_asks_first(hosted, cog):
     assert isinstance(view, draft_control.FailoverConfirmView)
     assert CONFIRM_SENTENCE in sent.args[0]
 
+    order: list[str] = []
     interaction = MagicMock()
-    interaction.response.edit_message = AsyncMock()
+    interaction.response.edit_message = AsyncMock(
+        side_effect=lambda **_: order.append("answered"))
+    interaction.edit_original_response = AsyncMock()
+
+    async def reopen_recorded(*_: Any, **__: Any) -> str:
+        order.append("reopen")
+        return "moved"
+
     with patch.object(draft_control.hosted_draft, "reopen_draft",
-                      AsyncMock(return_value="moved")) as reopen_now:
+                      AsyncMock(side_effect=reopen_recorded)) as reopen_now:
         await view.children[0].callback(interaction)
+    assert order == ["answered", "reopen"]
+    assert all(child.disabled for child in view.children)
+    assert "moved" in interaction.edit_original_response.await_args.kwargs["content"]
     reopen_now.assert_awaited_once()
     assert reopen_now.await_args.args[1:] == (SID, "manager")
     assert reopen_now.await_args.kwargs["reason"] == "failover"
@@ -557,11 +568,12 @@ async def test_failover_confirm_that_raises_gets_a_plain_failure_reply(hosted, c
     view = ctx.followup.send.await_args.kwargs["view"]
     interaction = MagicMock()
     interaction.response.edit_message = AsyncMock()
+    interaction.edit_original_response = AsyncMock()
     with patch.object(draft_control.hosted_draft, "reopen_draft",
                       AsyncMock(side_effect=RuntimeError("db"))):
         await view.children[0].callback(interaction)
 
-    assert "went wrong" in interaction.response.edit_message.await_args.kwargs["content"]
+    assert "went wrong" in interaction.edit_original_response.await_args.kwargs["content"]
 
 
 @pytest.mark.asyncio

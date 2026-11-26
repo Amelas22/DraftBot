@@ -456,9 +456,12 @@ class FailoverConfirmView(View):
 
     @discord.ui.button(label="Yes, move the draft", style=discord.ButtonStyle.danger)
     async def confirm(self, button: discord.ui.Button, interaction: discord.Interaction):
+        # Answer within Discord's 3 s window before the slow reopen; the disabled
+        # buttons also stop a second click from reaching reopen_draft.
         _disable_all(self)
+        await interaction.response.edit_message(content="Moving the draft…", view=self)
         text = await _failover_reply(self.bot, self.session_id, self.requested_by)
-        await interaction.response.edit_message(content=text, view=self)
+        await interaction.edit_original_response(content=text, view=self)
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, button: discord.ui.Button, interaction: discord.Interaction):
