@@ -69,6 +69,7 @@ from services.draft_setup_manager import (
     DISCONNECT_NOTICE_DELAY,
     DRAFT_LOG_UNLOCK_TIMER_MINUTES,
     DRAFT_PICK_TIMER_SECONDS,
+    DraftSetupManager,
 )
 from services.hosted_draftmancer import (
     HostedCubeImportFailed,
@@ -971,6 +972,153 @@ async def mutiny_hosted_draft(session_id: str, channel: Any,
         return ("moved" if stopped else "moved-unstopped"), ""
 
 
+# Where reopen_draft moves a draft: a new hosted session, or a bot-run room on
+# draftmancer.com (route NULL, a DraftSetupManager inside).
+ReopenRoute = Literal["hosted", "manager"]
+ReopenReason = Literal["failover", "redo"]
+ReopenResult = Literal["moved", "moved-unstopped", "ended", "no-teams", "bot-seats",
+                       "unreachable", "cube-import", "refused", "changed", "gone"]
+
+_REOPEN_HEADLINES: dict[ReopenReason, str] = {
+    "failover": "moved this draft to a bot-run room on draftmancer.com",
+    "redo": "opened a new Draftmancer room for this draft",
+}
+
+
+async def reopen_draft(bot: discord.Client, session_id: str, route: ReopenRoute, *,
+                       reason: ReopenReason, requested_by: str | None) -> ReopenResult:
+    """Move a draft with teams to a new Draftmancer room on `route`.
+
+    For /failover ("failover", route "manager") and a hosted /ready that starts
+    over ("redo"). The draft keeps its teams, sign-ups, stage and staked pool;
+    only the room, its draft id and every player's link change. A hosted room
+    is closed first when the server can be asked; one it cannot reach is left
+    behind ("moved-unstopped"), and its late push finds no draft, since the
+    draft id changes. A draft whose log exists, or that the server says has
+    ended, is not moved: its result is on the way. A new hosted session is
+    created before anything else changes, so a failed create leaves the draft
+    where it was. The row moves only if nobody moved it meanwhile ("changed").
+    """
+    async with _draft_lock(session_id):
+        row = await DraftSession.get_by_session_id(session_id)
+        if row is None:
+            return "gone"
+        if not row.session_stage:
+            return "no-teams"
+        if row.logs_captured_at is not None:
+            return "ended"
+        old_id: str = row.draft_id
+        was_hosted = row.draftmancer_route == ROUTE
+        stage = await hosted_stage(old_id) if was_hosted else None
+        if stage == "ended":
+            return "ended"
+        if row.hosted_bot_seats:
+            return "bot-seats"
+
+        client = hosted_client()
+        new_id = _new_draft_id()
+        seats = seat_list(row.sign_ups or {})
+        if route == "hosted":
+            created = await _create_reopened(client, row, new_id, seats)
+            if created is not None:
+                return created
+
+        async def undo() -> None:
+            if route == "hosted":
+                await _stop_quietly(client, new_id)
+
+        stopped = True
+        if was_hosted and stage not in ("stopped", "lost"):
+            try:
+                await client.stop(old_id)
+            except HostedUnavailable as e:
+                logger.warning(f"Reopening {session_id}: could not stop DB{old_id}; moving anyway: {e}")
+                stopped = False
+            except HostedRefused as e:
+                if e.status == 409:
+                    await undo()
+                    return "ended"
+                if e.status != 404:
+                    logger.error(f"Reopening {session_id}: stopping DB{old_id} refused: {e}")
+                    await undo()
+                    return "refused"
+        # Taken before _forget drops it: a running ready check's messages are closed below.
+        tracked = _TRACKED.pop(session_id, None)
+        if was_hosted:
+            _forget(session_id)
+            _UNPULLABLE.add(session_id)
+
+        link = (get_draftmancer_session_url(new_id) if route == "hosted"
+                else public_draftmancer_session_url(new_id))
+        # Compare-and-swap: only the room that was checked is replaced.
+        async with db_session() as session:
+            result = await session.execute(
+                update(DraftSession)
+                .where(DraftSession.session_id == session_id, DraftSession.draft_id == old_id)
+                .values(draft_id=new_id, draft_link=link,
+                        draftmancer_route=ROUTE if route == "hosted" else None,
+                        hosted_paused_by=None, hosted_pause_notice_id=None,
+                        hosted_bot_seats=None, status_message_id=None,
+                        ready_check_message_id=None))
+        # Whatever room the row names now, the poller and the reconciler learn
+        # its state afresh: nothing remembered about the old room applies to it.
+        _DONE.discard(session_id)
+        _UNPULLABLE.discard(session_id)
+        channel = bot.get_channel(int(row.draft_channel_id)) if row.draft_channel_id else None
+        if tracked is not None and tracked.ready_check is not None:
+            await _end_ready_check(channel, tracked, None)
+        if getattr(result, "rowcount", 0) == 0:
+            logger.warning(f"{session_id} moved while it was being reopened; keeping that move")
+            await undo()
+            return "changed"
+        logger.info(f"Reopened {session_id} ({reason}) from DB{old_id} to DB{new_id} on the "
+                     f"{route} route")
+
+        if route == "manager":
+            await DraftSetupManager.spawn_for_existing_session(session_id, bot)
+        if channel is not None:
+            note = ("" if stopped else
+                    "\n⚠️ The drafting server couldn't be reached to close the old room, "
+                    "which may still be open if it comes back. Don't draft there.")
+            await _announce_reopen(
+                session_id, channel,
+                f"{requested_by or 'An admin'} {_REOPEN_HEADLINES[reason]}", note)
+        if reason == "failover":
+            name = f"{row.friendly_id} ({session_id})" if row.friendly_id else session_id
+            await _tell_admins(bot, f"{requested_by or 'Someone'} failed draft {name} over to a "
+                                    f"bot-run room on draftmancer.com (DB{old_id} → DB{new_id})"
+                                    + ("" if stopped else "; the old room could not be closed")
+                                    + ".")
+        return "moved" if stopped else "moved-unstopped"
+
+
+async def _create_reopened(client: HostedDraftmancer, row: Any, new_id: str,
+                           seats: list[str]) -> ReopenResult | None:
+    """Open and seat the new hosted session; None on success, else why it failed."""
+    spec = build_session_spec(
+        draft_id=new_id, players=seats, cube_id=row.cube,
+        packs_per_player=row.packs_per_player or DEFAULT_PACKS_PER_PLAYER,
+        cards_per_pack=row.cards_per_pack or DEFAULT_CARDS_PER_PACK,
+        pick_timer=DRAFT_PICK_TIMER_SECONDS,
+        unlock_timer_minutes=DRAFT_LOG_UNLOCK_TIMER_MINUTES, log_webhook=log_webhook_url())
+    try:
+        await client.create(spec)
+    except HostedCubeImportFailed as e:
+        logger.warning(f"The hosted server could not import cube {row.cube} for {row.session_id}: {e}")
+        return "cube-import"
+    except HostedUnavailable as e:
+        logger.warning(f"Could not open a new hosted session for {row.session_id}: {e}")
+        return "unreachable"
+    except HostedRefused as e:
+        logger.error(f"New hosted session for {row.session_id} refused: {e}")
+        return "refused"
+    try:
+        await client.set_seating(new_id, seats)
+    except (HostedUnavailable, HostedRefused) as e:
+        logger.warning(f"Could not seat the new hosted session of {row.session_id}: {e}")
+    return None
+
+
 def _new_draft_id() -> str:
     """Same shape as SessionDetails' draft ids."""
     return "".join(secrets.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789") for _ in range(8))
@@ -1052,6 +1200,11 @@ async def _stop_quietly(client: HostedDraftmancer, draft_id: str) -> None:
 
 
 async def _announce_move(session_id: str, channel: Any) -> None:
+    await _announce_reopen(session_id, channel,
+                           "The cube changed, so the draft moved to a new Draftmancer room")
+
+
+async def _announce_reopen(session_id: str, channel: Any, headline: str, note: str = "") -> None:
     """Every player's new link: the links handed out with the teams now lead nowhere."""
     row = await DraftSession.get_by_session_id(session_id)
     if row is None:
@@ -1062,9 +1215,8 @@ async def _announce_move(session_id: str, channel: Any) -> None:
                       for discord_id, link in links.items())
     try:
         await channel.send(
-            f"⚠️ **The cube changed, so the draft moved to a new Draftmancer room** "
-            f"(`DB{row.draft_id}`). **Any link you were given before this message no "
-            f"longer works.**\n\n{lines}",
+            f"⚠️ **{headline}** (`DB{row.draft_id}`). **Any link you were given before this "
+            f"message no longer works.**{note}\n\n{lines}",
             allowed_mentions=_PING_USERS_ONLY)
     except Exception as e:
         logger.error(f"Could not announce the moved session of {session_id}: {e}")

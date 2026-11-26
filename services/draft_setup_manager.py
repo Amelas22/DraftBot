@@ -2884,6 +2884,8 @@ class DraftSetupManager:
             friendly_id=draft_session.friendly_id,
             cube_id=draft_session.cube,
             guild_id=draft_session.guild_id,
+            packs_per_player=draft_session.packs_per_player or DEFAULT_PACKS_PER_PLAYER,
+            cards_per_pack=draft_session.cards_per_pack or DEFAULT_CARDS_PER_PACK,
         )
         
         manager.set_bot_instance(bot)
