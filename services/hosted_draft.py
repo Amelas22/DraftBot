@@ -1289,26 +1289,45 @@ async def pull_ended_draft(bot: discord.Client, session_id: str, draft_id: str) 
     state) would otherwise be asked about until the reconciler's window ran
     out. A stopped or lost draft is never asked about again; an unreachable
     server is tried again next tick. Never raises for API trouble.
+
+    The reconciler read `draft_id` without the lock, so the draft may have been
+    reopened in a new room since: the room is asked about only while the row
+    still names it, under the draft's lock. The draft is finished after the
+    lock is let go, as a pushed log is -- finishing builds rooms and must not
+    wait on, or hold up, a command on the same draft.
     """
+    async with _draft_lock(session_id):
+        log = await _pull_ended_log(session_id, draft_id)
+    if log is not None:
+        logger.info(f"[reconciler] pulled the hosted log of {session_id}")
+        await on_draft_ended(bot, session_id, log)
+
+
+async def _pull_ended_log(session_id: str, draft_id: str) -> DraftLog | None:
+    """The ended room's log, or None (not ended, no log, or no longer the draft's room)."""
     if session_id in _UNPULLABLE:
-        return
+        return None
+    row = await DraftSession.get_by_session_id(session_id)
+    if row is None or row.draft_id != draft_id or row.draftmancer_route != ROUTE:
+        logger.info(f"[reconciler] {session_id} no longer runs in DB{draft_id}; not pulling it")
+        return None
     client = hosted_client()
     try:
         status = await client.status(draft_id)
         if status.stage == "stopped":
             logger.info(f"[reconciler] hosted draft {session_id} was stopped; it has no log")
             _UNPULLABLE.add(session_id)
-            return
+            return None
         if status.stage != "ended":
-            return
+            return None
         log = await client.fetch_log(draft_id)
     except HostedUnavailable as e:
         logger.warning(f"[reconciler] hosted API unreachable for {session_id}; retrying next tick: {e}")
-        return
+        return None
     except HostedLogStopped:
         logger.info(f"[reconciler] hosted draft {session_id} was stopped; it has no log")
         _UNPULLABLE.add(session_id)
-        return
+        return None
     except HostedRefused as e:
         if e.status == 404:
             logger.error(f"[reconciler] the hosted server no longer knows {session_id} "
@@ -1316,11 +1335,8 @@ async def pull_ended_draft(bot: discord.Client, session_id: str, draft_id: str) 
             _UNPULLABLE.add(session_id)
         else:
             logger.error(f"[reconciler] hosted API refused for {session_id}: {e}")
-        return
-    if log is None:
-        return
-    logger.info(f"[reconciler] pulled the hosted log of {session_id}")
-    await on_draft_ended(bot, session_id, log)
+        return None
+    return log
 
 
 # --- the fallback's log -----------------------------------------------------------------

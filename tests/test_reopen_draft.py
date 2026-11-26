@@ -286,3 +286,39 @@ async def test_a_running_ready_check_is_closed_by_the_move(hosted, bot, channel,
 
     ended.assert_awaited_once()
     assert SID not in hosted_draft._TRACKED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("old_stage", ["stopped", "ended"])
+async def test_a_pull_for_the_room_a_draft_left_changes_nothing(hosted, bot, old_stage):
+    """The reconciler read the old draft id before a reopen moved the draft on."""
+    await _seed_teams()
+    await _set(draft_id="NEWROOM")
+    hosted.stage = old_stage
+    hosted.log = {"sessionID": "DB" + DRAFT_ID, "users": {}}
+    finished = AsyncMock()
+    with patch("services.hosted_draft.on_draft_ended", finished):
+        await hosted_draft.pull_ended_draft(bot, SID, DRAFT_ID)
+
+    assert SID not in hosted_draft._UNPULLABLE
+    finished.assert_not_awaited()
+    assert ("fetch_log", DRAFT_ID) not in hosted.calls
+
+
+@pytest.mark.asyncio
+async def test_a_pull_for_the_current_room_still_finishes_the_draft(hosted, bot):
+    await _seed_teams()
+    hosted.stage = "ended"
+    hosted.log = {"sessionID": "DB" + DRAFT_ID, "users": {}}
+    held: list[bool] = []
+
+    async def finishing(*_: Any) -> None:
+        # Finishing runs with the lock let go: it must not hold up a command.
+        held.append(hosted_draft._draft_lock(SID).locked())
+
+    finished = AsyncMock(side_effect=finishing)
+    with patch("services.hosted_draft.on_draft_ended", finished):
+        await hosted_draft.pull_ended_draft(bot, SID, DRAFT_ID)
+
+    finished.assert_awaited_once_with(bot, SID, hosted.log)
+    assert held == [False]
