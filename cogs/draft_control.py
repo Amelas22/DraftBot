@@ -36,6 +36,18 @@ SCRAP_KEEPS_ENTRIES = ("\n💰 Entries stay in the prize pool for the restarted 
                        "If you're not restarting it, press **Cancel Draft** on the "
                        "draft post to return them.")
 
+
+async def _scrap_entries_note(draft_session: DraftSession) -> str:
+    """SCRAP_KEEPS_ENTRIES for a scrapped draft with entries in its pool, else ""."""
+    try:
+        staked = await pool_balance(str(draft_session.guild_id), draft_session.session_id) > 0
+    except Exception:
+        logger.opt(exception=True).warning(
+            f"scrapped {draft_session.session_id}: could not read its pool")
+        return ""
+    return SCRAP_KEEPS_ENTRIES if staked else ""
+
+
 # The pause between a passed vote (or ready check) and acting on it.
 VOTE_ACTION_DELAY_SECONDS = 5
 
@@ -949,18 +961,11 @@ class DraftControlCog(commands.Cog):
                 # come back only when the draft really ends early: Cancel Draft,
                 # /abandon, the queue expiring, or cleanup abandoning a draft
                 # that never got past drafting.
-                staked = False
-                try:
-                    staked = await pool_balance(str(draft_session.guild_id),
-                                                draft_session.session_id) > 0
-                except Exception:
-                    logger.opt(exception=True).warning(
-                        f"scrapped {draft_session.session_id}: could not read its pool")
                 await final_message.edit(content=
                                         "🛑 **Draft canceled!** \n" \
                                         "Use `/ready` to begin a ready check for a new draft.\n" \
                                         "Use `/mutiny` to remove the bot and take control of the session."
-                                        + (SCRAP_KEEPS_ENTRIES if staked else "")
+                                        + await _scrap_entries_note(draft_session)
                 )
 
             async def _not_cancelled():
@@ -1147,7 +1152,7 @@ class DraftControlCog(commands.Cog):
         if route is not None:
             config.update_setting(guild_id, config.DRAFTMANCER_ROUTE_SETTING, route)
         current = config.draftmancer_route_setting(guild_id)
-        lines = [f"New drafts here open on: {ROUTE_LABELS.get(current, current)}."]
+        lines = [f"New drafts here open on: {ROUTE_LABELS[current]}."]
         if route is not None:
             lines.append("Drafts already running keep their route.")
         if not config.hosted_draftmancer_enabled():
@@ -1692,16 +1697,9 @@ class DraftControlCog(commands.Cog):
                 return
             # The pool stays, as on the manager route: /ready opens a new room
             # for the same draft, teams and entries unchanged.
-            staked = False
-            try:
-                staked = await pool_balance(str(draft_session.guild_id),
-                                            draft_session.session_id) > 0
-            except Exception:
-                logger.opt(exception=True).warning(
-                    f"scrapped {draft_session.session_id}: could not read its pool")
             await final_message.edit(content=
                 "🛑 **Draft canceled!** Use `/ready` to open a new room and start again."
-                + (SCRAP_KEEPS_ENTRIES if staked else ""))
+                + await _scrap_entries_note(draft_session))
 
         async def _not_cancelled():
             await ctx.channel.send("🛑 **Vote to cancel draft did not pass.**\n Use `/unpause` to continue the draft.")

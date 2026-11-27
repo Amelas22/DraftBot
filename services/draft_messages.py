@@ -14,15 +14,18 @@ from typing import Any, TypedDict
 import discord
 from loguru import logger
 
+_READY_AGAIN = ("If the seating order is wrong, or if someone missed the ready check, please run "
+                "`/ready` again — this will reset the seating order and start a new ready check. ")
 READY_CHECK_INSTRUCTIONS = (
-    "If the seating order is wrong, or if someone missed the ready check, please run `/ready` again — this will reset the seating order and start a new ready check. "
-    "You can also use `/mutiny` to run the draft yourselves, without DraftBot, if needed."
+    _READY_AGAIN
+    + "You can also use `/mutiny` to run the draft yourselves, without DraftBot, if needed."
 )
 # A hosted draft can also move to a DraftBot-run room; a draft already there can't.
-HOSTED_READY_CHECK_INSTRUCTIONS = READY_CHECK_INSTRUCTIONS.replace(
-    "You can also use `/mutiny` to run the draft yourselves, without DraftBot, if needed.",
-    "If the drafting server is failing, `/failover` moves the draft to a DraftBot-run room "
-    "on draftmancer.com; `/mutiny` runs the draft yourselves, without DraftBot.")
+HOSTED_READY_CHECK_INSTRUCTIONS = (
+    _READY_AGAIN
+    + "If the drafting server is failing, `/failover` moves the draft to a DraftBot-run room "
+    "on draftmancer.com; `/mutiny` runs the draft yourselves, without DraftBot."
+)
 
 READY_CHECK_TIMEOUT_SECONDS = 90
 READY_CHECK_PASSED = "🎉 All drafters ready! Draft starting in 5 seconds..."
