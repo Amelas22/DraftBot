@@ -61,8 +61,9 @@ class Tournament(Base):
     # Every board links to it as another view of the same teams, standings and
     # pairings; None links nothing.
     website_url = Column(String(512), nullable=True)
-    # Round 1's deadline, the Sunday (Pacific) it ends; later rounds follow at
-    # seven-day steps (see services/round_weeks.py). NULL = no round calendar.
+    # Round 1's deadline, the Sunday (Pacific) it ends; later rounds follow
+    # weekly, passing over round_breaks (see services/round_weeks.py). NULL = no
+    # round calendar.
     # Set outside the bot's commands.
     round1_deadline = Column(Date, nullable=True)
     # Sundays (ISO dates, Pacific) on which no round ends: the round they fall

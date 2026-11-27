@@ -2,7 +2,7 @@
 // cell can be booked, and what the booking and a refusal say. No DOM; the view draws it.
 import { CELLS, CELL_MS, addCells } from "./week.js";
 import { memberFree } from "./teams.js";
-import { addDays, confirmedCells, leagueWeeksBetween } from "./rounds.js";
+import { addDays, confirmedCells, leagueMidnight, leagueWeeksBetween } from "./rounds.js";
 
 export const FORMAT = "draftbot.scheduler.team_draft";
 
@@ -77,9 +77,8 @@ export function freeRuns(freeSides, columnStarts, count = CELLS, sureSides = fre
 // stretched it), else every week the window touches.
 export function statusWeeks(state) {
   if (state.round) {
-    const weeks = [];
-    for (let m = addDays(state.round.first_day, 1); m <= addDays(state.round.last_day, -6); m = addDays(m, 7)) weeks.push(m);
-    return weeks;
+    const { first_day: first, last_day: last } = state.round;
+    return leagueWeeksBetween(leagueMidnight(addDays(first, 1)), leagueMidnight(addDays(last, 1)));
   }
   const start = new Date(state.window.start_utc);
   return leagueWeeksBetween(start, addCells(start, state.window.cells));

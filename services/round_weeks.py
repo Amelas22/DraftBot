@@ -74,6 +74,9 @@ def deadline_on_or_after(now: datetime) -> date:
 
 
 def _deadline(cal: Calendar, n: int) -> date:
+    """Round n's deadline Sunday; n = 0 is the Sunday Round 1's view starts on."""
+    if n == 0:
+        return cal.round1_deadline - timedelta(days=7)
     day = cal.round1_deadline
     for _ in range(n - 1):
         day += timedelta(days=7)
@@ -83,8 +86,6 @@ def _deadline(cal: Calendar, n: int) -> date:
 
 
 def round_week(cal: Calendar, n: int) -> Week:
-    if n == 1:
-        return week_ending(cal.round1_deadline, n)
     return _span(_deadline(cal, n - 1), _deadline(cal, n), n)
 
 
