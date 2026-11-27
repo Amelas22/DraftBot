@@ -50,7 +50,7 @@ def _page_schedule(page: WeekPage, span: BookingSpan) -> Schedule:
 def _breaks(tournament: Tournament) -> frozenset[date]:
     """The tournament's break Sundays, skipping (and logging) any entry that is not an ISO date."""
     stored = tournament.round_breaks
-    if not stored:
+    if stored is None or stored == []:
         return frozenset()
     if not isinstance(stored, list):
         logger.warning(f"tournament {tournament.id}: round_breaks is not a list, ignored: {stored!r}")
