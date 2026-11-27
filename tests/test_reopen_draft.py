@@ -335,7 +335,10 @@ async def test_spawn_passes_pack_settings(test_db):
     await _seed(route=None)
     await _set(packs_per_player=2, cards_per_pack=10)
     try:
-        with patch.object(DraftSetupManager, "keep_connection_alive", AsyncMock()):
+        # fetch_draft_info runs as a task of its own: left pending, it is torn
+        # down mid-query in a later test and breaks that test's database session.
+        with patch.object(DraftSetupManager, "keep_connection_alive", AsyncMock()), \
+             patch.object(DraftSetupManager, "fetch_draft_info", AsyncMock(return_value=True)):
             manager = await DraftSetupManager.spawn_for_existing_session(SID, AsyncMock())
         assert manager is not None
         assert (manager.packs_per_player, manager.cards_per_pack) == (2, 10)
