@@ -22,6 +22,8 @@ from models.draft_session import DraftSession as DraftSessionModel
 from helpers.team_names import labels_for
 from utils import split_into_teams, generate_seating_order, reorder_sign_ups, get_formatted_stake_pairs, check_weekly_limits, add_links_to_embed_safely
 from services.draft_setup_manager import DraftSetupManager
+from services.hosted_draft import on_teams_formed
+from helpers.hosted_seats import seat_list
 from services.state_manager import state_manager
 from notification_service import send_teams_created_dms
 
@@ -143,6 +145,8 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                     else:
                         seating_order = [session.sign_ups[user_id] for user_id in sign_ups_list]
 
+                    # Unique seat names, in seat order: what a hosted Draftmancer seats by.
+                    seat_names = seat_list(session.sign_ups)
                     team_a_display_names = [session.sign_ups[user_id] for user_id in session.team_a]
                     team_b_display_names = [session.sign_ups[user_id] for user_id in session.team_b]
                 else:
@@ -150,6 +154,7 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                     random.shuffle(sign_ups_list)
                     new_sign_ups = reorder_sign_ups(session.sign_ups, sign_ups_list)
                     seating_order = list(new_sign_ups.values())
+                    seat_names = seat_list(new_sign_ups)
                     await db_session.execute(update(DraftSession)
                                         .where(DraftSession.session_id == session.session_id)
                                         .values(sign_ups=new_sign_ups))
@@ -273,7 +278,7 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
                 session, seating_order, persistent_view.session_type)
             await _handle_staked_draft_completion(
                 interaction, session, embed, channel_embed,
-                persistent_view, draft_session_id, bot, guild_id)
+                persistent_view, draft_session_id, bot, guild_id, seat_names)
             return True
 
         # Update message and send announcement
@@ -296,6 +301,7 @@ async def create_and_display_teams(bot, draft_session_id, interaction, persisten
 
         # Handle draft manager updates
         await _update_draft_manager(draft_session_id, bot, interaction.client)
+        await on_teams_formed(draft_session_id, seat_names)
 
         # Check weekly limits if applicable
         if session.tracked_draft and session.premade_match_id is not None:
@@ -445,7 +451,7 @@ async def _create_teams_embed(session, team_a_names, team_b_names, seating_order
     # Add personalized draft links
     user_links = []
     for user_id, display_name in session.sign_ups.items():
-        personalized_link = session.get_draft_link_for_user(display_name)
+        personalized_link = session.get_draft_link_for_user(display_name, user_id=user_id)
         # Label stays RAW: Discord does not process backslash escapes inside a
         # markdown link label, so escaping here renders literal backslashes.
         user_links.append(f"[{display_name}]({personalized_link})")
@@ -487,7 +493,7 @@ async def _create_channel_announcement_embed(session, seating_order, session_typ
     team_b_links = []
 
     for user_id, display_name in session.sign_ups.items():
-        personalized_link = session.get_draft_link_for_user(display_name)
+        personalized_link = session.get_draft_link_for_user(display_name, user_id=user_id)
         # Raw label -- see the note in _create_teams_embed.
         link_entry = f"[{display_name}]({personalized_link})"
 
@@ -520,8 +526,13 @@ async def _create_channel_announcement_embed(session, seating_order, session_typ
 
 
 async def _handle_staked_draft_completion(interaction, session, embed, channel_embed,
-                                         persistent_view, draft_session_id, bot, guild_id):
-    """Handle special completion flow for staked drafts."""
+                                         persistent_view, draft_session_id, bot, guild_id,
+                                         seat_names):
+    """Handle special completion flow for staked drafts.
+
+    `seat_names` is the seating as drawn -- the reordered sign-ups the database
+    holds, which `session.sign_ups` may predate.
+    """
     from views import CallbackButton
 
     # Create view with stake calculation button
@@ -566,6 +577,7 @@ async def _handle_staked_draft_completion(interaction, session, embed, channel_e
 
     # Update draft manager
     await _update_draft_manager(draft_session_id, bot, interaction.client)
+    await on_teams_formed(draft_session_id, seat_names)
 
     # Check weekly limits
     if session.tracked_draft and session.premade_match_id is not None:

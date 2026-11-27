@@ -102,7 +102,7 @@ class PremadeSession(BaseSession):
             await post_premade_nudge(
                 interaction.channel,
                 interaction.guild.id,
-                self.draft_manager.session_id,
+                self.session_details.session_id,
                 self.session_details.team_a_name,
                 self.session_details.team_b_name,
             )

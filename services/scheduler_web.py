@@ -1,4 +1,9 @@
-"""The scheduler web app: static page plus the token-authenticated JSON API."""
+"""The scheduler web app: static page plus the token-authenticated JSON API.
+
+It also takes the hosted Draftmancer's end-of-draft push, which carries that
+server's own bearer token rather than a scheduler link token.
+"""
+import hmac
 import json
 import re
 from collections import deque
@@ -6,9 +11,11 @@ from collections.abc import Awaitable, Callable, Collection
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+from typing import Any
+
 from aiohttp import web
 
-from config import scheduler_enabled, scheduler_trusted_proxies
+from config import draftmancer_api_token, scheduler_enabled, scheduler_trusted_proxies
 from database.db_session import db_session
 from helpers.matchup import Roster
 from services.availability import (
@@ -60,6 +67,10 @@ _STATIC_DIR: web.AppKey[Path] = web.AppKey("static_dir")
 _LIMITER: web.AppKey["RateLimiter"] = web.AppKey("limiter")
 _ENABLED: web.AppKey[Callable[[str], bool]] = web.AppKey("enabled")
 _TRUSTED: web.AppKey[frozenset[str]] = web.AppKey("trusted_proxies")
+DraftEnded = Callable[[str, dict[str, Any]], Awaitable[bool]]
+_DRAFT_ENDED: web.AppKey[DraftEnded] = web.AppKey("draft_ended")
+# A finished draft log is ~0.5 MB; this leaves room for a long, wide one.
+MAX_DRAFT_LOG_BYTES = 16 * 1024 * 1024
 MAX_KEYS = 10_000
 _REPO_PAGE_DIR = Path(__file__).resolve().parent.parent / "scheduler_page"
 
@@ -364,6 +375,40 @@ async def get_fixture(request: web.Request) -> web.StreamResponse:
     return _static(request, f"fixtures/{name}")
 
 
+def _bearer_matches(header: str, expected: str) -> bool:
+    scheme, _, rest = header.partition(" ")
+    if scheme != "Bearer" or not expected:
+        return False
+    return hmac.compare_digest(rest.strip().encode(), expected.encode())
+
+
+@routes.post("/hosted/draft-ended")
+@public
+async def post_hosted_draft_ended(request: web.Request) -> web.Response:
+    """The hosted Draftmancer pushing a finished log: ``{sessionID, log}``.
+
+    Public to the link-token middleware; authenticated instead by the shared
+    Draftmancer API token, compared in constant time. 404 for a session that is
+    no hosted draft of ours.
+    """
+    if not _bearer_matches(request.headers.get("Authorization", ""), draftmancer_api_token()):
+        return error(401, "unauthorized")
+    raw = await read_body(request, MAX_DRAFT_LOG_BYTES)
+    if raw is None:
+        return error(413, "too_large")
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        return error(400, "invalid_json")
+    session_id = body.get("sessionID") if isinstance(body, dict) else None
+    log = body.get("log") if isinstance(body, dict) else None
+    if not isinstance(session_id, str) or not isinstance(log, dict):
+        return error(400, "invalid_body")
+    if not await request.app[_DRAFT_ENDED](session_id, log):
+        return error(404, "unknown_session")
+    return web.json_response({"result": "ok"})
+
+
 async def _no_notify(notice: Notice, guild_id: str) -> bool:
     return False
 
@@ -384,6 +429,10 @@ async def _no_announce(team_draft_id: int, change: BookingChange) -> None:
     return None
 
 
+async def _no_draft(session_id: str, log: dict[str, Any]) -> bool:
+    return False
+
+
 def build_app(
     now: Callable[[], datetime] = utc_now,
     static_dir: Path = _REPO_PAGE_DIR,
@@ -395,6 +444,7 @@ def build_app(
     announce: Callable[[int, BookingChange], Awaitable[None]] = _no_announce,
     match_people: Callable[[str, int], Awaitable[tuple[Roster, Roster] | None]] = _no_match,
     match_announce: Callable[[int, BookingChange], Awaitable[None]] = _no_announce,
+    draft_ended: DraftEnded = _no_draft,
 ) -> web.Application:
     app = web.Application(middlewares=[auth_middleware])
     app[NOW] = now
@@ -410,6 +460,7 @@ def build_app(
     app[ANNOUNCE] = announce
     app[MATCH_PEOPLE] = match_people
     app[MATCH_ANNOUNCE] = match_announce
+    app[_DRAFT_ENDED] = draft_ended
     app.add_routes(routes)
     app.add_routes(teams_routes)
     app.add_routes(team_draft_routes)

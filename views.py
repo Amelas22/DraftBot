@@ -12,6 +12,9 @@ from config import (
 from notification_service import send_ready_check_dms
 from ready_check import ReadyCheckView, ReadyCheckSession
 from services.draft_setup_manager import DraftSetupManager, ACTIVE_MANAGERS
+from services import hosted_draft
+from services.hosted_draft import on_signups_changed
+from services.draft_end import rooms_taken
 from session import StakeInfo, AsyncSessionLocal, get_draft_session, DraftSession, MatchResult
 from models import SignUpHistory
 from sqlalchemy import update, select, and_
@@ -80,6 +83,16 @@ from ready_check import READY_CHECK_DEBOUNCE_SECONDS
 # newer accounts — membership must be a tight range gated on test mode.
 TEST_USER_ID_START = 900000000000000000
 TEST_USER_ID_END = TEST_USER_ID_START + 100
+
+# Why Update Cube did nothing on a hosted draft, by change_hosted_cube's outcome.
+HOSTED_CUBE_REFUSALS = {
+    "started": "The draft has already started, so its cube can no longer be changed.",
+    "unreachable": "Couldn't reach the drafting server, so the cube was not changed. "
+                   "Please try again in a moment.",
+    "cube-import": "The drafting server couldn't import that cube from CubeCobra, so the "
+                   "cube was not changed. Check the cube id and try again.",
+    "failed": "Failed to update the cube in Draftmancer. Please try again later.",
+}
 
 
 def is_synthetic_test_user(user_id: str) -> bool:
@@ -441,6 +454,7 @@ class PersistentView(discord.ui.View):
         
         # Update the draft message to reflect the new list of sign-ups
         await update_draft_message(interaction.client, self.draft_session_id)
+        await on_signups_changed(self.draft_session_id)
         
         # Re-fetch to get the updated session data
         updated_session = await get_draft_session(self.draft_session_id)
@@ -497,6 +511,7 @@ class PersistentView(discord.ui.View):
         logger.info(f"Added {len(new_users)} test users to premade draft {self.draft_session_id} "
                     f"({draft_session.team_a_name}: {len(team_a)}, {draft_session.team_b_name}: {len(team_b)})")
         await self.update_team_view(interaction)
+        await on_signups_changed(self.draft_session_id)
         red, blue = labels_for(draft_session)
         await interaction.followup.send(
             f"Added {len(new_users)} test users. "
@@ -672,6 +687,7 @@ class PersistentView(discord.ui.View):
 
             # Update the draft message to reflect the new list of sign-ups
             await update_draft_message(interaction.client, self.draft_session_id)
+            await on_signups_changed(self.draft_session_id)
 
             # If a ready check is active, add the new player to no_response and refresh the embed
             await ReadyCheckSession.sync_added_player(self.draft_session_id, user_id, draft_session_updated, interaction)
@@ -753,6 +769,7 @@ class PersistentView(discord.ui.View):
             
             # Update the draft message to reflect the new list of sign-ups
             await update_draft_message(interaction.client, self.draft_session_id)
+            await on_signups_changed(self.draft_session_id)
 
             await ReadyCheckSession.sync_removed_player(self.draft_session_id, user_id, draft_session_updated, interaction)
 
@@ -789,9 +806,21 @@ class PersistentView(discord.ui.View):
                     )
 
                     manager = DraftSetupManager.get_active_manager(draft_session.session_id)
+                    hosted = draft_session.draftmancer_route == hosted_draft.ROUTE
 
+                    if hosted:
+                        # The hosted server takes a cube only at creation: the
+                        # queue moves to a new session, until the draft starts.
+                        moved = await hosted_draft.change_hosted_cube(
+                            select_interaction.client, draft_session.session_id,
+                            cube_choice, packs, cards)
+                        if moved != "moved":
+                            await select_interaction.followup.send(
+                                HOSTED_CUBE_REFUSALS.get(moved, HOSTED_CUBE_REFUSALS["failed"]),
+                                ephemeral=True)
+                            return
                     # Push to Draftmancer when we have a live manager.
-                    if manager:
+                    elif manager:
                         if cube_changed:
                             if not await manager.update_cube(cube_choice):
                                 await select_interaction.followup.send(
@@ -828,10 +857,18 @@ class PersistentView(discord.ui.View):
 
                     await update_draft_message(select_interaction.client, draft_session.session_id)
 
-                    if manager:
+                    if manager or hosted:
                         await select_interaction.followup.send(
                             f"The draft has been updated to cube **{cube_choice}** "
                             f"({packs} packs × {cards} cards).",
+                            ephemeral=True
+                        )
+                    elif draft_session.draftmancer_route == hosted_draft.FALLBACK_ROUTE:
+                        # Nobody from DraftBot is in a fallback room to change it.
+                        await select_interaction.followup.send(
+                            f"The draft has been updated to cube **{cube_choice}** "
+                            f"({packs} packs × {cards} cards). This draft runs on draftmancer.com "
+                            "without DraftBot, so import the new cube there yourselves.",
                             ephemeral=True
                         )
                     else:
@@ -1275,6 +1312,7 @@ class PersistentView(discord.ui.View):
 
         # Optionally update the message view to reflect the new team compositions
         await self.update_team_view(interaction)
+        await on_signups_changed(self.draft_session_id)
 
     async def cancel_draft_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         # Get the guild config for the interaction's guild
@@ -1516,15 +1554,23 @@ class PersistentView(discord.ui.View):
         return channel.id
 
     @classmethod
-    async def create_rooms_pairings(cls, bot, guild, session_id, interaction=None, session_type=None):
-        """Class method version of creating rooms and posting pairings"""
+    async def create_rooms_pairings(cls, bot, guild, session_id, interaction=None, session_type=None,
+                                    claim=None):
+        """Class method version of creating rooms and posting pairings.
+
+        `claim` is the rooms_created_at a caller stamped to reserve the build
+        (services/draft_end.claim_rooms). A set rooms_created_at normally means
+        the rooms exist and this refuses; one equal to the caller's own claim
+        means the build is theirs to do.
+        """
         logger.info("Starting create_rooms_pairings for session_id={}, session_type={}", session_id, session_type)
         async with rooms_creation_lock(session_id):
             return await cls._create_rooms_pairings_unlocked(
-                bot, guild, session_id, interaction, session_type)
+                bot, guild, session_id, interaction, session_type, claim)
 
     @classmethod
-    async def _create_rooms_pairings_unlocked(cls, bot, guild, session_id, interaction=None, session_type=None):
+    async def _create_rooms_pairings_unlocked(cls, bot, guild, session_id, interaction=None, session_type=None,
+                                              claim=None):
         """The body of create_rooms_pairings. Call that one, never this: it is
         only safe to run one at a time per draft, and the lock is there.
         """
@@ -1548,7 +1594,7 @@ class PersistentView(discord.ui.View):
                     # starts producing anything -- and a failure after it left the
                     # draft with a chat it could not be played in, permanently,
                     # because every retry read that flag and stopped.
-                    if session.rooms_created_at:
+                    if rooms_taken(session.rooms_created_at, bool(session.match_results), claim):
                         logger.info("Rooms already exist for session_id={}, channel={}", session_id, session.draft_chat_channel)
                         if interaction:
                             await interaction.followup.send(
@@ -1793,6 +1839,7 @@ class UserRemovalSelect(Select):
                 action="leave",
                 guild_id=str(interaction.guild_id)
             )
+            await on_signups_changed(session.session_id)
             # After removing a user, update the original message with the new sign-up list
             if session.session_type != "premade":
                 await update_draft_message(bot, session_id=session.session_id)
@@ -2712,6 +2759,8 @@ class CancelConfirmationView(discord.ui.View):
             await best_effort("announce", channel.send(
                 f"User **{self.user_display_name}** has cancelled the draft `{session.friendly_id}`."))
         await best_effort("stop the manager", DraftSetupManager.cancel_for_session(self.draft_session_id))
+        await best_effort("close the hosted session", hosted_draft.stop_if_hosted(
+            self.draft_session_id, session.draft_id, session.draftmancer_route))
         await best_effort("clear the ready check", ReadyCheckSession.cleanup(self.draft_session_id, channel))
         await best_effort("delete the sign-up", _delete_message(channel, session.message_id))
 
@@ -3079,6 +3128,7 @@ class StakeOptionsSelect(discord.ui.Select):
 
         # Update the draft message to reflect the new list of sign-ups
         await update_draft_message(interaction.client, self.draft_session_id)
+        await on_signups_changed(self.draft_session_id)
 
 
 class StakeOptionsView(discord.ui.View):
@@ -3257,6 +3307,7 @@ class StakeModal(discord.ui.Modal):
 
             # Update the draft message to reflect the new list of sign-ups
             await update_draft_message(interaction.client, self.draft_session_id)
+            await on_signups_changed(self.draft_session_id)
 
         except _EntryAborted:
             # A refused entry, not a fault: the transaction rolled back, so
@@ -3622,3 +3673,4 @@ class CombinedStakeSelect(discord.ui.Select):
         
         # Update the draft message to reflect the new list of sign-ups
         await update_draft_message(interaction.client, self.draft_session_id)
+        await on_signups_changed(self.draft_session_id)

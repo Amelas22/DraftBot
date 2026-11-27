@@ -1018,11 +1018,16 @@ async def release_decided_draft_log(draft_session_id):
     now = datetime.now()
     if draft_session.unlock_at <= now:
         return
+    from services import hosted_draft
     from services.draft_setup_manager import DraftSetupManager  # imports utils back
+    hosted = draft_session.draftmancer_route == hosted_draft.ROUTE
     if draft_session.tournament_match_id is not None:
-        if DraftSetupManager.is_drafting(draft_session_id):
+        if not hosted and DraftSetupManager.is_drafting(draft_session_id):
             return                           # a redraft; see the docstring
         if not await a_match_was_played(draft_session_id):
+            return
+        # A hosted draft has no manager to say it is a redraft: its server does.
+        if hosted and not await hosted_draft.hosted_draft_is_over(draft_session.draft_id):
             return
         why = "is a tournament match with a result in"
     else:
@@ -1041,9 +1046,10 @@ async def release_decided_draft_log(draft_session_id):
     logger.info(f"Draft {draft_session_id} {why}; its log publishes on the next reconciler tick")
     # Unlock Draftmancer too, and now: the manager holding the socket shuts
     # itself down within seconds of unlock_at passing, before the reconciler's
-    # next tick could ask it to.
-    manager = DraftSetupManager.get_active_manager(draft_session_id)
-    if manager is not None:
+    # next tick could ask it to. A hosted draft has no manager: ask the server.
+    if hosted:
+        await hosted_draft.unlock_hosted_log(draft_session_id, draft_session.draft_id)
+    elif (manager := DraftSetupManager.get_active_manager(draft_session_id)) is not None:
         await manager.release_draftmancer_log()
 
 
@@ -1908,13 +1914,14 @@ async def abandon_never_drafted(session_ids):
     its entries is logged and stays as it is: abandon_draft_session has already
     marked it abandoned, and an admin returns what is still held.
     """
-    # Local: draft_control, draft_setup_manager and views all import this module.
-    from cogs.draft_control import abandon_draft_session
-    from services.draft_setup_manager import DraftSetupManager
+    # Local: draft_control and views both import this module.
+    from cogs.draft_control import abandon_draft_session, still_drafting
     from views import rooms_creation_lock
 
     for session_id in session_ids:
-        if DraftSetupManager.is_drafting(session_id):
+        draft_session = await get_draft_session(session_id)
+        # None (a hosted server that can't say) may be mid-draft too.
+        if draft_session is None or await still_drafting(draft_session) is not False:
             continue
         try:
             # Under the rooms lock, and re-checked on the row being written: the
@@ -1934,6 +1941,7 @@ async def cleanup_sessions_task(bot):
     while True:
         cancelled_queues = []
         never_drafted = []
+        cancelled_rooms: list[tuple[str, str | None, str | None]] = []
         # A failed pass is logged and the next runs on schedule: a loop that dies
         # here is only revived at the next gateway reconnect.
         try:
@@ -1986,6 +1994,8 @@ async def cleanup_sessions_task(bot):
                                 f"{session.session_id}; keeping it for the next pass")
                             continue
                         cancelled_queues.append(session.session_id)
+                        cancelled_rooms.append((session.session_id, session.draft_id,
+                                                session.draftmancer_route))
                         reaped_guilds.add(str(session.guild_id))
                     
                         # Cancel the queue due to inactivity
@@ -2080,6 +2090,9 @@ async def cleanup_sessions_task(bot):
 
             # After the commit: abandoning writes in its own transactions.
             await abandon_never_drafted(never_drafted)
+            # A hosted queue's session likewise, read before its row was deleted.
+            from services.hosted_draft import stop_if_hosted
+            await asyncio.gather(*(stop_if_hosted(*room) for room in cancelled_rooms))
         except Exception as e:
             logger.exception(f"cleanup_sessions_task pass failed: {e}")
         # Sleep for a certain amount of time before running again

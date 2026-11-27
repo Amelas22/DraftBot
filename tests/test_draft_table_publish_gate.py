@@ -19,7 +19,7 @@ URL = "https://magic-draft-logs.nyc3.digitaloceanspaces.com/drafttable/y.html"
 def _session_row(session_type="premade"):
     return SimpleNamespace(session_id="sid", draft_data=_draft_data(),
                            data_received=False, session_type=session_type,
-                           drafttable_url=None)
+                           drafttable_url=None, guild_id="42")
 
 
 @pytest.mark.asyncio
@@ -32,10 +32,10 @@ async def test_every_draft_publishes_a_page_and_records_the_url(session_type):
     m.session_type = session_type
     ds = _session_row(session_type=session_type)
     db_factory, _ = _mock_db_session(ds)
-    with patch("services.draft_setup_manager.db_session", db_factory), \
+    with patch("services.draft_end.db_session", db_factory), \
          patch("services.draft_table_publisher.publish",
                AsyncMock(return_value=URL)) as publish, \
-         patch.object(DraftSetupManager, "send_magicprotools_embed",
+         patch("services.draft_end.send_draft_log_embed",
                       AsyncMock(return_value=True)) as embed:
         ok = await m.publish_draft_log()
 
@@ -53,10 +53,10 @@ async def test_a_failed_page_still_sends_the_embed():
     m = _manager()
     ds = _session_row()
     db_factory, _ = _mock_db_session(ds)
-    with patch("services.draft_setup_manager.db_session", db_factory), \
+    with patch("services.draft_end.db_session", db_factory), \
          patch("services.draft_table_publisher.publish",
                AsyncMock(return_value=None)), \
-         patch.object(DraftSetupManager, "send_magicprotools_embed",
+         patch("services.draft_end.send_draft_log_embed",
                       AsyncMock(return_value=True)) as embed:
         ok = await m.publish_draft_log()
 
@@ -75,10 +75,10 @@ async def test_a_failed_send_keeps_the_page_but_not_the_publish():
     m = _manager()
     ds = _session_row()
     db_factory, _ = _mock_db_session(ds)
-    with patch("services.draft_setup_manager.db_session", db_factory), \
+    with patch("services.draft_end.db_session", db_factory), \
          patch("services.draft_table_publisher.publish",
                AsyncMock(return_value=URL)), \
-         patch.object(DraftSetupManager, "send_magicprotools_embed",
+         patch("services.draft_end.send_draft_log_embed",
                       AsyncMock(return_value=False)):
         ok = await m.publish_draft_log()
 
@@ -93,10 +93,10 @@ async def test_a_retry_reuses_the_page_it_already_published():
     ds = _session_row()
     ds.drafttable_url = URL
     db_factory, _ = _mock_db_session(ds)
-    with patch("services.draft_setup_manager.db_session", db_factory), \
+    with patch("services.draft_end.db_session", db_factory), \
          patch("services.draft_table_publisher.publish",
                AsyncMock(side_effect=AssertionError("must not rebuild"))) as publish, \
-         patch.object(DraftSetupManager, "send_magicprotools_embed",
+         patch("services.draft_end.send_draft_log_embed",
                       AsyncMock(return_value=True)) as embed:
         ok = await m.publish_draft_log()
 

@@ -89,7 +89,7 @@ async def _send_notification_dms(
         channel_name: Name of the channel
         guild_name: Name of the guild/server
         notification_type: Type of notification for logging (e.g., "ready check", "teams created")
-        message_builder: Callable that takes (display_name, channel_link) and returns the DM message string
+        message_builder: Callable that takes (display_name, channel_link, user_id=) and returns the DM message string
 
     Returns:
         tuple: (dm_sent_count, enabled_count) - number of DMs sent and number of users with DMs enabled
@@ -136,7 +136,7 @@ async def _send_notification_dms(
             logger.debug(f"Processing batch {batch_number}/{total_batches} ({len(batch)} users)")
 
             for user_id, display_name in batch:
-                dm_message = message_builder(display_name, channel_link)
+                dm_message = message_builder(display_name, channel_link, user_id=user_id)
                 if await send_dm(bot_or_client, user_id, dm_message, label=f"{notification_type} {display_name}"):
                     dm_sent_count += 1
 
@@ -469,7 +469,7 @@ async def send_ready_check_dms(bot_or_client, draft_session, guild_id, channel_i
     Returns:
         tuple: (dm_sent_count, enabled_count) - number of DMs sent and number of users with DMs enabled
     """
-    def build_message(display_name, channel_link):
+    def build_message(display_name, channel_link, user_id=None):
         return (
             f"🔔 **Ready Check Initiated**\n\n"
             f"A ready check has been started for the draft you signed up for in **{guild_name}**.\n\n"
@@ -501,8 +501,8 @@ async def send_teams_created_dms(bot_or_client, draft_session, guild_id, channel
     Returns:
         tuple: (dm_sent_count, enabled_count) - number of DMs sent and number of users with DMs enabled
     """
-    def build_message(display_name, channel_link):
-        draft_link = draft_session.get_draft_link_for_user(display_name)
+    def build_message(display_name, channel_link, user_id=None):
+        draft_link = draft_session.get_draft_link_for_user(display_name, user_id=user_id)
         return (
             f"🎲 **Teams Created - Draft Ready!**\n\n"
             f"Teams have been created for the draft in **{guild_name}**.\n\n"

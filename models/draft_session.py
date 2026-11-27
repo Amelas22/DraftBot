@@ -38,6 +38,18 @@ class DraftSession(Base):
     channel_ids = Column(JSON)
     session_type = Column(String(64))
     session_stage = Column(String(64))
+    # Which Draftmancer path the draft runs on: "hosted" (control API), "fallback"
+    # (websocket manager, chosen when the API was down at creation); NULL = legacy manager.
+    draftmancer_route = Column(String(16), nullable=True)
+    # A hosted draft's pause, as the poller and the commands must agree on it
+    # across a restart: "bot" (a seat was empty; the poller resumes it once every
+    # seat is back) or "human" (/pause; only /unpause lifts it). NULL: not paused.
+    hosted_paused_by = Column(String(16), nullable=True)
+    # The poller's "draft paused" notice, edited when the table resumes.
+    hosted_pause_notice_id = Column(String(64), nullable=True)
+    # Seat names an admin handed to a bot (/replace_seat). The hosted server keeps
+    # reporting them disconnected, so the poller counts them as present.
+    hosted_bot_seats = Column(JSON, nullable=True)
     team_a_name = Column(String(128))
     team_b_name = Column(String(128))
     are_rooms_processing = Column(Boolean, default=False)
@@ -270,18 +282,24 @@ class DraftSession(Base):
             result = await session.execute(query)
             return result.scalars().first()
 
-    def get_draft_link_for_user(self, user_name: str) -> str:
+    def get_draft_link_for_user(self, user_name: str, user_id: str | None = None) -> str:
         """
         Get a personalized draft link for a specific user.
         
         Args:
             user_name (str): The username to add to the draft link
+            user_id: The player's Discord id. On a hosted draft the link names
+                their SEAT (helpers.hosted_seats), which differs from the
+                display name when two players share one.
             
         Returns:
             str: The draft link with the username parameter added
         """
         if not self.draft_link:
             return None
+        if self.draftmancer_route == "hosted" and user_id is not None:
+            from helpers.hosted_seats import seat_names
+            user_name = seat_names(self.sign_ups or {}).get(str(user_id), user_name)
         
         # URL-encode the username to handle spaces and special characters
         encoded_username = quote(user_name)

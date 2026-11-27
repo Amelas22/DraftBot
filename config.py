@@ -1,15 +1,71 @@
 # config.py
+import copy
 import json
 import os
 from pathlib import Path
 import logging
+from typing import Literal
 
 # Your specific guild ID
 SPECIAL_GUILD_ID = "336345350535118849"
 
-# Base URL for Draftmancer service
-# Change this to switch between environments (prod, beta, dev)
-DRAFTMANCER_BASE_URL = "https://draftmancer.com"
+# The Draftmancer settings are read when ASKED, never at import: config is
+# imported before bot.py's main() loads .env, so a module-level read would freeze
+# them at their defaults (see mtgo_tradebot_client.max_cards_per_trade).
+
+
+def get_draftmancer_base_url() -> str:
+    """Public base URL for Draftmancer links, websocket and Referer headers.
+
+    DRAFTMANCER_BASE_URL switches between environments (prod, beta, dev).
+    """
+    return os.environ.get("DRAFTMANCER_BASE_URL", "https://draftmancer.com").rstrip("/")
+
+
+def public_draftmancer_url() -> str:
+    """The public draftmancer.com, where a fallback draft runs.
+
+    Never DRAFTMANCER_BASE_URL: once hosting is on, that is our own server --
+    the one a fallback exists because it could not be used.
+    """
+    return os.environ.get("PUBLIC_DRAFTMANCER_URL", "https://draftmancer.com").rstrip("/")
+
+
+def draftmancer_api_url() -> str:
+    """Control API of the self-hosted Draftmancer fork ("" when unset)."""
+    return os.environ.get("DRAFTMANCER_API_URL", "")
+
+
+def draftmancer_api_token() -> str:
+    """Bearer token for the control API, and for the fork's log pushes to us."""
+    return os.environ.get("DRAFTMANCER_API_TOKEN", "")
+
+
+def hosted_draftmancer_enabled() -> bool:
+    """Whether the self-hosted Draftmancer control API is configured.
+
+    Hosted drafts are used only when both are set; otherwise every draft keeps
+    the websocket manager.
+    """
+    return bool(draftmancer_api_url() and draftmancer_api_token())
+
+
+DRAFTMANCER_ROUTE_SETTING = "features.draftmancer_route"
+
+
+def draftmancer_route_setting(guild_id) -> Literal["hosted", "draftmancer"]:
+    """A guild's chosen route for NEW drafts; missing or unknown means hosted."""
+    value = get_config(guild_id).get("features", {}).get("draftmancer_route")
+    return "draftmancer" if value == "draftmancer" else "hosted"
+
+
+def hosted_route_for(guild_id) -> bool:
+    """Whether a new draft in this guild opens on the self-hosted Draftmancer.
+
+    Hosting must be configured at all, and the guild must not have chosen
+    draftmancer.com. Running drafts keep the route stored on their row.
+    """
+    return hosted_draftmancer_enabled() and draftmancer_route_setting(guild_id) != "draftmancer"
 
 # Bots granted read+send in every draft channel (incl. private team
 # channels). Matched against bot-managed integration roles only — the role a
@@ -260,11 +316,13 @@ class Config:
     def get_guild_config(self, guild_id):
         guild_id = str(guild_id)
         if guild_id not in self.configs:
-            # Use special config for your guild, default for others
+            # Use special config for your guild, default for others. A deep
+            # copy: a guild's settings must not reach into the template's
+            # nested dicts, and so into every other guild built from it.
             if guild_id == SPECIAL_GUILD_ID:
-                self.configs[guild_id] = self.special_guild_config.copy()
+                self.configs[guild_id] = copy.deepcopy(self.special_guild_config)
             else:
-                self.configs[guild_id] = self.default_config.copy()
+                self.configs[guild_id] = copy.deepcopy(self.default_config)
             self.save_config(guild_id)
         return self.configs[guild_id]
     
@@ -368,17 +426,17 @@ def scheduler_trusted_proxies() -> frozenset[str]:
     return frozenset(part.strip() for part in raw.split(",") if part.strip())
 
 
-def get_draftmancer_base_url():
-    """Return the draftmancer base URL"""
-    return DRAFTMANCER_BASE_URL
-
 def get_draftmancer_session_url(draft_id, guild_id=None):
     """Get full session URL for a draft ID"""
-    return f"{DRAFTMANCER_BASE_URL}/?session=DB{draft_id}"
+    return f"{get_draftmancer_base_url()}/?session=DB{draft_id}"
+
+def public_draftmancer_session_url(draft_id: str) -> str:
+    """A fallback draft's session on the public draftmancer.com."""
+    return f"{public_draftmancer_url()}/?session=DB{draft_id}"
 
 def get_draftmancer_draft_url(draft_id, guild_id=None):
     """Get full draft URL for a draft ID"""
-    return f"{DRAFTMANCER_BASE_URL}/draft/DB{draft_id}"
+    return f"{get_draftmancer_base_url()}/draft/DB{draft_id}"
 
 def get_draftmancer_bot_user_id(draft_id):
     """The bot's Draftmancer identity for ONE draft.
@@ -395,11 +453,14 @@ def get_draftmancer_bot_user_id(draft_id):
 def get_draftmancer_websocket_url(draft_id, guild_id=None, user_id=None, user_name="DraftBot"):
     """Get full websocket URL for a draft ID.
 
+    Only DraftSetupManager connects, and only to a legacy (route NULL) draft,
+    which runs on the public draftmancer.com -- never DRAFTMANCER_BASE_URL.
+
     `user_name` stays "DraftBot": every bot-vs-player filter in DraftSetupManager
     compares userName, never userID.
     """
     # Convert https:// to wss://
-    websocket_url = DRAFTMANCER_BASE_URL.replace('https://', 'wss://')
+    websocket_url = public_draftmancer_url().replace('https://', 'wss://')
     user_id = user_id or get_draftmancer_bot_user_id(draft_id)
     return f"{websocket_url}?userID={user_id}&sessionID=DB{draft_id}&userName={user_name}"
 

@@ -11,6 +11,10 @@ preset = "strict"
 project-includes = [
     "helpers/background_tasks.py",
     "services/entry_notices.py",
+    "services/hosted_draftmancer.py",
+    "services/draft_messages.py",
+    "services/hosted_draft.py",
+    "helpers/hosted_seats.py",
     "services/availability.py",
     "services/round_weeks.py",
     "services/round_confirmation.py",
@@ -125,6 +129,7 @@ project-includes = [
     "services/match_booking.py",
     "team_draft_wizard.py",
     "cogs/team_draft_cog.py",
+    "services/draft_end.py",
 ]
 
 # SQLAlchemy 1.x-style Column() declarations type column attributes as Column[T]

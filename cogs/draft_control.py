@@ -5,13 +5,15 @@ from loguru import logger
 from models.draft_session import DraftSession
 from helpers.stale_drafts import is_finished_draft
 from models.match import MatchResult
-from helpers.permissions import is_bot_manager
+import config
+from helpers.permissions import has_bot_manager_role, is_bot_manager
 from services.draft_pool_service import ENTRIES_STILL_HELD, PoolNotSettled, pool_balance, release_draft_pool
 from helpers.stale_drafts import is_finished_draft
 from discord.ui import View, Button
 from datetime import datetime, timedelta
 from sqlalchemy import select, and_, desc, update
 from database.db_session import db_session
+from services import hosted_draft
 from services.draft_setup_manager import (
     DraftSetupManager,
     PAUSED_DRAFT_OPTIONS,
@@ -33,6 +35,79 @@ ABANDON_CLEANUP_HOURS = 2
 SCRAP_KEEPS_ENTRIES = ("\n💰 Entries stay in the prize pool for the restarted draft. "
                        "If you're not restarting it, press **Cancel Draft** on the "
                        "draft post to return them.")
+
+
+async def _scrap_entries_note(draft_session: DraftSession) -> str:
+    """SCRAP_KEEPS_ENTRIES for a scrapped draft with entries in its pool, else ""."""
+    try:
+        staked = await pool_balance(str(draft_session.guild_id), draft_session.session_id) > 0
+    except Exception:
+        logger.opt(exception=True).warning(
+            f"scrapped {draft_session.session_id}: could not read its pool")
+        return ""
+    return SCRAP_KEEPS_ENTRIES if staked else ""
+
+
+# The pause between a passed vote (or ready check) and acting on it.
+VOTE_ACTION_DELAY_SECONDS = 5
+
+# PAUSED_DRAFT_OPTIONS for a draft on DraftBot's own Draftmancer, where nobody
+# holds the session to take over, and an admin can give an empty seat to a bot.
+HOSTED_PAUSED_DRAFT_OPTIONS = (
+    "\u2022 Use `/unpause` to resume once everyone is ready.\n"
+    "\u2022 Use `/scrap` to start a vote to cancel the draft.\n"
+    "\u2022 If a player can't come back, a substitute can open their link — or an "
+    "admin can give the seat to a bot with `/replace_seat`."
+)
+
+UNREACHABLE = ("⚠️ Couldn't reach the drafting server. Nothing has changed — "
+               "please try again in a moment.")
+
+
+# /draft_route's choices, as an admin reads them.
+ROUTE_LABELS = {
+    "hosted": "DraftBot's own Draftmancer server (hosted)",
+    "draftmancer": "draftmancer.com, run by DraftBot",
+}
+
+# reopen_draft's "changed": another reopen moved the draft first.
+ALREADY_MOVED = "Already moved — see the draft channel for the current links."
+
+
+FALLBACK_NO_BOT = ("This draft runs on draftmancer.com without DraftBot in the room, so "
+                   "DraftBot can't do that there — run it from Draftmancer itself.")
+
+
+def _is_hosted(draft_session):
+    return getattr(draft_session, "draftmancer_route", None) == hosted_draft.ROUTE
+
+
+def _is_fallback(draft_session):
+    return getattr(draft_session, "draftmancer_route", None) == hosted_draft.FALLBACK_ROUTE
+
+
+def _is_participant(ctx, draft_session):
+    return str(ctx.author.id) in (draft_session.sign_ups or {})
+
+
+FALLBACK_LOG_NOT_IN = (
+    "This draft runs on draftmancer.com, so DraftBot can't see whether it is still "
+    "being drafted. `/abandon` works here once the draft's log reaches DraftBot — "
+    "after the draft ends and the room shares its log.")
+
+
+async def still_drafting(draft_session) -> bool | None:
+    """Whether players may still be picking; None when the hosted server can't say.
+
+    A legacy draft's manager knows. A hosted draft has none, so its server is
+    asked. A fallback draft runs on draftmancer.com, which can't be asked at all:
+    only its captured log proves drafting ended."""
+    if _is_hosted(draft_session):
+        stage = await hosted_draft.hosted_stage(draft_session.draft_id)
+        return None if stage is None else stage == "drafting"
+    if _is_fallback(draft_session):
+        return draft_session.logs_captured_at is None
+    return DraftSetupManager.is_drafting(draft_session.session_id)
 
 
 async def run_participant_vote(ctx, *, channel, view, registry, key, announcement,
@@ -147,6 +222,7 @@ async def abandon_draft_session(session_id, session_factory=None, *, only_if=Non
             # Read inside the transaction; the pool release below runs after it
             # closes, and the row object is not safe to touch by then.
             guild_id = str(current.guild_id)
+            draft_id, route = current.draft_id, current.draftmancer_route
 
             await db.execute(
                 update(MatchResult)
@@ -161,6 +237,9 @@ async def abandon_draft_session(session_id, session_factory=None, *, only_if=Non
                     deletion_time=datetime.now() + timedelta(hours=ABANDON_CLEANUP_HOURS),
                 )
             )
+    # A hosted queue abandoned before it started would otherwise hold its
+    # session open on the server; one that has ended answers 409, which is fine.
+    await hosted_draft.stop_if_hosted(session_id, draft_id, route)
     # An abandoned draft pays nobody, so everything in the pool goes back.
     await release_draft_pool(guild_id, session_id, "abandoned")
     return True
@@ -388,6 +467,77 @@ class AbandonConfirmView(View):
         await interaction.response.edit_message(content="Abandon cancelled.", view=self)
 
 
+class FailoverConfirmView(View):
+    """Ephemeral confirmation before /failover moves a draft whose server can't be reached."""
+
+    def __init__(self, session_id, draft_id, requested_by, bot, timeout=60.0):
+        super().__init__(timeout=timeout)
+        self.session_id = session_id
+        # The room the prompt was shown for: a click after the draft has left it changes nothing.
+        self.draft_id = draft_id
+        self.requested_by = requested_by
+        self.bot = bot
+
+    @discord.ui.button(label="Yes, move the draft", style=discord.ButtonStyle.danger)
+    async def confirm(self, button: discord.ui.Button, interaction: discord.Interaction):
+        # Answer within Discord's 3 s window before the slow reopen; the disabled
+        # buttons also stop a second click from reaching reopen_draft.
+        _disable_all(self)
+        self.stop()
+        await interaction.response.edit_message(content="Moving the draft…", view=self)
+        text = await _failover_reply(self.bot, self.session_id, self.draft_id, self.requested_by)
+        await interaction.edit_original_response(content=text, view=self)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, button: discord.ui.Button, interaction: discord.Interaction):
+        _disable_all(self)
+        self.stop()
+        await interaction.response.edit_message(content="Failover cancelled.", view=self)
+
+    async def on_timeout(self):
+        """An unanswered prompt stops looking clickable; its webhook token may have expired."""
+        _disable_all(self)
+        if self.message is None:
+            return
+        try:
+            await self.message.edit(
+                content="This prompt has expired. Run `/failover` again if the draft still "
+                        "needs to move.", view=self)
+        except Exception as e:
+            logger.info(f"Could not close the expired /failover prompt for {self.session_id}: {e}")
+
+
+FAILOVER_REPLIES = {
+    "moved": "The draft has moved to a DraftBot-run room on draftmancer.com. "
+             "Everyone's new link is in the draft channel.",
+    "moved-unstopped": "The draft has moved to a DraftBot-run room on draftmancer.com; the "
+                       "new links are in the draft channel. The old room couldn't be closed "
+                       "and may come back when the server does.",
+    "ended": "This draft has already finished, so there's nothing to move.",
+    "no-teams": "Teams haven't been formed yet, so there's nothing to move.",
+    "bot-seats": "A seat in this draft is played by a bot, so it can't be moved "
+                 "automatically. Ask an admin.",
+    "unreachable": "⚠️ Couldn't open a room on draftmancer.com right now. Try again in a moment.",
+    "cube-import": "The cube couldn't be imported for a new room. Try again shortly.",
+    "refused": "Couldn't move the draft right now. Try again in a moment.",
+    "changed": ALREADY_MOVED,
+    "gone": "This draft no longer exists.",
+}
+
+
+async def _failover_reply(bot, session_id, draft_id, requested_by) -> str:
+    """Reopen the draft on a DraftBot-run room and say, plainly, what happened."""
+    try:
+        result = await hosted_draft.reopen_draft(
+            bot, session_id, "manager", expected_draft_id=draft_id, reason="failover",
+            requested_by=requested_by)
+    except Exception:
+        logger.exception(f"/failover could not reopen draft {session_id}")
+        return ("⚠️ Something went wrong moving the draft. Check the draft channel for "
+                "new links, then try `/failover` again.")
+    return FAILOVER_REPLIES.get(result, FAILOVER_REPLIES["refused"])
+
+
 class LogReleaseVoteView(BaseVoteView):
     """Majority vote to release the draft logs early."""
     embed_title = "Draft Logs Release Vote"
@@ -549,10 +699,14 @@ class DraftControlCog(commands.Cog):
         self.logger = logger
         logger.info("Draft control commands registered")
 
-    async def _get_manager_for_channel(self, ctx):
+    async def _get_manager_for_channel(self, ctx, hosted_ok=False):
         """
         Helper to get the draft manager for draft control commands
         This checks for any draft with a non-NULL session_stage
+
+        A draft on the hosted Draftmancer has no manager. With hosted_ok it is
+        returned as (None, draft_session), for a command that calls the
+        control API instead.
         """
         channel_id = str(ctx.channel.id)
         logger.info(f"Looking for active drafts in channel {channel_id}")
@@ -577,6 +731,12 @@ class DraftControlCog(commands.Cog):
         # Take the most recent draft
         draft_session = draft_sessions[0]
         logger.info(f"Found most recent draft: {draft_session.session_id}")
+
+        if _is_fallback(draft_session):
+            await ctx.followup.send(FALLBACK_NO_BOT, ephemeral=True)
+            return None
+        if hosted_ok and _is_hosted(draft_session):
+            return None, draft_session
         
         # Get the manager for this session
         manager = DraftSetupManager.get_active_manager(draft_session.session_id)
@@ -593,11 +753,14 @@ class DraftControlCog(commands.Cog):
         await ctx.defer(ephemeral=True)
         
         try:
-            result = await self._get_manager_for_channel(ctx)
+            result = await self._get_manager_for_channel(ctx, hosted_ok=True)
             if not result:
                 return
                 
-            manager, _ = result
+            manager, draft_session = result
+            if manager is None:
+                await self._hosted_ready(ctx, draft_session)
+                return
             
             # Check if there's already an active ready check
             if manager.ready_check_active:
@@ -641,10 +804,13 @@ class DraftControlCog(commands.Cog):
                 return
                 
             session_id = draft_session.session_id
+            if _is_fallback(draft_session):
+                await ctx.followup.send(FALLBACK_NO_BOT, ephemeral=True)
+                return
             
-            # Get the manager for this session
-            manager = DraftSetupManager.get_active_manager(session_id)
-            if not manager:
+            # A hosted draft unlocks through the control API: no manager to ask.
+            manager = None if _is_hosted(draft_session) else DraftSetupManager.get_active_manager(session_id)
+            if not manager and not _is_hosted(draft_session):
                 logger.warning(f"No active manager found for session ID: {session_id}")
                 await ctx.followup.send("Draft manager is not active. Please wait a moment or contact an admin.", ephemeral=True)
                 return
@@ -668,8 +834,11 @@ class DraftControlCog(commands.Cog):
 
             async def _released():
                 final_message = await ctx.channel.send("✅ **Vote passed!** Releasing logs in 5 seconds...")
-                await asyncio.sleep(5)
-                success = await manager.manually_unlock_draft_logs()
+                await asyncio.sleep(VOTE_ACTION_DELAY_SECONDS)
+                if manager is None:
+                    success = await hosted_draft.release_hosted_logs(self.bot, session_id)
+                else:
+                    success = await manager.manually_unlock_draft_logs()
                 if success:
                     await final_message.edit(content="🔓 **Logs have been made public!**")
                 else:
@@ -706,11 +875,14 @@ class DraftControlCog(commands.Cog):
     async def _do_scrap(self, ctx):
         """The command body, minus the defer, so it can be driven from a test."""
         try:
-            result = await self._get_manager_for_channel(ctx)
+            result = await self._get_manager_for_channel(ctx, hosted_ok=True)
             if not result:
                 return
                 
             manager, draft_session = result
+            if manager is None:
+                await self._hosted_scrap(ctx, draft_session)
+                return
             
             # draft_finished rather than session_stage: _get_manager_for_channel
             # already filters out NULL stages, so a not-yet-started draft reaching
@@ -789,18 +961,11 @@ class DraftControlCog(commands.Cog):
                 # come back only when the draft really ends early: Cancel Draft,
                 # /abandon, the queue expiring, or cleanup abandoning a draft
                 # that never got past drafting.
-                staked = False
-                try:
-                    staked = await pool_balance(str(draft_session.guild_id),
-                                                draft_session.session_id) > 0
-                except Exception:
-                    logger.opt(exception=True).warning(
-                        f"scrapped {draft_session.session_id}: could not read its pool")
                 await final_message.edit(content=
                                         "🛑 **Draft canceled!** \n" \
                                         "Use `/ready` to begin a ready check for a new draft.\n" \
                                         "Use `/mutiny` to remove the bot and take control of the session."
-                                        + (SCRAP_KEEPS_ENTRIES if staked else "")
+                                        + await _scrap_entries_note(draft_session)
                 )
 
             async def _not_cancelled():
@@ -862,8 +1027,16 @@ class DraftControlCog(commands.Cog):
                 return
 
             # Still being drafted: that is /scrap's job. Voiding the record now
-            # would strand a session people are mid-pick in.
-            if DraftSetupManager.is_drafting(draft_session.session_id):
+            # would strand a session people are mid-pick in. A hosted server it
+            # cannot reach may be mid-draft, so that refuses too.
+            drafting = await still_drafting(draft_session)
+            if drafting is None:
+                await ctx.followup.send(UNREACHABLE, ephemeral=True)
+                return
+            if drafting and _is_fallback(draft_session):
+                await ctx.followup.send(FALLBACK_LOG_NOT_IN, ephemeral=True)
+                return
+            if drafting:
                 await ctx.followup.send(
                     "This draft is still running in Draftmancer. Use `/pause` then "
                     "`/scrap` **in the channel the draft was posted in**; `/abandon` "
@@ -959,17 +1132,92 @@ class DraftControlCog(commands.Cog):
             logger.exception(f"Error in abandon command: {e}")
             await ctx.followup.send(f"An error occurred: {str(e)}", ephemeral=True)
 
-    @discord.slash_command(name='mutiny', description='Take control of the Draftmancer session from the bot')
+    @discord.slash_command(
+        name='draft_route', contexts={discord.InteractionContextType.guild},
+        description="Admin: open this server's new drafts on our Draftmancer or on draftmancer.com")
+    async def draft_route_command(
+        self, ctx,
+        route: discord.Option(str, "Where new drafts open", choices=[  # type: ignore[valid-type]
+            discord.OptionChoice(name=label, value=value) for value, label in ROUTE_LABELS.items()],
+            required=False)):
+        await ctx.defer(ephemeral=True)
+        await self._do_draft_route(ctx, route)
+
+    async def _do_draft_route(self, ctx, route: str | None):
+        """Show or set this guild's route for new drafts."""
+        if not await is_bot_manager(ctx):
+            await ctx.followup.send("Only bot managers can change the draft route.", ephemeral=True)
+            return
+        guild_id = ctx.guild.id
+        if route is not None:
+            config.update_setting(guild_id, config.DRAFTMANCER_ROUTE_SETTING, route)
+        current = config.draftmancer_route_setting(guild_id)
+        lines = [f"New drafts here open on: {ROUTE_LABELS[current]}."]
+        if route is not None:
+            lines.append("Drafts already running keep their route.")
+        if not config.hosted_draftmancer_enabled():
+            lines.append("This has no effect until hosting is configured; "
+                         "every draft runs on draftmancer.com meanwhile.")
+        await ctx.followup.send(" ".join(lines), ephemeral=True)
+
+    @discord.slash_command(name='failover', description='Move this draft to a DraftBot-run room on draftmancer.com')
+    async def failover_command(self, ctx):
+        """Move a hosted draft to a DraftBot-run room when the hosted server is failing.
+
+        Unlike /mutiny, DraftBot comes along: teams, entries and results carry over."""
+        await ctx.defer(ephemeral=True)
+
+        try:
+            result = await self._get_manager_for_channel(ctx, hosted_ok=True)
+            if not result:
+                return
+            manager, draft_session = result
+            if manager is not None or not _is_hosted(draft_session):
+                await ctx.followup.send(
+                    "This draft is already on draftmancer.com, so there's nothing to fail over.",
+                    ephemeral=True)
+                return
+            if not _is_participant(ctx, draft_session) and not await is_bot_manager(ctx):
+                await ctx.followup.send(
+                    "Only the draft's players or an admin can move it to draftmancer.com.",
+                    ephemeral=True)
+                return
+            stage = await hosted_draft.hosted_stage(draft_session.draft_id)
+            if stage is None:
+                view = FailoverConfirmView(draft_session.session_id, draft_session.draft_id,
+                                           ctx.author.mention, self.bot)
+                await ctx.followup.send(
+                    "⚠️ The drafting server can't be reached, so DraftBot can't tell how far "
+                    "the draft got. Move it to a DraftBot-run room on draftmancer.com? "
+                    "Only if your draft hasn't finished — a finished draft's result would be lost.",
+                    view=view, ephemeral=True)
+                return
+            await ctx.followup.send(
+                await _failover_reply(self.bot, draft_session.session_id,
+                                      draft_session.draft_id, ctx.author.mention),
+                ephemeral=True)
+        except Exception as e:
+            logger.exception(f"Error in failover command: {e}")
+            await ctx.followup.send("⚠️ Something went wrong. Please try again.", ephemeral=True)
+
+    @discord.slash_command(name='mutiny', description='Run the draft yourselves on draftmancer.com, without DraftBot')
     async def mutiny_command(self, ctx):
-        """Transfer draft control to a user and disconnect the bot"""
+        """Hand the draft to its players.
+
+        A manager draft: the bot gives a player ownership of the Draftmancer
+        session and disconnects. A hosted draft: its session is closed and the
+        draft moves to a plain draftmancer.com session (the fallback)."""
         await ctx.defer(ephemeral=True)
         
         try:
-            result = await self._get_manager_for_channel(ctx)
+            result = await self._get_manager_for_channel(ctx, hosted_ok=True)
             if not result:
                 return
                 
             manager, draft_session = result
+            if manager is None:
+                await self._hosted_mutiny(ctx, draft_session)
+                return
             
             if manager.drafting:
                 self.logger.info(f"Mutiny during active draft for session {manager.session_id}. Will advance to pairings.")
@@ -1009,63 +1257,102 @@ class DraftControlCog(commands.Cog):
                 
             await ctx.channel.send(f"✅ Ownership transferred to {requester_name}. Bot disconnected.")
 
-            # No condition here. _get_manager_for_channel only returns sessions
-            # with a non-NULL session_stage, so every draft reaching this line
-            # has left the queue and its players already hold room links; asking
-            # a predicate that is constant True would only hide that. Whether
-            # there is anything left to create -- rooms already made, draft
-            # already over -- is create_rooms_and_pairings_with_fallback's
-            # question, answered once for both of its callers.
-            success = await create_rooms_and_pairings_with_fallback(
-                ctx.bot, ctx.guild, ctx.channel, session_id, logger=self.logger
-            )
-            if success:
-                return  # create_rooms_pairings handles the rest (deletes original message, etc)
-            # If failed, fall through to update the view so the button is enabled
-
-            # Room creation genuinely failed, so re-enable the button and let
-            # someone drive it by hand.
-            try:
-                # Get the original draft message
-                from session import AsyncSessionLocal
-                async with AsyncSessionLocal() as db_session:
-                    stmt = select(DraftSession).where(DraftSession.session_id == draft_session.session_id)
-                    draft_session_db = await db_session.scalar(stmt)
-                    
-                    if draft_session_db and draft_session_db.draft_channel_id and draft_session_db.message_id:
-                        # Get the channel and message
-                        channel = ctx.bot.get_channel(int(draft_session_db.draft_channel_id))
-                        if channel:
-                            try:
-                                message = await channel.fetch_message(int(draft_session_db.message_id))
-                                
-                                # Find the view for this message
-                                # Create a new view with the same settings but updated button states
-                                from views import PersistentView
-                                updated_view = PersistentView(
-                                    bot=ctx.bot,
-                                    draft_session_id=draft_session_db.session_id,
-                                    session_type=draft_session_db.session_type,
-                                    team_a_name=draft_session_db.team_a_name,
-                                    team_b_name=draft_session_db.team_b_name,
-                                    session_stage=draft_session_db.session_stage
-                                )
-                                
-                                # Apply button disabling logic - this will enable the button 
-                                # since the manager is now gone
-                                updated_view._apply_stage_button_disabling()
-                                
-                                # Update the message with the new view
-                                await message.edit(view=updated_view)
-                                logger.info(f"Updated view after mutiny for session {draft_session_db.session_id}")
-                            except Exception as view_error:
-                                logger.error(f"Error updating view after mutiny: {view_error}")
-            except Exception as update_error:
-                logger.error(f"Error finding message to update view: {update_error}")
+            await self._rooms_after_mutiny(ctx, session_id)
                 
         except Exception as e:
             logger.exception(f"Error in mutiny command: {e}")
             await ctx.followup.send(f"An error occurred: {str(e)}", ephemeral=True)
+
+    async def _hosted_mutiny(self, ctx, draft_session):
+        """Close the hosted session, then move the draft to draftmancer.com.
+
+        For the draft's players or an admin: it moves everyone to a new room.
+        A server that can't be reached doesn't stop it -- an outage is when
+        this is needed -- but everyone is told the old room may come back."""
+        if not _is_participant(ctx, draft_session) and not await is_bot_manager(ctx):
+            await ctx.followup.send(
+                "Only the draft's players or an admin can move it to draftmancer.com.",
+                ephemeral=True)
+            return
+        outcome, detail = await hosted_draft.mutiny_hosted_draft(
+            draft_session.session_id, channel=ctx.channel, requested_by=ctx.author.mention)
+        if outcome == "ended":
+            await ctx.followup.send(
+                "This draft has already finished on the drafting server, so there's nothing "
+                "to move — its rooms and log follow on their own.", ephemeral=True)
+            return
+        if outcome == "refused":
+            await ctx.followup.send(f"Couldn't move the draft: {detail}", ephemeral=True)
+            return
+        if outcome == "gone":
+            await ctx.followup.send("This draft is no longer on the drafting server.", ephemeral=True)
+            return
+        if outcome == "moved-unstopped":
+            await ctx.followup.send(
+                "⚠️ The drafting server couldn't be reached to close the draft's room there, "
+                "so it may come back when the server does. The draft has moved to "
+                "draftmancer.com anyway; the channel has everyone's new link.", ephemeral=True)
+        else:
+            await ctx.followup.send(
+                "The draft has moved to draftmancer.com; the channel has everyone's new link.",
+                ephemeral=True)
+        await self._rooms_after_mutiny(ctx, draft_session.session_id)
+
+    async def _rooms_after_mutiny(self, ctx, session_id):
+        """Rooms and pairings now, as after any /mutiny; on failure, the board's button."""
+        # No condition here. _get_manager_for_channel only returns sessions
+        # with a non-NULL session_stage, so every draft reaching this line
+        # has left the queue and its players already hold room links; asking
+        # a predicate that is constant True would only hide that. Whether
+        # there is anything left to create -- rooms already made, draft
+        # already over -- is create_rooms_and_pairings_with_fallback's
+        # question, answered once for both of its callers.
+        success = await create_rooms_and_pairings_with_fallback(
+            ctx.bot, ctx.guild, ctx.channel, session_id, logger=self.logger
+        )
+        if success:
+            return  # create_rooms_pairings handles the rest (deletes original message, etc)
+        # If failed, fall through to update the view so the button is enabled
+
+        # Room creation genuinely failed, so re-enable the button and let
+        # someone drive it by hand.
+        try:
+            # Get the original draft message
+            from session import AsyncSessionLocal
+            async with AsyncSessionLocal() as db_session:
+                stmt = select(DraftSession).where(DraftSession.session_id == session_id)
+                draft_session_db = await db_session.scalar(stmt)
+                
+                if draft_session_db and draft_session_db.draft_channel_id and draft_session_db.message_id:
+                    # Get the channel and message
+                    channel = ctx.bot.get_channel(int(draft_session_db.draft_channel_id))
+                    if channel:
+                        try:
+                            message = await channel.fetch_message(int(draft_session_db.message_id))
+                            
+                            # Find the view for this message
+                            # Create a new view with the same settings but updated button states
+                            from views import PersistentView
+                            updated_view = PersistentView(
+                                bot=ctx.bot,
+                                draft_session_id=draft_session_db.session_id,
+                                session_type=draft_session_db.session_type,
+                                team_a_name=draft_session_db.team_a_name,
+                                team_b_name=draft_session_db.team_b_name,
+                                session_stage=draft_session_db.session_stage
+                            )
+                            
+                            # Apply button disabling logic - this will enable the button 
+                            # since the manager is now gone
+                            updated_view._apply_stage_button_disabling()
+                            
+                            # Update the message with the new view
+                            await message.edit(view=updated_view)
+                            logger.info(f"Updated view after mutiny for session {draft_session_db.session_id}")
+                        except Exception as view_error:
+                            logger.error(f"Error updating view after mutiny: {view_error}")
+        except Exception as update_error:
+            logger.error(f"Error finding message to update view: {update_error}")
 
     @discord.slash_command(name='pause', description='Pause the current draft (only for draft participants)')
     async def pause_command(self, ctx):
@@ -1073,11 +1360,14 @@ class DraftControlCog(commands.Cog):
         await ctx.defer(ephemeral=True)
         
         try:
-            result = await self._get_manager_for_channel(ctx)
+            result = await self._get_manager_for_channel(ctx, hosted_ok=True)
             if not result:
                 return
                 
             manager, draft_session = result
+            if manager is None:
+                await self._hosted_pause(ctx, draft_session)
+                return
             
             # Check if draft has started
             if not manager.drafting:
@@ -1129,11 +1419,14 @@ class DraftControlCog(commands.Cog):
         await ctx.defer(ephemeral=True)
         
         try:
-            result = await self._get_manager_for_channel(ctx)
+            result = await self._get_manager_for_channel(ctx, hosted_ok=True)
             if not result:
                 return
                 
             manager, draft_session = result
+            if manager is None:
+                await self._hosted_unpause(ctx, draft_session)
+                return
             
             # Check if draft has started
             if not manager.drafting:
@@ -1145,95 +1438,320 @@ class DraftControlCog(commands.Cog):
                 await ctx.followup.send("The draft is not currently paused.", ephemeral=True)
                 return
                 
-            # Check if user is in sign_ups
-            user_id = str(ctx.author.id)
-            sign_ups = draft_session.sign_ups or {}
-            
-            is_participant = False
-            for discord_id, display_name in sign_ups.items():
-                if discord_id == user_id:
-                    is_participant = True
-                    break
-                    
-            if not is_participant:
+            if not _is_participant(ctx, draft_session):
                 await ctx.followup.send("Only draft participants can unpause the draft.", ephemeral=True)
                 return
-            
-            # Get all participants
-            participants = list(sign_ups.keys())
-            if not participants:
-                await ctx.followup.send("No draft participants found.", ephemeral=True)
-                return
-            
-            # Create ready check view
-            view = DraftMancerReadyCheckView(draft_session.session_id, participants)
-            
-            announcement = (
-                f"⚠️ **Draft Unpause Ready Check** initiated by {ctx.author.mention}\n\n"
-                f"{_ping_text(ctx.guild, sign_ups)}\n\n"
-                f"Please click the Ready button below when you're ready to continue."
-            )
 
-            # Test and claim with nothing awaited between them, the same way
-            # run_participant_vote does. Checking earlier -- before generating the
-            # embed and posting the message -- let two invocations both pass the
-            # check and both post a ready check, with the second overwriting the
-            # first and both able to emit resumeDraft.
-            if draft_session.session_id in ACTIVE_UNPAUSE_CHECKS:
-                await ctx.followup.send(
-                    "There's already an active unpause ready check.", ephemeral=True)
-                return
-            ACTIVE_UNPAUSE_CHECKS[draft_session.session_id] = view
-            try:
-                # Everything that can raise from here is covered by the finally
-                # below -- including the ack, whose failure used to leave the entry
-                # behind. A Ready click cancels the timer, so on_timeout never runs
-                # to heal it and the draft never resumes.
-                embed = await view.generate_status_embed(ctx.guild)
-                view.message = await ctx.channel.send(announcement, embed=embed, view=view)
-                view.timer_task = asyncio.create_task(view.start_timer())
-                await ctx.followup.send("Unpause ready check initiated.", ephemeral=True)
-                await view.complete.wait()
-                
-                # Check if everyone is ready
-                if view.is_everyone_ready():
-                    # Format pings again for the resume notification
-                    ping_text = _ping_text(ctx.guild, sign_ups)
-                    
-                    # Everyone is ready, resume the draft with pings
-                    resume_message = await ctx.channel.send(
-                        f"{ping_text}\n\n🎮 **Everyone is ready!** Draft resuming in 5 seconds..."
-                    )
-                    await asyncio.sleep(5)
-                    
-                    # Same contract as /pause: resumeDraft is owner-only.
-                    if not await manager.emit_as_owner(
-                            'resumeDraft', confirmed=lambda: not manager.draftPaused):
-                        await resume_message.edit(
-                            content="⚠️ Couldn't resume — the bot is no longer "
-                                    "running this Draftmancer session. Resume it "
-                                    "there directly.")
-                        return
+            async def resume():
+                # Same contract as /pause: resumeDraft is owner-only.
+                if not await manager.emit_as_owner(
+                        'resumeDraft', confirmed=lambda: not manager.draftPaused):
+                    return ("⚠️ Couldn't resume — the bot is no longer "
+                            "running this Draftmancer session. Resume it "
+                            "there directly.")
+                manager.draftPaused = False
+                return None
 
-                    manager.draftPaused = False
-
-                    await resume_message.edit(content="▶️ **Draft resumed!** Good luck and have fun!")
-                else:
-                    # Not everyone was ready, send timeout message
-                    await ctx.channel.send("⌛ The unpause ready check has expired. Please try again when everyone is ready.")
-                
-            except Exception as e:
-                logger.exception(f"Error while waiting for unpause ready check completion: {e}")
-                await ctx.channel.send("⚠️ An error occurred during the unpause ready check. Please try again.")
-            finally:
-                # Not run_participant_vote: this is a ready check, decided by
-                # is_everyone_ready() rather than a majority. Same leak though --
-                # deleting in two places left anything raising in between to skip
-                # both -- so it gets the same `finally`, in its own idiom.
-                ACTIVE_UNPAUSE_CHECKS.pop(draft_session.session_id, None)
+            await self._unpause_ready_check(ctx, draft_session, resume)
                     
         except Exception as e:
             logger.exception(f"Error in unpause command: {e}")
+            await ctx.followup.send(f"An error occurred: {str(e)}", ephemeral=True)
+
+    async def _unpause_ready_check(self, ctx, draft_session, resume):
+        """The Discord ready check /unpause runs, then `resume`.
+
+        `resume` returns None once the draft is running again, or the text that
+        replaces the "resuming" message when it could not be resumed.
+        """
+        sign_ups = draft_session.sign_ups or {}
+        # Get all participants
+        participants = list(sign_ups.keys())
+        if not participants:
+            await ctx.followup.send("No draft participants found.", ephemeral=True)
+            return
+        
+        # Create ready check view
+        view = DraftMancerReadyCheckView(draft_session.session_id, participants)
+        
+        announcement = (
+            f"⚠️ **Draft Unpause Ready Check** initiated by {ctx.author.mention}\n\n"
+            f"{_ping_text(ctx.guild, sign_ups)}\n\n"
+            f"Please click the Ready button below when you're ready to continue."
+        )
+
+        # Test and claim with nothing awaited between them, the same way
+        # run_participant_vote does. Checking earlier -- before generating the
+        # embed and posting the message -- let two invocations both pass the
+        # check and both post a ready check, with the second overwriting the
+        # first and both able to emit resumeDraft.
+        if draft_session.session_id in ACTIVE_UNPAUSE_CHECKS:
+            await ctx.followup.send(
+                "There's already an active unpause ready check.", ephemeral=True)
+            return
+        ACTIVE_UNPAUSE_CHECKS[draft_session.session_id] = view
+        try:
+            # Everything that can raise from here is covered by the finally
+            # below -- including the ack, whose failure used to leave the entry
+            # behind. A Ready click cancels the timer, so on_timeout never runs
+            # to heal it and the draft never resumes.
+            embed = await view.generate_status_embed(ctx.guild)
+            view.message = await ctx.channel.send(announcement, embed=embed, view=view)
+            view.timer_task = asyncio.create_task(view.start_timer())
+            await ctx.followup.send("Unpause ready check initiated.", ephemeral=True)
+            await view.complete.wait()
+            
+            # Check if everyone is ready
+            if view.is_everyone_ready():
+                # Format pings again for the resume notification
+                ping_text = _ping_text(ctx.guild, sign_ups)
+                
+                # Everyone is ready, resume the draft with pings
+                resume_message = await ctx.channel.send(
+                    f"{ping_text}\n\n🎮 **Everyone is ready!** Draft resuming in 5 seconds..."
+                )
+                await asyncio.sleep(VOTE_ACTION_DELAY_SECONDS)
+
+                failed = await resume()
+                if failed:
+                    await resume_message.edit(content=failed)
+                    return
+
+                await resume_message.edit(content="▶️ **Draft resumed!** Good luck and have fun!")
+            else:
+                # Not everyone was ready, send timeout message
+                await ctx.channel.send("⌛ The unpause ready check has expired. Please try again when everyone is ready.")
+            
+        except Exception as e:
+            logger.exception(f"Error while waiting for unpause ready check completion: {e}")
+            await ctx.channel.send("⚠️ An error occurred during the unpause ready check. Please try again.")
+        finally:
+            # Not run_participant_vote: this is a ready check, decided by
+            # is_everyone_ready() rather than a majority. Same leak though --
+            # deleting in two places left anything raising in between to skip
+            # both -- so it gets the same `finally`, in its own idiom.
+            ACTIVE_UNPAUSE_CHECKS.pop(draft_session.session_id, None)
+
+    # --- drafts on the hosted Draftmancer: the control API, never a manager ----------
+
+    async def _hosted_pause(self, ctx, draft_session):
+        if not _is_participant(ctx, draft_session):
+            await ctx.followup.send("Only draft participants can pause the draft.", ephemeral=True)
+            return
+        outcome = await hosted_draft.pause_for_player(draft_session.session_id)
+        if outcome == "already":
+            await ctx.followup.send("The draft is already paused. Use `/unpause` to resume it.",
+                                    ephemeral=True)
+        elif outcome == "not-drafting":
+            await ctx.followup.send("Draft hasn't started yet.", ephemeral=True)
+        elif outcome != "paused":
+            await ctx.followup.send(UNREACHABLE, ephemeral=True)
+        else:
+            await ctx.channel.send(
+                f"⏸️ **Draft paused** by {ctx.author.mention}.\n\n{HOSTED_PAUSED_DRAFT_OPTIONS}",
+                allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=True))
+            await ctx.followup.send("Draft paused.", ephemeral=True)
+
+    async def _hosted_unpause(self, ctx, draft_session):
+        if await hosted_draft.hosted_stage(draft_session.draft_id) == "stopped":
+            await ctx.followup.send(
+                "This draft was scrapped, so there's nothing to resume. Use `/ready` to start "
+                "it again in a new room.", ephemeral=True)
+            return
+        if draft_session.hosted_paused_by == hosted_draft.BOT_PAUSE:
+            await ctx.followup.send(
+                "The draft is paused because a seat is empty, and it resumes on its own "
+                "once every seat is connected again. If that player can't come back, a "
+                "substitute can open their link, or an admin can give the seat to a bot "
+                "with `/replace_seat`.", ephemeral=True)
+            return
+        if draft_session.hosted_paused_by != hosted_draft.HUMAN_PAUSE:
+            await ctx.followup.send("The draft is not currently paused.", ephemeral=True)
+            return
+        if not _is_participant(ctx, draft_session):
+            await ctx.followup.send("Only draft participants can unpause the draft.", ephemeral=True)
+            return
+
+        async def resume():
+            outcome = await hosted_draft.resume_for_players(draft_session.session_id)
+            if outcome == "resumed":
+                return None
+            if outcome == "not-drafting":
+                return "⚠️ There's no draft running to resume — it has already ended."
+            return "⚠️ Couldn't reach the drafting server to resume. Run `/unpause` again in a moment."
+
+        await self._unpause_ready_check(ctx, draft_session, resume)
+
+    async def _hosted_ready(self, ctx, draft_session):
+        stage = await hosted_draft.hosted_stage(draft_session.draft_id)
+        if stage is None:
+            await ctx.followup.send(
+                f"{UNREACHABLE} If the drafting server stays down, `/failover` moves the "
+                "draft to a bot-run room on draftmancer.com.", ephemeral=True)
+            return
+        if stage == "ended":
+            await ctx.followup.send("The draft has already started.", ephemeral=True)
+            return
+        if stage in ("stopped", "lost"):
+            await self._reopen_from_ready(ctx, draft_session)
+            return
+        await self._hosted_ready_check(ctx, draft_session)
+
+    async def _reopen_from_ready(self, ctx, draft_session):
+        route = "hosted" if config.hosted_route_for(draft_session.guild_id) else "manager"
+        try:
+            result = await hosted_draft.reopen_draft(
+                self.bot, draft_session.session_id, route,
+                expected_draft_id=draft_session.draft_id,
+                reason="redo", requested_by=ctx.author.mention)
+        except Exception:
+            logger.exception(f"/ready could not reopen draft {draft_session.session_id}")
+            await ctx.followup.send(
+                "⚠️ Something went wrong opening a new room. Check the draft channel for "
+                "new links, then try `/ready` again.", ephemeral=True)
+            return
+        replies = {
+            "moved": "A new room is open — the new links are in the draft channel.",
+            "moved-unstopped": "A new room is open — the new links are in the draft channel. "
+                               "The old room couldn't be closed and may still be listed.",
+            "ended": "This draft has already finished.",
+            "no-teams": "Teams haven't been formed yet.",
+            "bot-seats": "A bot holds a seat, so this draft can't open in a new room. "
+                         "Ask an admin — `/abandon` voids the draft.",
+            "cube-import": "The cube couldn't be imported for a new room. Try again shortly, "
+                           "or use `/failover` / `/draft_route` to change where it runs.",
+            "changed": ALREADY_MOVED,
+            "gone": "This draft no longer exists.",
+        }
+        text = replies.get(result)
+        if text is None:
+            text = ("⚠️ Couldn't open a new room right now. Try again in a moment, use "
+                    "`/failover` to move to a bot-run room on draftmancer.com, or ask an "
+                    "admin to change the route with `/draft_route`.")
+        await ctx.followup.send(text, ephemeral=True)
+
+    async def _hosted_ready_check(self, ctx, draft_session):
+        outcome, missing = await hosted_draft.request_ready_check(self.bot, draft_session.session_id)
+        replies = {
+            "started": "Ready check initiated!",
+            "running": "A ready check is already in progress.",
+            "no-teams": "Teams haven't been formed yet.",
+            "started-already": "The draft has already started.",
+        }
+        if outcome == "missing":
+            text = (f"Waiting for {', '.join(missing)} to join Draftmancer. A ready check "
+                    f"starts on its own once every seat is connected.")
+        else:
+            text = replies.get(outcome, UNREACHABLE)
+        await ctx.followup.send(text, ephemeral=True)
+
+    async def _hosted_scrap(self, ctx, draft_session):
+        stage = await hosted_draft.hosted_stage(draft_session.draft_id)
+        if stage is None:
+            await ctx.followup.send(UNREACHABLE, ephemeral=True)
+            return
+        if stage in hosted_draft.FINISHED_STAGES:
+            gone = {"lost": "This draft is no longer on the drafting server",
+                    "stopped": "This draft has already been stopped on the drafting server",
+                    }.get(stage, "This draft has finished drafting")
+            await ctx.followup.send(
+                f"{gone}, so there's no session to "
+                "cancel. Use `/abandon` from the draft chat or a team channel "
+                "to void the draft and its results.",
+                ephemeral=True,
+            )
+            return
+        if stage != "drafting":
+            await ctx.followup.send("Draft hasn't started yet.", ephemeral=True)
+            return
+        if draft_session.hosted_paused_by is None:
+            await ctx.followup.send("The draft must be paused before it can be canceled. Use `/pause` first.", ephemeral=True)
+            return
+        if not _is_participant(ctx, draft_session):
+            await ctx.followup.send("Only draft participants can initiate a vote to cancel.", ephemeral=True)
+            return
+
+        sign_ups = draft_session.sign_ups or {}
+        view = ScrapVoteView(draft_session.session_id, list(sign_ups.keys()))
+        announcement = (
+            f"⚠️ **Draft Cancellation Vote** initiated by {ctx.author.mention}\n\n"
+            f"{_ping_text(ctx.guild, sign_ups)}\n\n"
+            f"Please vote on whether to cancel the current draft."
+        )
+
+        async def _cancelled():
+            final_message = await ctx.channel.send("⚠️ **Vote passed!** Canceling draft in 5 seconds...")
+            await asyncio.sleep(VOTE_ACTION_DELAY_SECONDS)
+            outcome = await hosted_draft.stop_hosted_draft(draft_session.session_id)
+            if outcome == "ended":
+                await final_message.edit(content=
+                    "⚠️ **The draft had already finished**, so there was nothing to cancel. "
+                    "Use `/abandon` to void the draft and its results.")
+                return
+            if outcome != "stopped":
+                # As on the manager route: the money follows the server. A draft
+                # still running there keeps its entries.
+                await final_message.edit(content=
+                    "⚠️ **Could not reach the drafting server to cancel the draft.** "
+                    "The vote passed, but the draft is still running there. Try `/scrap` again.")
+                return
+            # The pool stays, as on the manager route: /ready opens a new room
+            # for the same draft, teams and entries unchanged.
+            await final_message.edit(content=
+                "🛑 **Draft canceled!** Use `/ready` to open a new room and start again."
+                + await _scrap_entries_note(draft_session))
+
+        async def _not_cancelled():
+            await ctx.channel.send("🛑 **Vote to cancel draft did not pass.**\n Use `/unpause` to continue the draft.")
+
+        try:
+            started = await run_participant_vote(
+                ctx, channel=ctx.channel, view=view,
+                registry=ACTIVE_SCRAP_VOTES, key=draft_session.session_id,
+                announcement=announcement, ack="Cancellation vote initiated.",
+                on_pass=_cancelled, on_fail=_not_cancelled)
+            if not started:
+                await ctx.followup.send(
+                    "There's already an active vote to cancel this draft.", ephemeral=True)
+        except Exception as e:
+            logger.exception(f"Error while waiting for scrap vote completion: {e}")
+            await ctx.channel.send("⚠️ An error occurred during the cancellation vote. Please try again.")
+
+    @discord.slash_command(
+        name='replace_seat',
+        description="Admin: give a disconnected player's seat in the running draft to a bot")
+    @has_bot_manager_role()
+    async def replace_seat_command(
+            self, ctx,
+            player: discord.Option(discord.Member, "The player whose seat a bot takes over")):
+        """Never automatic: a bot takes over a seat only when an admin says so."""
+        await ctx.defer(ephemeral=True)
+        try:
+            result = await self._get_manager_for_channel(ctx, hosted_ok=True)
+            if not result:
+                return
+            manager, draft_session = result
+            if manager is not None:
+                await ctx.followup.send(
+                    "Only drafts on DraftBot's own Draftmancer can give a seat to a bot.",
+                    ephemeral=True)
+                return
+            outcome, detail = await hosted_draft.replace_seat_with_bot(
+                draft_session.session_id, str(player.id))
+            if outcome == "not-in-draft":
+                await ctx.followup.send(f"<@{player.id}> isn't in this draft.", ephemeral=True)
+            elif outcome == "refused":
+                await ctx.followup.send(f"Couldn't replace that seat: {detail}", ephemeral=True)
+            elif outcome != "replaced":
+                await ctx.followup.send(UNREACHABLE, ephemeral=True)
+            else:
+                await ctx.channel.send(
+                    f"🤖 <@{player.id}>'s seat ({detail}) is now played by a bot, at "
+                    f"{ctx.author.mention}'s request. Their pool stays theirs.",
+                    allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=True))
+                await ctx.followup.send("Seat replaced.", ephemeral=True)
+        except Exception as e:
+            logger.exception(f"Error in replace_seat command: {e}")
             await ctx.followup.send(f"An error occurred: {str(e)}", ephemeral=True)
 
 def setup(bot):

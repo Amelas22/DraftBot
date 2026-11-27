@@ -27,6 +27,9 @@ async def reconnect_draft_setup_sessions(discord_client):
         # Query for draft sessions that need setup
         stmt = select(DraftSession).filter(
             DraftSession.session_stage.is_(None),  # teams have not been formed
+            # Only drafts the manager runs: a hosted draft is the poller's, and
+            # the bot never joins one.
+            DraftSession.draftmancer_route.is_(None),
             DraftSession.draft_start_time >= five_hours_ago,  # Created within the last 5 hours
             DraftSession.draft_start_time <= current_time  
         )

@@ -302,3 +302,118 @@ async def test_reconcile_capture_selects_teams_stage_draft(test_db):
         await reconcile_capture(MagicMock())
 
     mgr.capture_draft_log.assert_awaited_once_with(mgr.current_draft_log)
+
+
+# --- hosted drafts: pulled through the API, never a manager ------------------------
+
+from hosted_fakes import DRAFT_ID as HOSTED_DRAFT_ID, LOG as HOSTED_LOG, SID as HOSTED_SID  # noqa: E402
+from hosted_fakes import _seed as _seed_hosted, hosted  # noqa: E402,F401 -- fixture used by name
+from services import hosted_draft  # noqa: E402
+from services.hosted_draftmancer import HostedLogStopped, HostedRefused, HostedUnavailable  # noqa: E402
+
+
+async def _seed_hosted_draft():
+    await _seed_hosted(stage="teams", start=datetime.now())
+    from sqlalchemy import update
+    async with AsyncSessionLocal() as session:
+        await session.execute(update(DraftSession).where(DraftSession.session_id == HOSTED_SID)
+                              .values(teams_start_time=datetime.now()))
+        await session.commit()
+
+
+@pytest.fixture
+def no_spawn():
+    with patch.object(DraftSetupManager, "spawn_for_existing_session",
+                      AsyncMock(side_effect=AssertionError("spawned a manager"))) as spawn:
+        yield spawn
+
+
+@pytest.mark.asyncio
+async def test_the_reconciler_pulls_a_hosted_drafts_log_and_finishes_it(test_db, hosted, no_spawn):
+    await _seed_hosted_draft()
+    hosted.stage = "ended"
+    hosted.log = HOSTED_LOG
+    bot = MagicMock()
+    with patch("services.hosted_draft.finish_draft", AsyncMock()) as finish:
+        await reconcile_capture(bot)
+
+    finish.assert_awaited_once_with(bot, HOSTED_SID, HOSTED_LOG)
+    assert ("fetch_log", HOSTED_DRAFT_ID) in hosted.calls
+    no_spawn.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_the_reconciler_waits_for_a_hosted_draft_still_running(test_db, hosted, no_spawn):
+    await _seed_hosted_draft()
+    hosted.stage = "drafting"
+    with patch("services.hosted_draft.finish_draft", AsyncMock()) as finish:
+        await reconcile_capture(MagicMock())
+        hosted.stage = "ended"
+        hosted.log = HOSTED_LOG
+        await reconcile_capture(MagicMock())
+
+    finish.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("how", ["stage", "log"])
+async def test_the_reconciler_skips_a_stopped_hosted_draft_for_good(test_db, hosted, no_spawn, how):
+    await _seed_hosted_draft()
+    if how == "stage":
+        hosted.stage = "stopped"
+    else:
+        hosted.stage = "ended"
+        hosted.fail("fetch_log", HostedLogStopped(HOSTED_DRAFT_ID))
+    with patch("services.hosted_draft.finish_draft", AsyncMock()) as finish:
+        await reconcile_capture(MagicMock())
+        calls = len(hosted.calls)
+        await reconcile_capture(MagicMock())
+
+    finish.assert_not_awaited()
+    assert len(hosted.calls) == calls, "asked the API again about a stopped draft"
+
+
+@pytest.mark.asyncio
+async def test_the_reconciler_stops_polling_a_lost_hosted_session(test_db, hosted, no_spawn):
+    """A Draftmancer restart that lost the session answers 404 to everything --
+    and a log 404 alone reads as "not ended yet", which would be polled forever."""
+    await _seed_hosted_draft()
+    hosted.fail("status", HostedRefused(404, {"error": "No such session."}))
+    with patch("services.hosted_draft.finish_draft", AsyncMock()) as finish:
+        await reconcile_capture(MagicMock())
+        await reconcile_capture(MagicMock())
+
+    finish.assert_not_awaited()
+    assert hosted.calls == [("status", "raised")]
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_api_is_retried_on_the_next_tick(test_db, hosted, no_spawn):
+    await _seed_hosted_draft()
+    hosted.fail("status", HostedUnavailable("down"))
+    with patch("services.hosted_draft.finish_draft", AsyncMock()) as finish:
+        await reconcile_capture(MagicMock())
+        await reconcile_capture(MagicMock())
+
+    finish.assert_not_awaited()
+    assert hosted.calls == [("status", "raised")] * 2
+
+
+@pytest.mark.asyncio
+async def test_a_due_hosted_draft_publishes_without_a_manager(test_db, hosted):
+    await _seed("HP", captured_at=datetime.now() - timedelta(hours=1),
+                unlock_at=datetime.now() - timedelta(minutes=1),
+                team_posted_at=datetime.now(), data_received=False)
+    from sqlalchemy import update
+    async with AsyncSessionLocal() as session:
+        await session.execute(update(DraftSession).where(DraftSession.session_id == "HP")
+                              .values(draftmancer_route="hosted"))
+        await session.commit()
+    bot = MagicMock()
+    with patch("services.log_reconciler.publish_draft_log", AsyncMock(return_value=True)) as publish, \
+         patch("services.log_reconciler.DraftSetupManager",
+               MagicMock(side_effect=AssertionError("built a manager"))), \
+         patch("services.log_reconciler.assign_drafted_decks", AsyncMock()):
+        await reconcile_publish_and_team_logs(bot)
+
+    publish.assert_awaited_once_with(bot, "HP")

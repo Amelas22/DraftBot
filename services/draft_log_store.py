@@ -1,7 +1,7 @@
 """Shared draft-log helpers that are new to the reconciliation design:
-pool rendering and per-team pool posting. Capture/publish mechanics remain on
-DraftSetupManager (the single home); this module holds only the genuinely-new
-logic so it can be unit-tested in isolation."""
+pool rendering and per-team pool posting. Capture/publish mechanics live in
+services/draft_end; this module holds only the genuinely-new logic so it can be
+unit-tested in isolation."""
 from __future__ import annotations
 
 import io

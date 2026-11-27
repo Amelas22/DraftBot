@@ -1,7 +1,10 @@
 """Backup retry loop for draft-log capture/publish. Push is primary; this poll
 re-fires idempotent steps the push path left pending. Pure-DB actions
-(team-pool retry, deck assignment, delayed public embed) live here; the socket
-capture-retry is added in reconcile_capture (Task 6)."""
+(team-pool retry, deck assignment, delayed public embed) live here, and so does
+the capture retry: a hosted draft's log is pulled through the control API, a
+fallback draft's fetched from draftmancer.com's public endpoint, and a manager
+draft's re-delivered to a rejoining socket. Only a manager draft ever gets a
+manager here."""
 import asyncio
 from datetime import datetime, timedelta
 
@@ -12,6 +15,8 @@ from database.db_session import db_session
 from models.draft_session import DraftSession
 from services.draft_log_store import post_team_logs
 from services.draft_deck_assignment import assign_drafted_decks
+from services import hosted_draft
+from services.draft_end import publish_draft_log
 from services.draft_setup_manager import ACTIVE_MANAGERS, DraftSetupManager
 
 RECONCILE_INTERVAL_SECONDS: int = 60
@@ -64,10 +69,16 @@ _RECONCILER_RUNNING: bool = False  # guards against on_ready firing on every gat
 
 
 async def reconcile_capture(bot) -> None:
-    """Backup for a missed endDraft push: reconnect the owner socket for
-    uncaptured, recently-active drafts and capture the log the session
-    re-delivers on join, for as long as the room can still exist (see
-    CAPTURE_RETRY_WINDOW_MINUTES)."""
+    """Backup for a missed end-of-draft push, for uncaptured, recently-active
+    drafts, for as long as the log can still exist (see
+    CAPTURE_RETRY_WINDOW_MINUTES).
+
+    A hosted draft's log is pulled from the control API and the draft finished
+    (hosted_draft.pull_ended_draft); a fallback draft's is fetched from
+    draftmancer.com when its room shares it (hosted_draft.pull_fallback_log) --
+    a log it withholds is asked for again until the window ends. A manager
+    draft gets its owner socket reconnected, and the log the session
+    re-delivers on join is captured."""
     cutoff = datetime.now() - timedelta(minutes=CAPTURE_RETRY_WINDOW_MINUTES)
     async with db_session() as session:
         uncaptured = (await session.execute(
@@ -82,6 +93,13 @@ async def reconcile_capture(bot) -> None:
     for ds in uncaptured:
         session_id = ds.session_id
         try:
+            route = getattr(ds, "draftmancer_route", None)
+            if route == hosted_draft.ROUTE:
+                await hosted_draft.pull_ended_draft(bot, session_id, ds.draft_id)
+                continue
+            if route == hosted_draft.FALLBACK_ROUTE:
+                await hosted_draft.pull_fallback_log(bot, session_id, ds.draft_id)
+                continue
             manager = await DraftSetupManager.spawn_for_existing_session(session_id, bot)
             if manager is None:
                 continue
@@ -174,6 +192,11 @@ async def reconcile_publish_and_team_logs(bot) -> None:
         )).scalars().all()
     for ds in due_publish:
         try:
+            if getattr(ds, "draftmancer_route", None) is not None:
+                # No manager for a hosted or fallback draft: release=False
+                # needs no connection, and the room unlocks the log itself.
+                await publish_draft_log(bot, ds.session_id)
+                continue
             # Prefer an already-active manager (real state, idempotent publish)
             # over constructing a transient one that would leak into / clobber
             # the module-global ACTIVE_MANAGERS registry.
