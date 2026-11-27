@@ -393,3 +393,77 @@ async def test_a_pull_for_the_current_room_still_finishes_the_draft(hosted, bot)
 
     finished.assert_awaited_once_with(bot, SID, hosted.log)
     assert held == [False]
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_draft_is_not_reopened(hosted, bot, spawn, admin_dms):
+    """Abandoning released its entries; a new room would play for an empty pool."""
+    await _seed_teams(stage="abandoned")
+    hosted.stage = "stopped"
+
+    assert await _failover(bot) == "gone"
+
+    assert ("stop", DRAFT_ID) not in hosted.calls
+    assert (await _row()).draft_id == DRAFT_ID
+    spawn.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_push_accepted_before_a_move_does_not_finish_the_moved_draft(hosted, bot):
+    """The push named the old room; the draft moved on before its finish ran."""
+    await _seed_teams()
+    finished = AsyncMock()
+    with patch("services.hosted_draft.on_draft_ended", finished):
+        async with hosted_draft._draft_lock(SID):
+            assert await hosted_draft.accept_pushed_log(bot, "DB" + DRAFT_ID, {"users": {}})
+            await _set(draft_id="NEWROOM", draftmancer_route=None)
+        await hosted_draft.wait_for_finishing()
+
+    finished.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_push_for_the_current_room_still_finishes_the_draft(hosted, bot):
+    await _seed_teams()
+    log = {"users": {}}
+    finished = AsyncMock()
+    with patch("services.hosted_draft.on_draft_ended", finished):
+        assert await hosted_draft.accept_pushed_log(bot, "DB" + DRAFT_ID, log)
+        await hosted_draft.wait_for_finishing()
+
+    finished.assert_awaited_once_with(bot, SID, log)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("via", ["push", "pull"])
+async def test_a_move_while_a_log_is_being_finished_is_refused(hosted, bot, spawn, admin_dms, via):
+    """The server may no longer answer for the old room; the finish in flight decides."""
+    await _seed_teams()
+    hosted.stage = "ended"
+    hosted.log = {"sessionID": "DB" + DRAFT_ID, "users": {}}
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def finishing(*_: Any) -> None:
+        started.set()
+        await release.wait()
+
+    with patch("services.hosted_draft.on_draft_ended", AsyncMock(side_effect=finishing)):
+        if via == "push":
+            assert await hosted_draft.accept_pushed_log(bot, "DB" + DRAFT_ID, hosted.log)
+            running = None
+        else:
+            running = asyncio.create_task(hosted_draft.pull_ended_draft(bot, SID, DRAFT_ID))
+        await started.wait()
+        hosted.fail("status", HostedUnavailable("down"))
+        hosted.fail("stop", HostedUnavailable("down"))
+
+        assert await _failover(bot) == "ended"
+
+        release.set()
+        await hosted_draft.wait_for_finishing()
+        if running is not None:
+            await running
+
+    assert (await _row()).draft_id == DRAFT_ID
+    spawn.assert_not_awaited()
+    assert SID not in hosted_draft._ENDING

@@ -351,6 +351,10 @@ _FINISHING: dict[str, asyncio.Task[None]] = {}
 _DRAFT_LOCKS: dict[str, asyncio.Lock] = {}
 # Drafts the reconciler has learnt will never have a log: stopped, or lost.
 _UNPULLABLE: set[str] = set()
+# Drafts whose log is being finished, pushed or pulled. Marked under the draft's
+# lock once the room is confirmed as the draft's own, so a reopen that gets the
+# lock next sees a result on its way, even when the server no longer answers.
+_ENDING: set[str] = set()
 
 
 def forget_all() -> None:
@@ -359,6 +363,7 @@ def forget_all() -> None:
     _TRACKED.clear()
     _DONE.clear()
     _UNPULLABLE.clear()
+    _ENDING.clear()
     _HEALTH = _Health()
 
 
@@ -995,8 +1000,9 @@ async def reopen_draft(bot: discord.Client, session_id: str, route: ReopenRoute,
     only the room, its draft id and every player's link change. The old room
     is closed first when the server can be asked; one it cannot reach is left
     behind ("moved-unstopped"), and its late push finds no draft, since the
-    draft id changes. A draft whose log exists, or that the server says has
-    ended, is not moved: its result is on the way. A new hosted session is
+    draft id changes. A draft whose log exists or is being finished, or that
+    the server says has ended, is not moved: its result is on the way. An
+    abandoned draft is "gone": its entries were released. A new hosted session is
     created before anything else changes, so a failed create leaves the draft
     where it was. The row moves only if nobody moved it meanwhile ("changed").
 
@@ -1013,7 +1019,10 @@ async def reopen_draft(bot: discord.Client, session_id: str, route: ReopenRoute,
             return "changed"
         if not row.session_stage:
             return "no-teams"
-        if row.logs_captured_at is not None:
+        # Abandoning released the entries: a new room would play for nothing.
+        if row.session_stage == "abandoned":
+            return "gone"
+        if row.logs_captured_at is not None or session_id in _ENDING:
             return "ended"
         old_id: str = row.draft_id
         stage = await hosted_stage(old_id)
@@ -1260,7 +1269,7 @@ async def accept_pushed_log(bot: discord.Client, wire_session_id: str, log: Draf
     if session_id is None:
         return False
     if session_id not in _FINISHING or _FINISHING[session_id].done():
-        task = asyncio.create_task(_finish_logged(bot, session_id, log))
+        task = asyncio.create_task(_finish_logged(bot, session_id, draft_id, log))
         _FINISHING[session_id] = task
         task.add_done_callback(lambda t, sid=session_id: _drop_finishing(sid, t))
     return True
@@ -1271,11 +1280,25 @@ def _drop_finishing(session_id: str, task: asyncio.Task[None]) -> None:
         del _FINISHING[session_id]
 
 
-async def _finish_logged(bot: discord.Client, session_id: str, log: DraftLog) -> None:
+async def _finish_logged(bot: discord.Client, session_id: str, draft_id: str,
+                         log: DraftLog) -> None:
+    """Finish a pushed log, unless the draft left the room that sent it.
+
+    The webhook matched the room without the lock, so a reopen may have moved
+    the draft since; the room is checked again under it.
+    """
+    async with _draft_lock(session_id):
+        row = await DraftSession.get_by_session_id(session_id)
+        if row is None or row.draft_id != draft_id or row.draftmancer_route != ROUTE:
+            logger.warning(f"{session_id} no longer runs in DB{draft_id}; dropping its pushed log")
+            return
+        _ENDING.add(session_id)
     try:
         await on_draft_ended(bot, session_id, log)
     except Exception:
         logger.opt(exception=True).error(f"Finishing pushed hosted draft {session_id} failed")
+    finally:
+        _ENDING.discard(session_id)
 
 
 async def wait_for_finishing() -> None:
@@ -1304,9 +1327,14 @@ async def pull_ended_draft(bot: discord.Client, session_id: str, draft_id: str) 
     """
     async with _draft_lock(session_id):
         log = await _pull_ended_log(session_id, draft_id)
-    if log is not None:
+        if log is None:
+            return
+        _ENDING.add(session_id)
+    try:
         logger.info(f"[reconciler] pulled the hosted log of {session_id}")
         await on_draft_ended(bot, session_id, log)
+    finally:
+        _ENDING.discard(session_id)
 
 
 async def _pull_ended_log(session_id: str, draft_id: str) -> DraftLog | None:
