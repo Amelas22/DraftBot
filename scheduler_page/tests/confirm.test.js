@@ -66,7 +66,7 @@ test("switch on: no rows and no note", async () => {
   await mountConfirmPanel(root, fakeApi(true), opts);
   assert.equal(checkbox(root).checked, true);
   assert.equal(button(root), undefined);
-  assert.ok(!texts(root).includes("Editing any day in a round confirms that round."));
+  assert.ok(!texts(root).includes("Editing any day confirms the week it is in."));
   assert.ok(texts(root).includes("Show my usual as confirmed"));
   // Its own class: "confirm" is the teams page's yes/no box.
   assert.equal(root.children[0].className, "confirmpanel");
@@ -93,7 +93,7 @@ test("unchecking calls setTrustsUsual(false) and shows the round's row", async (
   await fire(checkbox(root), "change");
   assert.deepEqual(api.calls[0], ["set", false, { from: "2026-11-16", to: "2026-11-16" }]);
   assert.ok(texts(root).includes("Round 3: Not confirmed"));
-  assert.ok(texts(root).includes("Editing any day in a round confirms that round."));
+  assert.ok(texts(root).includes("Editing any day confirms the week it is in."));
 });
 
 test("Looks right, confirm confirms that week", async () => {
