@@ -151,3 +151,34 @@ def test_parse_monday() -> None:
     for bad in ("2026-11-17", "16/11/2026", "2026-02-30", ""):
         with pytest.raises(ValueError):
             parse_monday(bad)
+
+
+THANKSGIVING = Calendar(date(2026, 11, 8), 7, frozenset({date(2026, 11, 29)}))
+
+
+def test_a_break_sunday_stretches_its_round_to_the_next_sunday():
+    r4 = round_week(THANKSGIVING, 4)
+    assert (r4.first_day, r4.last_day) == (date(2026, 11, 22), date(2026, 12, 6))
+    assert r4.start_utc == datetime(2026, 11, 22, 8, tzinfo=timezone.utc)
+    assert r4.end_utc == datetime(2026, 12, 7, 8, tzinfo=timezone.utc)
+    assert r4.cells == 15 * 48
+
+
+def test_rounds_after_a_break_shift_back_a_week_and_rounds_before_it_stay():
+    assert [round_week(THANKSGIVING, n).last_day for n in range(1, 8)] == [
+        date(2026, 11, 8), date(2026, 11, 15), date(2026, 11, 22), date(2026, 12, 6),
+        date(2026, 12, 13), date(2026, 12, 20), date(2026, 12, 27),
+    ]
+    assert round_week(THANKSGIVING, 5).first_day == date(2026, 12, 6)
+    assert round_week(THANKSGIVING, 3) == round_week(LOTUS, 3)
+
+
+def test_the_round_spanning_a_break_is_current_through_the_break_week():
+    assert current_round(THANKSGIVING, utc("2026-11-27T15:00")) == 4
+    assert current_round(THANKSGIVING, utc("2026-11-30T12:00")) == 4
+    assert current_round(THANKSGIVING, utc("2026-12-07T07:59")) == 4
+    assert current_round(THANKSGIVING, utc("2026-12-07T08:00")) == 5
+
+
+def test_the_horizon_follows_the_shifted_last_round():
+    assert horizon(THANKSGIVING, utc("2026-11-27T15:00")) == datetime(2026, 12, 28, 8, tzinfo=timezone.utc)

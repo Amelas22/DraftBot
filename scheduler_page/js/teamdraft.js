@@ -73,9 +73,14 @@ export function freeRuns(freeSides, columnStarts, count = CELLS, sureSides = fre
   return keys.map((k, j) => (/[12]/.test(k) ? { first: !joined(j), last: j === count - 1 || !joined(j + 1) } : null));
 }
 
-// The league weeks (Mondays) a view's confirmations are about: the viewed round's, else every week the window touches.
+// The league weeks (Mondays) a view's confirmations are about: the viewed round's (two or more when a break Sunday
+// stretched it), else every week the window touches.
 export function statusWeeks(state) {
-  if (state.round) return [addDays(state.round.last_day, -6)];
+  if (state.round) {
+    const weeks = [];
+    for (let m = addDays(state.round.first_day, 1); m <= addDays(state.round.last_day, -6); m = addDays(m, 7)) weeks.push(m);
+    return weeks;
+  }
   const start = new Date(state.window.start_utc);
   return leagueWeeksBetween(start, addCells(start, state.window.cells));
 }

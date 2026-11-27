@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Literal
 
 from sqlalchemy import select
@@ -49,7 +49,8 @@ def _page_schedule(page: WeekPage, span: BookingSpan) -> Schedule:
 def _calendar(tournament: Tournament) -> Calendar | None:
     if tournament.round1_deadline is None:
         return None
-    return Calendar(tournament.round1_deadline, tournament.total_rounds)
+    breaks = frozenset(date.fromisoformat(day) for day in tournament.round_breaks or ())
+    return Calendar(tournament.round1_deadline, tournament.total_rounds, breaks)
 
 
 async def guild_calendar(session: AsyncSession, guild_id: str) -> Calendar | None:
