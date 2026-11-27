@@ -360,6 +360,13 @@ test("gridFrame marks only the open day's column, however many days the window h
   assert.deepEqual(open(), ["14"]);
 });
 
+test("gridFrame wraps the day tabs only past a week and a day", () => {
+  const frameOf = (n) => gridFrame(Array.from({ length: n }, (_, i) => ({ date: `d${i}`, label: `D${i}`, start: 0, cells: [] })),
+    { role: "grid" }, () => new Node(), "d0");
+  assert.equal(frameOf(9).tabs.attrs["data-wrap"], "false");
+  assert.equal(frameOf(16).tabs.attrs["data-wrap"], "true");
+});
+
 // Round 3 of a tournament: Sunday to Sunday Pacific, 384 cells, booked anywhere inside it.
 const r3 = { ...doc, window: { start_utc: "2026-11-15T08:00:00Z", cell_minutes: 30, cells: 384, shape: "round" },
   round: { number: 3, first_day: "2026-11-15", last_day: "2026-11-22", prev: { round: 2 }, next: { round: 4 } },

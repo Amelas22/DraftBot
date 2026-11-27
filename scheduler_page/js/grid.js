@@ -111,7 +111,7 @@ export const rowClass = (row) => `${row % 2 ? "half" : "hr"}${Math.floor(row / 2
 // classes ride along with the row's, and makeCell also gets the words a due cell adds to its label, so the deadline
 // reaches a screen reader as well as the eye. It opens on the tab of the column dated openDate, else the first.
 export function gridFrame(columns, attrs, makeCell, openDate) {
-  const tabs = el("div", { class: "daytabs", role: "tablist", "aria-label": "Day" });
+  const tabs = el("div", { class: "daytabs", role: "tablist", "aria-label": "Day", "data-wrap": String(columns.length > 9) });
   const grid = el("div", attrs);
   const tabButtons = columns.map((c, i) => {
     const b = el("button", { type: "button", role: "tab", text: c.label, class: kindClass(c) });

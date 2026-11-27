@@ -58,6 +58,9 @@ select { font: inherit; max-width: 100%; padding: 6px 10px; border: 2px solid va
 
 .daytabs { display: none; gap: 6px; margin-bottom: 8px; }
 .daytabs button { flex: 1; min-height: 44px; padding: 0; border: 0; border-radius: 999px; background: var(--chip); color: var(--fg); font-weight: 700; cursor: pointer; }
+/* A round stretched past a week has too many days for one row: they wrap, eight to a row. */
+.daytabs[data-wrap="true"] { flex-wrap: wrap; }
+.daytabs[data-wrap="true"] button { flex: 0 0 calc((100% - 42px) / 8); min-width: 0; }
 .daytabs button[aria-selected="true"] { background: var(--accent); color: var(--accent-fg); }
 
 .actions { display: flex; gap: 10px; margin-top: 14px; }
