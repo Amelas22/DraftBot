@@ -113,10 +113,32 @@ async def test_an_unreachable_api_records_the_fallback_not_the_hosted_route(test
 # --- players and seating --------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_sign_up_changes_update_the_expected_players(hosted):
-    await _seed(stage=None)
+async def test_sign_up_changes_after_teams_update_the_expected_players(hosted):
+    await _seed()
     await hosted_draft.on_signups_changed(SID)
     assert hosted.calls == [("set_players", DRAFT_ID, list(SIGN_UPS.values()))]
+
+
+@pytest.mark.asyncio
+async def test_sign_up_changes_before_teams_leave_the_hosted_session_alone(hosted, bot, channel):
+    # Nobody has a link before teams, and forming them sends every player and the seating.
+    await _seed(stage=None)
+    hosted.seats = [seat("Alice", False)]
+    await hosted_draft.on_signups_changed(SID)
+    await hosted_draft.poll_hosted_drafts(bot)
+    assert "set_players" not in hosted.call_names()
+
+
+@pytest.mark.asyncio
+async def test_the_last_player_leaving_a_hosted_queue_sends_nothing(hosted, bot, channel):
+    await _seed(stage=None)
+    async with AsyncSessionLocal() as s:
+        await s.execute(update(DraftSession).where(DraftSession.session_id == SID).values(sign_ups={}))
+        await s.commit()
+    hosted.seats = [seat("Alice", False)]
+    await hosted_draft.on_signups_changed(SID)
+    await hosted_draft.poll_hosted_drafts(bot)
+    assert "set_players" not in hosted.call_names()
 
 
 @pytest.mark.asyncio
@@ -124,6 +146,19 @@ async def test_sign_up_changes_leave_a_manager_draft_alone(hosted):
     await _seed(stage=None, route=None)
     await hosted_draft.on_signups_changed(SID)
     assert hosted.calls == []
+
+
+@pytest.mark.asyncio
+async def test_removing_everyone_after_teams_sends_no_empty_player_list(hosted, bot, channel):
+    # The hosted server refuses an empty list, and the poller would resend it every tick.
+    await _seed()
+    async with AsyncSessionLocal() as s:
+        await s.execute(update(DraftSession).where(DraftSession.session_id == SID).values(sign_ups={}))
+        await s.commit()
+    hosted.seats = [seat("Alice", False)]
+    await hosted_draft.on_signups_changed(SID)
+    await hosted_draft.poll_hosted_drafts(bot)
+    assert "set_players" not in hosted.call_names()
 
 
 @pytest.mark.asyncio
@@ -137,7 +172,7 @@ async def test_teams_formed_sets_the_seating_order(hosted):
 
 @pytest.mark.asyncio
 async def test_the_poller_brings_stale_players_back_in_step(hosted, bot, channel):
-    await _seed(stage=None)
+    await _seed()
     hosted.seats = [seat("Alice", False)]
     await hosted_draft.poll_hosted_drafts(bot)
     assert hosted.calls == [("set_players", DRAFT_ID, list(SIGN_UPS.values()))]
@@ -476,20 +511,26 @@ async def test_two_sign_ups_with_the_same_display_name_each_get_a_seat(hosted, b
     assert await hosted_draft.open_draft_room(await _row(), channel=None) == "hosted"
     assert created[0]["players"] == seats
 
-    await hosted_draft.on_signups_changed(SID)
-    assert hosted.calls[-1] == ("set_players", DRAFT_ID, seats)
-
-    # The poller sees the seats as in step: no endless re-sending.
-    await hosted_draft.poll_hosted_drafts(bot)
-    assert hosted.call_names().count("set_players") == 1
-
     # Teams: the seating is a permutation of exactly those seat names.
     from helpers.hosted_seats import seat_list
     reordered = {k: TWINS[k] for k in ("333", "111", "444", "222")}
     seating = seat_list(reordered)
     assert sorted(seating) == sorted(seats)
     await hosted_draft.on_teams_formed(SID, seating)
-    assert hosted.calls[-1] == ("set_seating", DRAFT_ID, seating)
+    assert hosted.calls[-2:] == [("set_players", DRAFT_ID, seating), ("set_seating", DRAFT_ID, seating)]
+
+    # After teams a sign-up change sends the seat names, and the poller then sees
+    # the seats in step: no endless re-sending.
+    async with AsyncSessionLocal() as s:
+        await s.execute(update(DraftSession).where(DraftSession.session_id == SID)
+                        .values(session_stage="teams", sign_ups=reordered))
+        await s.commit()
+    await hosted_draft.on_signups_changed(SID)
+    assert hosted.calls[-1] == ("set_players", DRAFT_ID, seating)
+    hosted.seats = [seat(name, False) for name in seating]
+    before = hosted.call_names().count("set_players")
+    await hosted_draft.poll_hosted_drafts(bot)
+    assert hosted.call_names().count("set_players") == before
 
 
 @pytest.mark.asyncio
