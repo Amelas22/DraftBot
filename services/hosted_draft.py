@@ -1,12 +1,12 @@
 """Drafts run on the self-hosted Draftmancer, from queue to finished log.
 
 DraftBot never sits in a hosted draft. It creates the session through the
-control API when the queue opens, keeps the expected players and the seating in
-step with Discord, and polls status to drive the draft channel: the status
-message, Draftmancer's in-app ready check (after the Discord one has formed the
-teams), the start, and a pause while a seat is empty mid-draft. The end arrives
-as a pushed log -- or the reconciler's pull -- and runs finish_draft, which
-builds rooms at most once.
+control API when the queue opens, keeps its players and seating in step with
+the teams once they are formed (nobody holds a link before then), and polls
+status to drive the draft channel: the status message, Draftmancer's in-app
+ready check (after the Discord one has formed the teams), the start, and a
+pause while a seat is empty mid-draft. The end arrives as a pushed log -- or
+the reconciler's pull -- and runs finish_draft, which builds rooms at most once.
 
 Everything the poller acts on is re-read from the database and the status
 endpoint every tick, so a restarted bot picks up where it was. Who paused the
@@ -298,7 +298,9 @@ async def on_signups_changed(session_id: str) -> None:
         row = await _hosted_row(session_id)
         if row is None or not row.session_stage:
             return
-        await hosted_client().set_players(row.draft_id, seat_list(row.sign_ups or {}))
+        players = seat_list(row.sign_ups or {})
+        if players:  # The server refuses an empty list; there is nobody to seat.
+            await hosted_client().set_players(row.draft_id, players)
     except Exception as e:
         logger.warning(f"Could not update the hosted players of {session_id}: {e}")
 
@@ -469,7 +471,7 @@ async def _gathering(bot: discord.Client, row: Any, status: HostedStatus, st: _T
     if not row.session_stage:
         return  # No teams yet: nobody has a link, and forming them sends every player.
     expected = seat_list(row.sign_ups or {})
-    if [s.name for s in status.seats] != expected:
+    if expected and [s.name for s in status.seats] != expected:
         # A missed sign-up update, or one made while the API was away. Setting the
         # players clears the in-app ready check, so ours goes with it.
         await hosted_client().set_players(row.draft_id, expected)

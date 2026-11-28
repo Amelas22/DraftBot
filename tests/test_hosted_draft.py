@@ -149,6 +149,19 @@ async def test_sign_up_changes_leave_a_manager_draft_alone(hosted):
 
 
 @pytest.mark.asyncio
+async def test_removing_everyone_after_teams_sends_no_empty_player_list(hosted, bot, channel):
+    # The hosted server refuses an empty list, and the poller would resend it every tick.
+    await _seed()
+    async with AsyncSessionLocal() as s:
+        await s.execute(update(DraftSession).where(DraftSession.session_id == SID).values(sign_ups={}))
+        await s.commit()
+    hosted.seats = [seat("Alice", False)]
+    await hosted_draft.on_signups_changed(SID)
+    await hosted_draft.poll_hosted_drafts(bot)
+    assert "set_players" not in hosted.call_names()
+
+
+@pytest.mark.asyncio
 async def test_teams_formed_sets_the_seating_order(hosted):
     await _seed()
     seating = ["Cara", "Alice", "Dan", "Bob"]
