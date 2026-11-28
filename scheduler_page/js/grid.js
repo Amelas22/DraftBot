@@ -26,8 +26,8 @@ export const LEAGUE_ZONE = "America/Los_Angeles";
 // Each cell also carries its league week, by the league's clock wherever the viewer is: kind is "due" on the league's
 // Sunday (the last day to get that round's matches finished), else "wk0" until the first cutoff (the last cell before
 // results are due) and "wk1" after it.
-// A "round" window runs Sunday to Sunday over one round, so it has no next week: its cells are "due" on a league
-// Sunday and "wk0" otherwise. A "rolling" window (the default) tints as described above.
+// A "round" window runs Sunday to Sunday over one round, so it has no next week: its cells are "due" on the league
+// Sundays it starts and ends on and "wk0" otherwise, a break Sunday inside a stretched round included. A "rolling" window (the default) tints as described above.
 // Pure in (startUtc, zone, count, shape), and a page lays its window out again on every redraw, so the last layout is kept.
 let lastLayout = null;
 export function layoutWindow(startUtc, zone, count = CELLS, shape = "rolling") {
@@ -38,6 +38,10 @@ export function layoutWindow(startUtc, zone, count = CELLS, shape = "rolling") {
 
 function layOutWindow(startUtc, zone, count, shape) {
   const days = [];
+  const leagueDate = (t) => { const q = partsOf(t, LEAGUE_ZONE); return `${q.year}-${q.month}-${q.day}`; };
+  // A round ends on its window's last league day and the round before ended on its first; a Sunday between them is
+  // a break, when no round ends.
+  const ends = shape === "round" ? [leagueDate(startUtc), leagueDate(addCells(startUtc, count - 1))] : null;
   let league = partsOf(startUtc, LEAGUE_ZONE).weekday;
   let nextWeek = false;
   for (let j = 0; j < count; j++) {
@@ -50,8 +54,9 @@ function layOutWindow(startUtc, zone, count, shape) {
       days.push(day);
     }
     const after = partsOf(addCells(startUtc, j + 1), LEAGUE_ZONE).weekday;
-    const cutoff = league === "Sun" && after === "Mon";
-    day.cells.push({ j, minutes: Number(p.hour) * 60 + Number(p.minute), kind: league === "Sun" ? "due" : nextWeek && shape !== "round" ? "wk1" : "wk0", cutoff });
+    const due = league === "Sun" && (ends === null || ends.includes(leagueDate(at)));
+    const cutoff = due && after === "Mon";
+    day.cells.push({ j, minutes: Number(p.hour) * 60 + Number(p.minute), kind: due ? "due" : nextWeek && shape !== "round" ? "wk1" : "wk0", cutoff });
     if (cutoff) nextWeek = true;
     league = after;
   }
@@ -106,7 +111,7 @@ export const rowClass = (row) => `${row % 2 ? "half" : "hr"}${Math.floor(row / 2
 // classes ride along with the row's, and makeCell also gets the words a due cell adds to its label, so the deadline
 // reaches a screen reader as well as the eye. It opens on the tab of the column dated openDate, else the first.
 export function gridFrame(columns, attrs, makeCell, openDate) {
-  const tabs = el("div", { class: "daytabs", role: "tablist", "aria-label": "Day" });
+  const tabs = el("div", { class: "daytabs", role: "tablist", "aria-label": "Day", "data-wrap": String(columns.length > 9) });
   const grid = el("div", attrs);
   const tabButtons = columns.map((c, i) => {
     const b = el("button", { type: "button", role: "tab", text: c.label, class: kindClass(c) });
@@ -115,15 +120,18 @@ export function gridFrame(columns, attrs, makeCell, openDate) {
     tabs.append(b);
     return b;
   });
+  const dayCols = [];
   const setDay = (day) => {
     grid.dataset.active = String(day);
     tabButtons.forEach((b, i) => b.setAttribute("aria-selected", String(i === day)));
+    dayCols.forEach((col, i) => col.setAttribute("data-open", String(i === day)));
   };
   const hours = el("div", { class: "col hours", "aria-hidden": "true" });
   for (let h = 0; h < 48; h++) hours.append(el("div", { class: `hour ${rowClass(h)}`, text: h % 2 === 0 ? hourLabel(h / 2) : "" }));
   grid.append(hours);
   columns.forEach((c, d) => {
     const col = el("div", { class: `col day ${kindClass(c)}`.trim(), "data-day": String(d), role: "row" });
+    dayCols.push(col);
     col.append(el("div", { class: "dayname", text: c.label, "aria-hidden": "true" }));
     for (let g = 0; g < c.start; g++) col.append(el("div", { class: `gap ${rowClass(g)}`, "aria-hidden": "true" }));
     c.cells.forEach((cell, i) => col.append(makeCell(cell, `${rowClass(c.start + i)} ${kindClass(cell)}`.trim(), leagueWords(cell))));

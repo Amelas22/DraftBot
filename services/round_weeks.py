@@ -1,8 +1,10 @@
 """Round and week arithmetic on the league's Pacific clock.
 
-Round N's deadline is ``round1_deadline + 7*(N-1)`` days (a Sunday). Round N's
-view runs from 00:00 PT on Round N-1's deadline Sunday to 24:00 PT on Round
-N's deadline Sunday.
+Round N's deadline is the Nth Sunday counting weekly from ``round1_deadline``,
+passing over the calendar's break Sundays, so a break stretches the round it
+falls in by a week and moves every later round back by one. Round N's view runs
+from 00:00 PT on Round N-1's deadline Sunday (Round 1: the Sunday a week before
+its own) to 24:00 PT on Round N's deadline Sunday.
 """
 
 from collections.abc import Iterable, Mapping
@@ -28,6 +30,7 @@ class BadWeek(ValueError):
 class Calendar:
     round1_deadline: date
     total_rounds: int
+    breaks: frozenset[date] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -55,7 +58,10 @@ def _midnight_utc(day: date) -> datetime:
 
 
 def week_ending(last_day: date, number: int | None = None) -> Week:
-    first_day = last_day - timedelta(days=7)
+    return _span(last_day - timedelta(days=7), last_day, number)
+
+
+def _span(first_day: date, last_day: date, number: int | None) -> Week:
     start = _midnight_utc(first_day)
     end = _midnight_utc(last_day + timedelta(days=1))
     cells = int((end - start) / timedelta(minutes=CELL_MINUTES))
@@ -68,11 +74,19 @@ def deadline_on_or_after(now: datetime) -> date:
 
 
 def _deadline(cal: Calendar, n: int) -> date:
-    return cal.round1_deadline + timedelta(days=7 * (n - 1))
+    """Round n's deadline Sunday; n = 0 is the Sunday Round 1's view starts on."""
+    if n == 0:
+        return cal.round1_deadline - timedelta(days=7)
+    day = cal.round1_deadline
+    for _ in range(n - 1):
+        day += timedelta(days=7)
+        while day in cal.breaks:
+            day += timedelta(days=7)
+    return day
 
 
 def round_week(cal: Calendar, n: int) -> Week:
-    return week_ending(_deadline(cal, n), n)
+    return _span(_deadline(cal, n - 1), _deadline(cal, n), n)
 
 
 def current_round(cal: Calendar, now: datetime) -> int | None:

@@ -134,3 +134,31 @@ async def test_this_week_horizon_covers_both_the_calendar_and_the_unnumbered_wee
         await s.execute(update(Tournament).values(total_rounds=9))
         await s.commit()
         assert await this_week_horizon(s, "g1", NOW) == utc("2027-01-04T08:00")
+
+
+@pytest.mark.asyncio
+async def test_the_calendar_carries_the_tournaments_break_sundays(test_db):
+    await _seed(date(2026, 11, 8))
+    async with db_session() as s:
+        await s.execute(update(Tournament).values(round_breaks=["2026-11-29"], total_rounds=7))
+        await s.commit()
+        cal = await guild_calendar(s, "g1")
+        sch = await team_draft_schedule(s, "g1", {}, utc("2026-11-27T15:00"))
+    assert cal is not None and cal.breaks == frozenset({date(2026, 11, 29)})
+    assert sch.page.week.number == 4
+    assert (sch.page.week.first_day, sch.page.week.last_day) == (date(2026, 11, 22), date(2026, 12, 6))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stored, expected", [
+    (["not a date", 5, None, "2026-11-29"], {date(2026, 11, 29)}),
+    ("2026-11-29", set()),
+    ({"2026-11-29": True}, set()),
+])
+async def test_unreadable_break_entries_are_ignored_rather_than_breaking_the_page(test_db, stored, expected):
+    await _seed(date(2026, 11, 8))
+    async with db_session() as s:
+        await s.execute(update(Tournament).values(round_breaks=stored, total_rounds=7))
+        await s.commit()
+        cal = await guild_calendar(s, "g1")
+    assert cal is not None and cal.breaks == frozenset(expected)

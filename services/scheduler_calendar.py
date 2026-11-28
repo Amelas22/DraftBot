@@ -2,9 +2,10 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Literal
 
+from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -46,10 +47,27 @@ def _page_schedule(page: WeekPage, span: BookingSpan) -> Schedule:
     return Schedule(page.week.start_utc, page.week.cells, page, span)
 
 
+def _breaks(tournament: Tournament) -> frozenset[date]:
+    """The tournament's break Sundays, skipping (and logging) any entry that is not an ISO date."""
+    stored = tournament.round_breaks
+    if stored is None or stored == []:
+        return frozenset()
+    if not isinstance(stored, list):
+        logger.warning(f"tournament {tournament.id}: round_breaks is not a list, ignored: {stored!r}")
+        return frozenset()
+    days: set[date] = set()
+    for entry in stored:
+        try:
+            days.add(date.fromisoformat(entry))
+        except (TypeError, ValueError):
+            logger.warning(f"tournament {tournament.id}: round_breaks entry is not a date, ignored: {entry!r}")
+    return frozenset(days)
+
+
 def _calendar(tournament: Tournament) -> Calendar | None:
     if tournament.round1_deadline is None:
         return None
-    return Calendar(tournament.round1_deadline, tournament.total_rounds)
+    return Calendar(tournament.round1_deadline, tournament.total_rounds, _breaks(tournament))
 
 
 async def guild_calendar(session: AsyncSession, guild_id: str) -> Calendar | None:

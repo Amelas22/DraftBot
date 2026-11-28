@@ -58,6 +58,9 @@ select { font: inherit; max-width: 100%; padding: 6px 10px; border: 2px solid va
 
 .daytabs { display: none; gap: 6px; margin-bottom: 8px; }
 .daytabs button { flex: 1; min-height: 44px; padding: 0; border: 0; border-radius: 999px; background: var(--chip); color: var(--fg); font-weight: 700; cursor: pointer; }
+/* A round stretched past a week has too many days for one row: they wrap, eight to a row. */
+.daytabs[data-wrap="true"] { flex-wrap: wrap; }
+.daytabs[data-wrap="true"] button { flex: 0 0 calc((100% - 42px) / 8); min-width: 0; }
 .daytabs button[aria-selected="true"] { background: var(--accent); color: var(--accent-fg); }
 
 .actions { display: flex; gap: 10px; margin-top: 14px; }
@@ -180,10 +183,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
   .daytabs { display: flex; }
   .touchhint { display: block; margin: 0 0 8px; font-size: 12px; color: var(--muted); }
   .grid .day { display: none; }
-  .grid[data-active="0"] .day[data-day="0"], .grid[data-active="1"] .day[data-day="1"],
-  .grid[data-active="2"] .day[data-day="2"], .grid[data-active="3"] .day[data-day="3"],
-  .grid[data-active="4"] .day[data-day="4"], .grid[data-active="5"] .day[data-day="5"],
-  .grid[data-active="6"] .day[data-day="6"], .grid[data-active="7"] .day[data-day="7"] { display: flex; }
+  .grid .day[data-open="true"] { display: flex; }
   .cell, .gap, .hour, .hcell { height: 24px; line-height: 24px; }
   .counted .hcell { font-size: 13px; line-height: 24px; }
   .dayname { display: none; }

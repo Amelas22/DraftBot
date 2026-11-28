@@ -7,6 +7,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    JSON,
     String,
     UniqueConstraint,
     text,
@@ -60,10 +61,15 @@ class Tournament(Base):
     # Every board links to it as another view of the same teams, standings and
     # pairings; None links nothing.
     website_url = Column(String(512), nullable=True)
-    # Round 1's deadline, the Sunday (Pacific) it ends; later rounds follow at
-    # seven-day steps (see services/round_weeks.py). NULL = no round calendar.
+    # Round 1's deadline, the Sunday (Pacific) it ends; later rounds follow
+    # weekly, passing over round_breaks (see services/round_weeks.py). NULL = no
+    # round calendar.
     # Set outside the bot's commands.
     round1_deadline = Column(Date, nullable=True)
+    # Sundays (ISO dates, Pacific) on which no round ends: the round they fall
+    # in runs a week longer and every later round moves back a week. NULL or []
+    # = none. Set outside the bot's commands, like round1_deadline.
+    round_breaks = Column(JSON, nullable=True)
     # While this tournament is active, its players borrow from the libraries its
     # server draws on with no hold and no member/draft gate
     # (services/library_tournament_exemption). Off unless somebody turns it on,

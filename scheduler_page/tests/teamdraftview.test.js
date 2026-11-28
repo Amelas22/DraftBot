@@ -349,6 +349,24 @@ test("gridFrame opens on the column dated openDate, else the first, and reports 
   assert.equal(gridFrame(columns, { role: "grid" }, () => new Node(), "2030-01-01").grid.dataset.active, "0");
 });
 
+test("gridFrame marks only the open day's column, however many days the window has", () => {
+  const dates = Array.from({ length: 15 }, (_, i) => `2026-11-${String(22 + i).padStart(2, "0")}`);
+  const columns = dates.map((date, i) => ({ date, label: `D${i}`, start: 0, cells: [] }));
+  const frame = gridFrame(columns, { role: "grid" }, () => new Node(), dates[12]);
+  const open = () => frame.grid.children.filter((c) => c.attrs["data-day"] != null && c.attrs["data-open"] === "true")
+    .map((c) => c.attrs["data-day"]);
+  assert.deepEqual(open(), ["12"]);
+  frame.setDay(14);
+  assert.deepEqual(open(), ["14"]);
+});
+
+test("gridFrame wraps the day tabs only past a week and a day", () => {
+  const frameOf = (n) => gridFrame(Array.from({ length: n }, (_, i) => ({ date: `d${i}`, label: `D${i}`, start: 0, cells: [] })),
+    { role: "grid" }, () => new Node(), "d0");
+  assert.equal(frameOf(9).tabs.attrs["data-wrap"], "false");
+  assert.equal(frameOf(16).tabs.attrs["data-wrap"], "true");
+});
+
 // Round 3 of a tournament: Sunday to Sunday Pacific, 384 cells, booked anywhere inside it.
 const r3 = { ...doc, window: { start_utc: "2026-11-15T08:00:00Z", cell_minutes: 30, cells: 384, shape: "round" },
   round: { number: 3, first_day: "2026-11-15", last_day: "2026-11-22", prev: { round: 2 }, next: { round: 4 } },

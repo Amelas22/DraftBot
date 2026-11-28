@@ -8,7 +8,7 @@ import { addDays, dayName, leagueMidnight } from "./rounds.js";
 export const SWITCH_LABEL = "Show my usual as confirmed";
 export const SWITCH_HINT = 'On: your usual week counts as confirmed every round. Off: it shows as "probably" until you confirm the round.';
 export const CONFIRM_BUTTON = "Looks right, confirm";
-export const CONFIRM_NOTE = "Editing any day in a round confirms that round.";
+export const CONFIRM_NOTE = "Editing any day confirms the week it is in.";
 export const SAVE_FAILED = "Couldn't save that. Check your connection and try again.";
 
 // A league week named for its round, or by its deadline Sunday when it has no number.

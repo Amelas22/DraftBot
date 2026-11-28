@@ -162,3 +162,13 @@ test("weekKeys for a round has no next round", () => {
   assert.deepEqual(weekKeys("round").map((k) => k.children[1].textContent),
     ["this round", "round ends: midnight PT Sunday (3 AM ET Mon)"]);
 });
+
+test("a round stretched over a break Sunday is due only on its first and last Sundays", () => {
+  const cols = windowColumns(new Date("2026-11-22T08:00:00Z"), "America/Los_Angeles", 720, "round");
+  assert.equal(cols.length, 15);
+  assert.deepEqual(cols.filter((c) => c.kind === "due").map((c) => c.label), ["Sun 22", "Sun 6"]);
+  assert.equal(cols.find((c) => c.label === "Sun 29").kind, "wk0");
+  const cutoffs = cols.flatMap((c) => c.cells.filter((x) => x.cutoff).map((x) => x.label));
+  assert.equal(cutoffs.length, 2);
+  assert.ok(cutoffs[1].startsWith("Sun 6 Dec"), cutoffs.join(" | "));
+});

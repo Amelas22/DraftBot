@@ -233,6 +233,10 @@ test("statusWeeks: the viewed round, or every week a rolling window touches", ()
   assert.deepEqual(statusWeeks({ ...r3state, round: null, window: { start_utc: "2026-11-20T17:00:00Z", cells: 336, shape: "rolling" } }),
     ["2026-11-16", "2026-11-23"]);
 });
+test("statusWeeks: a two-week round confirms both of its league weeks", () => {
+  const round = { ...r3state.round, number: 4, first_day: "2026-11-22", last_day: "2026-12-06" };
+  assert.deepEqual(statusWeeks({ ...r3state, round }), ["2026-11-23", "2026-11-30"]);
+});
 test("isUnconfirmed", () => {
   assert.deepEqual([ann, bo, cy].map((p) => isUnconfirmed(p, ["2026-11-16"])), [false, true, false]);
   assert.equal(isUnconfirmed(cy, ["2026-11-16", "2026-11-23"]), true);
