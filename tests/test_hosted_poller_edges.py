@@ -98,7 +98,7 @@ async def test_a_refused_status_is_a_warning_not_a_traceback(hosted, bot):
 
 @pytest.mark.asyncio
 async def test_a_sign_up_does_not_wait_on_a_server_known_to_be_down(hosted):
-    await _seed(stage=None)
+    await _seed()
     hosted_draft._observe_api("unanswered")
     hosted.clock["now"] += hosted_draft.OUTAGE_ALERT_AFTER_SECONDS
     await hosted_draft.on_signups_changed(SID)

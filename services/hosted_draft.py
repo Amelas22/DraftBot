@@ -285,16 +285,18 @@ async def _hosted_row(session_id: str) -> Any:
 
 
 async def on_signups_changed(session_id: str) -> None:
-    """Send the hosted session the current sign-ups as its expected players.
+    """Send the hosted session the current sign-ups as its expected players, once teams exist.
 
-    Never raises: a failed update is retried by the poller, which compares the
-    seats with the sign-ups on every tick.
+    Before teams nobody has a link, and forming them sends every player and the
+    seating (on_teams_formed), so a queue's joins and leaves are not sent: an
+    emptied queue would be refused anyway. Never raises: a failed update is
+    retried by the poller, which compares the seats with the sign-ups on every tick.
     """
     try:
         if _known_down():
             return  # Not worth the click's wait: the poller re-syncs once it is back.
         row = await _hosted_row(session_id)
-        if row is None:
+        if row is None or not row.session_stage:
             return
         await hosted_client().set_players(row.draft_id, seat_list(row.sign_ups or {}))
     except Exception as e:
@@ -464,6 +466,8 @@ def _forget(session_id: str) -> None:
 
 async def _gathering(bot: discord.Client, row: Any, status: HostedStatus, st: _Tracked,
                      channel: Any) -> None:
+    if not row.session_stage:
+        return  # No teams yet: nobody has a link, and forming them sends every player.
     expected = seat_list(row.sign_ups or {})
     if [s.name for s in status.seats] != expected:
         # A missed sign-up update, or one made while the API was away. Setting the
@@ -475,8 +479,8 @@ async def _gathering(bot: discord.Client, row: Any, status: HostedStatus, st: _T
                                    else ready_check_reset_text())
         st.retry = None
         return
-    if not row.session_stage or channel is None:
-        return  # No teams yet: nobody has been given a link.
+    if channel is None:
+        return
     await _report_status(row, status, st, channel)
     await _ready_check_step(bot, row, status, st, channel)
 
